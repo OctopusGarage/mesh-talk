@@ -27,6 +27,17 @@ fn start(root: &Path, owner: &str, name: &str, port: u16) -> (NodeRuntime, Recei
     (runtime, rx)
 }
 
+fn stop_and_close(runtime: NodeRuntime) {
+    tauri::async_runtime::block_on(async {
+        let retired = tokio::time::timeout(Duration::from_secs(15), runtime.stop_for_storage())
+            .await
+            .expect("Timed out joining retired runtime producers");
+        retired
+            .close()
+            .expect("Retired profile must close before reopen");
+    });
+}
+
 fn until(description: &str, check: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !check() {
@@ -95,7 +106,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         alice_rx.recv_timeout(Duration::from_secs(15)).unwrap().text,
         b"existing conversation before hide"
     );
-    let history_before_hide = alice_handle.account_history(&bob_account, 20);
+    let history_before_hide = alice_handle.account_history(&bob_account, 20).unwrap();
     let peers_before_hide: Vec<_> = alice
         .peers()
         .iter()
@@ -207,7 +218,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert!(personal_row["history_floor"].is_null());
     assert_eq!(personal_row["local_cleanup_complete"], true);
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide
     );
     announce(&bob, a_port);
@@ -239,7 +250,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .hidden
     );
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide
     );
     let restored_personal = invoke(
@@ -251,7 +262,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     .unwrap();
     assert!(restored_personal.deleted.is_empty());
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide
     );
 
@@ -287,7 +298,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         "Hiding must not mutate the authentic raw roster"
     );
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide,
         "Hiding must preserve the existing conversation"
     );
@@ -357,7 +368,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         b"outbound while hidden"
     );
     until("durable account history contains both directions", || {
-        let history = alice_handle.account_history(&bob_account, 20);
+        let history = alice_handle.account_history(&bob_account, 20).unwrap();
         history
             .iter()
             .any(|e| !e.from_me && e.text == b"inbound while hidden")
@@ -376,6 +387,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     until("real group membership reaches Alice", || {
         alice_handle
             .list_channels()
+            .unwrap()
             .iter()
             .any(|row| row.id == group)
     });
@@ -390,9 +402,18 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         bob_handle.send_channel_message(group, b"synthetic group history before personal deletion"),
     )
     .unwrap();
-    until("original group message reaches Alice", || {
-        !alice_handle.channel_history(group, 20).is_empty()
-    });
+    until(
+        "original group message reaches Alice",
+        || match alice_handle.channel_history(group, 20) {
+            Ok(history) => history
+                .iter()
+                .any(|entry| entry.text == b"synthetic group history before personal deletion"),
+            Err(mesh_talk_core::node::NodeError::Log(
+                mesh_talk_core::eventlog::LogError::StaleCursor,
+            )) => false,
+            Err(error) => panic!("group history read failed: {error}"),
+        },
+    );
     tauri::async_runtime::block_on(alice_handle.leave_channel(group)).unwrap();
     let deleted = invoke_raw("owner_delete_left_channel", delete_body);
     assert!(
@@ -402,10 +423,11 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .unwrap()
             .is_null()
     );
-    assert!(alice_handle.channel_history(group, 20).is_empty());
+    assert!(alice_handle.channel_history(group, 20).unwrap().is_empty());
     assert!(
         alice_handle
             .list_channels()
+            .unwrap()
             .iter()
             .any(|row| row.id == group),
         "raw core membership/proof inventory must remain intact"
@@ -440,18 +462,24 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert_eq!(group_row["local_cleanup_complete"], true);
     assert!(group_row["history_floor"].is_string());
 
-    // Drop every handle before opening stores again, exactly as logout/relaunch does.
-    let before_restart = alice_handle.account_history(&bob_account, 20);
+    // Join producers and close the exact profile before reopening, as the
+    // production retirement boundary does. A dead Weak<Node> alone can precede
+    // field destruction and does not prove the storage lease has been released.
+    let before_restart = alice_handle.account_history(&bob_account, 20).unwrap();
     let old_node = Arc::downgrade(&alice_handle);
-    nodes.0.blocking_write().take();
+    let retiring = nodes.0.blocking_write().take().unwrap();
     drop(alice_handle);
-    until("old runtime tasks release their node and stores", || {
-        old_node.upgrade().is_none()
-    });
-    drop((bob, bob_two, bob_handle));
+    stop_and_close(retiring);
+    assert!(old_node.upgrade().is_none());
+    drop(bob_handle);
+    stop_and_close(bob);
+    stop_and_close(bob_two);
     let (restarted, _) = start(root.path(), "alice", "Alice", a_port);
     assert_eq!(restarted.account_id(), alice_account);
-    assert_eq!(restarted.account_history(&bob_account, 20), before_restart);
+    assert_eq!(
+        restarted.account_history(&bob_account, 20).unwrap(),
+        before_restart
+    );
     assert_eq!(
         HiddenContactsState::new(root.path().to_owned())
             .get(Some("alice"), "alice")
@@ -518,7 +546,12 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     )
     .unwrap();
     assert_eq!(deleted.deleted, vec![bob_account.clone()]);
-    assert!(deletion_handle.account_history(&bob_account, 20).is_empty());
+    assert!(
+        deletion_handle
+            .account_history(&bob_account, 20)
+            .unwrap()
+            .is_empty()
+    );
     let personal_rows = invoke_raw(
         "owner_personal_conversation_states",
         serde_json::json!({"owner":"alice", "expectedAccount":alice_account}),
@@ -539,14 +572,16 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .is_some_and(|floor| floor.split(':').count() == 3)
     );
     assert_eq!(personal_row["local_cleanup_complete"], true);
-    nodes.0.blocking_write().take();
+    let retiring = nodes.0.blocking_write().take().unwrap();
     drop(deletion_handle);
-    until("deleted runtime releases stores", || {
-        deletion_weak.upgrade().is_none()
-    });
+    stop_and_close(retiring);
+    assert!(deletion_weak.upgrade().is_none());
     let (after_delete, _) = start(root.path(), "alice", "Alice", a_port);
     assert!(
-        after_delete.account_history(&bob_account, 20).is_empty(),
+        after_delete
+            .account_history(&bob_account, 20)
+            .unwrap()
+            .is_empty(),
         "deleted history must not return after restart"
     );
     assert!(
@@ -567,4 +602,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             && personal.local_cleanup_complete
     );
     assert!(personal.floor.is_some());
+    // Every fixture participant must join its crypto/storage producers before
+    // the test process tears down SQLCipher's provider.
+    stop_and_close(after_delete);
 }

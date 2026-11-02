@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 fn open(dir: &std::path::Path, name: &str) -> Arc<Node> {
+    let dir = dir.join(name);
     let (d, _) = mpsc::unbounded_channel();
     let (c, _) = mpsc::unbounded_channel();
     let (f, _) = mpsc::unbounded_channel();
@@ -55,7 +56,7 @@ async fn pairing_without_backfill_case(wanted: bool, source_enabled: bool, versi
             EventId::new([13; 32]),
         )
         .unwrap();
-    assert_eq!(linker.export_account_backfill().len(), 1);
+    assert_eq!(linker.export_account_backfill().unwrap().len(), 1);
     let code = PairingCode::from_hex(&linker.start_linking()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -649,7 +650,7 @@ async fn v4_client_persists_source_account_record_without_relabeling_target_cred
     task.await.unwrap();
     drop(target);
     let reopened = super::super::account_access::AccountAccessStore::open(
-        &dir.path().join("target/account-access.log"),
+        &dir.path().join("target/target/account-access.log"),
         "pw",
     )
     .unwrap();

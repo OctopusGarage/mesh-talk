@@ -92,9 +92,20 @@ async fn channel_sticker_recovery_keeps_local_bytes_and_verified_recipient_compl
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
     // Current group delivery reserves real recipient completion without a DM
     // receipt. Only the source's own preview lacks an incoming completion row.
-    let final_chunk = a.log.lock().unwrap().events(&file).last().unwrap().id;
+    let final_chunk = a
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .unwrap()
+        .last()
+        .unwrap()
+        .id;
     assert!(b.has_verified_file_completion(file));
-    assert!(b.historical_file_completion(file, final_chunk, &a.identity.public()));
+    assert!(
+        b.historical_file_completion(file, final_chunk, &a.identity.public())
+            .unwrap()
+    );
     assert!(!a.has_verified_file_completion(file));
     assert!(a.delivery.lock().unwrap().cards_for_file(file).is_empty());
     let stored = b.media.path_for(file, &offer.name);
@@ -110,8 +121,8 @@ async fn channel_sticker_recovery_keeps_local_bytes_and_verified_recipient_compl
             source_ciphertext,
             "an own preview must not be decoded and encrypted again on each recovery callback"
         );
-        assert!(a.log.lock().unwrap().has(&final_chunk));
-        b.pending_files.lock().unwrap().insert(file);
+        assert!(a.log.lock().unwrap().has(&final_chunk).unwrap());
+        b.files.lock().unwrap().request_download(file).unwrap();
         b.pull_pending_files().await;
         assert_eq!(
             std::fs::read(&stored).unwrap(),
@@ -119,24 +130,30 @@ async fn channel_sticker_recovery_keeps_local_bytes_and_verified_recipient_compl
             "completed group media must not be decoded and encrypted again on each recovery wake"
         );
         assert!(
-            !b.pending_files.lock().unwrap().contains(&file),
+            !b.files.lock().unwrap().pending_for_test(file),
             "verified group media completion retires local recovery"
         );
     }
     assert!(!a.has_verified_file_completion(file));
     assert!(a.delivery.lock().unwrap().retry_receipts(1).is_empty());
-    assert!(b.historical_file_completion(file, final_chunk, &a.identity.public()));
+    assert!(
+        b.historical_file_completion(file, final_chunk, &a.identity.public())
+            .unwrap()
+    );
     assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
     std::fs::remove_file(&stored).unwrap();
-    b.pending_files.lock().unwrap().insert(file);
+    b.files.lock().unwrap().request_download(file).unwrap();
     b.pull_pending_files().await;
     assert_eq!(
         b.read_media(file).as_deref(),
         Some(bytes.as_slice()),
         "a missing local copy must still be recovered"
     );
-    assert!(!b.pending_files.lock().unwrap().contains(&file));
-    assert!(b.historical_file_completion(file, final_chunk, &a.identity.public()));
+    assert!(!b.files.lock().unwrap().pending_for_test(file));
+    assert!(
+        b.historical_file_completion(file, final_chunk, &a.identity.public())
+            .unwrap()
+    );
     a.runtime_work.close();
     b.runtime_work.close();
     alice_server.abort();
@@ -173,7 +190,7 @@ async fn repeated_sticker_reuses_bytes_and_history_survives_source_removal_and_r
         file, repeated,
         "repeated stickers reuse the verified file conversation"
     );
-    assert_eq!(node.account_history(&target, 10).len(), 2);
+    assert_eq!(node.account_history(&target, 10).unwrap().len(), 2);
     assert!(
         node.reusable_sticker(
             crate::eventlog::ConversationId::new([9; 32]),
@@ -182,6 +199,7 @@ async fn repeated_sticker_reuses_bytes_and_history_survives_source_removal_and_r
             &bytes,
             None
         )
+        .unwrap()
         .is_none(),
         "a different host cannot reuse this file key"
     );
@@ -205,7 +223,7 @@ async fn repeated_sticker_reuses_bytes_and_history_survives_source_removal_and_r
         Account::from_secret_bytes(account_secret),
     );
     assert_eq!(reopened.read_media(file).unwrap(), bytes);
-    assert_eq!(reopened.account_history(&target, 10).len(), 1);
+    assert_eq!(reopened.account_history(&target, 10).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -234,7 +252,7 @@ async fn repeated_sticker_restages_after_transient_chunk_reclamation() {
     );
     assert_eq!(node.read_file_internal(restaged).unwrap(), bytes);
     assert_eq!(node.read_media(file).unwrap(), bytes);
-    let rows = node.account_history(&target, 10);
+    let rows = node.account_history(&target, 10).unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows.iter().filter(|row| row.id == first).count(), 1);
     assert_eq!(rows.iter().filter(|row| row.id == second).count(), 1);
@@ -287,7 +305,7 @@ async fn malformed_sticker_image_is_rejected_before_staging() {
             .await
             .is_err()
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -306,7 +324,7 @@ async fn sticker_recall_account_keeps_other_reference_and_excludes_recalled_cach
         .unwrap();
     assert_eq!(shared, repeated);
     node.recall_account(&target, first).await.unwrap();
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert!(history.iter().find(|row| row.id == first).unwrap().recalled);
     assert!(
         history
@@ -358,7 +376,7 @@ async fn sticker_recall_channel_preserves_other_message_references() {
         .unwrap();
     assert_eq!(file, shared);
     node.recall_channel(channel, first).await.unwrap();
-    let history = node.channel_history(channel, 10);
+    let history = node.channel_history(channel, 10).unwrap();
     assert!(history.iter().find(|row| row.id == first).unwrap().recalled);
     assert!(
         history
@@ -414,7 +432,7 @@ async fn channel_sticker_reuses_only_its_own_group_transfer() {
     assert_eq!(first, repeated);
     assert_ne!(first, different_group);
     assert_eq!(node.read_media(first).unwrap(), bytes);
-    assert_eq!(node.channel_history(first_group, 10).len(), 2);
+    assert_eq!(node.channel_history(first_group, 10).unwrap().len(), 2);
     node.clear_conversation(first_group).unwrap();
     assert!(node.read_media(first).is_none());
     assert_eq!(node.read_media(different_group).unwrap(), bytes);
@@ -486,7 +504,7 @@ async fn v2_sticker_media_delivers_label_after_source_removal_without_receiver_i
     .expect("automatic sticker bytes become durable without installing a pack");
     // Existing peers can decode this as ordinary MFM3 media, without new enum tags.
     assert!(matches!(
-        b.files.lock().unwrap().manifest(&file),
+        b.files.lock().unwrap().manifest(file).unwrap(),
         Some(crate::file::AnyManifest::V3(_))
     ));
     assert!(
@@ -496,12 +514,14 @@ async fn v2_sticker_media_delivers_label_after_source_removal_without_receiver_i
     a.recall_account(&target, id).await.unwrap();
     assert!(
         b.account_history(&a.account_id(), 10)
+            .unwrap()
             .iter()
             .any(|row| row.id == id && row.recalled && row.file.is_none()),
         "the authenticated sender recall hides sticker media on the recipient"
     );
     assert!(
         b.account_history(&a.account_id(), 10)
+            .unwrap()
             .iter()
             .any(|row| row.id == second_id
                 && !row.recalled
@@ -520,7 +540,7 @@ async fn v2_sticker_media_delivers_label_after_source_removal_without_receiver_i
         Account::from_secret_bytes(bob_account_secret),
     );
     assert_eq!(reopened.read_media(file).unwrap(), bytes);
-    let rows = reopened.account_history(&a.account_id(), 10);
+    let rows = reopened.account_history(&a.account_id(), 10).unwrap();
     let media = rows
         .iter()
         .find(|row| row.id == second_id)
@@ -559,7 +579,15 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
         .enqueue_file_to_account(&target, &path, FileKind::Media)
         .await
         .unwrap();
-    let manifest = match a.files.lock().unwrap().manifest(&file).unwrap().clone() {
+    let manifest = match a
+        .files
+        .lock()
+        .unwrap()
+        .manifest(file)
+        .unwrap()
+        .unwrap()
+        .clone()
+    {
         crate::file::AnyManifest::V3(manifest) => manifest,
         _ => unreachable!(),
     };
@@ -568,7 +596,7 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
     a.flush_file_delivery(first).await;
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
     assert!(
-        b.log.lock().unwrap().events(&file).is_empty(),
+        b.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "first completion reclaims receiver chunks"
     );
     let prior = b.delivery.lock().unwrap().cards_for_file(file);
@@ -626,7 +654,15 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .enqueue_file_to_account(&target, &path, FileKind::Media)
         .await
         .unwrap();
-    let manifest = match a.files.lock().unwrap().manifest(&file).unwrap().clone() {
+    let manifest = match a
+        .files
+        .lock()
+        .unwrap()
+        .manifest(file)
+        .unwrap()
+        .unwrap()
+        .clone()
+    {
         crate::file::AnyManifest::V3(manifest) => manifest,
         _ => unreachable!(),
     };
@@ -635,7 +671,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
     a.flush_file_delivery(first).await;
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
     assert!(
-        b.log.lock().unwrap().events(&file).is_empty(),
+        b.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "first completion reclaims receiver chunks"
     );
     let prior = b.delivery.lock().unwrap().cards_for_file(file);
@@ -659,13 +695,13 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
     let alias = cards.iter().find(|card| card.id != prior[0].id).unwrap();
     let name = manifest.v2.name.as_str();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "corrupted durable bytes cannot complete an alias"
     );
     assert!(!b.delivery.lock().unwrap().file_completed(alias.id));
     b.media.remove(file).unwrap();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "a cache index without bytes is insufficient"
     );
     b.media.store_bytes(file, name, &bytes).unwrap();
@@ -675,14 +711,14 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .unwrap()
         .entry(prior[0].id)
         .unwrap()
-        .clone();
+        .unwrap();
     b.received_files
         .lock()
         .unwrap()
         .remove_where(|row| row.event_id == prior[0].id)
         .unwrap();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "the completed original manifest must remain retained"
     );
     for mismatch in 0..4 {
@@ -706,7 +742,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
             .record_durable(&row)
             .unwrap();
         assert!(
-            !b.complete_sticker_aliases(file),
+            !b.complete_sticker_aliases(file).unwrap(),
             "mismatched retained row {mismatch} cannot provide ancestry"
         );
         assert!(!b.delivery.lock().unwrap().file_completed(alias.id));
@@ -727,7 +763,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .erase_file(prior[0].conversation, prior[0].id)
         .unwrap();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "erased completion is not reusable ancestry"
     );
     assert!(!b.delivery.lock().unwrap().file_completed(alias.id));
@@ -777,7 +813,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
         let destination = card.destinations.first().unwrap();
         let manifest = destination.binding.event_id;
-        let proofs = a.sticker_chunk_proof(file).unwrap();
+        let proofs = a.sticker_chunk_proof(file).unwrap().unwrap();
         assert_eq!(proofs.len(), chunk_count);
         assert!(proofs.iter().all(|event| event.ciphertext.is_empty()));
         assert!(b.read_media(file).is_none());
@@ -787,6 +823,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
                 .lock()
                 .unwrap()
                 .sticker_file_consent(&file, &manifest, proofs.clone())
+                .unwrap()
                 .is_none()
         );
         assert!(
@@ -798,6 +835,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
                     &crate::eventlog::EventId::new([237; 32]),
                     proofs.clone()
                 )
+                .unwrap()
                 .is_none()
         );
         let control = b
@@ -805,6 +843,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
             .lock()
             .unwrap()
             .sticker_file_consent(&file, &manifest, proofs.clone())
+            .unwrap()
             .unwrap();
         assert!(
             super::file_consent::Decision::open(&control)
@@ -822,6 +861,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
             .lock()
             .unwrap()
             .sticker_file_consent(&file, &manifest, tampered)
+            .unwrap()
             .unwrap();
         assert!(
             super::file_consent::Decision::open(&control)
@@ -830,17 +870,18 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
                 .is_none()
         );
         assert!(b.read_media(file).is_none());
-        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
         let control = b
             .sync_store(&ap.public())
             .lock()
             .unwrap()
             .sticker_file_consent(&file, &manifest, proofs)
+            .unwrap()
             .unwrap();
         assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
         a.accept_file_consent_event(&control, &bp.public()).unwrap();
-        assert!(a.recipient_completed_file(&card, destination));
-        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        assert!(a.recipient_completed_file(&card, destination).unwrap());
+        assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
         serving.abort();
         let _ = serving.await;
     }
@@ -921,7 +962,10 @@ async fn installed_sticker_wire_reuse_and_legacy_mismatch_fallback() {
                 "matching artwork sends no image ciphertext"
             );
             let card = a.delivery.lock().unwrap().file_card(first).unwrap().clone();
-            assert!(a.recipient_completed_file(&card, &card.destinations[0]));
+            assert!(
+                a.recipient_completed_file(&card, &card.destinations[0])
+                    .unwrap()
+            );
             let (second, reused) = a
                 .enqueue_file_to_account(&target, &path, FileKind::Media)
                 .await
@@ -981,7 +1025,8 @@ fn sticker_wire_server(
                             return;
                         }
                     }
-                    match super::session::serve_wire_bytes(&mut channel, &store, &frame).await {
+                    match super::session::serve_wire_bytes_paged(&mut channel, &store, &frame).await
+                    {
                         Ok(super::session::Served::Handled(conversation)) => {
                             node.emit_new_messages(conversation);
                             node.process_file_events(conversation);
@@ -1050,6 +1095,7 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
                 .lock()
                 .unwrap()
                 .sticker_file_proof(&file, &manifest)
+                .unwrap()
                 .is_none()
         );
         assert!(
@@ -1057,6 +1103,7 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
                 .lock()
                 .unwrap()
                 .sticker_file_proof(&file, &crate::eventlog::EventId::new([226; 32]))
+                .unwrap()
                 .is_none()
         );
         tokio::time::timeout(std::time::Duration::from_secs(10), b.pull_pending_files())
@@ -1071,6 +1118,7 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
                     .lock()
                     .unwrap()
                     .sticker_file_proof(&file, &manifest)
+                    .unwrap()
                     .unwrap()
                     .iter()
                     .all(|event| event.ciphertext.is_empty())
@@ -1087,7 +1135,10 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
             .unwrap()
             .unwrap();
         a.accept_file_consent_event(&control, &bp.public()).unwrap();
-        assert!(a.recipient_completed_file(&card, &card.destinations[0]));
+        assert!(
+            a.recipient_completed_file(&card, &card.destinations[0])
+                .unwrap()
+        );
         sender.abort();
         receiver.abort();
         let _ = sender.await;
@@ -1145,34 +1196,39 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
         .append_durable(event.clone())
         .unwrap();
     receiver.process_file_events(event.conversation_id);
-    let headers = source.sticker_chunk_proof(file).unwrap();
+    let headers = source.sticker_chunk_proof(file).unwrap().unwrap();
     assert_eq!(headers.len(), 2);
     assert!(
-        receiver.sticker_chunk_proof(file).is_none(),
+        receiver.sticker_chunk_proof(file).unwrap().is_none(),
         "an offered manifest is not retained chunk evidence"
     );
     assert!(
         receiver
             .sticker_recovery_offer(file, &source_announce.public())
+            .unwrap()
             .is_none(),
         "recovery cannot claim an uninstalled image"
     );
     assert!(
         receiver
             .reconstruct_sticker_proof(file, offer, &source_announce.public(), headers.clone())
+            .unwrap()
             .is_none()
     );
     receiver
         .register_sticker_source(path.file_name().unwrap().to_str().unwrap(), &bytes)
         .unwrap();
     assert_eq!(
-        receiver.sticker_recovery_offer(file, &source_announce.public()),
+        receiver
+            .sticker_recovery_offer(file, &source_announce.public())
+            .unwrap(),
         Some(offer)
     );
     let foreign = DeviceIdentity::generate().public();
     assert!(
         receiver
             .reconstruct_sticker_proof(file, offer, &foreign, headers.clone())
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -1183,6 +1239,7 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
                 &source_announce.public(),
                 headers.clone()
             )
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -1193,11 +1250,13 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
                 &source_announce.public(),
                 headers.clone()
             )
+            .unwrap()
             .is_none()
     );
     assert!(
         receiver
             .reconstruct_sticker_proof(file, offer, &source_announce.public(), vec![])
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -1208,12 +1267,14 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
                 &source_announce.public(),
                 vec![headers[0].clone(); 65]
             )
+            .unwrap()
             .is_none()
     );
     receiver.delivery_suspended.store(true, Ordering::Release);
     assert!(
         receiver
             .reconstruct_sticker_proof(file, offer, &source_announce.public(), headers.clone())
+            .unwrap()
             .is_none()
     );
     receiver.delivery_suspended.store(false, Ordering::Release);
@@ -1252,11 +1313,18 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
         assert!(
             receiver
                 .reconstruct_sticker_proof(file, offer, &source_announce.public(), invalid)
+                .unwrap()
                 .is_none(),
             "{case}"
         );
         assert!(
-            receiver.log.lock().unwrap().events(&file).is_empty(),
+            receiver
+                .log
+                .lock()
+                .unwrap()
+                .events(&file)
+                .unwrap()
+                .is_empty(),
             "rejected proof must not admit partial chunks"
         );
         assert!(
@@ -1266,21 +1334,28 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
     }
     let rebuilt = receiver
         .reconstruct_sticker_proof(file, offer, &source_announce.public(), headers.clone())
+        .unwrap()
         .unwrap();
     let retained: Vec<_> = source
         .log
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     assert_eq!(
         rebuilt, retained,
         "valid local bytes must reproduce the exact signed ciphertext events"
     );
     assert!(
-        receiver.log.lock().unwrap().events(&file).is_empty(),
+        receiver
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty(),
         "reconstruction alone is not durable admission"
     );
     assert!(receiver.read_media(file).is_none());
@@ -1288,7 +1363,8 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
         .files
         .lock()
         .unwrap()
-        .manifest(&file)
+        .manifest(file)
+        .unwrap()
         .unwrap()
         .clone()
     else {
@@ -1333,8 +1409,9 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
             .lock()
             .unwrap()
             .events(&event.conversation_id)
+            .unwrap()
             .last()
-            .map(|event| (**event).clone())
+            .cloned()
             .unwrap();
         receiver
             .log
@@ -1348,7 +1425,8 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
                 .files
                 .lock()
                 .unwrap()
-                .manifest(&alternate_file)
+                .manifest(alternate_file)
+                .unwrap()
                 .is_some(),
             "alternate media is a valid admitted offer"
         );
@@ -1360,6 +1438,7 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
                     &source_announce.public(),
                     headers.clone()
                 )
+                .unwrap()
                 .is_none(),
             "unsupported format, ordinary image intent and nonstandard chunk size retain normal transfer fallback"
         );
@@ -1387,45 +1466,76 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
         .files
         .lock()
         .unwrap()
-        .manifest(&original)
+        .manifest(original)
+        .unwrap()
         .unwrap()
         .clone();
     let AnyManifest::V3(base) = manifest else {
         panic!("fixture must use deployed MFM3")
     };
+    let install = |manifest: AnyManifest| {
+        let bytes = match manifest {
+            AnyManifest::V3(value) => value.encode(),
+            AnyManifest::V4(value) => value.encode(),
+            _ => panic!("fixture manifest"),
+        };
+        let host =
+            super::conversation::account_conversation_id(&node.account_id(), &node.account_id());
+        let original = node.build_personal_manifest_proof(host, 0, &bytes).unwrap();
+        node.account_file_proofs
+            .lock()
+            .unwrap()
+            .insert(original.clone())
+            .unwrap();
+        let row = super::received_log::ReceivedEntry {
+            event_id: original.id,
+            conversation: host,
+            from: node.user_id(),
+            wall_clock: 0,
+            plaintext: bytes,
+        };
+        node.received_files
+            .lock()
+            .unwrap()
+            .record_file_with_reception(&row, Some(&original), None)
+            .unwrap();
+    };
     let mut unsupported = base.clone();
     unsupported.v2.file_conv = ConversationId::new([71; 32]);
     unsupported.v2.chunk_hashes.clear();
-    node.files
-        .lock()
-        .unwrap()
-        .record(AnyManifest::V4(FileManifestV4 { v3: unsupported }));
+    install(AnyManifest::V4(FileManifestV4 { v3: unsupported }));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([71; 32]))
+            .unwrap()
             .is_none(),
         "unsupported proof format keeps ordinary transfer fallback"
     );
     let mut missing = base.clone();
     missing.v2.file_conv = ConversationId::new([72; 32]);
-    node.files.lock().unwrap().record(AnyManifest::V3(missing));
+    install(AnyManifest::V3(missing));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([72; 32]))
+            .unwrap()
             .is_none(),
         "a manifest cannot substitute for missing signed chunks"
     );
     let mut ordinary = base.clone();
     ordinary.v2.file_conv = ConversationId::new([73; 32]);
     ordinary.kind = FileKind::File;
-    node.files.lock().unwrap().record(AnyManifest::V3(ordinary));
+    // A reserved sticker name requires media intent at admission. Use a valid
+    // ordinary offer to exercise the independent proof-reuse rejection below.
+    ordinary.v2.name = "ordinary-file.png".into();
+    install(AnyManifest::V3(ordinary));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([73; 32]))
+            .unwrap()
             .is_none(),
         "ordinary file offers do not opt into sticker proof reuse"
     );
     let foreign = DeviceIdentity::generate();
     let mut copied = base;
     copied.v2.file_conv = ConversationId::new([74; 32]);
-    let ciphertext = node.log.lock().unwrap().events(&original)[0]
+    let ciphertext = node.log.lock().unwrap().events(&original).unwrap()[0]
         .ciphertext
         .clone();
     let event = Event::new(
@@ -1439,9 +1549,10 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
         ciphertext,
     );
     node.log.lock().unwrap().append_durable(event).unwrap();
-    node.files.lock().unwrap().record(AnyManifest::V3(copied));
+    install(AnyManifest::V3(copied));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([74; 32]))
+            .unwrap()
             .is_none(),
         "retaining another author's ciphertext does not let this node export it as its own signed proof"
     );

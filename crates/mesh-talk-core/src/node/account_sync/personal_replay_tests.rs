@@ -55,8 +55,8 @@ async fn buffered_archive_page_cannot_acquire_permission_from_a_later_cleanup_ac
             Some(&old_cut),
         )
         .unwrap();
-    assert!(target.account_history(&peer, 10).is_empty());
-    assert_eq!(target.account_history(&other, 10).len(), 1);
+    assert!(target.account_history(&peer, 10).unwrap().is_empty());
+    assert_eq!(target.account_history(&other, 10).unwrap().len(), 1);
     // A new request starts with the exact applied-source proof and can accept
     // genuinely new content without reopening any old buffered request.
     let fresh_cut = target.capture_personal_history_cut(&source.identity.public());
@@ -69,7 +69,7 @@ async fn buffered_archive_page_cannot_acquire_permission_from_a_later_cleanup_ac
             Some(&fresh_cut),
         )
         .unwrap();
-    let rows = target.account_history(&peer, 10);
+    let rows = target.account_history(&peer, 10).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, EventId::new([73; 32]));
 }

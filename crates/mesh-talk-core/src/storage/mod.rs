@@ -1,3 +1,4 @@
+pub(crate) mod database;
 pub mod encryption;
 pub mod errors;
 pub mod file_manager;
@@ -6,3 +7,5 @@ pub mod serialization;
 
 #[cfg(test)]
 mod tests;
+
+pub mod profile;

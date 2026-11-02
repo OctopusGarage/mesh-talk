@@ -49,6 +49,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
     let event_id = original.primary_event.unwrap();
     let live = source
         .operation_projection(group)
+        .unwrap()
         .results
         .into_iter()
         .find(|result| result.reference.id == id)
@@ -68,6 +69,10 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
     let next_id = source
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
+    // This fixture drives accepted effects without the participant worker.
+    // Finish metadata before constructing the internal executor snapshot whose
+    // preflight is then tested while the delivery lock is held.
+    source.await_channel_metadata(group).await.unwrap();
     let executor = source
         .account_group_access(group)
         .unwrap()
@@ -161,11 +166,12 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
                     .lock()
                     .unwrap()
                     .entry(event_id)
+                    .unwrap()
                     .is_none()
             );
         }
     }
-    let projection = source.operation_projection(group);
+    let projection = source.operation_projection(group).unwrap();
     let retired = projection
         .results
         .iter()
@@ -206,6 +212,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .entry(event_id)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -214,12 +221,21 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .get(&event_id)
+            .unwrap()
             .is_none()
     );
     assert!(reference.account_group_data_work(None).work.is_empty());
     assert!(reference.channel_members(group).is_empty());
-    assert!(reference.history(group, 20).is_empty());
-    assert!(reference.log.lock().unwrap().events(&file).is_empty());
+    assert!(reference.history(group, 20).unwrap().is_empty());
+    assert!(
+        reference
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty()
+    );
     let identity = reference.identity.secret_bytes();
     drop(reference);
     let (dm, _) = mpsc::unbounded_channel();
@@ -251,6 +267,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .entry(event_id)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -259,6 +276,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .get(&event_id)
+            .unwrap()
             .is_none()
     );
 }
@@ -483,16 +501,27 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
             let key = crate::node::AccountDocumentKey::GroupOperation {
                 channel: hex::encode(group.as_bytes()), source_device: source.user_id(),
             };
+            let control_key = crate::node::AccountDocumentKey::GroupControl {
+                channel: hex::encode(group.as_bytes()), source_device: source.user_id(),
+            };
             loop {
                 let published_terminal = source.account_document(&key).unwrap()
                     .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
                     .is_some_and(|frame| frame.projection.results.iter().any(|result|
                         result.reference.id == id && result.status.phase == AccountGroupOperationPhase::Committed));
-                if held_control.load(Ordering::Acquire) && published_terminal { break; }
+                let published_left = source.account_document(&control_key).unwrap()
+                    .and_then(|document| crate::node::account_group::wire::GroupControlHead::decode(
+                        document.payload(), &account.public().ed25519_pub))
+                    .is_some_and(|head| head.access.source.role == AccountGroupRole::Left
+                        && head.access.observation.role == AccountGroupRole::Left);
+                if held_control.load(Ordering::Acquire) && published_terminal && published_left {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            // Retain the real endpoint and signed terminal head, but prevent a
-            // later automatic publication from masking this one during-attempt wake.
+            // The terminal receipt and membership head publish independently.
+            // Retain both signed heads at the real endpoint before stopping their
+            // producer, so later publication cannot mask this during-attempt wake.
             source_worker.abort();
             while !source_worker.is_finished() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -532,7 +561,11 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
                 .unwrap().into_iter().find(|status| status.id == id).unwrap();
             if status.phase == AccountGroupOperationPhase::Committed {
                 assert_eq!(status.committed_events.len(), 1);
-                break;
+                // The receipt can arrive before the separate mandatory access
+                // head. Keep the same worker and total deadline through both.
+                if reference.account_group_access(group).unwrap().role == AccountGroupRole::Left {
+                    break;
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -580,7 +613,7 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
     assert_eq!(source_phase, Some(AccountGroupOperationPhase::Committed));
     assert!(
         outcome.is_ok(),
-        "original Leave receipt must recover within 8s after real Noise timeout; elapsed={elapsed:?}, trace={:?}",
+        "original Leave receipt and Left access must recover within 8s after real Noise timeout; elapsed={elapsed:?}, trace={:?}",
         trace.lock().unwrap()
     );
     assert_eq!(

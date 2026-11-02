@@ -152,14 +152,14 @@ fn validate_parent_common(
     let batch = batch(body)?;
     let first = &batch[0];
     let group = first.conversation_id;
-    let mut ancestors: HashMap<EventId, &Event> = HashMap::new();
+    let mut ancestors: HashMap<EventId, Event> = HashMap::new();
     let mut pending = witness.parents.clone();
     while let Some(id) = pending.pop() {
         if ancestors.contains_key(&id) {
             continue;
         }
         let event = log
-            .get(&id)
+            .get(&id)?
             .ok_or_else(|| invalid("invitation causal parent missing"))?;
         if event.conversation_id != group || batch.iter().any(|effect| effect.id == id) {
             return Err(invalid("invalid invitation causal parent"));
@@ -167,7 +167,7 @@ fn validate_parent_common(
         pending.extend(event.parents.iter().copied());
         ancestors.insert(id, event);
     }
-    let events: Vec<_> = ancestors.values().copied().collect();
+    let events: Vec<_> = ancestors.values().collect();
     let projection = ChannelBook::project_membership(group, &events);
     if let Some((operation, _)) = bound {
         let mut source = Node::public_account_group_source(
@@ -491,7 +491,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(log.get(&f.request.message_id).is_none());
+        assert!(log.get(&f.request.message_id).unwrap().is_none());
         assert_ne!(f.request.message_id, EventId::new([0; 32]));
     }
 }

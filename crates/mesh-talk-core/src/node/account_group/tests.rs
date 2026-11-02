@@ -1,4 +1,5 @@
 use super::*;
+use crate::node::test_support::settle_group_metadata;
 use crate::{
     channel::{ChannelMeta, new_channel_id},
     discovery::{Announce, Roster},
@@ -106,6 +107,24 @@ fn node(path: &Path, account: &Account) -> Arc<Node> {
     .unwrap()
 }
 
+fn reopen_events(
+    path: &Path,
+    identity: &crate::identity::device::PublicIdentity,
+    account: &crate::identity::account::AccountPublic,
+) -> crate::eventlog::persist::PersistentEventLog {
+    let lease = crate::storage::profile::ProfileStorageLease::acquire(path).unwrap();
+    let storage = crate::storage::profile::context::ProfileStorage::open_participant(
+        lease,
+        identity,
+        account,
+        &path.join("events.log"),
+        &path.join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    crate::eventlog::persist::PersistentEventLog::open_profile(storage, "pw").unwrap()
+}
+
 fn legacy_group(owner: &Node, member: &Node) -> Event {
     Event::new(
         &owner.identity,
@@ -128,6 +147,7 @@ fn legacy_group(owner: &Node, member: &Node) -> Event {
 fn install(node: &Node, event: &Event) {
     node.log.lock().unwrap().append(event.clone()).unwrap();
     node.process_channel(event.conversation_id);
+    settle_group_metadata(node, event.conversation_id);
 }
 
 #[test]
@@ -171,7 +191,7 @@ fn a_certificate_for_an_owner_device_alone_cannot_claim_its_account_role() {
         .unwrap();
     assert_eq!(access.role, AccountGroupRole::Member);
     assert!(access.can_leave_account());
-    assert!(!member.channel_can_manage(genesis.conversation_id));
+    assert!(!member.channel_can_manage(genesis.conversation_id).unwrap());
     assert_eq!(
         member.channel_owner(genesis.conversation_id),
         owner.user_id()
@@ -217,8 +237,8 @@ async fn legacy_account_leave_commits_with_owner_offline() {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     let leaves: Vec<_> = events
         .iter()
@@ -287,6 +307,7 @@ async fn legacy_account_leave_cancelled_before_execution_emits_no_departure() {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .any(|event| event.kind == EventKind::ChannelLeave)
     );
@@ -466,8 +487,8 @@ async fn legacy_account_leave_coordinates_original_devices_over_noise_with_histo
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
-            .cloned()
             .collect::<Vec<_>>();
         let leaves: Vec<_> = events
             .iter()
@@ -515,9 +536,11 @@ async fn modern_owner_access_reuses_the_existing_account_authority() {
             &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
         )
         .await;
+    settle_group_metadata(&owner, group);
     assert!(
         owner
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event()
             .is_some()
@@ -530,6 +553,7 @@ async fn modern_owner_access_reuses_the_existing_account_authority() {
         access.sources[0].authority.authority,
         owner
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event()
     );
@@ -618,7 +642,7 @@ async fn new_group_invites_one_account_and_starts_with_account_owner_authority()
         )
         .await
         .unwrap();
-    let projection = owner.account_group_projection(group);
+    let projection = owner.account_group_projection(group).unwrap();
     assert!(
         projection.authority.current_event().is_some(),
         "new groups must not wait for legacy migration"
@@ -664,7 +688,7 @@ async fn new_account_group_rejects_unknown_binding_and_retired_admission_before_
             .is_err()
     );
     assert!(
-        owner.list_channels().is_empty(),
+        owner.list_channels().unwrap().is_empty(),
         "failed creation cannot leave a partial group"
     );
 }
@@ -698,7 +722,7 @@ async fn new_account_group_rejects_a_route_whose_authenticated_account_changed()
             .await
             .is_err()
     );
-    assert!(owner.list_channels().is_empty());
+    assert!(owner.list_channels().unwrap().is_empty());
     server.abort();
 }
 
@@ -743,14 +767,24 @@ async fn new_account_group_preflight_has_one_deadline_and_creates_no_partial_gro
         !committed.get(),
         "expired verification must not enter host admission"
     );
-    assert!(owner.list_channels().is_empty());
-    assert!(owner.log.lock().unwrap().conversations().is_empty());
+    assert!(owner.list_channels().unwrap().is_empty());
+    assert!(
+        owner
+            .log
+            .lock()
+            .unwrap()
+            .conversations()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn new_account_group_crash_before_publication_cannot_leave_device_only_genesis() {
     let dir = tempfile::tempdir().unwrap();
     let owner = node(dir.path(), &Account::generate());
+    let identity = owner.identity.public();
+    let account = owner.account.public();
     owner
         .log
         .lock()
@@ -768,11 +802,9 @@ async fn new_account_group_crash_before_publication_cannot_leave_device_only_gen
         result.is_err_and(|error| error.is_panic()),
         "creation must use the atomic genesis publication boundary"
     );
-    let reopened =
-        crate::eventlog::persist::PersistentEventLog::open(&dir.path().join("events.log"), "pw")
-            .unwrap();
+    let reopened = reopen_events(dir.path(), &identity, &account);
     assert!(
-        reopened.conversations().is_empty(),
+        reopened.conversations().unwrap().is_empty(),
         "a failed new group must not restart as a device-only group"
     );
 }
@@ -918,7 +950,11 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
             .channel_members(genesis.conversation_id)
             .is_empty()
     );
-    assert!(!reference.channel_can_manage(genesis.conversation_id));
+    assert!(
+        !reference
+            .channel_can_manage(genesis.conversation_id)
+            .unwrap()
+    );
     if !certificate_only {
         assert!(!access.can_leave_account());
         assert_eq!(access.execution, AccountGroupExecution::WaitingForDevice);
@@ -986,11 +1022,13 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
             )
             .unwrap();
         owner.process_channel(genesis.conversation_id);
+        settle_group_metadata(&owner, genesis.conversation_id);
         let transfer = owner
             .log
             .lock()
             .unwrap()
             .events(&genesis.conversation_id)
+            .unwrap()
             .into_iter()
             .find(|event| event.kind == EventKind::ChannelOwnerTransfer)
             .unwrap()
@@ -1117,7 +1155,7 @@ async fn legacy_owner_account_has_the_same_owner_role_on_member_and_reference_si
             "the owner account cannot leave through another physical member"
         );
         assert!(
-            !target.channel_can_manage(genesis.conversation_id),
+            !target.channel_can_manage(genesis.conversation_id).unwrap(),
             "account permission must not turn a sibling into the public owner signer"
         );
     }
@@ -1220,6 +1258,7 @@ async fn a_newer_validated_owner_transfer_prevents_old_source_evidence_restoring
         )
         .unwrap();
     owner.process_channel(genesis.conversation_id);
+    settle_group_metadata(&owner, genesis.conversation_id);
     assert_eq!(
         owner.channel_owner(genesis.conversation_id),
         external.user_id()
@@ -1229,6 +1268,7 @@ async fn a_newer_validated_owner_transfer_prevents_old_source_evidence_restoring
         .lock()
         .unwrap()
         .events(&genesis.conversation_id)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::ChannelOwnerTransfer)
         .unwrap()
@@ -1281,7 +1321,7 @@ async fn a_newer_source_member_observation_wins_before_its_public_transfer_arriv
     );
     install(&owner, &genesis);
     install(&member, &genesis);
-    assert!(owner.channel_can_manage(genesis.conversation_id));
+    assert!(owner.channel_can_manage(genesis.conversation_id).unwrap());
     owner
         .append_event(
             genesis.conversation_id,
@@ -1290,6 +1330,7 @@ async fn a_newer_source_member_observation_wins_before_its_public_transfer_arriv
         )
         .unwrap();
     owner.process_channel(genesis.conversation_id);
+    settle_group_metadata(&owner, genesis.conversation_id);
     assert_eq!(
         owner.channel_owner(genesis.conversation_id),
         external.user_id()
@@ -1565,7 +1606,7 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         AccountGroupRole::Owner
     );
     assert!(reference.channel_members(group).is_empty());
-    assert!(!reference.channel_can_manage(group));
+    assert!(!reference.channel_can_manage(group).unwrap());
     // Observe only the selected route. Task IDs correlate concurrent lanes
     // without changing the authenticated exchange or adding any traffic.
     let private_trace =
@@ -1777,8 +1818,8 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
             .unwrap().map(|status| status.phase);
         let source_phase = owner.account_group_operation_status(&account.account_id(), id)
             .unwrap().map(|status| status.phase);
-        let requester_projection = reference.operation_projection(group);
-        let source_projection = owner.operation_projection(group);
+        let requester_projection = reference.operation_projection(group).unwrap();
+        let source_projection = owner.operation_projection(group).unwrap();
         let operation_metadata: Vec<_> = [("source", &owner), ("requester", &reference)].into_iter().map(|(label, node)| {
             let versions: Vec<_> = [("source", owner.user_id()), ("requester", reference.user_id())].into_iter().map(|(writer, source_device)| {
                 let meta = node.account_document_meta(&crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device });
@@ -1847,9 +1888,9 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
-        .cloned()
         .collect();
     assert_eq!(events.len(), 1);
     assert!(events[0].verify_signature() && events[0].verify_integrity());
@@ -1899,7 +1940,8 @@ fn retired_session_cannot_admit_an_account_group_operation_for_the_same_account(
         .log
         .lock()
         .unwrap()
-        .fingerprint_and_len(&genesis.conversation_id);
+        .fingerprint_and_len(&genesis.conversation_id)
+        .unwrap();
     let result = owner.submit_account_group_operation_if(
         &account.account_id(),
         id,
@@ -1928,7 +1970,8 @@ fn retired_session_cannot_admit_an_account_group_operation_for_the_same_account(
             .log
             .lock()
             .unwrap()
-            .fingerprint_and_len(&genesis.conversation_id),
+            .fingerprint_and_len(&genesis.conversation_id)
+            .unwrap(),
         before
     );
     assert!(
@@ -1969,21 +2012,23 @@ async fn modern_inherited_owner_executes_rename_through_the_account_facade() {
             &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
         )
         .await;
+    settle_group_metadata(&owner, group);
     assert!(
         owner
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event()
             .is_some()
     );
     link(&owner, &sibling);
     link(&sibling, &owner);
-    for event in owner.log.lock().unwrap().events(&group) {
-        install(&sibling, event);
+    for event in owner.log.lock().unwrap().events(&group).unwrap() {
+        install(&sibling, &event);
     }
     // Use the existing signed inheritance control against the real account
     // grant produced above. No physical member or authority is invented.
-    let projection = sibling.account_group_projection(group);
+    let projection = sibling.account_group_projection(group).unwrap();
     let authority = projection.authority.current_event().unwrap();
     let grant = projection
         .authority
@@ -2013,8 +2058,9 @@ async fn modern_inherited_owner_executes_rename_through_the_account_facade() {
         )
         .unwrap();
     sibling.process_channel(group);
+    settle_group_metadata(&sibling, group);
     assert!(
-        sibling.channel_can_manage(group),
+        sibling.channel_can_manage(group).unwrap(),
         "the existing modern authority owner must authorize its inherited sibling"
     );
     assert_ne!(sibling.channel_owner(group), sibling.user_id());

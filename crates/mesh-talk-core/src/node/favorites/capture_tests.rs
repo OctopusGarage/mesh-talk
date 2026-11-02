@@ -327,12 +327,26 @@ fn shared_attachment_references_survive_until_last_expiry_and_startup_prunes_orp
         .unwrap();
     node.prune_expired_received().unwrap();
     assert!(!node.favorite_media.contains(conv));
-    node.favorite_media
+    let orphan = node
+        .favorite_media
         .store_bytes(conv, "orphan.txt", b"bytes")
         .unwrap();
     drop(node);
     let node = open(dir.path(), &account);
+    // Opening only schedules cleanup. This fixture has no runtime worker, so
+    // advance the same bounded owner explicitly. The old and reopened cutoffs
+    // each need at most one row page and one empty completion page.
+    assert!(orphan.exists());
+    assert!(node.favorite_media.gc_pending().unwrap());
+    for _ in 0..4 {
+        if !node.favorite_media.gc_pending().unwrap() {
+            break;
+        }
+        node.maintain_media().unwrap();
+    }
+    assert!(!node.favorite_media.gc_pending().unwrap());
     assert!(!node.favorite_media.contains(conv));
+    assert!(!orphan.exists());
 }
 
 #[test]

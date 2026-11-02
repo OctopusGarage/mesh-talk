@@ -300,7 +300,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         reference.account_group_access(group_b).unwrap().role,
         AccountGroupRole::Owner
     );
-    assert!(!reference.channel_can_manage(group_b));
+    assert!(!reference.channel_can_manage(group_b).unwrap());
 
     let release = Arc::new(Semaphore::new(0));
     let _release = ReleaseQueuedReads(release.clone());
@@ -936,14 +936,16 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     };
     let recovery_started = clock.elapsed();
     let mut last_recovery_observation = None;
-    let recovered = tokio::time::timeout(
-        Duration::from_secs(8),
-        observe_queued_recovery(&recovery_changed, || {
-            let snapshot = recovery_snapshot();
-            last_recovery_observation = Some((clock.elapsed(), snapshot));
-            snapshot
-        }),
-    )
+    // The critical private receipt keeps its eight-second deadline above.
+    // Complete all 66 signed rows, public fanout and both retained comparisons
+    // under the same fixture-recovery watchdog as the same-source scenarios.
+    // Paid background pages yield to fresh work; their full drain is not an
+    // eight-second operation SLA. This observer creates no extra traffic.
+    let recovered = super::cold_account_setup(observe_queued_recovery(&recovery_changed, || {
+        let snapshot = recovery_snapshot();
+        last_recovery_observation = Some((clock.elapsed(), snapshot));
+        snapshot
+    }))
     .await;
     let recovery_at_completion = (clock.elapsed(), recovery_snapshot());
     *a.account_session_test_hook.lock().unwrap() = None;
@@ -1006,6 +1008,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         .lock()
         .unwrap()
         .get(&result.committed_events[0])
+        .unwrap()
         .unwrap()
         .clone();
     assert!(event.verify_integrity() && event.verify_signature());

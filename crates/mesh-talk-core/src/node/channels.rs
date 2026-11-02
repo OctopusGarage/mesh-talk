@@ -11,10 +11,11 @@ use super::node::now_millis;
 use super::*;
 use crate::channel::{ChannelMeta, ChannelState};
 use crate::discovery::roster::PeerRecord;
+use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
-use crate::node::session::{request_durable_have, request_round};
+use crate::node::session::{request_durable_have, request_round_paged as request_round};
 use futures_util::future::join_all;
 use futures_util::stream::{self, StreamExt};
 use std::collections::{HashMap, HashSet};
@@ -125,16 +126,23 @@ pub struct ChannelRecovery {
 
 impl Node {
     /// Historical membership belonging to an account other than the active one.
-    pub fn channel_previous_account(&self, channel: ConversationId) -> Option<String> {
-        let projection = self.account_group_projection(channel);
-        let state = projection.state.as_ref()?;
+    pub fn channel_previous_account(
+        &self,
+        channel: ConversationId,
+    ) -> Result<Option<String>, LogError> {
+        let projection = self.account_group_projection(channel)?;
+        let Some(state) = projection.state.as_ref() else {
+            return Ok(None);
+        };
         let public = self.identity.public();
         if projection.authority.current_event().is_none() || !state.members().contains(&public) {
-            return None;
+            return Ok(None);
         }
-        let previous = state.member_account_id(&public.user_id())?;
+        let Some(previous) = state.member_account_id(&public.user_id()) else {
+            return Ok(None);
+        };
         if previous == self.account_id() {
-            return None;
+            return Ok(None);
         }
         // A current account grant or invitation may name another certified
         // device. Its account authority takes precedence over the old tuple.
@@ -143,9 +151,9 @@ impl Node {
             .account_grant(&self.account.public().ed25519_pub)
             .is_some()
         {
-            return None;
+            return Ok(None);
         }
-        Some(previous.to_owned())
+        Ok(Some(previous.to_owned()))
     }
 
     /// A historical device grant does not authorize a newly adopted account.
@@ -155,9 +163,12 @@ impl Node {
             && (state.owner_account_id().is_none()
                 || state.member_account_id(&public.user_id()) == Some(self.account_id().as_str()))
     }
-    pub(in crate::node) fn channel_identity_is_current(&self, state: &ChannelState) -> bool {
-        let current = self.account_group_projection(state.id());
-        self.channel_identity_is_current_in(state, &current)
+    pub(in crate::node) fn channel_identity_is_current(
+        &self,
+        state: &ChannelState,
+    ) -> Result<bool, LogError> {
+        let current = self.account_group_projection(state.id())?;
+        Ok(self.channel_identity_is_current_in(state, &current))
     }
 
     pub(in crate::node) fn channel_identity_is_current_in(
@@ -177,12 +188,22 @@ impl Node {
                     .is_member(&self.identity.public(), &self.own_group_proof())
         } else {
             state.owner_account_id().is_none()
+                && current.state.as_ref().is_some_and(|fresh| {
+                    fresh.epoch() == state.epoch()
+                        && fresh.members() == state.members()
+                        && fresh.owner() == state.owner()
+                        && fresh.is_accepted_member(&self.user_id())
+                        && !fresh.is_dissolved()
+                })
         }
     }
 
-    pub(in crate::node) fn channel_identity_can_manage(&self, state: &ChannelState) -> bool {
-        let current = self.account_group_projection(state.id());
-        self.channel_identity_can_manage_in(state, &current)
+    pub(in crate::node) fn channel_identity_can_manage(
+        &self,
+        state: &ChannelState,
+    ) -> Result<bool, LogError> {
+        let current = self.account_group_projection(state.id())?;
+        Ok(self.channel_identity_can_manage_in(state, &current))
     }
 
     fn channel_identity_can_manage_in(
@@ -227,10 +248,13 @@ impl Node {
     pub fn channel_member_account_sets(
         &self,
         channel: ConversationId,
-    ) -> (
-        std::collections::BTreeSet<String>,
-        std::collections::BTreeSet<String>,
-    ) {
+    ) -> Result<
+        (
+            std::collections::BTreeSet<String>,
+            std::collections::BTreeSet<String>,
+        ),
+        NodeError,
+    > {
         let members = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             if let Some(state) = book.state(&channel)
@@ -246,7 +270,7 @@ impl Node {
                             .map(str::to_owned)
                     })
                     .collect();
-                return (accounts, std::collections::BTreeSet::new());
+                return Ok((accounts, std::collections::BTreeSet::new()));
             }
             book.state(&channel).map(|state| {
                 state
@@ -256,10 +280,12 @@ impl Node {
                     .cloned()
                     .collect::<Vec<_>>()
             })
-        }
-        .unwrap_or_else(|| {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            super::channel::ChannelBook::projected_metadata(channel, &log.events(&channel))
+        };
+        let members = match members {
+            Some(members) => members,
+            None => self
+                .account_group_projection(channel)?
+                .state
                 .map(|state| {
                     state
                         .members()
@@ -268,16 +294,16 @@ impl Node {
                         .cloned()
                         .collect::<Vec<_>>()
                 })
-                .unwrap_or_default()
-        });
-        self.project_channel_member_accounts(&members)
+                .unwrap_or_default(),
+        };
+        Ok(self.project_channel_member_accounts(&members))
     }
 
     /// Read validated controls independently of delayed plaintext persistence.
     fn channel_control_state(&self, channel: ConversationId) -> Result<ChannelState, NodeError> {
-        let log = self.log.lock().expect("log mutex not poisoned");
-        let events = log.events(&channel);
-        let state = ChannelBook::projected_metadata(channel, &events)
+        let state = self
+            .account_group_projection(channel)?
+            .state
             .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
         if state.is_dissolved() {
             return Err(NodeError::Channel("channel is dissolved".into()));
@@ -374,7 +400,7 @@ impl Node {
     /// device certificates; never infer account ownership from display names.
     pub(in crate::node) fn auto_enrollment_candidate(
         &self,
-    ) -> Option<(ConversationId, PublicIdentity)> {
+    ) -> Result<Option<(ConversationId, PublicIdentity)>, NodeError> {
         let me = self.user_id();
         let own_account = self.account_id();
         let mut peers = self.routing_peers();
@@ -395,7 +421,7 @@ impl Node {
             if state.owner() != me || state.is_dissolved() || state.owner_account_id().is_some() {
                 continue;
             }
-            let projection = self.account_group_projection(channel);
+            let projection = self.account_group_projection(channel)?;
             let Some(root) = projection
                 .accepted
                 .iter()
@@ -437,17 +463,17 @@ impl Node {
                     .is_some_and(|account| accepted_accounts.contains(account))
                     && !state.is_member(&peer.public.user_id())
                 {
-                    return Some((channel, peer.public.clone()));
+                    return Ok(Some((channel, peer.public.clone())));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// Persist an owner-signed invitation for one sibling per pass. The ordinary
     /// channel distribution and recovery paths deliver it to the new device.
     pub(in crate::node) async fn auto_enroll_one_channel_sibling(&self) -> Result<bool, NodeError> {
-        let Some((channel, device)) = self.auto_enrollment_candidate() else {
+        let Some((channel, device)) = self.auto_enrollment_candidate()? else {
             return Ok(false);
         };
         self.add_channel_member_checked_if(channel, device, true, |commit| commit())
@@ -497,12 +523,102 @@ impl Node {
 
     /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
     pub(in crate::node) async fn run_channel_recovery_loop(self: Arc<Self>, changes: Arc<Notify>) {
+        // Freeze the test policy before entering the production worker. Notify,
+        // metadata, discovery, bounded admission and peer rotation are unchanged.
+        #[cfg(test)]
+        let periodic = !self
+            .channel_recovery_periodic_disabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let periodic = true;
+        let maintenance = Arc::clone(&self).run_account_channel_maintenance_loop(periodic);
+        Box::pin(self.run_channel_recovery_with_maintenance(changes, periodic, maintenance)).await;
+    }
+
+    /// One parent owns both futures; cancellation drops both without detached work.
+    pub(super) async fn run_channel_recovery_with_maintenance(
+        self: Arc<Self>,
+        changes: Arc<Notify>,
+        periodic: bool,
+        maintenance: impl std::future::Future<Output = ()>,
+    ) {
+        tokio::select! {
+            _ = self.run_local_channel_recovery_loop(changes, periodic) => {}
+            _ = maintenance => {}
+        }
+    }
+
+    async fn run_account_channel_maintenance_loop(self: Arc<Self>, periodic: bool) {
+        let mut work = super::channel_account_maintenance::ChannelAccountMaintenance::default();
+        let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // These subscriptions do not consume the local recovery/roster Notify
+        // permits. The existing maintenance state survives every local wake.
+        let mut metadata = self.subscribe_channel_changes();
+        let mut network = self.network_changes.subscribe();
+        loop {
+            tokio::select! {
+                _ = tick.tick(), if periodic => {}
+                change = metadata.recv() => match change {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+                change = network.changed() => if change.is_err() { return; },
+            }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_maintenance_begin".into()
+            });
+            self.maintain_account_channels(&mut work).await;
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_maintenance_done".into()
+            });
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn prepare_local_channel_recovery_turn(&self) {
+        self.retry_channel_plaintext();
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "channel_recovery_plaintext_done".into()
+        });
+    }
+
+    /// Keep one remote turn and its leases alive while notified local work advances.
+    /// The outer selection is inactive here, so this Notify has one consumer.
+    async fn complete_channel_recovery_turn(
+        &self,
+        mut remote: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    ) {
+        let mut consumed_notification = false;
+        loop {
+            tokio::select! {
+                () = remote.as_mut() => break,
+                () = self.channel_recovery_notify.notified() => {
+                    consumed_notification = true;
+                    self.prepare_local_channel_recovery_turn();
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        // A local notification may also own a pending network target. Preserve
+        // one outer turn without restarting the active exchange or adding a queue.
+        if consumed_notification {
+            self.channel_recovery_notify.notify_one();
+        }
+    }
+
+    async fn run_local_channel_recovery_loop(
+        self: Arc<Self>,
+        changes: Arc<Notify>,
+        periodic: bool,
+    ) {
         let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
         let mut custody_cursor = 0usize;
-        let mut account_maintenance =
-            super::channel_account_maintenance::ChannelAccountMaintenance::default();
         let mut retry_after = HashMap::new();
         let mut retry_cycle = HashMap::new();
         let mut recheck_after = HashMap::new();
@@ -524,8 +640,8 @@ impl Node {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => discovered = true,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
-                _ = tick.tick() => { custody_tick = true; },
-                _ = tokio::time::sleep_until(fallback_at) => {},
+                _ = tick.tick(), if periodic => { custody_tick = true; },
+                _ = tokio::time::sleep_until(fallback_at), if periodic => {},
             }
             loop {
                 match metadata.try_recv() {
@@ -536,77 +652,145 @@ impl Node {
                     Err(_) => break,
                 }
             }
-            self.maintain_account_channels(&mut account_maintenance)
-                .await;
-            self.retry_channel_plaintext();
-            if let Err(error) = self.auto_enroll_one_channel_sibling().await {
-                log::warn!("linked channel invitation failed; will retry: {error}");
-            }
-            if let Err(error) = self.auto_accept_one_linked_invite().await {
-                log::warn!("linked channel acceptance failed; will retry: {error}");
-            }
-            let targets = {
-                let mut pending = self
-                    .channel_recovery_pending
-                    .lock()
-                    .expect("recovery queue not poisoned");
-                let mut targets: Vec<_> = pending.iter().copied().collect();
-                targets.sort_unstable_by_key(|id| *id.as_bytes());
-                targets.truncate(CHANNEL_RECOVERY_WAKE_BATCH);
-                for channel in &targets {
-                    pending.remove(channel);
+            self.prepare_local_channel_recovery_turn();
+            let remote = async {
+                match self.retry_join_history_new() {
+                    Ok(channels) => {
+                        for channel in channels {
+                            let members = self.channel_members(channel);
+                            self.distribute_channel(channel, &members).await;
+                        }
+                    }
+                    Err(error) => log::warn!("channel history recovery deferred: {error}"),
                 }
-                if !pending.is_empty() {
-                    self.channel_recovery_notify.notify_one();
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_join_history_done".into()
+                });
+                match self.retry_group_metadata() {
+                    Ok(channels) => {
+                        for channel in channels {
+                            let members = self.channel_members(channel);
+                            self.distribute_channel(channel, &members).await;
+                        }
+                    }
+                    Err(error) => log::warn!("channel metadata recovery deferred: {error}"),
                 }
-                targets
-            };
-            let active = discovered || !targets.is_empty();
-            if active {
-                backoff.reset();
-                fallback_at =
-                    fallback_at.min(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
-            }
-            stream::iter(targets)
-                .for_each_concurrent(CHANNEL_RECOVERY_GROUP_CONCURRENCY, |channel| async move {
-                    node.pull_channel_from_members(channel, cursor, false).await;
-                })
-                .await;
-            if discovered || tokio::time::Instant::now() >= fallback_at {
-                let batch = self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH);
-                let start = cursor;
-                cursor = cursor.wrapping_add(batch);
-                stream::iter(start..start.saturating_add(batch))
-                    .for_each_concurrent(CHANNEL_RECOVERY_GROUP_CONCURRENCY, |index| async move {
-                        node.pull_one_channel_from_member(index).await;
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_group_metadata_done".into()
+                });
+                if let Err(error) = self.auto_enroll_one_channel_sibling().await {
+                    log::warn!("linked channel invitation failed; will retry: {error}");
+                }
+                if let Err(error) = self.auto_accept_one_linked_invite().await {
+                    log::warn!("linked channel acceptance failed; will retry: {error}");
+                }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_membership_done".into()
+                });
+                let targets = {
+                    let mut pending = self
+                        .channel_recovery_pending
+                        .lock()
+                        .expect("recovery queue not poisoned");
+                    let mut targets: Vec<_> = pending.iter().copied().collect();
+                    targets.sort_unstable_by_key(|id| *id.as_bytes());
+                    targets.truncate(CHANNEL_RECOVERY_WAKE_BATCH);
+                    for channel in &targets {
+                        pending.remove(channel);
+                    }
+                    if !pending.is_empty() {
+                        self.channel_recovery_notify.notify_one();
+                    }
+                    targets
+                };
+                let active = discovered || !targets.is_empty();
+                if active {
+                    backoff.reset();
+                    fallback_at =
+                        fallback_at.min(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
+                }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    format!("channel_recovery_targets_begin count={}", targets.len())
+                });
+                stream::iter(targets)
+                    .for_each_concurrent(CHANNEL_RECOVERY_GROUP_CONCURRENCY, |channel| async move {
+                        node.pull_channel_from_members(channel, cursor, false).await;
                     })
                     .await;
-                // Independent bounded jitter prevents synchronized idle repair bursts.
-                let jitter =
-                    (now_millis() ^ u64::from(self.identity.public().ed25519_pub[0])) as u8;
-                fallback_at = tokio::time::Instant::now() + backoff.next_delay(jitter);
-            }
-            // Custody and failed plaintext retain their existing retry clock.
-            if custody_tick {
-                if let Some((channel, event, peer)) = self
-                    .retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
-                    .await
-                {
-                    // No replication exchange used this turn. Repair only the
-                    // missing report with the existing exact durable-have query.
-                    self.recheck_channel_custody_peer(channel, event, &peer)
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_targets_done".into()
+                });
+                // Notification-only tests exclude discovery-triggered repair as well.
+                if periodic && (discovered || tokio::time::Instant::now() >= fallback_at) {
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        "channel_recovery_fallback_begin".into()
+                    });
+
+                    let batch = self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH);
+                    let start = cursor;
+                    cursor = cursor.wrapping_add(batch);
+                    stream::iter(start..start.saturating_add(batch))
+                        .for_each_concurrent(
+                            CHANNEL_RECOVERY_GROUP_CONCURRENCY,
+                            |index| async move {
+                                node.pull_one_channel_from_member(index).await;
+                            },
+                        )
                         .await;
+                    // Independent bounded jitter prevents synchronized idle repair bursts.
+                    let jitter =
+                        (now_millis() ^ u64::from(self.identity.public().ed25519_pub[0])) as u8;
+                    fallback_at = tokio::time::Instant::now() + backoff.next_delay(jitter);
                 }
-                if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
-                    self.recheck_one_channel_custody(
-                        custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
-                        &mut recheck_after,
-                        &mut recheck_cycle,
-                    )
-                    .await;
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_fallback_done".into()
+                });
+                // Custody and failed plaintext retain their existing retry clock.
+                if custody_tick {
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        "channel_recovery_custody_begin".into()
+                    });
+                    if let Some((channel, event, peer)) = self
+                        .retry_one_channel_custody(
+                            custody_cursor,
+                            &mut retry_after,
+                            &mut retry_cycle,
+                        )
+                        .await
+                    {
+                        // No replication exchange used this turn. Repair only the
+                        // missing report with the existing exact durable-have query.
+                        self.recheck_channel_custody_peer(channel, event, &peer)
+                            .await;
+                    }
+                    if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
+                        self.recheck_one_channel_custody(
+                            custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
+                            &mut recheck_after,
+                            &mut recheck_cycle,
+                        )
+                        .await;
+                    }
+                    custody_cursor = custody_cursor.wrapping_add(1);
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        "channel_recovery_custody_done".into()
+                    });
                 }
-                custody_cursor = custody_cursor.wrapping_add(1);
-            }
+            };
+            tokio::pin!(remote);
+            self.complete_channel_recovery_turn(remote.as_mut()).await;
+            // Notify can remain immediately ready after bounded local work.
+            // Yield so the sibling maintenance future can always be polled.
+            tokio::task::yield_now().await;
         }
     }
 
@@ -637,6 +821,7 @@ impl Node {
         enabled: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -648,7 +833,7 @@ impl Node {
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-                if !self.channel_identity_is_current(state) || state.is_dissolved() {
+                if !self.channel_identity_is_current(state)? || state.is_dissolved() {
                     return Err(NodeError::Channel("not an active channel member".into()));
                 }
                 state.members().to_vec()
@@ -675,6 +860,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -686,7 +872,7 @@ impl Node {
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                if !self.channel_identity_can_manage(state) {
+                if !self.channel_identity_can_manage(state)? {
                     return Err(NodeError::Channel(
                         "only the channel owner can dissolve it".into(),
                     ));
@@ -708,24 +894,55 @@ impl Node {
         Ok(())
     }
 
+    /// Stable selected-content cache binding. Ordinary content tails preserve
+    /// this token; control changes and reordered canonical history replace it.
+    pub(in crate::node) fn channel_content_generation(
+        &self,
+        channel: ConversationId,
+    ) -> Result<Option<([u8; 16], i64)>, NodeError> {
+        let Some(source) = self.channel_checkpoints.source_binding(channel)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            source.job,
+            self.channel_checkpoints.control_stamp(&source)?,
+        )))
+    }
+
+    /// Exact invitation cutoff for one selected event, including own authors.
+    /// Receive-chain admission has a separate stricter owner.
+    pub(in crate::node) fn channel_content_visible(
+        &self,
+        channel: ConversationId,
+        event: crate::eventlog::EventId,
+    ) -> Result<bool, LogError> {
+        self.channel_checkpoints.content_visible(channel, event)
+    }
+
     /// Event ids visible to this device after it accepted an invitation.
     /// `None` means this channel has no acceptance cutoff (or is not a channel).
+    #[cfg(test)]
     pub(in crate::node) fn channel_content_gate(
         &self,
         channel: ConversationId,
-    ) -> Option<HashSet<EventId>> {
+    ) -> Result<Option<HashSet<EventId>>, LogError> {
         let status = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.state(&channel)
                 .map(|state| (state.pending_invite(), state.accepted_event_id()))
-        }?;
+        };
+        let Some(status) = status else {
+            return Ok(None);
+        };
         if status.0 {
-            return Some(HashSet::new());
+            return Ok(Some(HashSet::new()));
         }
-        let accepted = status.1?;
+        let Some(accepted) = status.1 else {
+            return Ok(None);
+        };
         let log = self.log.lock().expect("log mutex not poisoned");
         let mut descendants = HashSet::new();
-        for event in log.events(&channel) {
+        for event in log.events(&channel)? {
             if event.id == accepted
                 || event
                     .parents
@@ -735,7 +952,7 @@ impl Node {
                 descendants.insert(event.id);
             }
         }
-        Some(descendants)
+        Ok(Some(descendants))
     }
     /// Create a channel named `name` with `members` (the creator is added
     /// automatically). Mints a channel id, posts the membership event, builds our own
@@ -936,16 +1153,19 @@ impl Node {
                     self.append_event(channel, EventKind::ChannelHistoryPolicy, history_policy())?;
                 }
             }
-            // Build our own channel state (sets our identity for the sender-key path).
-            self.process_channel(channel);
-            self.record_channel_owner_origin(channel)?;
-            // Distribute our epoch-0 sender-key distribution to every member.
-            self.distribute_my_sender_key(channel, &members)?;
-
             distribution = Some((channel, members.clone()));
             Ok(())
         })?;
         let (channel, members) = distribution.expect("authorized channel commit executed");
+        self.await_channel_metadata(channel).await?;
+        self.distribute_my_sender_key(channel, &members)?;
+        // Key publication advances the signed source too. Complete that local
+        // intent before exposing a newly created channel to immediate sends.
+        self.await_channel_metadata(channel).await?;
+        // This grants automatic account migration permission. Grant it only
+        // after creation's final source read, so maintenance cannot append an
+        // authority upgrade between sender publication and metadata completion.
+        self.record_channel_owner_origin(channel)?;
         self.distribute_channel(channel, &members).await;
         Ok(channel)
     }
@@ -959,6 +1179,18 @@ impl Node {
         channel: ConversationId,
         members: &[PublicIdentity],
     ) -> Result<(), NodeError> {
+        self.commit_my_sender_key(channel, members)?;
+        self.process_channel(channel);
+        Ok(())
+    }
+
+    /// Commit the same sender WAL without spending another canonical allowance.
+    /// Bounded maintenance prepares its accepted tail with its existing budget.
+    pub(in crate::node) fn commit_my_sender_key(
+        &self,
+        channel: ConversationId,
+        members: &[PublicIdentity],
+    ) -> Result<(), NodeError> {
         let _ = members;
         let mut delivery = self.delivery.lock().expect("delivery lock");
         self.recover_delivery(&mut delivery)
@@ -967,7 +1199,7 @@ impl Node {
         let state = book
             .state(&channel)
             .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-        if !self.channel_identity_is_current(state) || state.is_dissolved() {
+        if !self.channel_identity_is_current(state)? || state.is_dissolved() {
             return Err(NodeError::Channel("not an active channel member".into()));
         }
         let mut senders = state.export_my_senders();
@@ -1022,6 +1254,7 @@ impl Node {
         drop(book);
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
+        drop(delivery);
         Ok(())
     }
 
@@ -1060,8 +1293,9 @@ impl Node {
         require_account_sibling: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
+        self.await_channel_metadata(channel).await?;
         let upgraded = self
-            .account_group_projection(channel)
+            .account_group_projection(channel)?
             .authority
             .current_event()
             .is_some();
@@ -1105,13 +1339,14 @@ impl Node {
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
         let mut distribution = None;
+        let mut owner_control = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
             if self
-                .account_group_projection(channel)
+                .account_group_projection(channel)?
                 .authority
                 .current_event()
                 .is_some()
@@ -1122,6 +1357,14 @@ impl Node {
                     )
                 })?;
                 match self.try_account_channel_invite(channel, &new_member, proof)? {
+                    super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                        event,
+                        recipients,
+                    } => {
+                        owner_control = Some(event);
+                        distribution = Some(recipients);
+                        return Ok(());
+                    }
                     super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                         distribution = Some(members);
                         return Ok(());
@@ -1137,7 +1380,7 @@ impl Node {
                 }
             }
             if require_account_sibling
-                && self.auto_enrollment_candidate() != Some((channel, new_member.clone()))
+                && self.auto_enrollment_candidate()? != Some((channel, new_member.clone()))
             {
                 return Ok(());
             }
@@ -1163,7 +1406,7 @@ impl Node {
             };
             // Only the owner may change membership — a non-owner's event would be rejected by
             // every node's `process`, so refuse it locally too (no useless event/epoch bump).
-            if !self.channel_can_manage(channel) {
+            if !self.channel_can_manage(channel)? {
                 return Err(NodeError::Channel(
                     "only the channel owner can change membership".into(),
                 ));
@@ -1183,14 +1426,17 @@ impl Node {
                 epoch: new_epoch,
                 owner,
             };
-            let policy = self.channel_history_policy(channel);
-            let selected = self.select_join_history(channel, policy, now_millis());
+            let policy = self.channel_history_policy(channel)?;
+            let selected = self.select_join_history(channel, policy, now_millis())?;
             self.append_invitation_with_history(channel, &meta, &new_member, selected, policy)?;
             self.process_channel(channel);
             distribution = Some(new_members.clone());
             Ok(())
         })?;
         drop(policy);
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         let Some(new_members) = distribution else {
             return Ok(false);
         };
@@ -1218,16 +1464,18 @@ impl Node {
         member_user_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
         let mut distribution = None;
+        let mut owner_control = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
-            let projection = self.account_group_projection(channel);
+            let projection = self.account_group_projection(channel)?;
             if projection.authority.current_event().is_some() {
                 let account = projection
                     .state
@@ -1235,6 +1483,14 @@ impl Node {
                     .and_then(|state| state.member_account_id(member_user_id))
                     .unwrap_or("");
                 match self.try_account_channel_remove(channel, account)? {
+                    super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                        event,
+                        recipients,
+                    } => {
+                        owner_control = Some(event);
+                        distribution = Some(recipients);
+                        return Ok(());
+                    }
                     super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                         distribution = Some(members);
                         return Ok(());
@@ -1260,7 +1516,7 @@ impl Node {
             };
             // Only the owner may change membership — reject a non-owner's removal locally
             // (every node would reject the resulting event anyway).
-            if !self.channel_can_manage(channel) {
+            if !self.channel_can_manage(channel)? {
                 return Err(NodeError::Channel(
                     "only the channel owner can change membership".into(),
                 ));
@@ -1294,6 +1550,9 @@ impl Node {
             Ok(())
         })?;
         drop(policy);
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         let Some(new_members) = distribution else {
             return Ok(());
         };
@@ -1309,16 +1568,26 @@ impl Node {
         account_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
         let mut distribution = None;
+        let mut owner_control = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
             match self.try_account_channel_remove(channel, account_id)? {
+                super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                    event,
+                    recipients,
+                } => {
+                    owner_control = Some(event);
+                    distribution = Some(recipients);
+                    return Ok(());
+                }
                 super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                     distribution = Some(members);
                     return Ok(());
@@ -1335,7 +1604,7 @@ impl Node {
                     state.owner().to_owned(),
                 )
             };
-            if !self.channel_can_manage(channel) {
+            if !self.channel_can_manage(channel)? {
                 return Err(NodeError::Channel(
                     "only the channel owner can change membership".into(),
                 ));
@@ -1385,6 +1654,9 @@ impl Node {
             Ok(())
         })?;
         drop(policy);
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         if let Some(members) = distribution {
             self.distribute_channel(channel, &members).await;
         }
@@ -1412,6 +1684,7 @@ impl Node {
         new_name: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -1427,7 +1700,7 @@ impl Node {
             };
             // Only the owner may rename — a non-owner's event would be rejected by every node's
             // `process`, so refuse it locally too.
-            if !self.channel_can_manage(channel) {
+            if !self.channel_can_manage(channel)? {
                 return Err(NodeError::Channel(
                     "only the channel owner can rename the channel".into(),
                 ));
@@ -1470,13 +1743,24 @@ impl Node {
         new_owner: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
+        let mut owner_control = None;
+        let mut transfer = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
             match self.try_account_channel_transfer(channel, new_owner)? {
+                super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                    event,
+                    recipients,
+                } => {
+                    owner_control = Some(event);
+                    distribution = Some(recipients);
+                    return Ok(());
+                }
                 super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                     distribution = Some(members);
                     return Ok(());
@@ -1484,7 +1768,7 @@ impl Node {
                 super::channel_account_controls::AccountChannelMutation::Unchanged => return Ok(()),
                 super::channel_account_controls::AccountChannelMutation::Legacy => {}
             }
-            let (owner, accepted) = {
+            let (owner, accepted, members) = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
                     .state(&channel)
@@ -1492,9 +1776,10 @@ impl Node {
                 (
                     state.owner().to_string(),
                     state.is_accepted_member(new_owner),
+                    state.members().to_vec(),
                 )
             };
-            if !self.channel_can_manage(channel) {
+            if !self.channel_can_manage(channel)? {
                 return Err(NodeError::Channel(
                     "only the channel owner can transfer ownership".into(),
                 ));
@@ -1507,30 +1792,36 @@ impl Node {
                     "new owner must have accepted the channel invitation".into(),
                 ));
             }
-            self.append_event(
+            let (_, event) = self.append_event_with_profile_parent(
                 channel,
                 EventKind::ChannelOwnerTransfer,
                 new_owner.as_bytes().to_vec(),
+                None,
             )?;
-            self.process_channel(channel);
-            let members = {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                let state = book
-                    .state(&channel)
-                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                if state.owner() != new_owner {
-                    return Err(NodeError::Channel(
-                        "channel membership changed before ownership transfer completed".into(),
-                    ));
-                }
-                state.members().to_vec()
-            };
-            distribution = Some(members.clone());
+            transfer = Some(event);
+            distribution = Some(members);
             Ok(())
         })?;
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         let Some(members) = distribution else {
             return Ok(());
         };
+        self.await_channel_metadata(channel).await?;
+        if let Some(event) = transfer {
+            let projection = self.account_group_projection(channel)?;
+            if projection.ownership != Some(event)
+                || !projection
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.owner() == new_owner)
+            {
+                return Err(NodeError::Channel(
+                    "channel membership changed before ownership transfer completed".into(),
+                ));
+            }
+        }
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -1546,6 +1837,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
@@ -1554,7 +1846,7 @@ impl Node {
                 .lock()
                 .expect("channel membership commit lock");
             if self
-                .account_group_projection(channel)
+                .account_group_projection(channel)?
                 .authority
                 .current_event()
                 .is_some()
@@ -1569,9 +1861,18 @@ impl Node {
             distribution = Some(self.apply_legacy_member_leave(channel, &own_proof)?);
             Ok(())
         })?;
-        let Some(members) = distribution else {
+        let Some((members, event)) = distribution else {
             return Ok(());
         };
+        self.await_channel_metadata(channel).await?;
+        if !self
+            .account_group_projection(channel)?
+            .is_authorized(event)?
+        {
+            return Err(NodeError::Channel(
+                "legacy departure was not admitted".into(),
+            ));
+        }
         self.distribute_channel(channel, &members).await;
         self.process_channel(channel);
         Ok(())
@@ -1589,6 +1890,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
@@ -1597,16 +1899,17 @@ impl Node {
                 .lock()
                 .expect("channel membership commit lock");
             if self
-                .account_group_projection(channel)
+                .account_group_projection(channel)?
                 .authority
                 .current_event()
                 .is_some()
             {
-                distribution = Some(self.apply_account_self_control(
+                let (members, event) = self.apply_account_self_control(
                     channel,
                     account_self_control::AccountSelfControlInput::Accept,
                     &own_proof,
-                )?);
+                )?;
+                distribution = Some((members, Some(event)));
                 return Ok(());
             }
             let members = {
@@ -1621,12 +1924,22 @@ impl Node {
             };
             self.append_event(channel, EventKind::ChannelAccept, vec![])?;
             self.process_channel(channel);
-            distribution = Some(members.clone());
+            distribution = Some((members, None));
             Ok(())
         })?;
-        let Some(members) = distribution else {
+        let Some((members, event)) = distribution else {
             return Ok(());
         };
+        self.await_channel_metadata(channel).await?;
+        if let Some(event) = event
+            && !self
+                .account_group_projection(channel)?
+                .is_authorized(event)?
+        {
+            return Err(NodeError::Channel(
+                "account self control was not admitted".into(),
+            ));
+        }
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -1726,6 +2039,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let id = self.enqueue_channel_message_reply_expiring_if(
             channel,
             text,
@@ -1735,6 +2049,9 @@ impl Node {
         )?;
         self.flush_accepted_message(&MessageDestination::Channel(channel), id)
             .await;
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::debug!("accepted channel metadata preparation deferred: {error}");
+        }
         Ok(())
     }
 
@@ -1776,6 +2093,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let id = self.enqueue_sticker_channel_expiring_if(
             channel,
             sticker_id,
@@ -1785,6 +2103,9 @@ impl Node {
         )?;
         self.flush_accepted_message(&MessageDestination::Channel(channel), id)
             .await;
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::debug!("accepted channel metadata preparation deferred: {error}");
+        }
         Ok(())
     }
 
@@ -1858,6 +2179,10 @@ impl Node {
         channel: ConversationId,
         members: &[PublicIdentity],
     ) {
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::warn!("accepted channel control preparation deferred: {error}");
+            return;
+        }
         self.distribute_channel_targets(channel, members, None, true, None)
             .await;
     }
@@ -1870,6 +2195,10 @@ impl Node {
         members: &[PublicIdentity],
         event: Option<EventId>,
     ) -> bool {
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::warn!("accepted channel control preparation deferred: {error}");
+            return false;
+        }
         self.distribute_channel_targets(channel, members, None, true, event)
             .await
     }
@@ -1968,7 +2297,10 @@ impl Node {
             hex::encode(&channel.as_bytes()[..4]),
             members.len(),
             seeded,
-            self.channel_custody_count(channel, event_id).unwrap_or(0),
+            match self.channel_custody_count(channel, event_id) {
+                Ok(count) => count.unwrap_or(0),
+                Err(error) => { log::warn!("channel send custody observation deferred: {error}"); return; }
+            },
             sent_frame_bytes,
             started.elapsed().as_millis(),
         );
@@ -1977,7 +2309,11 @@ impl Node {
     /// Number of distinct other accepted member accounts with historical
     /// authenticated custody evidence. This never establishes delivery or reading.
     /// A sibling-authored row without synchronized evidence remains unknown.
-    pub fn channel_custody_count(&self, channel: ConversationId, id: EventId) -> Option<usize> {
+    pub fn channel_custody_count(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+    ) -> Result<Option<usize>, NodeError> {
         let physical_member = {
             let book = self.channels.lock().expect("channels mutex");
             book.state(&channel)
@@ -1993,7 +2329,7 @@ impl Node {
             .log
             .lock()
             .expect("log mutex")
-            .get(&id)
+            .get(&id)?
             .is_some_and(|event| {
                 event.conversation_id == channel
                     && event.kind == EventKind::Message
@@ -2003,7 +2339,7 @@ impl Node {
             .log
             .lock()
             .expect("log mutex")
-            .get(&id)
+            .get(&id)?
             .is_some_and(|event| {
                 event.conversation_id == channel
                     && event.kind == EventKind::Message
@@ -2013,10 +2349,10 @@ impl Node {
             .received
             .lock()
             .expect("received mutex")
-            .entry(id)
+            .entry(id)?
             .is_some_and(|row| row.conversation == channel && own_devices.contains(&row.from));
         if !own_signed && !own_archived {
-            return None;
+            return Ok(None);
         }
         let observations = self.channel_custody_observations(channel, id);
         if !physical_member {
@@ -2024,8 +2360,8 @@ impl Node {
             // observed external copies without installing a physical grant.
             // Positive holder qualification still needs the existing public
             // membership view; never turn an unresolved positive into zero.
-            let (confirmed, _) = self.effective_channel_custody_observations(channel, id);
-            return (!observations.is_empty()
+            let (confirmed, _) = self.effective_channel_custody_observations(channel, id)?;
+            return Ok((!observations.is_empty()
                 && observations.iter().all(|meta| meta.tombstone)
                 && confirmed.is_empty()
                 && self.account_group_access(channel).is_ok_and(|access| {
@@ -2034,16 +2370,16 @@ impl Node {
                         super::AccountGroupRole::Owner | super::AccountGroupRole::Member
                     )
                 }))
-            .then_some(0);
+            .then_some(0));
         }
         if !own_local && observations.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let (principals, unreadable) = self.confirmed_channel_custody_principals(channel, id);
+        let (principals, unreadable) = self.confirmed_channel_custody_principals(channel, id)?;
         if unreadable && principals.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(principals.len())
+            Ok(Some(principals.len()))
         }
     }
 
@@ -2118,16 +2454,19 @@ impl Node {
         &self,
         channel: ConversationId,
         id: EventId,
-    ) -> (
-        HashSet<String>,
-        Vec<super::account_documents::AccountDocumentMeta>,
-    ) {
+    ) -> Result<
+        (
+            HashSet<String>,
+            Vec<super::account_documents::AccountDocumentMeta>,
+        ),
+        NodeError,
+    > {
         let observations = self.channel_custody_observations(channel, id);
         let mut confirmed = self
             .channel_custody
             .lock()
             .expect("custody mutex")
-            .peers(id);
+            .peers(id)?;
         for meta in &observations {
             if let super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } =
                 &meta.key
@@ -2139,15 +2478,15 @@ impl Node {
                 }
             }
         }
-        (confirmed, observations)
+        Ok((confirmed, observations))
     }
 
     fn confirmed_channel_custody_principals(
         &self,
         channel: ConversationId,
         id: EventId,
-    ) -> (HashSet<String>, bool) {
-        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id);
+    ) -> Result<(HashSet<String>, bool), NodeError> {
+        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id)?;
         let members = self
             .channels
             .lock()
@@ -2167,7 +2506,7 @@ impl Node {
             let member = members.iter().find(|member| member.user_id() == device)?;
             self.channel_custody_member_principal(channel, member, None)
         }).collect();
-        (principals, unreadable)
+        Ok((principals, unreadable))
     }
 
     /// Historical exact-wrapper custody confirmed by post offices, separate
@@ -2176,19 +2515,21 @@ impl Node {
         &self,
         channel: ConversationId,
         id: EventId,
-    ) -> Option<usize> {
-        self.channel_custody_count(channel, id)?;
-        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id);
+    ) -> Result<Option<usize>, NodeError> {
+        if self.channel_custody_count(channel, id)?.is_none() {
+            return Ok(None);
+        }
+        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id)?;
         let unreadable = observations.iter().any(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder.starts_with("relay:")) && self.channel_custody_holder_binding(&meta.key).is_none());
         if unreadable {
-            return None;
+            return Ok(None);
         }
-        Some(
+        Ok(Some(
             confirmed
                 .iter()
                 .filter(|peer| peer.starts_with("relay:"))
                 .count(),
-        )
+        ))
     }
 
     async fn sync_and_confirm_custody(
@@ -2260,55 +2601,63 @@ impl Node {
         after: &mut HashMap<ConversationId, (u64, EventId)>,
         cycles: &mut HashMap<ConversationId, usize>,
     ) {
-        let me = self.user_id();
-        let author =
-            crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
-        let mut channels: Vec<_> = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.channel_ids()
+        let result: Result<(), NodeError> = async {
+            let me = self.user_id();
+            let author =
+                crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
+            let mut channels: Vec<_> = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                book.channel_ids()
+                    .into_iter()
+                    .filter(|channel| {
+                        book.state(channel)
+                            .is_some_and(|state| state.is_member(&me) && !state.is_dissolved())
+                    })
+                    .collect()
+            };
+            if channels.is_empty() {
+                return Ok(());
+            }
+            channels.sort_unstable_by_key(|channel| *channel.as_bytes());
+            let channel = channels[cursor % channels.len()];
+            let previous = after.get(&channel).copied();
+            let Some((lamport, event_id)) = self
+                .log
+                .lock()
+                .expect("log mutex not poisoned")
+                .message_keys_after(channel, author, previous, 1)?
                 .into_iter()
-                .filter(|channel| {
-                    book.state(channel)
-                        .is_some_and(|state| state.is_member(&me) && !state.is_dissolved())
+                .next()
+            else {
+                return Ok(());
+            };
+            let cycle = advance_custody_cursor(channel, (lamport, event_id), after, cycles);
+            let (confirmed, _) = self.effective_channel_custody_observations(channel, event_id)?;
+            let members = self.channel_custody_repair_members(channel);
+            let peers = members
+                .iter()
+                .filter(|member| {
+                    confirmed.contains(&member.user_id())
+                        && self
+                            .channel_custody_member_principal(channel, member, None)
+                            .is_some()
                 })
-                .collect()
-        };
-        if channels.is_empty() {
-            return;
+                .filter_map(|member| {
+                    self.routing_peer(&member.user_id())
+                        .filter(|peer| peer.public == *member)
+                })
+                .collect();
+            let peer = select_custody_peer(peers, cycle);
+            let Some(peer) = peer else { return Ok(()) };
+            self.recheck_channel_custody_peer(channel, event_id, &peer)
+                .await;
+
+            Ok(())
         }
-        channels.sort_unstable_by_key(|channel| *channel.as_bytes());
-        let channel = channels[cursor % channels.len()];
-        let previous = after.get(&channel).copied();
-        let Some((lamport, event_id)) = self
-            .log
-            .lock()
-            .expect("log mutex not poisoned")
-            .message_keys_after(channel, author, previous, 1)
-            .into_iter()
-            .next()
-        else {
-            return;
-        };
-        let cycle = advance_custody_cursor(channel, (lamport, event_id), after, cycles);
-        let (confirmed, _) = self.effective_channel_custody_observations(channel, event_id);
-        let members = self.channel_custody_repair_members(channel);
-        let peers = members
-            .iter()
-            .filter(|member| {
-                confirmed.contains(&member.user_id())
-                    && self
-                        .channel_custody_member_principal(channel, member, None)
-                        .is_some()
-            })
-            .filter_map(|member| {
-                self.routing_peer(&member.user_id())
-                    .filter(|peer| peer.public == *member)
-            })
-            .collect();
-        let peer = select_custody_peer(peers, cycle);
-        let Some(peer) = peer else { return };
-        self.recheck_channel_custody_peer(channel, event_id, &peer)
-            .await;
+        .await;
+        if let Err(error) = result {
+            log::warn!("recheck_one_channel_custody deferred after storage failure: {error}");
+        }
     }
 
     pub(in crate::node) async fn recheck_channel_custody_peer(
@@ -2358,104 +2707,120 @@ impl Node {
         after: &mut HashMap<ConversationId, (u64, EventId)>,
         cycles: &mut HashMap<ConversationId, usize>,
     ) -> Option<(ConversationId, EventId, PeerRecord)> {
-        let me = self.user_id();
-        let mut channels: Vec<_> = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.channel_ids()
+        let result: Result<Option<(ConversationId, EventId, PeerRecord)>, NodeError> = async {
+            let me = self.user_id();
+            let mut channels: Vec<_> = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                book.channel_ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        let state = book.state(&id)?;
+                        (state.is_member(&me) && !state.is_dissolved())
+                            .then(|| (id, state.members().to_vec()))
+                    })
+                    .collect()
+            };
+            if channels.is_empty() {
+                return Ok(None);
+            }
+            channels.sort_unstable_by_key(|(channel, _)| *channel.as_bytes());
+            let (channel, _) = &channels[cursor % channels.len()];
+            let channel = *channel;
+            let members = self.channel_custody_repair_members(channel);
+            let author =
+                crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
+            let candidates: Vec<_> = {
+                let log = self.log.lock().expect("log mutex not poisoned");
+                log.message_keys_after(
+                    channel,
+                    author,
+                    after.get(&channel).copied(),
+                    CHANNEL_CUSTODY_SCAN_PER_TICK,
+                )?
+            };
+            if candidates.is_empty() {
+                return Ok(None);
+            }
+            // A read-only custody report does not require a physical group grant.
+            // Pairing's current full-device/account binding selects the endpoint;
+            // the ordinary durable-have responder still owns original visibility.
+            let own_account = self.account_id();
+            let report_peers: Vec<_> = self
+                .linked_devices()
                 .into_iter()
-                .filter_map(|id| {
-                    let state = book.state(&id)?;
-                    (state.is_member(&me) && !state.is_dissolved())
-                        .then(|| (id, state.members().to_vec()))
+                .filter(|device| {
+                    device.public != self.identity.public()
+                        && device.certificate.verify()
+                        && device.certificate.account_ed25519_pub
+                            == self.account.public().ed25519_pub
+                        && device.certificate.device_ed25519_pub == device.public.ed25519_pub
                 })
-                .collect()
-        };
-        if channels.is_empty() {
-            return None;
-        }
-        channels.sort_unstable_by_key(|(channel, _)| *channel.as_bytes());
-        let (channel, _) = &channels[cursor % channels.len()];
-        let channel = *channel;
-        let members = self.channel_custody_repair_members(channel);
-        let author =
-            crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
-        let candidates: Vec<_> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.message_keys_after(
-                channel,
-                author,
-                after.get(&channel).copied(),
-                CHANNEL_CUSTODY_SCAN_PER_TICK,
-            )
-        };
-        if candidates.is_empty() {
-            return None;
-        }
-        // A read-only custody report does not require a physical group grant.
-        // Pairing's current full-device/account binding selects the endpoint;
-        // the ordinary durable-have responder still owns original visibility.
-        let own_account = self.account_id();
-        let report_peers: Vec<_> = self
-            .linked_devices()
-            .into_iter()
-            .filter(|device| {
-                device.public != self.identity.public()
-                    && device.certificate.verify()
-                    && device.certificate.account_ed25519_pub == self.account.public().ed25519_pub
-                    && device.certificate.device_ed25519_pub == device.public.ed25519_pub
-            })
-            .filter_map(|device| {
-                self.routing_peer(&device.public.user_id()).filter(|peer| {
-                    peer.public == device.public
-                        && !peer.post_office
-                        && peer.account_id.as_deref() == Some(own_account.as_str())
-                })
-            })
-            .collect();
-        let mut missing_report = None;
-        let mut candidates = candidates.into_iter();
-        while let Some((event_id, cycle)) =
-            next_custody_retry_key(&mut candidates, channel, after, cycles)
-        {
-            if missing_report.is_none()
-                && self
-                    .channel_custody_observations(channel, event_id)
-                    .is_empty()
-            {
-                missing_report = select_custody_peer(report_peers.clone(), cycle)
-                    .map(|peer| (channel, event_id, peer));
-            }
-            let target = members
-                .iter()
-                .filter_map(|member| self.channel_custody_member_principal(channel, member, None))
-                .collect::<HashSet<_>>()
-                .len()
-                .min(2);
-            if target == 0 || self.channel_custody_count(channel, event_id).unwrap_or(0) >= target {
-                continue;
-            }
-            let (principals, _) = self.confirmed_channel_custody_principals(channel, event_id);
-            let peers = members
-                .iter()
-                .filter(|member| {
-                    self.channel_custody_member_principal(channel, member, None)
-                        .is_some_and(|principal| !principals.contains(&principal))
-                })
-                .filter_map(|member| {
-                    self.routing_peer(&member.user_id())
-                        .filter(|peer| peer.public == *member)
+                .filter_map(|device| {
+                    self.routing_peer(&device.public.user_id()).filter(|peer| {
+                        peer.public == device.public
+                            && !peer.post_office
+                            && peer.account_id.as_deref() == Some(own_account.as_str())
+                    })
                 })
                 .collect();
-            if let Some(peer) = select_custody_peer(peers, cycle) {
-                let _ = tokio::time::timeout(
-                    CHANNEL_RECOVERY_PEER_TIMEOUT,
-                    self.sync_and_confirm_custody(channel, event_id, &peer),
-                )
-                .await;
-                return None;
+            let mut missing_report = None;
+            let mut candidates = candidates.into_iter();
+            while let Some((event_id, cycle)) =
+                next_custody_retry_key(&mut candidates, channel, after, cycles)
+            {
+                if missing_report.is_none()
+                    && self
+                        .channel_custody_observations(channel, event_id)
+                        .is_empty()
+                {
+                    missing_report = select_custody_peer(report_peers.clone(), cycle)
+                        .map(|peer| (channel, event_id, peer));
+                }
+                let target = members
+                    .iter()
+                    .filter_map(|member| {
+                        self.channel_custody_member_principal(channel, member, None)
+                    })
+                    .collect::<HashSet<_>>()
+                    .len()
+                    .min(2);
+                if target == 0
+                    || self.channel_custody_count(channel, event_id)?.unwrap_or(0) >= target
+                {
+                    continue;
+                }
+                let (principals, _) =
+                    self.confirmed_channel_custody_principals(channel, event_id)?;
+                let peers = members
+                    .iter()
+                    .filter(|member| {
+                        self.channel_custody_member_principal(channel, member, None)
+                            .is_some_and(|principal| !principals.contains(&principal))
+                    })
+                    .filter_map(|member| {
+                        self.routing_peer(&member.user_id())
+                            .filter(|peer| peer.public == *member)
+                    })
+                    .collect();
+                if let Some(peer) = select_custody_peer(peers, cycle) {
+                    let _ = tokio::time::timeout(
+                        CHANNEL_RECOVERY_PEER_TIMEOUT,
+                        self.sync_and_confirm_custody(channel, event_id, &peer),
+                    )
+                    .await;
+                    return Ok(None);
+                }
+            }
+            Ok(missing_report)
+        }
+        .await;
+        match result {
+            Ok(report) => report,
+            Err(error) => {
+                log::warn!("channel custody recovery deferred: {error}");
+                None
             }
         }
-        missing_report
     }
 
     async fn distribute_channel_targets(
@@ -2466,77 +2831,132 @@ impl Node {
         replicate_to_post_office: bool,
         confirming: Option<EventId>,
     ) -> bool {
-        let me = self.identity.public().user_id();
-        let peers: Vec<PeerRecord> = {
-            members
-                .iter()
-                .filter(|m| m.user_id() != me)
-                .filter_map(|m| {
-                    self.routing_peer(&m.user_id())
-                        .filter(|peer| peer.public == *m)
-                })
-                .collect()
-        };
-        let targets = if let Some(limit) = fanout {
-            let start = self
-                .log
-                .lock()
-                .expect("log mutex not poisoned")
-                .conversation_len(&channel)
-                .wrapping_add(self.identity.public().ed25519_pub[0] as usize);
-            select_channel_targets(peers, members.len(), start, limit)
-        } else {
-            peers
-        };
-        // Controls still reach every routed member, but a stalled route must
-        // neither block healthy members nor create an unbounded dial burst.
-        let deferred = std::sync::atomic::AtomicBool::new(false);
-        stream::iter(targets)
-            .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| {
-                let deferred = &deferred;
-                async move {
-                    let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                        if let Some(event) = confirming {
-                            self.sync_and_confirm_custody_admitted(channel, event, &peer)
-                                .await
-                                .map(|_| ())
-                        } else {
-                            let mut ch = self.privacy_sync_dial(peer.addr, &peer.public).await?;
-                            let store = self.sync_store(ch.peer_identity());
-                            if request_round(&mut ch, &store, channel).await.is_ok() {
-                                self.recycle_sync_channel(ch);
-                            }
-                            Ok(())
-                        }
+        let result: Result<bool, NodeError> = async {
+            let me = self.identity.public().user_id();
+            let peers: Vec<PeerRecord> = {
+                members
+                    .iter()
+                    .filter(|m| m.user_id() != me)
+                    .filter_map(|m| {
+                        self.routing_peer(&m.user_id())
+                            .filter(|peer| peer.public == *m)
                     })
-                    .await;
-                    if let Ok(Err(error)) = result
-                        && super::session_pool::local_capacity_busy(&error)
-                    {
-                        deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+                    .collect()
+            };
+            let targets = if let Some(limit) = fanout {
+                let start = self
+                    .log
+                    .lock()
+                    .expect("log mutex not poisoned")
+                    .conversation_len(&channel)?
+                    .wrapping_add(self.identity.public().ed25519_pub[0] as usize);
+                select_channel_targets(peers, members.len(), start, limit)
+            } else {
+                peers
+            };
+            // Controls still reach every routed member, but a stalled route must
+            // neither block healthy members nor create an unbounded dial burst.
+            let deferred = std::sync::atomic::AtomicBool::new(false);
+            stream::iter(targets)
+                .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| {
+                    let deferred = &deferred;
+                    async move {
+                        let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                            if let Some(event) = confirming {
+                                self.sync_and_confirm_custody_admitted(channel, event, &peer)
+                                    .await
+                                    .map(|_| ())
+                            } else {
+                                let mut ch =
+                                    self.privacy_sync_dial(peer.addr, &peer.public).await?;
+                                let store = self.sync_store(ch.peer_identity());
+                                let round = request_round(&mut ch, &store, channel).await;
+                                #[cfg(test)]
+                                self.trace_account_client(&peer.public, || {
+                                    match &round {
+                                        Ok(_) => "control_fanout_round_ok",
+                                        Err(super::session::SessionError::Store(
+                                            LogError::StaleCursor,
+                                        )) => "control_fanout_round_stale",
+                                        Err(error)
+                                            if super::session_pool::retryable_sync_error(error) =>
+                                        {
+                                            "control_fanout_round_failed kind=transport_closed"
+                                        }
+                                        Err(super::session::SessionError::Transport(_)) => {
+                                            "control_fanout_round_failed kind=transport"
+                                        }
+                                        Err(super::session::SessionError::Store(_)) => {
+                                            "control_fanout_round_failed kind=store"
+                                        }
+                                        Err(super::session::SessionError::Serialization(_)) => {
+                                            "control_fanout_round_failed kind=serialization"
+                                        }
+                                        Err(super::session::SessionError::UnexpectedMessage) => {
+                                            "control_fanout_round_failed kind=unexpected_message"
+                                        }
+                                        Err(super::session::SessionError::NoProgress) => {
+                                            "control_fanout_round_failed kind=no_progress"
+                                        }
+                                        Err(super::session::SessionError::ResourceUnavailable) => {
+                                            "control_fanout_round_failed kind=resource_unavailable"
+                                        }
+                                    }
+                                    .into()
+                                });
+                                if round.is_ok() {
+                                    self.recycle_sync_channel(ch);
+                                } else if round.as_ref().is_err_and(|error| {
+                                    matches!(
+                                        error,
+                                        super::session::SessionError::Store(LogError::StaleCursor)
+                                    ) || super::session_pool::retryable_sync_error(error)
+                                }) {
+                                    // A changed local view or closed remote session did
+                                    // not finish this round. Keep the journal ticket
+                                    // for a fresh view through the existing backoff.
+                                    deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                Ok(())
+                            }
+                        })
+                        .await;
+                        if let Ok(Err(error)) = result
+                            && super::session_pool::local_capacity_busy(&error)
+                        {
+                            deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
-                }
-            })
-            .await;
-        if replicate_to_post_office {
-            let result = self
-                .replicate_to_post_office_targets_confirming(
-                    channel,
-                    members
-                        .iter()
-                        .filter(|member| member.user_id() != me)
-                        .cloned()
-                        .collect(),
-                    confirming,
-                )
+                })
                 .await;
-            if let Err(super::session::SessionError::Transport(error)) = result
-                && super::session_pool::local_capacity_busy(&error)
-            {
-                deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+            if replicate_to_post_office {
+                let result = self
+                    .replicate_to_post_office_targets_confirming(
+                        channel,
+                        members
+                            .iter()
+                            .filter(|member| member.user_id() != me)
+                            .cloned()
+                            .collect(),
+                        confirming,
+                    )
+                    .await;
+                if let Err(super::session::SessionError::Transport(error)) = result
+                    && super::session_pool::local_capacity_busy(&error)
+                {
+                    deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Ok(deferred.load(std::sync::atomic::Ordering::Relaxed))
+        }
+        .await;
+        match result {
+            Ok(deferred) => deferred,
+            Err(error) => {
+                log::warn!("channel distribution deferred: {error}");
+                true
             }
         }
-        deferred.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Reconcile one joined channel with an online member. A rotating cursor gives
@@ -2589,9 +3009,17 @@ impl Node {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("channel_recovery_local_begin channel={channel:?}")
+        });
         // Local projection repair is independent of a reachable remote holder.
         self.process_channel_reception(*channel_id, "catch_up");
         self.process_file_events_reception(*channel_id, "catch_up");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("channel_recovery_local_done channel={channel:?}")
+        });
         let peers: Vec<_> = members
             .iter()
             .filter(|member| member.user_id() != me)
@@ -2617,23 +3045,61 @@ impl Node {
             .map(|offset| {
                 let peer = &peers[(start + offset) % peers.len()];
                 async move {
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        format!("channel_recovery_peer_begin channel={channel:?}")
+                    });
                     let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
                         let Ok(mut conn) = self.privacy_sync_dial(peer.addr, &peer.public).await
                         else {
                             return None;
                         };
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("channel_recovery_connection_ready channel={channel:?}")
+                        });
                         // Recovery fetches retained history; it must not turn an
                         // outbound connection into a sharing-preference bypass.
-                        let store = if self.shares_replica(channel_id) {
+                        let sharing = match self.shares_replica(channel_id) {
+                            Ok(sharing) => sharing,
+                            Err(error) => {
+                                log::warn!("channel replica export deferred: {error}");
+                                return None;
+                            }
+                        };
+                        let store = if sharing {
                             self.sync_store(conn.peer_identity())
                         } else {
                             self.pull_sync_store(conn.peer_identity())
                         };
-                        let report = request_round(&mut conn, &store, *channel_id).await.ok()?;
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("channel_recovery_sync_begin channel={channel:?}")
+                        });
+                        let report = match request_round(&mut conn, &store, *channel_id).await {
+                            Ok(report) => report,
+                            Err(error) => {
+                                log::warn!("channel recovery exchange deferred: {error}");
+                                return None;
+                            }
+                        };
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("channel_recovery_sync_done channel={channel:?}")
+                        });
                         self.recycle_sync_channel(conn);
                         Some((report.applied, report.rejected.is_empty()))
                     })
                     .await;
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        let outcome = match &result {
+                            Ok(Some(_)) => "complete",
+                            Ok(None) => "failed",
+                            Err(_) => "timeout",
+                        };
+                        format!("channel_recovery_peer_end channel={channel:?} outcome={outcome}")
+                    });
                     if let Ok(Some((applied, clean))) = result {
                         self.process_channel_reception(*channel_id, "catch_up");
                         self.process_file_events_reception(*channel_id, "catch_up");
@@ -2659,6 +3125,12 @@ impl Node {
             }
         }
         drop(exchanges);
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!(
+                "channel_recovery_group_done channel={channel:?} checked={checked} clean={clean}"
+            )
+        });
         self.record_channel_recovery(
             channel,
             if !checked {
@@ -2726,7 +3198,7 @@ mod fanout_tests {
             node.send_channel_message(channel, b"synthetic retry target")
                 .await
                 .unwrap();
-            let event = node.channel_history(channel, 10)[0].id;
+            let event = node.channel_history(channel, 10).unwrap()[0].id;
             if external {
                 node.publish_channel_custody(channel, event, &holder.public(), true, false, false)
                     .unwrap();
@@ -2735,7 +3207,7 @@ mod fanout_tests {
                     .unwrap()
                     .confirm(event, &holder.public().user_id())
                     .unwrap();
-                assert_eq!(node.channel_custody_count(channel, event), Some(1));
+                assert_eq!(node.channel_custody_count(channel, event).unwrap(), Some(1));
             }
             // A newly advertised endpoint accepts TCP but intentionally never
             // completes Noise. Any unnecessary retry is observable at this socket.
@@ -2942,6 +3414,7 @@ mod fanout_tests {
         );
         node.log.lock().unwrap().append(preference).unwrap();
         node.process_channel(channel);
+        crate::node::test_support::settle_group_metadata(&node, channel);
         assert!(!node.channel_replica_enabled(channel, &peer.public().user_id()));
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -3063,9 +3536,9 @@ mod fanout_tests {
                 .await
                 .is_err()
         );
-        assert!(node.list_channels().is_empty());
+        assert!(node.list_channels().unwrap().is_empty());
         let channel = node.create_channel("original", vec![]).await.unwrap();
-        let before = node.log.lock().unwrap().events(&channel).len();
+        let before = node.log.lock().unwrap().events(&channel).unwrap().len();
         assert!(
             node.rename_channel_if(channel, "denied", deny)
                 .await
@@ -3087,9 +3560,12 @@ mod fanout_tests {
                 .await
                 .is_err()
         );
-        assert_eq!(node.log.lock().unwrap().events(&channel).len(), before);
-        assert_eq!(node.list_channels()[0].name, "original");
-        assert!(!node.list_channels()[0].dissolved);
+        assert_eq!(
+            node.log.lock().unwrap().events(&channel).unwrap().len(),
+            before
+        );
+        assert_eq!(node.list_channels().unwrap()[0].name, "original");
+        assert!(!node.list_channels().unwrap()[0].dissolved);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Explicit account actions work through Noise while optional public history is off.
 use super::*;
-use crate::node::AccountGroupTextInput;
+use crate::node::{AccountGroupTextInput, NodeError};
 
 #[path = "reaction_account_reduction.rs"]
 mod reaction_account_reduction;
@@ -709,7 +709,13 @@ async fn reference_message_action(recall: bool) {
                 .is_some_and(|status| {
                     status.phase == AccountGroupOperationPhase::Committed
                         && status.primary_event.is_some_and(|id| {
-                            external.history(group, 20).iter().any(|row| row.id == id)
+                            match external.history(group, 20) {
+                                Ok(rows) => rows.iter().any(|row| row.id == id),
+                                Err(crate::node::NodeError::Log(
+                                    crate::eventlog::LogError::StaleCursor,
+                                )) => false,
+                                Err(error) => panic!("incoming history read failed: {error}"),
+                            }
                         })
                 })
         },
@@ -725,14 +731,21 @@ async fn reference_message_action(recall: bool) {
     assert!(
         reference
             .history(group, 20)
+            .unwrap()
             .iter()
             .any(|row| row.id == target && row.from_me)
     );
     assert!(
-        reference.log.lock().unwrap().get(&target).is_none(),
+        reference
+            .log
+            .lock()
+            .unwrap()
+            .get(&target)
+            .unwrap()
+            .is_none(),
         "History OFF must leave B with the original private send receipt, not public message history"
     );
-    let original = external.log.lock().unwrap().get(&target).cloned().unwrap();
+    let original = external.log.lock().unwrap().get(&target).unwrap().unwrap();
     assert_eq!(
         original.author.ed25519_pub(),
         &source.identity.public().ed25519_pub
@@ -928,7 +941,7 @@ async fn reference_message_action(recall: bool) {
                         .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)),
                     (2, "external", (if recall || turn == 0 { &source } else { &sibling })
                         .account_group_operation_status(&account.account_id(), id).unwrap()
-                        .and_then(|status| status.primary_event).is_some_and(|event| external.log.lock().unwrap().get(&event).is_some())),
+                        .and_then(|status| status.primary_event).is_some_and(|event| external.log.lock().unwrap().get(&event).unwrap().is_some())),
                 ] {
                     if ready && !observed_phases[index] {
                         observed_phases[index] = true;
@@ -1020,6 +1033,7 @@ async fn reference_message_action(recall: bool) {
             assert!(
                 reference
                     .history(group, 20)
+                    .unwrap()
                     .iter()
                     .any(|row| row.id == target && row.recalled)
             );
@@ -1067,7 +1081,7 @@ async fn reference_message_action(recall: bool) {
             .lock()
             .unwrap()
             .get(&effect_id)
-            .cloned()
+            .unwrap()
             .unwrap();
         assert!(effect.verify_integrity() && effect.verify_signature());
         assert_eq!(
@@ -1099,12 +1113,15 @@ async fn reference_message_action(recall: bool) {
                     .target,
                 target
             );
-            assert!(
-                external
-                    .history(group, 20)
-                    .iter()
-                    .any(|row| row.id == target && row.recalled)
-            );
+            wait_action_fixture(
+                || match external.history(group, 20) {
+                    Ok(rows) => rows.iter().any(|row| row.id == target && row.recalled),
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                    Err(error) => panic!("external recall history failed: {error}"),
+                },
+                "the authenticated public recall must finish its bounded projection",
+            )
+            .await;
             assert!(
                 reference
                     .recalls
@@ -1117,6 +1134,7 @@ async fn reference_message_action(recall: bool) {
             assert!(
                 reference
                     .history(group, 20)
+                    .unwrap()
                     .iter()
                     .any(|row| row.id == target && row.recalled)
             );
@@ -1125,8 +1143,8 @@ async fn reference_message_action(recall: bool) {
             assert_eq!(payload.target, target);
             assert_eq!(payload.emoji, "👍");
             assert_eq!(payload.remove, turn == 1);
-            let external_views = external.reactions(group);
-            let private_views = reference.reactions(group);
+            let external_views = external.reactions(group).unwrap();
+            let private_views = reference.reactions(group).unwrap();
             if turn == 0 {
                 assert!(
                     external_views
@@ -1190,7 +1208,13 @@ async fn reference_message_action(recall: bool) {
         );
         assert!(reference.channel_members(group).is_empty());
         assert!(
-            reference.log.lock().unwrap().get(&effect_id).is_none(),
+            reference
+                .log
+                .lock()
+                .unwrap()
+                .get(&effect_id)
+                .unwrap()
+                .is_none(),
             "private action results must not install public history or physical membership on B"
         );
     }
@@ -1199,6 +1223,7 @@ async fn reference_message_action(recall: bool) {
         for effect_id in &effect_ids {
             let count = log
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.id == *effect_id)
                 .count();
@@ -1410,6 +1435,7 @@ async fn role_bootstrap_refreshes_the_requested_group_after_a_real_owner_transfe
         )
         .unwrap();
     source.process_channel(group);
+    settle_group_metadata(&source, group);
     source.publish_account_group_access_for(group);
     assert_eq!(
         source.account_group_access(group).unwrap().role,

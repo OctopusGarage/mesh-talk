@@ -2,16 +2,23 @@
 //! Legacy MTREAC files migrate atomically to the versioned MTREA2 record family.
 
 use super::reaction::ReactionPayload;
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::{account::DeviceCertificate, device::PublicIdentity};
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
+#[cfg(test)]
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::{collections::HashMap, io::Read, path::Path};
 
+#[cfg(test)]
 type ReactionKey = (ConversationId, EventId, String);
+#[cfg(test)]
 type ReactionValue = (u64, ReactionPayload);
+#[cfg(test)]
 type Entries = HashMap<ReactionKey, ReactionValue>;
 pub(in crate::node) type RetainedChannelReaction = (
     PublicIdentity,
@@ -20,6 +27,7 @@ pub(in crate::node) type RetainedChannelReaction = (
     ReactionPayload,
     Option<[u8; 32]>,
 );
+#[cfg(test)]
 type ChannelKey = (ConversationId, EventId, String, [u8; 32], Option<[u8; 32]>);
 const LEGACY_MAGIC: &[u8; 6] = b"MTREAC";
 const MAGIC: &[u8; 6] = b"MTREA2";
@@ -29,10 +37,10 @@ const MAX_CHANNEL_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CHANNEL_ENTRIES: usize = 100_000;
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Record {
-    conversation: ConversationId,
-    wall: u64,
-    payload: ReactionPayload,
+pub(in crate::node) struct Record {
+    pub conversation: ConversationId,
+    pub wall: u64,
+    pub payload: ReactionPayload,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct ChannelRecord {
@@ -55,6 +63,7 @@ enum StoreRecord {
     },
 }
 
+#[cfg(test)]
 pub(super) struct ReactionStore {
     file: EncryptedRecordLog<StoreRecord>,
     entries: Entries,
@@ -63,6 +72,7 @@ pub(super) struct ReactionStore {
     records: usize,
 }
 
+#[cfg(test)]
 fn channel_key(record: &ChannelRecord) -> ChannelKey {
     (
         record.conversation,
@@ -84,11 +94,13 @@ fn channel_record(record: ChannelRecord) -> StoreRecord {
         None => StoreRecord::Channel(record),
     }
 }
+#[cfg(test)]
 fn channel_size(record: &ChannelRecord) -> Result<u64, LogError> {
     bincode::serialized_size(&channel_record(record.clone()))
         .map(|size| size.saturating_add(32))
         .map_err(|error| LogError::Serialization(error.to_string()))
 }
+#[cfg(test)]
 fn replace_action(
     wall: u64,
     payload: &ReactionPayload,
@@ -98,6 +110,7 @@ fn replace_action(
     wall > old_wall || (wall == old_wall && payload.remove && !old.remove)
 }
 
+#[cfg(test)]
 impl ReactionStore {
     pub(super) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         Self::open_with_migration_hook(path, password, || Ok(()))
@@ -292,31 +305,6 @@ impl ReactionStore {
         }
         self.record_channel_with_certificate(conversation, source, effect_id, wall, payload, None)
     }
-    pub(in crate::node) fn record_channel_bound(
-        &mut self,
-        conversation: ConversationId,
-        source: PublicIdentity,
-        effect_id: EventId,
-        wall: u64,
-        payload: ReactionPayload,
-        source_certificate: DeviceCertificate,
-    ) -> Result<(), LogError> {
-        if !source_certificate.verify()
-            || source_certificate.device_ed25519_pub != source.ed25519_pub
-        {
-            return Err(LogError::CorruptFile(
-                "invalid bound channel reaction certificate".into(),
-            ));
-        }
-        self.record_channel_with_certificate(
-            conversation,
-            source,
-            effect_id,
-            wall,
-            payload,
-            Some(source_certificate),
-        )
-    }
     fn record_channel_with_certificate(
         &mut self,
         conversation: ConversationId,
@@ -382,26 +370,6 @@ impl ReactionStore {
             })
             .collect()
     }
-    pub(in crate::node) fn channel_entries_with_account(
-        &self,
-        conversation: ConversationId,
-    ) -> Vec<RetainedChannelReaction> {
-        self.channels
-            .values()
-            .filter(|row| row.conversation == conversation)
-            .map(|row| {
-                (
-                    row.source.clone(),
-                    row.effect_id,
-                    row.wall,
-                    row.payload.clone(),
-                    row.certificate
-                        .as_ref()
-                        .map(|certificate| certificate.account_ed25519_pub),
-                )
-            })
-            .collect()
-    }
     pub(super) fn iter(&self) -> impl Iterator<Item = (&ReactionKey, &ReactionValue)> {
         self.entries.iter()
     }
@@ -448,10 +416,6 @@ impl ReactionStore {
                     .map(channel_record),
             )
             .collect()
-    }
-    #[cfg(test)]
-    pub(super) fn fail_appends_for_test(&mut self) {
-        self.file.fail_appends_for_test(true).unwrap();
     }
     #[cfg(test)]
     fn open_fail_migration(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -781,3 +745,6 @@ mod channel_tests {
         assert_eq!(rows[0].1, EventId::new([34; 32]));
     }
 }
+
+mod indexed;
+pub(in crate::node) use indexed::IndexedReactionStore;

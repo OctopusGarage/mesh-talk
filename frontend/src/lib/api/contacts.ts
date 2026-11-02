@@ -94,11 +94,12 @@ export const avatars = {
       owner,
       expectedAccount,
     }),
-  /**
-   * Every signed profile peers propagated, including null clear tombstones. The node
-   * persists them so a linked-device clear survives a relaunch.
-   */
-  peers: () => invoke<Record<string, string | null>>("peer_avatars"),
+  /** Exact current value distinguishes a clear tombstone from no signed profile. */
+  peer: (owner: string, accountId: string) =>
+    invoke<{ account_id: string; avatar: string | null } | null>(
+      "peer_profile_avatar",
+      { owner, accountId },
+    ),
   /**
    * Publish (or clear with null) THIS user's own avatar to peers as a signed profile.
    * Call when the user sets/removes their own photo; contacts then render it.

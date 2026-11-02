@@ -191,9 +191,21 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   persisted so a restarted node can resume sending. The static-recipient sealed
   distributions remain recoverable after member identity-key compromise, so
   deleting used chain keys does not protect recorded group history against that
-  attack. Receiver state currently rebuilds by reopening distributions from the
-  event log; replacing this with consuming pairwise ratchets requires a durable,
-  transactional receiver projection that preserves restart and replay behavior.
+  attack. Receiver checkpoints are indexed by channel, author and epoch in the
+  leased profile database. Exact receiver CAS, retained transcript/evidence and
+  reception facts commit together before an in-memory result is installed.
+  Opening text or a file manifest first binds the authenticated author and epoch,
+  then prepares an exact private receiver candidate. Only successful AEAD installs
+  it; failed authentication and abandoned preparation preserve the live chain.
+  The bounded device-local codec preserves the next position, skipped keys and
+  exact eviction order, rejects malformed or oversized input, and wipes temporary
+  secret buffers. It is neither a wire distribution nor a portable backup format.
+  Sender and receiver advances reject exhausted `u32` positions before mutation;
+  already-buffered skipped keys remain usable at the terminal position. These
+  primitives share the durable checkpoint owner. Startup restores only validated
+  current presentation and the active sending epoch; unfinished controls and
+  pending reception resume through the existing bounded recovery turns after
+  account adoption. Presentation never substitutes for fresh admission authority.
   An owner-authored `ChannelDissolve`
   event closes a channel for all members without erasing local history; closed channels
   remain visible as read-only history and reject new local events. Desktop-created
@@ -207,7 +219,12 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   is the bounded exception to the acceptance cutoff. Append-only event kinds 15/16
   carry a signed policy and versioned offer/release controls; V3 channel sync gates
   them from older decoders. Invitation and offer use the existing durable delivery
-  journal as one transaction. The offer freezes a capped selection of retained text
+  journal as one transaction. Normal offer/release retry authorization yields
+  between bounded selected reads and causal steps, retaining the exact pending
+  candidate until its verdict and transcript/effect transaction complete. Explicit
+  invitation creation still checks up to ten selected rows synchronously before
+  journaling; this is separate from the bounded background retry path.
+  The offer freezes a capped selection of retained text
   at the invitation, with original event IDs and expiry framing. A fresh snapshot
   root derives independent per-message encryption keys via domain-separated HKDF;
   only existing holders authorized for every row receive the root, sealed per
@@ -391,10 +408,26 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   `SequenceExhausted` when the author counter has no successor. Exhaustive
   `LogError` matches must account for these variants. Event serialization and
   wire formats are unchanged.
+  Individual durable lookups `PersistentEventLog::get` and `authored_event`
+  return `Result<Option<Event>, LogError>` with an owned, complete event. The
+  in-memory `EventLog` keeps its borrowed API. Durable collection, membership,
+  conversation metadata and capability reads also return `Result`; `events`
+  returns owned events. Only `Ok(None)` permits an
+  absence-based fallback; a failed read must stop authorization, media reclamation
+  or the affected delivery/recovery attempt without advancing its progress.
 - **Sync** (`sync.rs`) — three-message id-set reconciliation: `Request(have)` →
   `Response(missing + responder have)` → `Followup(what responder lacks)`, bounded by
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is
   re-verified (hash + signature) on ingest.
+  Storage reads and reconciliation handlers return `Result`; a local read,
+  synchronization or persistence failure terminates the exchange through
+  `SessionError::Store`, preserving its error source. It must not become an empty
+  event set, a matching fingerprint or a positive custody claim. Invalid incoming
+  events remain bounded per-event rejections; explicit policy denials use
+  `LogError::AdmissionRejected`. I/O error kinds do not identify policy denials.
+  A failed batch can retain its already committed prefix; retry uses the existing
+  content-addressed duplicate check rather than assuming the batch rolled back.
+  This changes the Rust storage interface, not event IDs or the wire encoding.
   Channel recovery asks up to three online members per turn and continues past a
   reachable but stale member. A completed generic channel attachment remains available from a
   receiver after local save; complete attachment chunk conversations are retained
@@ -479,8 +512,9 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
-  loop shared by desktop, CLI, and SDK hosts: every 3 seconds it drains at most one
-  conversation on the blocking pool, with a 10-second per-conversation cooldown.
+  loop shared by desktop, CLI, and SDK hosts: every 3 seconds it coalesces eligible
+  conversations into at most one cost-bounded rewrite on the blocking pool. The
+  [storage budgets](#storage-replay-and-query-budgets) govern eligibility and cadence.
   Dropping the accept-loop future stops scheduling maintenance; an already-running
   blocking rewrite finishes atomically. The log mutex serializes rewrites with appends
   within one Node, but is not shared with a replacement Node opening the same files.
@@ -498,8 +532,26 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   blocking profile rewrites, delivery recovery, peer-cache writes and file staging
   to finish.
   Runtime Drop only requests cancellation and cannot provide that retirement barrier.
-  This is in-process runtime ownership; external SDK operations and host file staging
-  require the host's own lifecycle serialization, and no cross-process lease is implied.
+  Participant constructors also retain the cooperating
+  [profile lease](#storage-replay-and-query-budgets). External SDK operations and
+  host file staging still require the host's own lifecycle serialization; an
+  independently retained Node keeps its profile busy after runtime retirement.
+
+  `RuntimeStartup` owns construction admission before keystore work begins.
+  `StartupCompletion` waits for the construction future and every admitted
+  blocking initializer, including canceled waiters. Blocking captures and
+  undelivered results release their resources before completion admission ends.
+  The desktop retains replacement serialization through this completion.
+  A successfully returned runtime retains the ordinary consuming stop contract;
+  construction completion does not retire that runtime or grant session authority.
+
+  A renderer reload restores the existing unlocked native session through the
+  existing auto-login command without reauthentication, credential-store access,
+  session-generation changes or runtime replacement. The command projects only
+  public user information under the exact session lease and app-lock revision.
+  Locked sessions remain behind the existing lock screen and central IPC gates;
+  logout or owner replacement invalidates captured restoration authority. With
+  no live session, the ordinary saved-login consent and credential path applies.
 
   The desktop host serializes authentication operations separately from runtime
   replacement. Every published session has a private owner/generation lease; a
@@ -838,10 +890,22 @@ Relay custody remains pending. The receiver independently rejects unsolicited ch
 durable sync gate, including chunk-first delivery from older senders. A channel sender
 publishes the manifest and members pull chunks only after their own consent; automatic
 images retain eager distribution. Decisions bind the signed manifest event and survive
-restart. Local receive policy remains in `attachment-consent.log`; signed protocol
-controls and authenticated direct observations use the separate encrypted
-`file-consent-controls.log`. `file_consent` owns control validation and exchange,
-`file_consent_store` owns durable revision and replay state, and `FileBook` indexes
+restart. The prior `attachment-consent.log` and `file-consent-controls.log` sources
+publish once through the existing participant source owner (auxiliary kinds 17 and 18).
+Current receive policy, signed revisions and authenticated direct observations then live
+on that same encrypted database, qualified by the authenticated account namespace.
+Opaque exchanges retain at most eight consent offer IDs, selected through an
+account-scoped durable rotating cursor. Each send rechecks the current signed
+controls (at most 16 KiB), so failed exchanges retry without growing a payload
+backlog or retaining obsolete permission. The cursor is discovery progress only;
+returning accounts resume their own offers and stale handles remain fenced.
+Warm open does not decrypt historical consent frames. Selected controls enforce the
+existing signed-format byte limit before allocation; persisted counters retain the
+existing admission quotas. Account adoption preserves the previous account's decisions
+and fences old readers and writers, including A→B→A. The one-time legacy import uses
+its authenticated original namespace and refuses ambiguous experimental ownership
+without changing the source. `file_consent` owns validation and exchange,
+`file_consent_store` owns exact current revisions and direct overrides, and `FileBook` indexes
 offers by author. Exact manifest lookup avoids sorting all aliases for each offer;
 publication resolves alias policy once per file and excludes channel manifests. Saved
 completion controls require the current owner account, original sender and matching
@@ -864,8 +928,37 @@ blocking pool. A retained managed-media copy can be exported after pruning;
 every export verifies its size and checksum and synchronizes its output. Group
 and own-device media use retained signed manifest/local-row references only for
 local export, never for a historical network probe or a delivery receipt. Legacy
-v1 exports keep their prior in-memory path and retain chunks rather than creating
-new completion proofs.
+v1 exports also stream, and retain chunks rather than creating new completion proofs.
+Progress uses retained kind counts. Save and completion validation traverse fixed
+32-row header pages and admit at most one signed event under a 4 MiB allocation
+budget before fetching its body; a legal larger event returns the required budget
+without being discarded. Inline reads share the existing 64 MiB media limit;
+larger files remain available through streaming saves. Receive-complete media is
+encrypted into a temporary prepared object, then its exact size/checksum and
+current accepted manifest are rechecked before publication under the file-row
+reference lock. Neither chunk IDs nor ciphertexts are collected for a whole file.
+Channel replica retention projects each accepted offer's fixed presentation and
+clock metadata in the same FILES transaction. Its current per-file index supplies
+32 candidates at a time in newest-first order; erasing an offer updates that order
+transactionally. Reclamation counts selected chunk headers and fences the source
+before dropping a whole file. The existing 64 MiB greedy retention policy is unchanged.
+
+Actual chat, Favorites and account-document media use a derived filename inventory
+on the same profile database. Initial import streams regular directory entries once;
+warm open and selected paths use metadata seeks. Failed plaintext migrations retain
+their exact disk flags and original bytes without a resident set of historical IDs.
+A locator is reserved before filesystem publication; a failed metadata completion
+cannot cause encrypted bytes to be returned as plaintext. Backup enumerates fixed
+metadata pages and rejects duplicate IDs or a changing inventory. Startup schedules
+an orphan-cleanup cutoff; background turns examine at most 32 locators per store,
+hold the owning reference lock, and recheck locator revisions before unlinking.
+Cleanup validates its media root before treating a missing child as absent. A
+missing or non-directory root remains a retryable persistence failure and retains
+the exact indexed locator, including on hosts that report child path errors as
+not found. Restoring storage permits the original cleanup to finish.
+Writes after that cutoff wait for a subsequent startup cleanup, so publication cannot
+race a stale orphan decision. The existing standalone MediaStore constructor retains
+its legacy filesystem-only behavior.
 
 The durable per-account `media/` store uses a versioned `MTMEDIA1` header and
 64 KiB AES-256-GCM chunks. One password-derived key uses a private store salt;
@@ -1290,13 +1383,871 @@ superseded requests invalidate pending results and context.
 
 ### Storage replay and query budgets
 
+The indexed-storage connection owner in `storage/database.rs` uses SQLCipher
+for encrypted and authenticated database pages, including indexes and WAL data.
+It verifies the application/schema version and encrypted owner binding before
+use, and never replaces unreadable storage with an empty database. A profile
+shares one serialized connection; domain stores own their tables and bounded
+queries. SQLCipher passphrases are domain-separated so user input cannot select
+the raw-key syntax. Production key derivation retains a 600,000-iteration
+password work factor; only existing test configurations reduce it.
+
+Event repository schema v2 admits the signed `ChannelMetadata` event added by
+channel protocol v5. The only v1 schema change relaxes the event-kind constraint
+from 18 to 19. Upgrade validates the exact owned v1 tables and indexes, then
+changes that fixed constraint and version atomically using SQLite's documented
+schema-only procedure. It preserves retained payload pages and foreign keys;
+interruption rolls back the version and definition together. Unknown or weakened
+schemas fail explicitly. Capability probes use a covering kind index and never
+load retained bodies; a newly required v5 control invalidates an older sync view.
+
+Fresh encrypted databases establish incremental auto-vacuum (mode 2) before the
+first metadata table. Warm open authenticates application/schema and owner first,
+then requires the same mode. Unsupported NONE/FULL modes fail without a full
+VACUUM, initialization over existing authority or an empty-store fallback.
+Authenticated legacy publication creates its new database with this policy.
+
+Connection policy disables mmap, keeps temporary data in memory, suggests a
+4 MiB page cache, and uses FULL synchronization with a 256-page automatic WAL
+checkpoint trigger and a 4 MiB retained-journal target. A connection also retains
+at most 64 prepared SQL statements. Relay inventory, session authority, maintenance
+and network metadata selectors share this fixed cache; the former 16-entry bound
+recompiled warm queries as these paths displaced each other. Reused statements
+still execute every eligibility, readiness, expiry, revision, session and lifecycle
+check against the current transaction. Query results are
+not cached, and returned statements clear their bound values. These are connection budgets,
+not a global RAM or disk cap: query results, concurrent domain work, long readers
+and historical data require their own bounds. Failed commits, failed rollbacks
+and fatal storage errors invalidate the handle until reopening. Read failures
+remain errors rather than missing records. The connection owner does not by
+itself convert legacy event or transcript stores to demand loading.
+
+Physical maintenance reads checked page-size, page-count and freelist scalars.
+Its explicit budget accepts one through 64 free-page iterations, default 64.
+The row-producing incremental-vacuum pragma is stepped through completion inside
+the existing transaction; even zero-column result rows represent engine work.
+Progress is returned only after COMMIT. Zero free pages avoid a vacuum statement
+and write transaction; late statement, COMMIT and rollback failures retain the
+same authority and fault policy. No whole-file scan or history-body hydration is
+needed to discover this work.
+
+The dedicated worker starts a physical drain at 256 free pages, stops at or below
+64, and processes at most 64 iterations per eligible slice with a 100 ms success
+cooldown plus its measured-duty gate. These are internal scheduling/hysteresis
+choices, not physical-byte, latency or throughput guarantees. The class has
+independent 100 ms–5 s retry eligibility for typed BUSY/LOCKED and incomplete
+checkpoint progress; other role, digest, staging, archive and session work
+continues. With only future physical work pending, the worker waits for its
+eligibility deadline, cancellation or a normal wake instead of polling a backlog.
+
+Each successful vacuum slice requests one background PASSIVE checkpoint outside
+its transaction and live statements. A partial frame transfer remains pending
+even when SQLite returns a zero busy flag. On the first worker inspection only,
+one known main-file length comparison against the checked logical page estimate
+discovers pending truncation after restart, including below-threshold freelists.
+Ordinary WAL growth does not initiate this completion path. No-WAL or complete
+frame progress clears the intent without promising shrink of mere file padding.
+A pinned reader can defer completion; retries never force WAL truncation or a
+checkpoint loop. PASSIVE may copy an arbitrarily large available WAL backlog,
+so its engine work is **not** capped by the 64 vacuum iterations. The measured
+slice duty and cooperative shutdown include that admitted synchronous work.
+
+Logical domain charges, reusable free pages, the SQL page estimate, main/WAL file
+lengths and actual filesystem block release are separate observations. Completed
+checkpointing permits main-file truncation while the owner remains open; allocated
+WAL space may remain for reuse. Neither the page budget nor the WAL trigger is a
+hard total disk or I/O cap. Physical maintenance removes only already-free pages
+and does not change live signed events, counters, local suppression or retention.
+
+The shared core profile lease retains the operating-system lock on persistent
+`node.lock`. CLI, central participant startup and offline recovery acquire it
+before opening keystores; public Node constructors acquire it for their
+caller-owned identities. Handed ownership moves into the context once and lasts
+through all retained stores, admitted work and retirement. Acquisition rejects
+unsafe aliases, unrecognized nonempty lock data and live legacy PID holders
+before mutation. Empty and stale numeric diagnostics retain compatibility.
+Release clears the PID while holding the lock, explicitly unlocks the retired
+owner and never unlinks its path. A descriptor inherited during a concurrent
+process spawn cannot prolong that retired ownership; closing an old descriptor
+also cannot release a replacement owner's lock.
+Canonical root aliases and same-process callers cannot create a second cooperating
+owner. Standalone legacy store APIs do not acquire a profile lease implicitly.
+
+Exact event and sent locators remain explicit. Bare filenames normalize their
+empty parent to the current directory; safe Unicode leaves are preserved.
+Reserved source namespaces, case aliases and existing file identities are
+checked before conflicting writers open. An explicit external sent parent has
+its own immediate, nonwaiting guard under the same owner; no ancestor directory
+or cryptographic account is inferred from a filename. Internal source locators
+remain relative; external sources require their explicit mappings on relocation.
+
+Database relocation requires explicit checked retirement: truncate-checkpoint
+the WAL, reject busy or incomplete results, and check connection close before
+moving files. Failure preserves the database for recovery rather than allowing
+publication of a main file without committed WAL data. Ordinary append and
+normal open do not perform this retirement checkpoint.
+
+The shared profile context retains that lease for every repository using its
+single encrypted connection. Its immutable owner binding includes both device
+public keys and a versioned profile class, separately from mutable account
+membership. Explicit role and source-domain manifests prevent filename-based
+ownership inference. Source locators inside the profile are relative to its
+leased root, preserving closed-profile relocation.
+
+Participant control metadata uses that same physical device binding and an
+authenticated participant role, exact source layout and active/pending account
+identity. A relay-only authority cannot be reinterpreted as a participant.
+For an absent main database, the lease-backed context first runs the actual
+legacy Node validation. Only successful validation permits authenticated private
+candidate publication and connection initialization. A wrong password, unrelated
+account or corrupt legacy source cannot publish conflicting authority; header-only
+legacy sources retain their existing semantics. Existing unreadable authority
+or orphan canonical WAL/SHM never selects fresh initialization.
+
+Account adoption extends the delivery owner: durable delivery and SQL intent
+precede account-keystore replacement. An ambiguous save reloads the authenticated
+key under ownership. The exact old key cancels, the exact prepared next key
+completes, and any third key or unreadable result fails closed. Recovery is
+idempotent across delivery binding and SQL completion. A pre-SQL delivery intent
+can preserve its exact previous account ID through bootstrap without inventing
+an unavailable full public key. Old history retains its original provenance.
+Security rekey does not manufacture a signed linking-continuity proof.
+
+Participant events now use the same encrypted profile connection and a distinct
+event domain. The participant constructor authenticates its existing legacy
+owners before first SQL publication, then completes event-source publication
+before delivery-journal recovery. The journal keeps its established crypto,
+event, transcript, receipt and outbox recovery ordering while unrelated sources
+retain their legacy owners; no multi-domain atomic cutover is required.
+
+The event source has its own persisted publication manifest. Authentication uses
+a private copy and the streaming legacy visitor, preserving the original source
+on failure. A manifest-bound `MTSDB1` downgrade barrier freezes the source before
+verified staged events and published authority commit together. Interrupted
+preparation, freeze, import and publication resume under the held profile lease.
+Warm opens inspect only the manifest and exact small barrier; they do not hash
+or reopen legacy history. Archive removal follows destination checkpointing,
+and durable cleanup flags retain retry work for the runtime maintenance owner.
+A missing or changed barrier is an error, never an empty-store fallback.
+
+`PersistentEventLog::open_profile` is the production Node path. Its indexed
+backend retains no event-body cache; exact reads fetch complete owned events
+from SQLCipher, and ordinary appends leave the retired legacy source untouched.
+The explicit standalone `PersistentEventLog::open` remains the collecting legacy
+SDK owner and rejects a retired participant source. Transcripts, crypto and
+projections still have separate migration boundaries. Transcript history ordering
+and account routes use persisted metadata selectors; ordinary recent and
+exact-context reads hydrate selected rows only. Combined-order input checkpoints
+seek after the prior transcript ordinal on ordinary appends and reuse the signed
+order owner’s safe-tail generation. Rewrites, deletion, due expiry, late roots and
+identity changes invalidate this prefix; interrupted retirement or extension
+cannot publish partial ranks. Unsafe changes retain the synchronous metadata
+rebuild, and file-eligibility revisions currently invalidate conservatively.
+Production network authorization
+prepares finite SQL selections through yielded header/edge turns. Individual
+channel-control authority queries and the explicit collecting SDK compatibility
+adapter remain separate; these cuts do not establish the complete participant
+runtime work bound.
+
+The channel checkpoint owner reuses the existing canonical logical-order job and
+its source revision. Safe tails extend the same job; a late control that changes
+canonical order rebuilds derived authority in bounded turns. Current metadata,
+selected causal membership, activity rows and exact applied identities live in
+indexed tables. Retired derived generations are reclaimed incrementally. A
+canonical preparation turn shares its explicit row, edge and byte budget across
+ordering, legacy parent cuts, generation cleanup and one reducer decision. A
+completed phase yields before the next one; network preparation forwards actual
+work counts. Canonical readiness alone does not authorize plaintext reads:
+admitted recalls must first be attempted, and exact dependency wakes close that
+read gate again. Selected history and sibling plaintext export check this gate
+before body hydration and recheck the captured exact channel source before
+returning their result. Retained signed membership identifies pending channels
+even when presentation metadata is absent; completed recall facts omit archived
+plaintext while local history keeps its tombstone. Dormant missing-target retries
+remain nonblocking. Constructor
+and remaining synchronous compatibility callers still require separate bounded
+caller integration; this preparation interface does not establish that bound.
+Async local channel controls and sends await selected metadata in bounded turns.
+A concurrent source change resumes that preparation only while the checkpoint's
+captured account and generation remain valid and signed source rows remain.
+Retired participant handles, removed sources awaiting derived cleanup, and
+non-stale storage failures return immediately; preparation retries do not replay
+message acceptance or its durable journal transaction.
+
+An ordinary warm Node open loads current channel metadata without decoding completed
+signed channel history. Source 8 independently publishes legacy channel sender
+snapshots; only each channel's active sending epoch is loaded into memory.
+
+Receiver state is separate from rebuildable authority. One exact channel, author
+and epoch checkpoint preserves consumed holes, skipped keys and their eviction
+order. Preparation never mutates it. The account/source-bound compare-and-swap,
+received body or exact suppression evidence, reception provenance and batch
+progress commit in one SQL transaction before any in-memory publication. Failed
+writes leave the key usable. Replaying old distributions or reordered controls
+cannot roll consumed keys back. The owner provides separate message and file
+batch terminal facts. Channel file reception installs the receiver, FILES row,
+validated FileBook offer, reception fact and file-role batch progress in that
+same transaction. Its existing group-completion reservation precedes the
+transaction; reservation failure leaves the ciphertext and consuming key pending.
+
+File provenance counts surfaced valid cards, excluding malformed, expired,
+suppressed and conflicting transfer bindings. One bounded continuation retains a
+first candidate and a private receiver checkpoint while it crosses rejected
+plaintext. Existing pending rows hold its speculative progress; at most 64 bodies
+and 64 selector turns share a 16 MiB charge budget. Source changes discard the
+private keys, and restart or resolution resets speculative marks in bounded pages.
+Authenticated rejected plaintext is consumed with exact evidence. Production hosts
+receive only durable facts and coalesced wakes; the explicit legacy SDK retains
+one admitted manifest for its final callback and rechecks visibility before delivery.
+
+Pending channel work is selected by bounded indexed pages. One message producer
+invocation examines at most 64 bodies and 64 selector pages, sharing a 16 MiB
+charge budget across its previews while retaining the existing 8 MiB per-row
+admission. Two successful candidates distinguish catch-up from live delivery.
+When the budget ends first, a lone candidate stays pending without consuming its
+key; a scheduled continuation preserves arrival provenance and leaves the batch
+terminal open. Startup expiry and legacy notification policy use each signed source event’s
+retained commit ordinal against the exact cutoff captured for this runtime. A
+continuation can repair silent pre-open history and receive new events without
+classifying those later arrivals as startup history. Invitation copies use their
+authenticated release event for this distinction. A mixed durable batch keeps its
+receipt counts, while the existing retry lane retains one visibility flag until
+a newly surfaced legacy batch commits its terminal, independently of source
+retirement. Authentication failures wait for changed key material; sequence gaps wait until receiver
+progress can satisfy the existing skip bound. Valid oversized records remain
+pending with an explicit budget error. Definitive malformed sender headers
+commit exact general-discovery evidence with their channel disposition. Missing
+recall targets wake exact persisted dependencies. Invitation history uses indexed
+offer/release selectors, canonical and causal authority, and the existing bounded
+frozen text copy; unchanged retry ticks do not replay historical control bodies.
+Shared delivery journals retain their existing last-retired recovery ordering.
+
+The separate `node/transcript_repository/` owner provides indexed sent, received,
+file-card and exact suppression storage on that same encrypted connection.
+Signed file proofs and logical-file bindings reuse its per-source publication
+barrier. Proof reads validate row and physical allocation charges before payload
+fetches; aliases remain bounded by the signed identity limit. Persisted revisions
+advance only for newly accepted proofs or bindings, so duplicate insertion and
+restart preserve ordered-view invalidation. Export visitors release the SQL guard
+between bounded pages. Production Node uses the indexed FileBook described below;
+other independent runtime owners retain their own resource and startup contracts.
+The indexed FileBook projection references those existing file-card bodies by
+ordinal. It installs validated signed bindings and exact processing facts in the
+body transaction. Its transfer fingerprint shares the existing file equality
+rule: presentation names and MIME can differ between aliases, while version,
+protection and immutable transfer fields remain bound. Each source row still
+retains its exact plaintext digest. Physical deletion cascades to eligibility metadata, advances
+its persisted revision and retains compact processing evidence. Durable local
+suppression also revokes eligibility in that same transaction, before physical
+cleanup can fail. Signed logical aliases apply this rule in either arrival order;
+the indexed author and exact plaintext digest must match the retained offer.
+History and sibling archive selectors qualify FILES ordinals through this validated
+projection before reading bodies, and bind their cached generations to its persisted
+eligibility revision. Selected reads recheck eligibility before hydration. Explicit local
+host history can select previously validated offers from a former account namespace;
+current account history, transfer routing and archive export retain the current-account
+gate. A fixed historical revision and current offer acceptance metadata support bounded
+invalidation without retaining deleted-offer history. Combined history stores those
+acceptance watermarks separately from deletion and visibility fences. Ordinary
+FILE append reads only new transcript headers and newly accepted binding keys;
+a new proof or logical binding affecting an older ordinal rebuilds the canonical
+order before serving it. Identity acceptance upgrades establish their initial
+baseline from fixed-size header keys without reading signed bundle bodies. Archive
+retirement clears its ready marker before deleting the first bounded batch, so an
+interrupted rebuild cannot serve a partially retired generation.
+Metadata pages check row and byte budgets; selected manifest reads verify physical allocation
+charges before loading bytes. Account adoption fences old handles and never
+imports the former account into the new namespace. Production Node imports old
+FILES bindings once through bounded turns; warm reopen reads checkpoints and exact
+retained erasure keys without hydrating file-card history. Download scheduling is
+account-scoped SQL work installed with each new validated offer. Metadata discovery
+pages contain at most 128 IDs and each worker turn admits eight files. A completion
+acknowledges the observed work revision, so a newer offer cannot lose its sole retry
+fact. Manifest receive discovery scans at most 128 committed headers per turn;
+only commits owned by the captured account enter that account's pending index.
+Returning to an account resumes both undiscovered and pending work without admitting
+intervening accounts' events. Adoption generations reject old handles and ACKs even
+when the same account returns. Rows are admitted by count and decoded allocation
+cost before body reads; an oversized legal row remains pending for a larger budget.
+The direct-file producer and idle retry worker use this index; channel FILES use
+the independent checkpoint/CAS scheduler and rotate a bounded discovery prefix
+so a stalled channel cannot starve another conversation. Consent changes restart
+a persisted metadata scan, and failed media or
+completion writes leave pending work retryable across restart. Sent fanout scopes
+reuse source 9 publication and bounded metadata pages; the sync owner still checks
+each exact signed parent permission. Ordinary scope reads require a live validated
+binding, and historical scopes are never rebuilt in a resident map. Delivery-journal file
+projections now install FILES, validated eligibility and incoming reception facts
+in one transaction before retiring the intent. The same installer accepts the
+incoming channel owner's receiver checkpoint transaction. Outgoing manifest
+projections create no incoming effect. Signed same-account certification retains
+own-device attribution across recovery; retry preserves the first durable effect.
+
+The attachment receive-policy owner uses source 17 of the shared publisher and
+account-qualified SQL facts. Global automatic receive defaults to false; exact
+latest decisions across validated aliases override contact/global preferences.
+The sequence and policy generation commit with each decision, so failed writes
+cannot advance scheduling or supersede a durable decline. Warm open reads no
+historical decision frames or maps. Adoption starts a fresh policy namespace and
+preserves the prior account for a later return; generation fences reject old
+handles even after that return. Initial legacy records belong to the authenticated
+original or bootstrap-previous account. An unpublished experimental legacy source
+with multiple account namespaces and no authoritative attribution fails explicitly
+and preserves its bytes. Existing signed remote file-consent revisions keep their
+independent ordering and admission contract.
+
+`node/reception_effects/` provides the derived reception-work owner for bounded
+host integration. An effect references its existing transcript row and stores
+first-installation provenance, own-device and batch metadata without copying its
+body. Producers install it inside the same SQL transaction as plaintext and
+exact processing evidence, before completing the existing delivery journal or
+channel checkpoint. A separate terminal batch fact survives deletion of its
+former content template. Legacy historical-source migration creates no effects.
+Each receipt stream, exact installation identity, and fixed consumer cursor is
+scoped to the authenticated `participant_profile.account` key. Producers derive
+that key within their existing SQL transaction and verify the producer's captured
+participant account and adoption generation there before installing effects.
+Message and file producers are recaptured after adoption publication; a former
+account's producer cannot revive when that same account later returns. Migration
+handles may import historical bodies but cannot install new reception effects.
+Open readers capture the same adoption generation and reject pages, ACKs, and
+retirement after account adoption, including a return to the original account.
+Reopened readers preserve each account's pending work, consumer progress and stream
+epoch. Runtime/session authority additionally fences
+individual host installations.
+
+Participant adoption also owns event commit intervals in the same encrypted
+database. Half-open ordinal ranges reference retained account namespaces; the
+full authenticated account key resolves that reference. Promotion commits the
+range boundary, account namespace and monotonic owner generation together. A
+generation fences a captured owner even after switching from A to B and back to
+A without appending an event. Exact ordinal lookups let derived receive queues
+index the account before selecting a bounded attempt page, retaining earlier
+accounts' undiscovered and pending work. Event deletion does not erase these
+ownership boundaries.
+
+DM discovery captures that generation after adoption completes. Its pending index
+qualifies the original account namespace and authoritative ordinal range before
+applying row limits, preserving inactive accounts' work without making processing
+claims. Private-control migration has a separate cursor per account and selects
+only that account's control headers before body admission. Upgrading the older
+unscoped derived queue rebuilds metadata in bounded pages and preserves exact
+completed-control evidence; warm reopen keeps the existing discovery position.
+
+An authenticated legacy adoption preserves the previous owner's imported prefix;
+the event-source publication transaction fixes its end before new-account event
+appends. A compatible older indexed profile with one authenticated namespace can
+initialize one range. Experimental indexed profiles with several historical
+namespaces and no authoritative commit cut are unsupported: open returns an
+explicit ownership-boundary error and preserves the data. Namespace membership
+alone cannot reconstruct those lost boundaries. Relay-role storage is separate.
+
+Receipt cursors bind a persisted random epoch and local installation sequence;
+sender timestamps never order host work. A finite through-cursor prevents
+continuous intake from extending one drain indefinitely. Each demand page scans
+at most 128 pending slots and admits at most 8 MiB of transcript body/sender
+bytes, plus bounded metadata. Before fetching a body it also checks a separate
+JSON upper bound: six times the raw byte charge plus fixed per-row/envelope
+allowances, with a maximum 64 MiB response budget. A first row that does not fit
+fails explicitly. Deleted, suppressed and expired sources advance the cursor
+without returning their bodies; recall and final owner/session authority remain
+the materializing consumer's responsibility.
+
+Desktop, CLI output and CLI autosave have fixed consumer identities. A committed
+prefix ACK records host processing, not peer delivery or user read state. Pending
+metadata retires incrementally only through every enrolled consumer's ACK;
+no enrolled consumers means retaining work. Compact exact source-to-sequence
+evidence survives that retirement, preventing an accepted-journal retry from
+creating another unread event. The desktop must atomically persist its existing
+reception state and cursor before ACK. CLI autosave must retain durable save work
+before ACK, and a bounded in-memory queue does not satisfy that requirement.
+The frontend demand pump uses a single in-flight page and a dirty wake bit. The
+existing reception owner still decides unread, mention, own-device, history-sync
+and batch-terminal behavior. A single local-storage replacement commits its
+bounded ledger, unread counts, undiscovered senders, overflow, history coverage,
+batch state and exact decimal-string cursor. A persistence failure leaves that
+page pending without replaying its already-applied effects; an ambiguous ACK
+retries the same token. The snapshot is scoped to local user, account and device;
+the first observed prefix is persisted before applying any effects, so older
+per-field writes cannot become the recovery baseline after an interrupted page.
+current runtime authority fences every page and ACK. Replacing a runtime stops
+old pulls, and a new WebView may replace a lost unacknowledged page. A missing or
+corrupt previously committed snapshot is an explicit recovery failure, never an
+implicit advance past unread work.
+
+`RuntimeStartup::bounded` and `Node::open_bounded_with_profile_lease` select the
+additive production delivery mode. They allocate no DM, channel, file or profile
+payload queue; durable reception/current-profile commits wake the existing
+coalesced state watch. Legacy callback constructors retain their existing
+caller-owned collecting contract. Ephemeral call signals use a separate inbox
+of at most 16 signals and 256 KiB including sender identifiers; admission fails
+explicitly when full, and a too-small demand read leaves the first signal queued.
+Call signaling remains best-effort and adds no wire acknowledgement or replay.
+Desktop startup, the node CLI and the dedicated integration host select this
+mode. The desktop publishes one scoped wake until its pending page is ACKed;
+state, channel, profile and file-progress invalidations share that gate. It
+retains only page cursor/token metadata and at most 64 current progress hints.
+Current profile values occupy at most 16 rows and 1 MiB raw per page; their walk
+restarts on a new revision or renderer replacement. Alongside receipt and call
+budgets, their conservative serialization charge remains below 64 MiB. Backend current-value payloads use the encrypted participant indexes; Node warm
+reconciliation visits only exact pending source changes. Display-name inventories
+read bounded header pages and never hydrate avatars. The desktop resolves a
+selected current profile under its local-user/runtime admission; explicit clear
+and missing profile remain distinct. It never sends a whole-avatar map through
+IPC. The received-avatar cache admits at most 1,024 values and 64 MiB of UTF-16
+payload charge, preserving the own-account value where it fits. Owner replacement
+and newer local edits fence delayed startup reads.
+Native alerts start at launch high-water, sample at most eight live observations
+per second and intentionally coalesce excess alarms. One queued main-thread batch
+waits for actual execution before another batch is admitted. Queued callbacks hold
+only weak access to the payload: retiring the observer releases its content even
+while the main thread is busy. Execution rechecks exact runtime authority; no
+session guard crosses SQL observation or a main-thread dispatch. Native alerts
+never retire durable unread work or replay old unread backlog as live notifications.
+
+CLI output and autosave enroll before either consumer starts. Output ACKs its
+printed prefix independently. Autosave keeps at most 32 pending file cards and
+does not ACK that page until each save succeeds or authoritative state says the
+file was declined or removed. Storage failures retain the durable prefix for
+retry and restart; a save completed before an interrupted ACK may run again.
+
+`SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
+participant authority; integration must retain `validate_participant_request`
+before invoking their constructors. Node uses these indexed owners; separate
+file, channel, account-document and host consumers retain their own resource and
+authorization acceptance boundaries.
+
+Each transcript source imports independently from a private encrypted snapshot,
+retaining one authenticated record at a time. Original source identity must still
+match before committing imported rows and before replacing the legacy path with
+its exact downgrade barrier. Tail repair affects only the snapshot. Import
+failure preserves the original source; an interrupted committed import resumes
+publication without replaying it. The imported rows become available only after
+the barrier is durable and SQL publication completes. A published source with a
+missing or changed barrier fails closed. Warm constructors inspect fixed metadata
+and barriers without decoding historical bodies or opening another connection.
+The existing profile lease excludes cooperating writers; identity comparisons
+also reject detected source changes during import.
+
+Custody observations reuse this publisher through auxiliary source identity 16.
+Positive and negative exact-event/holder facts stay in the encrypted database;
+warm participant startup does not replay the custody journal. Migration seeks
+32 observations after its compound key and retries storage failures without
+inventing an empty result. Auxiliary identities 16–18 have their own registry,
+so extending the publisher does not rewrite the installed transcript table.
+
+Shared group metadata uses a persistent selected-control index in the same leased
+profile database. Canonical job identity and authority changes fence its rows;
+ordinary message appends do not discard completed metadata selections. A cursor
+advances only after a publication or release has been examined. Source replacement
+retires at most 128 indexed keys per turn before rebuilding. The selected cover,
+latest announcement and last 20 valid announcement publications share a 64-body,
+128-row, 512-edge and 8 MiB turn budget with canonical and causal authority work.
+Publication ownership and release ancestry reuse the checkpoint owner's resumable
+queries. At most 64 selected controls retain an active continuation; capacity
+backpressure preserves existing work instead of evicting it. A source change
+restarts only the unfinished decision, and its durable cursor remains unchanged.
+Validated facts and cursor advancement commit together. Release key searches
+resume by exact recipient and rank.
+Missing keys remain distinct from an incomplete query, which returns no partial
+values and is retried by the owning editor. Plaintext caching remains limited to
+64 selected channel summaries. The existing control worker pages 32 current
+channels and appends releases under the captured source guard.
+
+Raw account-group access observations remain separate from admitted channel
+authority: rejected signed controls still contribute to their original sorted-ID
+fingerprint. The access owner computes this metadata using bounded header and
+parent pages with disk ancestry marks, and caches the completed result against
+the raw control revision, destructive revision and canonical generation. Ordinary
+safe message appends reuse that observation; late parents or reordered sources
+invalidate it even when the signed control set is unchanged. A source whose kind
+index is still catching up uses the complete retained revision. The frontier is
+capped with an overflow sentinel; an incomplete local frontier cannot establish a complete observation.
+This bounds memory and makes unchanged observations reusable; a changed source
+can still require metadata work proportional to its retained graph.
+Directory observations reuse this owner with their distinct hexadecimal-ID
+fingerprint and rename/history-policy selector. Cold preparation advances at
+most 128 header rows and 512 ancestry edges per turn, without loading historical
+event bodies. Runtime-owned ancestry selections isolate interleaved queries and
+retire abandoned marks. At most 64 active digests/cursors are retained; a full
+cache advances resident work rather than evicting it or blocking new requests
+forever. Only complete observations are cached and signed. The existing account
+sync wake continues progress; no separate worker is created. Wire IDs remain
+limited to 512, while explicit final local receipts preserve their existing
+131,072-ID bound and are admitted by byte cost before materialization.
+
+
+Transcript lookups return owned, fallible results. Chronological, reverse and
+insertion-order pages select keys and aggregate sender/body bytes before fetching
+payloads, enforcing at most 128 rows and 8 MiB. Invalid budgets and oversized first
+rows fail before body reads. Exact event/logical-ID and deadline indexes support
+existence checks and expiry selection without payload scans. Deadline consumers
+continue until an empty page, since the byte budget may shorten a page. Removal
+predicates run under the shared SQL lock and must remain pure; body deletion and
+physical row/byte counters commit together. Counts include retained aliases and
+per-device copies rather than canonical UI message counts. Suppression uses exact
+64-byte conversation/ID keys with bounded export pages and no expiry or Bloom
+filter. An exact suppression fact cannot expire solely by age while an offline
+peer or old backup can still reintroduce the row. Safe reclamation needs an
+acknowledged reintroduction horizon or a protocol rule rejecting the old lifetime;
+local absence alone is insufficient. This distinction is also explicit in
+[CouchDB's deletion and purge semantics](https://docs.couchdb.org/en/stable/api/database/misc.html#db-purge).
+The existing delivery journal remains the cross-store transaction owner.
+
+Metadata-only transcript pages charge 256 bytes per header and expose stable
+ordinals for exact owned body lookup. Source revisions persist across reopening;
+conversation revisions retain empty tombstones so deletion and recreation cannot
+reuse an old revision. File-conversation metadata is an untrusted selector derived
+from parsed file cards and grants no authorization. Recovered sent identities use
+the same exact conversation/sequence/time/plaintext-digest key on disk, with no
+resident history map. `PublishedHistorySource` shares the independent source
+registry and downgrade-barrier checks with auxiliary file-proof and file-identity
+owners, whose SQL tables and validation remain their own responsibility.
+
+Relay source publication validates independent encrypted legacy archives before
+replacing source paths with manifest-bound downgrade barriers. A private database
+bootstrap is checkpointed and closed before publication. Prepared, frozen,
+importing, verified and published states make interrupted operations explicit;
+event and arrival domains become available together only after verification.
+Streaming encrypted staging repairs historical child-before-parent ordering
+without retaining the graph or bodies in memory. Staging retains one decoded
+event and batches encoded rows within 64 records and 1 MiB, including fixed
+metadata and parent capacity; one legal oversized record is processed alone.
+Each batch uses the existing durable owner transaction. Canonical ranking batches
+only an ordered prefix of at most 64 childless ready vertex IDs, stopping
+before any parent that could introduce an earlier-priority child. Ranking retains
+fixed IDs, but SQLite may read body pages while locating rows in the existing
+WITHOUT ROWID staging table; initial migration remains proportional to history. Parent processing retains bounded 128-child pages. Interrupted imports
+restart their authenticated stream; the legacy parser does not provide seek
+recovery. These batches do not change the schema or publication barriers.
+Arrival import preserves last-record precedence and seeds only missing retained
+mailboxes with the upgrade time. The same indexed metadata pass assigns distinct
+touch ticks and verifies summed event counts and costs against the event domain;
+it does not reread event IDs or bodies. Relay role readiness is published in the
+transaction that publishes both mandatory sources. Prepared imports can resume
+while unready; a published profile with missing or unready role authority fails
+closed rather than rebuilding that authority during ordinary open.
+
+Published opens inspect manifests and fixed barriers rather than rehashing or
+decrypting archived history. Replaced or missing barriers cannot trigger empty
+creation or automatic legacy merging. Published migration archives are retired
+through durable cleanup intent after successful publication; a cleanup failure
+does not make them an alternate history source. The dedicated post-office CLI
+uses the indexed runtime described below. Other participant domains and the
+explicit collecting SDK retain their separate migration boundaries.
+
+The domain-owned indexed event repository keeps immutable signed event bytes,
+parent edges, author sequences, frontier and conversation metadata in the same
+encrypted database transaction. Explicit domain IDs isolate stores sharing a
+connection. A component-wide schema marker is checked before event-domain table
+adoption; foreign-key enforcement is enabled and verified by the connection
+owner. Existing unsigned 64-bit sequence and clock values use ordered eight-byte
+big-endian blobs, preserving their full range.
+
+Large retained-event payloads use an ordinary integer-rowid table with an
+explicit non-null composite event key; signed identities and foreign-key targets
+remain unchanged. Small key indexes locate the payload row, and every scalar
+metadata column precedes its final body column. GC obtains admission order from
+the covering commit index. This avoids whole overflowing index-record comparison
+and trailing-payload traversal during metadata reads. The choice follows
+[SQLite's table-layout guidance](https://www.sqlite.org/withoutrowid.html#when_to_use_without_rowid);
+engine plans and cold SQLite page-cache regressions enforce the access pattern.
+Small key-only tables retain their separate layout decisions.
+
+Indexed individual lookups return complete owned events. Metadata headers omit
+bodies and expose parent counts; parent edges have separate bounded pages.
+Keyset pages enforce row and byte budgets before selecting bodies, and bind their
+cursors to database UUID, domain, conversation, ordering and source revision.
+Raw Lamport pages do not claim causal order. Invalid budgets, oversized first rows,
+stale cursors, exhausted repository counters and incompatible component schemas
+remain explicit errors. Fingerprints preserve the wire's exact
+`SHA256(count_le || sorted_event_ids)` construction: an indexed ID scan uses
+bounded memory, and its revision-bound cache persists across reopening. The
+first hash after changes may still scan all IDs; unchanged probes do not.
+The repository backend alone does not switch the existing runtime persistence or
+replace its full-history replay; bounded consumers and verified source migration
+are required before that cutover.
+
+Canonical signed-event order uses a separate persisted Kahn generation for
+Lamport and wall-clock priorities. Encrypted ordinary work tables hold indegrees,
+the indexed ready queue, ranks and a partially drained parent's child cursor.
+Seed, vertex and edge work is bounded per step; child updates and their cursor
+advance commit together. Pending or stale generations cannot masquerade as a
+successful empty or current history. Generation cursors bind their source and
+ordering, and publication checks the completed source boundary atomically.
+
+A new event can append to an exact generation only when its priority tuple is
+greater than the maximum over all prior vertices, including Profile leaves.
+The last ranked event and protocol heads are insufficient proofs. A building
+generation can retain a closed commit-prefix and append a validated safe tail;
+ordinary monotonic writes must not perpetually restart its repair. Unsafe late
+insertions invalidate the candidate, and obsolete work is reclaimed in bounded
+steps. These signed-event generations do not include archive-only transcript
+roots or provide channel-state checkpoints; their owners must integrate those
+sources before runtime history/replay cutover.
+
+Indexed maintenance uses metadata rather than loading retained bodies. Domain
+and conversation counters track physical event counts and the legacy record-cost
+estimate separately from encoded byte lengths. The event repository maintains
+these counters together during append, conversation drop and profile-leaf
+removal. Relay bookkeeping reuses these authoritative counters rather than
+maintaining another count or byte estimate. A conversation drop removes its own
+rows transactionally;
+an empty revision tombstone prevents an old cursor becoming valid when that
+conversation is recreated. Empty tombstones are excluded from discovery.
+
+Repository conversation retirement provides a separate bounded-reclamation
+lifecycle. Beginning retirement atomically hides the whole scope and advances
+its revision and destructive generation; physical charge remains until rows are
+removed. Scope-known ordinary reads and mutations return a local availability
+error, while earlier page, order and network views become stale. ID-only reads
+can return absence after the physical ID has been removed. Active conversation
+listing uses a partial index that excludes retiring scopes, avoiding a scan of
+hidden rows before applying a page limit.
+
+Retirement tokens retain the profile lease and bind the database, domain,
+conversation, generation and logical revision. Transaction helpers verify the
+actual connection identity. Completion is idempotent for the unchanged empty
+tombstone; recreation makes the old token stale. Derived order and profile work
+cannot republish a retiring scope. Persisted cleanup phases remove auxiliary
+rows and individual edges before deleting vertices in reverse admission order,
+preserving foreign keys. Partially erased graphs remain inaccessible until
+finalization. Each committed step updates physical count and cost exactly once.
+
+Reclamation budgets distinguish auxiliary work, edges, vertex work and estimated
+work bytes from reclaimed event cost and deleted serialized bytes. They do not
+promise an equivalent reduction in filesystem size. A single oversized stored
+row is an explicit atomic-work exception; it is reported separately and consumes
+the step. Ordinary reclamation does not decode event bodies or collect history
+IDs. Only a transaction-owning wrapper measures commit latency; helpers within a
+caller's transaction cannot claim that timing. The indexed relay role composes
+these primitives with expiry and capacity policy. The dedicated relay runtime
+uses this indexed authority; participant storage retains its separate migration
+boundary below.
+
+The indexed relay state retains the existing shared profile connection
+and owns first-arrival time, touch ticks, role readiness and retention policy.
+Validated admission and arrival/touch changes commit in one transaction through
+the event repository. Its new-growth gate runs after signature, causal and
+counter validation and before allocating the stored-event encoding; scalar size
+preflight preserves permanent counter errors. Input ownership and cryptographic
+validation retain their existing per-event allocations. Signed duplicates are authenticated
+without invoking the growth gate, adding charge or advancing touch. Watch
+notifications follow successful commit only.
+
+Expiry uses a nullable, persisted monotonic cutoff and indexed arrival deadlines.
+A mailbox becomes unavailable at thirty days even before physical reclamation;
+clock rollback cannot restore eligibility. Time before the first representable
+expiry and deadline overflow do not wrap or prematurely expire an arrival at
+zero. Unchanged idle checks neither walk history nor update policy. A trusted
+origin must still pass the existing expiry and future-skew checks. After clock
+rollback, an earlier valid origin on an authenticated duplicate can correct its
+arrival below the persisted cutoff and commit an unavailable result. Rejected
+new growth does not make that correction.
+
+Policy-bearing exact reads qualify the current mailbox before fetching a body
+or returning positive custody. Their leased views bind the database, domain,
+conversation, destructive generation, cutoff and first-arrival identity. Changed
+bindings become stale before newer reclamation progress is interpreted; ordinary
+appends and touches do not change these policy identities. Physical diagnostics
+remain distinct from eligible availability. Warm open validates fixed policy
+records and exact schema authority, including required unique indexes, without
+materializing mailbox history or opening another database connection.
+
+Capacity reuses the event domain's physical count and estimated cost, including
+hidden rows awaiting reclamation. Defaults remain 100,000 events plus 5,000 slack
+and 512 MiB plus 16 MiB slack. An authenticated new event exceeding either
+envelope requests persistent draining and returns local retryable backpressure
+without inserting its body or arrival. An event unable to fit even an empty
+envelope has a distinct local failure and cannot trigger futile eviction.
+Validation and permanent counter failures remain errors rather than capacity
+pressure. These local resource outcomes are not peer-event rejections.
+
+Draining continues until both base targets are met. Indexed expiry selection
+precedes least-recently-touched capacity selection. At most one selected mailbox
+is pending physical reclamation, preventing unchanged physical charge from
+causing repeated over-selection. Role pending state and repository retirement
+change together; completion removes the matching arrival in the same transaction
+as final graph reclamation. Metadata probes, scope selection and graph work have
+separate budgets. Physical charge is not an exact live-mailbox total or a promise
+of equivalent filesystem shrinkage.
+
+The dedicated `mesh-talk-node --post-office` path transfers its pre-keystore
+profile lease into one `IndexedPostOffice` and shares one `IndexedRelayEndpoint`
+across plain, named bridge, gateway, pinned federation and approved-network
+modes. Normal reopen uses encrypted indexed state without hydrating the legacy
+history log. Initial authenticated legacy migration remains proportional to
+source data. Participant event publication is independently owned as described
+above; relay adoption does not establish desktop startup or total process memory
+bounds.
+
+Federation sessions persist bounded remote inventory and the exact local digest
+snapshot actually sent. Owner/session identities, monotonic deadlines and
+cancellation qualify each operation in its current transaction. Stale sessions
+retain their storage charges until bounded cleanup. Inventory preparation keeps
+one active digest context and a finite initial scan followed by an indexed commit
+tail. Each pass has separate limits of 512 raw producer rows and 512 retained
+event IDs hashed; these are not a combined 512-row limit for the whole maintenance
+pass or its other bounded work classes. Derived digest writes
+wake maintenance separately from externally visible mailbox changes. Ordinary
+metadata probes request only scoped fingerprints; a full demand queue leaves an
+optional cache miss for a later probe instead of starting global preparation.
+Explicit federation demand starts global preparation. Missing or stale derived
+state never authorizes a fabricated fingerprint match or positive custody.
+
+One owned maintenance future interleaves retention, demanded digests, publication
+cleanup and session cleanup. It subscribes before inspecting work, waits at least
+10 ms and three times the measured slice duration between passes, and backs off
+retryable failures from 100 ms to five seconds. Self notifications cannot bypass
+that pacing. This is a maintenance duty policy, not a total CPU or transaction
+latency limit. Idle passes do not scan historical IDs/bodies or rewrite policy.
+Expiry waits use checked monotonic conversion with at most a 24-hour recheck
+horizon and retain earlier session deadlines. A faulted or poisoned database
+stops admission and fails the owned runtime; it is not reused in a retry loop.
+A rollback failure remains an authoritative database error requiring reopen and
+retains both sanitized operation and rollback diagnostics; COMMIT failure policy
+is unchanged.
+
+Archive-only checkpoint contention or filesystem unavailability returns a typed
+deferred outcome with its original cause. Its independent 100 ms–5 s retry
+schedule does not delay bounded publication staging, role, digest or session
+work; unrelated successful slices and watch notifications cannot reset or bypass
+that schedule. Repeated identical cleanup diagnostics do not rewrite their
+stored value. Initial publication/reopen may leave these explicitly deferred
+archives pending. Invalid source/artifact provenance and authoritative database
+failures remain errors, and faulted handles are not reused for diagnostic writes.
+
+The CLI owns inbound sessions, outgoing reconciliation, discovery and gateway
+proxy tasks. Cooperative shutdown stops admission, cancels and joins those
+owners, lets admitted synchronous database work return, then releases profile
+ownership. Unix SIGINT/SIGTERM use this path. Windows hard service termination
+requires separate crash/reopen evidence. See the
+[relay resource bounds](post-office-federation.md#indexed-relay-runtime-and-resource-bounds)
+and [data-directory ownership](../specifications/deployment_guide.md#data-directory-ownership).
+
+Profile maintenance records pending conversations on disk and examines candidates
+in bounded steps. Its snapshot keeps the newest two unreferenced Profile leaves
+per author and every referenced ancestor. Deleting a child does not make its
+parent eligible in the same snapshot. The existing minimum of eight candidates
+and reclaimed-cost threshold of one eighth of the domain estimate remain in
+force. Source changes invalidate an unfinished selection without losing pending
+requests. Applying a complete selection is atomic and updates metadata,
+fingerprints and ordering authority together; it may perform disk work
+proportional to the removed rows, without rewriting unrelated event bodies.
+Participant runtime maintenance now drives these bounded repository steps and
+retries publication cleanup through the same admitted blocking-work owner.
+
+Participant network sync uses `NetworkSyncStore` directly: retained Have and
+export pages bind a finite commit cutoff and destructive generation. Ordinary
+new messages do not invalidate the captured membership. Authorization, sharing,
+network-cost restrictions, sibling status and device-policy revision are checked
+again before handing off prepared data. Pending invitations retain their existing
+8 MiB admission budget and remain in Have until admission completes. No full
+repository body or ID collection is retained in memory across transport awaits.
+`repository/selection.rs` stores disposable authorized IDs, causal ranks and
+outbound policy facts in the encrypted profile database. Have uses only identities;
+export tests selection before fetching payloads. Sibling category filtering and
+share-off ancestry use retained parent edges plus the peer's exact Have set.
+Source, roster, proof, receipt-control and channel-state revisions guard the selection, while
+privacy, sharing, cost and device-policy changes invalidate stale views. Unchanged
+views also check a domain-wide destructive revision, advanced atomically with
+logical retirement or destructive rewrites. This invalidates inherited file
+authorization when a parent channel retires, even before physical deletion and
+without changing the file's own epoch, transcript or scope rows. Unchanged
+Have pages and pre-send validation read no historical bodies; each export fetches
+only selected payloads once, including retransmissions. Receipt-control bindings
+and their process-local revision publish under one index lock, including complete
+cancellation replacements and individual delivery-recovery insertions; a privacy
+generation bump cannot hide a later control-map retirement. Ordinary source appends
+preserve the original finite cutoff; current authority changes invalidate it.
+
+Opening a production view captures context without collecting retained history.
+`privacy_sync/principal.rs` advances canonical ordering, policy scope selection,
+legacy/modern authorization, exact parent closure and the unchanged wire
+fingerprint in separate preparation turns. The session releases its store lock
+and yields after each turn, checking cancellation and current authority on resume.
+Historical selected IDs, departures and ancestor marks stay in the existing
+SQL selection owner; a persisted current reducer/cursor resumes interrupted
+preparation without a body cache. Raw kind revisions include rejected controls
+and invalidate preparation independently of admitted channel authority. Message
+classification reads headers and, only for receipt-shaped payloads, a bounded
+incremental BLOB prefix; matching receipts and selected controls still receive
+full authentication. Fresh sessions may traverse retained metadata, so they are
+not constant-time opens followed by constant-time preparation.
+
+Preparation defaults to 64 rows, 512 parent edges and an 8 MiB body/work charge.
+Large legal parent lists resume at an exact edge cursor. An undersized budget
+returns an explicit error without discarding the event. Have-dependent export
+closure stages the admitted peer Have in bounded batches and resumes its vertex
+and edge together; replacing Have also retires old rows incrementally.
+Channel checkpoint projection remains the authority for signed controls. A private
+reducer suspends when an exact graph answer or historical predicate is unfinished.
+The existing encrypted ancestry owner advances caller-budgeted vertices and edges;
+quantified predicates retain their last fully checked fact key. Partial decisions
+never publish receiver state, transcripts, reception effects or authority. Decision
+progress is fenced by the exact control as well as its source generation.
+
+Causal query handles return Pending with charged work or one complete leased
+projection. Owner queries additionally retain the validated strict-causal state
+until later ownership-loss checks finish. Runtime-owned ancestor selections retire
+incrementally after cancellation or restart; transferring a walk to a durable
+checkpoint reference is atomic. Captured account generations reject old receiver,
+source and query handles after an account is adopted again. The initial query API
+still conservatively invalidates on same-channel source revisions, including safe
+tails. Canonical outer work accounting and startup/runtime callers that drain steps
+remain separate integration work; these primitives alone do not establish bounded
+whole-call startup latency. The explicit collecting SyncStore compatibility API is
+separate from the paged runtime. Durable-Have requests prepare a finite view through
+the same yielding session loop and test exact selected membership before syncing;
+they do not collect the conversation's historical payloads.
+
+Selection lifetimes use the existing eight-connection exchange limit and admitted
+remote-Have budget. Each connection may hold its primary selection and one
+non-file parent selection for file-scope authorization, giving at most sixteen
+active selections. Drop/cancellation retires a selection and deletes at most 512
+rows from one working table; warm open and admitted maintenance take the same
+bounded cleanup step. A new view drains previous retirement debt through yielded
+bounded transactions before adding another selection, preventing cancellation
+buildup. An owner nonce identifies abandoned work after restart without replaying it.
+
+Owned individual participant event reads fetch only the selected body from the
+encrypted repository. Standalone legacy SDK reads copy from their resident index.
+Explicit whole-conversation collectors remain visible at their callers.
+Canonical history, search, protected-content, attachment availability and custody
+queries propagate these read failures through `Node` and affected `NodeRuntime`
+methods. Host IPC preserves its successful payload shapes and uses its existing
+error channel for failures. Boolean Favorites eligibility logs failed canonical
+reads and denies capture/export eligibility; it does not authorize a snapshot or
+substitute a successful empty history. Typed node/runtime wrappers retain their
+underlying error sources.
+The outgoing journal's existing acceptance boundary remains authoritative: a
+later projection/recovery read failure does not revoke durable acceptance or
+turn it into a retryable send result. Supervisors log the original failure and
+retain queued work for retry without claiming a send or recipient delivery.
+Live receive notifications and derived channel-recall persistence remain separate.
+A failed recall-target lookup leaves the signed `Delete` event in the log and
+records the failure; canonical queries report the read error rather than an empty
+recall set. Control-only recall repair currently depends on a later processing
+pass or canonical query, without an independent background retry clock.
+
+Sync storage reads and handlers propagate local failures as errors before sending
+a successful empty history, fingerprint match or custody claim. Explicit invalid
+input and policy rejection remain separate from local persistence failures. A
+batch failure preserves its already committed prefix for idempotent retry; it
+does not imply transaction rollback across independently committed events.
+
 Encrypted record logs replay one framed record at a time instead of retaining a
 second buffer containing the complete encrypted file. The loader validates a
 declared frame length against the remaining file bytes before allocating that
 frame. It preserves the existing encrypted format, authenticated decode errors,
 valid-prefix crash-tail recovery and Windows repair-handle ownership. This bounds
 the temporary ciphertext buffer by one record; decoded retained records and
-their indexes still consume memory proportional to retained data.
+their indexes still consume memory proportional to retained data. Migration
+callers can instead use `open_with_visitor` to process each authenticated decoded
+record before decoding the next. The visitor owns any retained values or partial
+staged effects. A callback error returns no writer and preserves source bytes,
+including an unfinished tail; tail repair happens only after complete successful
+visitation. The existing collecting API uses this same framing/parser path.
 
 Canonical history queries select lightweight retained metadata before copying
 the chosen message content. Ordering, logical-ID deduplication, pending accepted
@@ -1310,6 +2261,44 @@ rows retain their established sorted-before-dedup precedence even when arrival
 order differs from authored time; pending accepted rows follow durable rows.
 Signed DAG ancestry is not pruned to satisfy a local memory
 limit; authenticated checkpoint compaction remains a separate protocol decision.
+
+Automatic desktop history refreshes share one running native-read bundle and one
+coalesced pending invalidation. The running slot remains occupied until every
+original history and context read settles, even after a presentation
+deadline or an early rejection. Explicit navigation, search and retry retain their
+own admission path and preserve their history-baseline policy. The existing global
+64-read admission limit and owner/run fences still apply. A native read that never
+settles holds the automatic lane; explicit reads remain available within the global
+limit. This bounds burst refresh work without dropping durable messages.
+A queued presentation waiter has one shared ten-second deadline, so a stalled
+history operation cannot hold the roster-refresh coordinator indefinitely. This
+deadline reports incomplete history without clearing the pending invalidation,
+advancing its revision, or releasing native admission.
+
+Selected reaction summaries have an independent owner-fenced native read lane.
+The desktop requests at most 64 visible message IDs per turn; the core returns
+at most 128 summary rows within its 1 MiB serialized budget, with explicit pending
+projection continuations. Replies contain counts and authenticated own-account
+membership, without retaining author lists. One physical summary request remains
+admitted until native settlement; inline refreshes retain only the latest pending
+demand, and a single-message inspector shares that admission. The active renderer
+cache keeps at most 512 summaries and 2 MiB of charged strings. Incomplete targets
+open a page-replacing inspector; subsequent pages never append an unbounded list.
+Reaction projection does not delay the existing history or read-ledger commit.
+
+The standalone legacy SDK's profile maintenance preserves referenced ancestors
+and the latest two safe profile leaves per author. Pending conversations share one atomic rewrite rather
+than rewriting the entire log separately for each conversation. Maintenance
+requires at least eight removable leaves whose estimated event bytes reclaim at
+least one eighth of the retained log; smaller obsolete profiles wait for a later
+amortized batch. Eligibility checks use borrowed metadata, with a ten-second
+global scan cooldown. Reclaimable requests below the byte threshold remain
+pending so later conversations can contribute to the same batch. Expensive
+maintenance rewrite attempts share a
+sixty-second global cooldown, including failed attempts; failures preserve all
+pending requests and the original durable log for retry. Explicit compaction
+uses the same byte-cost test without the background timer. Encrypted formats,
+causal closure and latest-profile projection remain unchanged.
 
 ### Manual encrypted backup and recovery
 
@@ -1325,8 +2314,13 @@ rejected before a restored profile can be published.
 
 The desktop export command takes the same consuming runtime barrier as account
 replacement: it stops producers and drains admitted work, opens the existing
-profile offline, streams the snapshot to a restrictive sibling temporary file,
+profile offline only when no retired owner is available, streams the snapshot to a restrictive sibling temporary file,
 verifies it, then atomically publishes it without overwriting an existing file.
+`stop_for_storage` hands the joined Node and its existing context to export rather
+than reacquiring a live lease. Before any temporary/archive write, the desktop
+checks both the originating host local-user label and the canonical profile root
+against current authority; equal mesh account keys alone are insufficient.
+Raw SDK snapshot export remains caller-serialized.
 It restarts the runtime even when export fails or the IPC caller disappears.
 The local last-export summary is password encrypted; it contains the path, time,
 size, and counts, but never the key.
@@ -1334,8 +2328,13 @@ size, and counts, but never the key.
 Restore is available while signed out. Inspection decrypts to private scratch,
 checks the full archive and snapshot, and returns only a preview. Installation
 creates fresh local auth credentials and a fresh device identity in an unpublished
-directory, re-encrypts supported stores under the new password, then reopens both
-auth and node stores for verification. A publication marker makes the two directory
+directory, re-encrypts supported stores under the new password, then verifies both
+auth and node stores under staged ownership. Enrollment uses the same standard
+`messages.log` source. Before relocation, every staged handle is dropped and the
+encrypted connection is explicitly checkpointed and closed; retained handles or
+busy/faulted close prevent publication. The lease is released before the move,
+including on Windows. Private staging, host namespace serialization and the
+publication journal protect this cooperative gap. A publication marker makes the two directory
 renames recoverable: startup removes an incomplete pair or retains a completed pair
 before auth initializes. Startup also removes orphan staging and decrypted scratch.
 The recovered account fingerprint remains the same; the new device fingerprint
@@ -1354,8 +2353,12 @@ Snapshots include visible plaintext history, signed event provenance, file cards
 managed media referenced by visible cards, received peer avatars, signed public
 account profiles, immutable account creation metadata, legacy compatibility records,
 recall marks, and account-owned Favorites with their metadata, notes and independently
-retained attachment bytes. Schema 5 combines these records without changing the
-released positional tags. Readers preserve schemas 1–3 and strictly distinguish the
+retained attachment bytes. Schema 6 adds exact conversation/message local suppression
+facts after the schema-5 records, without changing earlier positional tags. Restore
+streams a suppression pass before installing any history, so record order cannot
+resurrect known erased content. Suppression is local to its recorded host; signed
+ancestry and independent Favorites remain separate. Readers preserve schemas 1–5
+and strictly distinguish the
 two draft schema-4 extension families; mixed or malformed extensions are rejected.
 The Favorites owner applies one eligible record projection to archive count, record
 encoding and retained-file authorization. Expired and canonical protected Favorite

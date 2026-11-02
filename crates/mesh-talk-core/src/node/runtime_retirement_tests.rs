@@ -50,12 +50,13 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
             selected_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
         }));
-        log.request_profile_compaction(conv);
+        log.request_profile_compaction(conv).unwrap();
     }
     tokio::time::timeout(Duration::from_secs(6), selected_rx)
         .await
         .unwrap()
         .unwrap();
+    drop(node);
     let (initialized_tx, mut initialized_rx) = tokio::sync::oneshot::channel();
     let base = dir.path().to_path_buf();
     let replacement = tokio::spawn(async move {
@@ -86,7 +87,16 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
     replacement.node.log.lock().unwrap().append(event).unwrap();
     retire(replacement).await;
     let reopened = start(dir.path()).await;
-    assert!(reopened.node.log.lock().unwrap().get(&event_id).is_some());
+    assert!(
+        reopened
+            .node
+            .log
+            .lock()
+            .unwrap()
+            .get(&event_id)
+            .unwrap()
+            .is_some()
+    );
     retire(reopened).await;
 }
 
@@ -265,6 +275,7 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     // so a new authentication cannot mask missing pre-retirement persistence.
     let bob_port = bob.listen_tcp_port();
     bob.stop().await;
+    drop(node);
     let reopened = start(alice_dir.path()).await;
     let proof = reopened
         .node
@@ -423,7 +434,7 @@ async fn startup_identity_precedes_blocked_durable_store_and_matches_runtime() {
                 identity_tx.send(identity).unwrap();
                 Ok(())
             },
-            |launch| Ok(launch("Owner")),
+            |launch| launch("Owner"),
         )
         .await
     });
@@ -506,4 +517,236 @@ async fn startup_identity_rejection_stops_before_listener_and_durable_stores() {
     )
     .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn profile_contention_precedes_runtime_keystore_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    let _lease = crate::storage::profile::ProfileStorageLease::acquire(&profile).unwrap();
+    let result = NodeRuntime::start(
+        directory.path(),
+        "owner",
+        "Owner",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert!(result.is_err(), "runtime ignored an existing profile owner");
+    assert!(
+        !profile.join("identity.keystore").exists(),
+        "contender created device keys"
+    );
+    assert!(
+        !profile.join("account.keystore").exists(),
+        "contender created account keys"
+    );
+}
+
+#[tokio::test]
+async fn participant_rekey_reopens_same_device_with_exact_next_account() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = start(directory.path()).await;
+    let device = runtime.user_id().to_owned();
+    let previous = runtime.account_id().to_owned();
+    let next = runtime.rekey_account().unwrap();
+    assert_ne!(previous, next);
+    runtime.stop().await;
+    let replacement = start(directory.path()).await;
+    assert_eq!(replacement.user_id(), device);
+    assert_eq!(replacement.account_id(), next);
+    replacement.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceled_startup_completion_waits_for_later_privacy_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    PRIVACY_OPEN_HOOKS.lock().unwrap().insert(
+        profile.clone(),
+        Box::new(move || {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+        }),
+    );
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let base = directory.path().to_owned();
+    let startup = tokio::spawn(async move {
+        let request = super::super::RuntimeStartup::new(
+            RuntimeConfig {
+                base_dir: &base,
+                account_id: "owner",
+                display_name: "Owner",
+                password: "pw",
+                discovery_port: 0,
+                post_office_enabled: false,
+                candidate_source: None,
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_| {}),
+                on_channel: Box::new(|_| {}),
+                on_file: Box::new(|_| {}),
+                on_profile: Box::new(|_| {}),
+                on_call_signal: Box::new(|_| {}),
+            },
+        );
+        completion_tx.send(request.completion()).ok().unwrap();
+        NodeRuntime::start_owned(request, |_| Ok(()), |launch| launch("Owner")).await
+    });
+    let completion = completion_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), started)
+        .await
+        .unwrap()
+        .unwrap();
+    startup.abort();
+    assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+    let mut completed = tokio::spawn(completion.wait());
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut completed)
+        .await
+        .is_ok();
+    assert!(crate::storage::profile::ProfileStorageLease::acquire(&profile).is_err());
+    release.send(()).unwrap();
+    if !early {
+        tokio::time::timeout(Duration::from_secs(10), completed)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(!early, "startup completion lost the later blocking child");
+    assert!(crate::storage::profile::ProfileStorageLease::acquire(&profile).is_ok());
+}
+
+#[tokio::test]
+async fn retired_runtime_exports_without_reopening_and_closes_before_relocation() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = start(directory.path()).await;
+    let profile = directory.path().join("accounts/owner");
+    let account = runtime.account_id().to_owned();
+    let retired = runtime.stop_for_storage().await;
+    assert!(Node::open_recovery_profile(&profile, "pw").is_err());
+    let mut snapshot = Vec::new();
+    retired
+        .node()
+        .write_recovery_snapshot(&mut snapshot, 1)
+        .unwrap();
+    assert!(!snapshot.is_empty());
+    assert_eq!(retired.node().account_id(), account);
+    retired.close().unwrap();
+    let moved = directory.path().join("closed-profile");
+    std::fs::rename(&profile, &moved).unwrap();
+    let reopened = Node::open_recovery_profile(&moved, "pw").unwrap();
+    assert_eq!(reopened.account_id(), account);
+    reopened.close_profile().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn redirected_account_keystore_is_rejected_before_device_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    std::fs::create_dir_all(&profile).unwrap();
+    let external = directory.path().join("external-account");
+    std::fs::write(&external, b"existing private authority").unwrap();
+    std::os::unix::fs::symlink(&external, profile.join("account.keystore")).unwrap();
+    let result = NodeRuntime::start(
+        directory.path(),
+        "owner",
+        "Owner",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!profile.join("identity.keystore").exists());
+    assert_eq!(
+        std::fs::read(external).unwrap(),
+        b"existing private authority"
+    );
+}
+
+#[tokio::test]
+async fn profile_owner_blocks_subprocess_before_any_keystore_creation() {
+    if let Some(base) = std::env::var_os("MESH_TEST_RUNTIME_CONTENDER") {
+        let result = NodeRuntime::start(
+            Path::new(&base),
+            "owner",
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await;
+        assert!(result.is_err(), "subprocess ignored the profile lease");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("accounts/owner");
+    let _owner = crate::storage::profile::ProfileStorageLease::acquire(&profile).unwrap();
+    assert!(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact","node::runtime::retirement_tests::profile_owner_blocks_subprocess_before_any_keystore_creation","--nocapture"])
+        .env("MESH_TEST_RUNTIME_CONTENDER",directory.path()).status().unwrap().success());
+    assert!(!profile.join("identity.keystore").exists());
+    assert!(!profile.join("account.keystore").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_joins_actual_expiry_writer_before_profile_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = start(directory.path()).await;
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let released = Mutex::new(released);
+    *runtime.node.expiry_cleanup_hook.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        released.lock().unwrap().recv().unwrap();
+    }));
+    tokio::time::timeout(Duration::from_secs(5), started)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut retirement = tokio::spawn(runtime.stop());
+    let early = tokio::time::timeout(Duration::from_millis(150), &mut retirement)
+        .await
+        .is_ok();
+    release.send(()).unwrap();
+    if !early {
+        tokio::time::timeout(Duration::from_secs(5), retirement)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let profile = directory.path().join("accounts/owner");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if crate::storage::profile::ProfileStorageLease::acquire(&profile).is_ok() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expiry worker did not release profile"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !early,
+        "runtime stop completed while its expiry writer was still active"
+    );
+    let reopened = start(directory.path()).await;
+    reopened.stop().await;
 }

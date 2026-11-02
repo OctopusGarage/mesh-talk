@@ -347,6 +347,7 @@ export function MessageBubble({
   fresh,
   mentioned,
   reactions,
+  onMoreReactions,
   selfReactionId,
   myName: _myName,
   onReply,
@@ -392,8 +393,8 @@ export function MessageBubble({
   /** True when this channel message mentions the current user. */
   mentioned?: boolean;
   reactions: ReactionInfo[];
-  // Compatibility fallback when the native channel ownership projection is absent:
-  // account ID for account conversations; device ID for channels.
+  onMoreReactions?: () => void;
+  // Kept with the presentation identity; ownership comes from the native summary.
   selfReactionId: string;
   myName: string;
   onReply: (m: ChatMessage) => void;
@@ -812,7 +813,7 @@ export function MessageBubble({
         )}
 
         {/* reaction chips */}
-        {reactions.length > 0 && (
+        {(reactions.length > 0 || onMoreReactions) && (
           <div
             className={cn("mt-1 flex flex-wrap gap-1", mine && "justify-end")}
           >
@@ -838,11 +839,20 @@ export function MessageBubble({
                 >
                   <span>{r.emoji}</span>
                   <span className="font-mono text-[11px] tabular-nums">
-                    {r.who.length}
+                    {r.count}
                   </span>
                 </button>
               );
             })}
+            {onMoreReactions && (
+              <button
+                type="button"
+                onClick={onMoreReactions}
+                className="rounded-full border border-border px-2 py-0.5 text-xs hover:bg-muted"
+              >
+                {t("message.reactionsMore")}
+              </button>
+            )}
           </div>
         )}
 

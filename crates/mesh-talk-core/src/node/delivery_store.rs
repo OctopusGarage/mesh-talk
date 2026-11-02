@@ -13,7 +13,9 @@ use super::account_group::operations::journal::OperationReference;
 use super::dm_envelope::DmEnvelope;
 use super::dm_ratchet::{DmRatchet, PreparedRatchet};
 use super::received_log::{ReceivedEntry, ReceivedLog};
-use super::sentlog::{SentEntry, SentLog};
+use super::sentlog::SentEntry;
+#[cfg(test)]
+use super::sentlog::SentLog;
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::eventlog::persist::PersistentEventLog;
@@ -24,6 +26,100 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// The delivery journal installs only these durable projections. Standalone
+/// encrypted-log fixtures and profile-backed runtime stores share this write
+/// boundary; neither exposes a historical collection through it.
+pub(crate) trait DeliverySentProjection {
+    fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError>;
+}
+pub(crate) trait DeliveryReceivedProjection {
+    fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError>;
+    fn record_manifest(
+        &mut self,
+        entry: &ReceivedEntry,
+        _original: Option<&Event>,
+        _metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<(), LogError> {
+        self.record_durable(entry)
+    }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        let _ = scopes;
+        self.record_manifest(entry, original, None)
+    }
+    fn record_incoming(
+        &mut self,
+        original: &Event,
+        entry: &ReceivedEntry,
+        owner: Option<(&PublicIdentity, &str)>,
+    ) -> Result<(), LogError>;
+}
+#[cfg(test)]
+impl DeliverySentProjection for SentLog {
+    fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError> {
+        SentLog::record_durable(self, entry)
+    }
+}
+impl DeliverySentProjection for super::sent_store::SentStore {
+    fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError> {
+        Self::record_durable(self, entry)
+    }
+}
+impl DeliveryReceivedProjection for ReceivedLog {
+    fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
+        ReceivedLog::record_durable(self, entry)
+    }
+    fn record_incoming(
+        &mut self,
+        _: &Event,
+        entry: &ReceivedEntry,
+        _: Option<(&PublicIdentity, &str)>,
+    ) -> Result<(), LogError> {
+        self.record_durable(entry)
+    }
+}
+impl DeliveryReceivedProjection for super::received_store::ReceivedStore {
+    fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
+        Self::record_durable(self, entry)
+    }
+    fn record_manifest(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<(), LogError> {
+        self.record_file_with_reception(entry, original, metadata)
+    }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        self.record_file_with_scopes(entry, original, None, scopes)
+    }
+    fn record_incoming(
+        &mut self,
+        original: &Event,
+        entry: &ReceivedEntry,
+        owner: Option<(&PublicIdentity, &str)>,
+    ) -> Result<(), LogError> {
+        let (device, account) =
+            owner.ok_or_else(|| invalid("incoming transcript requires bound delivery owner"))?;
+        let metadata = super::reception_effects::ReceptionMetadata::for_incoming(
+            original,
+            entry,
+            device,
+            account,
+            super::node::now_millis(),
+        );
+        self.record_durable_with_reception(entry, &metadata)
+    }
+}
 pub(crate) type GroupOperationCompletion<'a> =
     dyn FnMut(&OperationReference, &[Event]) -> Result<(), LogError> + 'a;
 
@@ -78,6 +174,44 @@ pub(crate) struct ReceiptDelivery {
 pub(crate) struct ControlBinding {
     pub device: PublicIdentity,
     pub account: Option<String>,
+}
+
+/// Process-local publication of receipt authorization reconstructed from the
+/// delivery owner. Callers hold the Node's index mutex for reads and mutations;
+/// the revision and bindings therefore become visible together. Map mutation
+/// stays behind this interface so cancellation and recovery cannot omit it.
+pub(in crate::node) struct DeliveryControlIndex {
+    bindings: std::collections::HashMap<EventId, ControlBinding>,
+    revision: u64,
+}
+impl DeliveryControlIndex {
+    pub(in crate::node) fn new(
+        bindings: std::collections::HashMap<EventId, ControlBinding>,
+    ) -> Self {
+        Self {
+            bindings,
+            revision: 0,
+        }
+    }
+    pub(in crate::node) fn get(&self, id: &EventId) -> Option<&ControlBinding> {
+        self.bindings.get(id)
+    }
+    pub(in crate::node) fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(in crate::node) fn insert(&mut self, id: EventId, binding: ControlBinding) {
+        if self.bindings.get(&id) != Some(&binding) {
+            self.bindings.insert(id, binding);
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+    pub(in crate::node) fn replace(
+        &mut self,
+        bindings: std::collections::HashMap<EventId, ControlBinding>,
+    ) {
+        self.bindings = bindings;
+        self.revision = self.revision.wrapping_add(1);
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,6 +593,7 @@ pub(crate) struct DeliveryStore {
     limits: DeliveryLimits,
     outbox_records: usize,
     needs_sync: bool,
+    deferred_profile_binding: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,11 +604,28 @@ struct DeliveryProfile {
 }
 
 impl DeliveryStore {
+    /// Reproduce an imported legacy card whose optional completion proof was
+    /// never reserved, without changing its retained manifest or ciphertext.
+    #[cfg(test)]
+    pub(crate) fn omit_file_completion_binding_for_test(
+        &mut self,
+        conversation: ConversationId,
+    ) -> usize {
+        let mut omitted = 0;
+        for file in self.files.values_mut() {
+            if file.file_conversation == conversation && file.completion_binding.take().is_some() {
+                omitted += 1;
+            }
+        }
+        omitted
+    }
+
     #[cfg(test)]
     pub(crate) fn fail_journal_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
         self.journal.fail_appends_for_test(enabled)
     }
 
+    #[cfg(test)]
     pub(crate) fn bind_profile(
         &mut self,
         log_path: &Path,
@@ -481,6 +633,19 @@ impl DeliveryStore {
         own: &PublicIdentity,
         account: &str,
     ) -> Result<(), LogError> {
+        self.bind_profile_authorized(log_path, password, own, account, None, true)
+            .map(|_| ())
+    }
+
+    pub(crate) fn bind_profile_authorized(
+        &mut self,
+        log_path: &Path,
+        password: &str,
+        own: &PublicIdentity,
+        account: &str,
+        previous_account: Option<&str>,
+        legacy_bootstrap: bool,
+    ) -> Result<Option<String>, LogError> {
         let mut path = log_path.as_os_str().to_os_string();
         path.push(".delivery-owner");
         let accepted = !self.pending.is_empty()
@@ -506,6 +671,10 @@ impl DeliveryStore {
         }) {
             return Err(invalid("invalid delivery profile binding"));
         }
+        let previous = entries
+            .first()
+            .filter(|entry| entry.account != account)
+            .map(|entry| entry.account.clone());
         if entries.is_empty() {
             file.append_durable(&expected)?;
         } else if entries.len() != 1 || entries[0].device != *own {
@@ -515,6 +684,11 @@ impl DeliveryStore {
             // device only after secret intents are resolved. Old account work
             // loses network/status eligibility; accepted history is retained.
             if entries[0].account != account {
+                if (!legacy_bootstrap && previous_account != Some(entries[0].account.as_str()))
+                    || entries[0].adoption.as_deref() != Some(account)
+                {
+                    return Err(invalid("unprepared delivery account change"));
+                }
                 if !self.pending.is_empty() {
                     return Err(invalid("recover old account delivery before adoption"));
                 }
@@ -527,10 +701,29 @@ impl DeliveryStore {
                     self.cancel(conversation, id)?;
                 }
             }
-            file.rewrite(std::slice::from_ref(&expected))?;
+            if legacy_bootstrap && previous.is_some() {
+                // Keep the old exact-device intent recoverable until SQL
+                // metadata durably records its legacy previous-account ID.
+                self.deferred_profile_binding = true;
+            } else {
+                file.rewrite(std::slice::from_ref(&expected))?;
+            }
         }
         file.sync()?;
         self.profile = Some((file, expected));
+        Ok(previous)
+    }
+
+    pub(crate) fn finish_profile_binding(&mut self) -> Result<(), LogError> {
+        if self.deferred_profile_binding {
+            let (file, profile) = self
+                .profile
+                .as_mut()
+                .ok_or_else(|| invalid("delivery owner is unbound"))?;
+            file.rewrite(std::slice::from_ref(profile))?;
+            file.sync()?;
+            self.deferred_profile_binding = false;
+        }
         Ok(())
     }
 
@@ -795,6 +988,7 @@ impl DeliveryStore {
             limits,
             outbox_records: records.len(),
             needs_sync: false,
+            deferred_profile_binding: false,
         };
         for record in records {
             store.validate_record(&record)?;
@@ -1198,8 +1392,8 @@ impl DeliveryStore {
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
-        sent: &mut SentLog,
-        received: &mut ReceivedLog,
+        sent: &mut impl DeliverySentProjection,
+        received: &mut impl DeliveryReceivedProjection,
     ) -> Result<Option<EventId>, LogError> {
         self.recover_next_with_files(ratchet, log, sent, received, None)
     }
@@ -1209,9 +1403,9 @@ impl DeliveryStore {
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
-        sent: &mut SentLog,
-        received: &mut ReceivedLog,
-        files: Option<&mut ReceivedLog>,
+        sent: &mut impl DeliverySentProjection,
+        received: &mut impl DeliveryReceivedProjection,
+        files: Option<&mut dyn DeliveryReceivedProjection>,
     ) -> Result<Option<EventId>, LogError> {
         self.recover_next_with_channels(ratchet, log, sent, received, files, None)
     }
@@ -1222,9 +1416,9 @@ impl DeliveryStore {
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
-        sent: &mut SentLog,
-        received: &mut ReceivedLog,
-        files: Option<&mut ReceivedLog>,
+        sent: &mut impl DeliverySentProjection,
+        received: &mut impl DeliveryReceivedProjection,
+        files: Option<&mut dyn DeliveryReceivedProjection>,
         channel_senders: Option<&mut super::channel_senders::ChannelSenderStore>,
     ) -> Result<Option<EventId>, LogError> {
         self.recover_next_with_group_operations(
@@ -1243,9 +1437,9 @@ impl DeliveryStore {
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
-        sent: &mut SentLog,
-        received: &mut ReceivedLog,
-        files: Option<&mut ReceivedLog>,
+        sent: &mut impl DeliverySentProjection,
+        received: &mut impl DeliveryReceivedProjection,
+        files: Option<&mut dyn DeliveryReceivedProjection>,
         channel_senders: Option<&mut super::channel_senders::ChannelSenderStore>,
         mut completion: Option<&mut GroupOperationCompletion<'_>>,
     ) -> Result<Option<EventId>, LogError> {
@@ -1382,13 +1576,17 @@ impl DeliveryStore {
                 {
                     files
                         .ok_or_else(|| invalid("file recovery adapter required"))?
-                        .record_durable(&ReceivedEntry {
-                            event_id: event.id,
-                            conversation: entry.conversation,
-                            from: event.author.user_id(),
-                            wall_clock: entry.wall_clock,
-                            plaintext: entry.plaintext.clone(),
-                        })?;
+                        .record_manifest(
+                            &ReceivedEntry {
+                                event_id: event.id,
+                                conversation: entry.conversation,
+                                from: event.author.user_id(),
+                                wall_clock: entry.wall_clock,
+                                plaintext: entry.plaintext.clone(),
+                            },
+                            Some(event),
+                            None,
+                        )?;
                 }
             }
             DeliveryTransaction::Outgoing {
@@ -1413,7 +1611,13 @@ impl DeliveryStore {
             } => {
                 ratchet.commit_prepared(prepared)?;
                 log.append_durable((**original).clone())?;
-                received.record_durable(entry)?;
+                received.record_incoming(
+                    original,
+                    entry,
+                    self.profile
+                        .as_ref()
+                        .map(|(_, p)| (&p.device, p.account.as_str())),
+                )?;
                 // Persist/schedule the receipt only after plaintext durability.
                 if let Some(receipt) = receipt {
                     log.append_durable(receipt.destination.event.clone())?;
@@ -1434,15 +1638,53 @@ impl DeliveryStore {
                 }
                 files
                     .ok_or_else(|| invalid("file recovery adapter required"))?
-                    .record_durable(received)?;
+                    .record_manifest_scopes(
+                        received,
+                        message
+                            .destinations
+                            .iter()
+                            .find(|destination| destination.event.id == received.event_id)
+                            .map(|destination| &destination.event),
+                        &message
+                            .destinations
+                            .iter()
+                            .map(|destination| &destination.event)
+                            .collect::<Vec<_>>(),
+                    )?;
             }
             DeliveryTransaction::IncomingManifest {
-                original, received, ..
+                original,
+                received,
+                file,
+                ..
             } => {
                 log.append_durable((**original).clone())?;
+                let own_device = self.profile.as_ref().is_some_and(|(_, owner)| {
+                    original.author.ed25519_pub() == &owner.device.ed25519_pub
+                        || file
+                            .completion_binding
+                            .as_ref()
+                            .and_then(|binding| binding.certificate.as_ref())
+                            .is_some_and(|certificate| {
+                                certificate.verify()
+                                    && &certificate.device_ed25519_pub
+                                        == original.author.ed25519_pub()
+                                    && certificate.account_id() == owner.account
+                            })
+                });
+                let metadata = super::reception_effects::ReceptionMetadata {
+                    from_device: original.author.user_id(),
+                    received_at: super::node::now_millis(),
+                    arrival_kind: super::reception_effects::ArrivalKind::Live,
+                    own_device,
+                    batch_id: None,
+                    batch_complete: true,
+                    batch_size: 1,
+                    reception_only: false,
+                };
                 files
                     .ok_or_else(|| invalid("file recovery adapter required"))?
-                    .record_durable(received)?;
+                    .record_manifest(received, Some(original), Some(&metadata))?;
             }
         }
         if let DeliveryTransaction::OutgoingManifest { file, .. }
@@ -1703,6 +1945,11 @@ impl DeliveryStore {
         }
     }
 
+    pub(crate) fn file_erasures(&self) -> impl Iterator<Item = (ConversationId, EventId)> + '_ {
+        self.erased_files
+            .iter()
+            .map(|(conversation, id)| (ConversationId::new(*conversation), *id))
+    }
     pub(crate) fn file_erased(&self, conversation: ConversationId, original: EventId) -> bool {
         self.erased_files
             .contains(&(*conversation.as_bytes(), original))
@@ -1716,6 +1963,30 @@ impl DeliveryStore {
 
     /// Validate the entire requested batch before any visibility tombstone commits.
     /// Existing cards already reserve their slot; legacy aliases need new slots.
+    pub(crate) fn file_erasure_needs_slot(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> bool {
+        !self.file_erased(conversation, id)
+            && !self
+                .files
+                .get(&id)
+                .is_some_and(|file| file.conversation == conversation)
+    }
+    pub(crate) fn check_file_erasure_count(&self, additional: usize) -> Result<(), LogError> {
+        if additional > 0
+            && self
+                .files
+                .len()
+                .saturating_add(self.erased_files.len())
+                .saturating_add(additional)
+                > self.limits.completed_receipts
+        {
+            return Err(invalid("file erasure capacity exhausted"));
+        }
+        Ok(())
+    }
     pub(crate) fn check_file_erasure_capacity(
         &self,
         targets: impl IntoIterator<Item = (ConversationId, EventId)>,
@@ -1843,7 +2114,7 @@ impl DeliveryStore {
         log: &PersistentEventLog,
         author: &crate::eventlog::Author,
     ) -> Result<(), LogError> {
-        let chunks = log.events(&file.file_conversation);
+        let chunks = log.events(&file.file_conversation)?;
         if chunks.len() != file.chunk_count as usize
             || chunks.last().map(|e| e.id) != file.final_chunk
         {
@@ -1911,7 +2182,7 @@ impl DeliveryStore {
             wall_clock: message.wall_clock,
             file_conversation: manifest.file_conv(),
             final_chunk: log
-                .events(&manifest.file_conv())
+                .events(&manifest.file_conv())?
                 .last()
                 .map(|event| event.id),
             chunk_count: manifest.chunk_count(),

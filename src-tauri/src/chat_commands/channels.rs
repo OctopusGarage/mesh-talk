@@ -1,6 +1,5 @@
 use super::{
-    ChannelMemberInfo, ChannelMembersInfo, HistoryItem, NodeState, ReactionInfo, parse_channel_id,
-    parse_event_id, to_reaction_infos,
+    ChannelMemberInfo, ChannelMembersInfo, HistoryItem, NodeState, parse_channel_id, parse_event_id,
 };
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
@@ -96,8 +95,7 @@ pub async fn list_channels(
     admission
         .blocking(move |rt, _| {
             let node = rt.handle();
-            Ok(rt
-                .list_channels()
+            rt.list_channels()?
                 .into_iter()
                 .filter(|channel| {
                     let personal = node.conversation_personal_state(
@@ -109,7 +107,7 @@ pub async fn list_channels(
                 })
                 .map(|c| {
                     let reference = node.channel_shared_reference(c.id);
-                    ChannelInfo {
+                    Ok(ChannelInfo {
                         metadata: node.channel_metadata(c.id).ok().map(|mut metadata| {
                             // The summary serves recent publication cards; detailed IPC retains the bounded history.
                             let remove = metadata.announcement_history.len().saturating_sub(20);
@@ -124,9 +122,9 @@ pub async fn list_channels(
                             .as_ref()
                             .and_then(|r| r.owner_account_id.clone())
                             .or_else(|| node.channel_owner_account_id(c.id)),
-                        can_manage: reference.is_none() && node.channel_can_manage(c.id),
+                        can_manage: reference.is_none() && node.channel_can_manage(c.id)?,
                         account_access: Some(AccountGroupAccessInfo::read(&node, c.id)),
-                        previous_account: node.channel_previous_account(c.id),
+                        previous_account: node.channel_previous_account(c.id)?,
                         shared_reference: reference.is_some(),
                         reference_members_complete: reference
                             .as_ref()
@@ -143,9 +141,9 @@ pub async fn list_channels(
                         left: c.left,
                         pending_invite: c.pending_invite,
                         recovery: rt.channel_recovery(c.id),
-                    }
+                    })
                 })
-                .collect())
+                .collect()
         })
         .await
 }
@@ -184,7 +182,7 @@ pub async fn channel_members(
             let node = rt.handle();
             let reference = node.channel_shared_reference(channel);
             let own_account = rt.account_id();
-            let known_names = rt.known_account_names();
+            let known_names = rt.known_account_names()?;
             let pending: std::collections::HashSet<_> =
                 rt.channel_pending_members(channel).into_iter().collect();
             // Borrowed facts are projected here only. Core member queries and every
@@ -265,10 +263,10 @@ pub async fn channel_members(
                 )
                 .collect();
             Ok(ChannelMembersInfo {
-                history_policy: reference
-                    .as_ref()
-                    .and_then(|r| r.observed_history_policy())
-                    .unwrap_or_else(|| node.channel_history_policy(channel)),
+                history_policy: match reference.as_ref().and_then(|r| r.observed_history_policy()) {
+                    Some(policy) => policy,
+                    None => node.channel_history_policy(channel)?,
+                },
                 history_policy_known: reference
                     .as_ref()
                     .is_none_or(|r| r.observed_history_policy().is_some()),
@@ -281,7 +279,7 @@ pub async fn channel_members(
                     .as_ref()
                     .and_then(|r| r.owner_account_id.clone())
                     .or_else(|| node.channel_owner_account_id(channel)),
-                can_manage: reference.is_none() && node.channel_can_manage(channel),
+                can_manage: reference.is_none() && node.channel_can_manage(channel)?,
                 account_access: Some(AccountGroupAccessInfo::read(&node, channel)),
                 members,
             })
@@ -391,18 +389,22 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
     admission
         .with_runtime(move |runtime| {
             let node = runtime.handle();
-            Ok(ids
-                .into_iter()
-                .filter_map(|id| {
-                    let replicas = node.channel_custody_count(channel, id)?;
-                    let post_offices = node.channel_post_office_custody_count(channel, id)?;
-                    Some(ChannelCustodyInfo {
-                        id: id.to_hex(),
-                        replicas,
-                        post_offices,
-                    })
-                })
-                .collect())
+            let mut counts = Vec::new();
+            for id in ids {
+                let Some(replicas) = node.channel_custody_count(channel, id)? else {
+                    continue;
+                };
+                let Some(post_offices) = node.channel_post_office_custody_count(channel, id)?
+                else {
+                    continue;
+                };
+                counts.push(ChannelCustodyInfo {
+                    id: id.to_hex(),
+                    replicas,
+                    post_offices,
+                });
+            }
+            Ok(counts)
         })
         .await
 }
@@ -424,7 +426,7 @@ pub async fn channel_activity(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
-        .channel_activity(channel)
+        .channel_activity(channel)?
         .into_iter()
         .map(|entry| ChannelActivityInfo {
             kind: entry.kind.to_string(),
@@ -694,7 +696,7 @@ pub async fn channel_history<R: tauri::Runtime>(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let history = rt
-        .channel_history(id, limit)
+        .channel_history(id, limit)?
         .into_iter()
         .map(HistoryItem::from)
         .collect();
@@ -726,22 +728,6 @@ pub async fn react_channel(
             })
         })
         .await
-}
-
-#[tauri::command]
-pub async fn channel_reactions(
-    state: tauri::State<'_, NodeState>,
-    channel_id: String,
-) -> Result<Vec<ReactionInfo>, CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    // Only the authenticated account principal proves account ownership.
-    // Unknown/adopted historical physical authors remain explicitly unowned.
-    Ok(to_reaction_infos(
-        rt.channel_reactions(channel),
-        Some(rt.account_id()),
-    ))
 }
 
 #[cfg(test)]

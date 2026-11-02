@@ -189,10 +189,17 @@ impl ControlTestDispatch {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ColdControlCorpus {
+    rows: usize,
+    tail: Option<(u64, [u8; 32])>,
+}
+
 #[derive(Default)]
 pub(super) struct ColdControlScope {
     settled: bool,
     paired: bool,
+    settled_corpus: Option<ColdControlCorpus>,
 }
 impl ColdControlScope {
     pub(super) fn invalidate(&mut self) {
@@ -217,6 +224,15 @@ impl ColdControlScope {
     }
     pub(super) fn ready(&self) -> bool {
         self.settled && !self.paired
+    }
+    fn observe_corpus(&mut self, event: &str, corpus: Option<ColdControlCorpus>) {
+        self.observe(event, corpus.is_some());
+        if event == "document_scope_settled scope=Control" {
+            self.settled_corpus = corpus;
+        }
+    }
+    fn ready_for(&self, corpus: ColdControlCorpus) -> bool {
+        self.ready() && self.settled_corpus == Some(corpus)
     }
 }
 
@@ -1464,22 +1480,39 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         *target.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let target = Arc::downgrade(target);
             let expected = prefix_metadata.clone();
+            let current_keys = partial_keys.clone();
             move |public, event| {
                 let Some((_, peer, scope)) = peers.iter().find(|(exact, _, _)| *exact == public)
                 else {
                     return;
                 };
-                let corpus_present = event == "document_scope_settled scope=Control"
-                    && target
-                        .upgrade()
-                        .zip(peer.upgrade())
-                        .is_some_and(|(target, peer)| {
-                            expected.iter().all(|meta| {
-                                target.account_document_meta(&meta.key).as_ref() == Some(meta)
-                                    && peer.account_document_meta(&meta.key).as_ref() == Some(meta)
+                let corpus = (event == "document_scope_settled scope=Control")
+                    .then(|| {
+                        target
+                            .upgrade()
+                            .zip(peer.upgrade())
+                            .and_then(|(target, peer)| {
+                                let keys = current_keys.lock().unwrap().clone();
+                                let mut corpus = ColdControlCorpus {
+                                    rows: keys.len(),
+                                    tail: None,
+                                };
+                                for (index, key) in keys.iter().enumerate() {
+                                    let meta = peer.account_document_meta(key)?;
+                                    if expected
+                                        .get(index)
+                                        .is_some_and(|expected| expected != &meta)
+                                        || target.account_document_meta(key).as_ref() != Some(&meta)
+                                    {
+                                        return None;
+                                    }
+                                    corpus.tail = Some((meta.revision, meta.content_hash));
+                                }
+                                Some(corpus)
                             })
-                        });
-                scope.lock().unwrap().observe(&event, corpus_present);
+                    })
+                    .flatten();
+                scope.lock().unwrap().observe_corpus(&event, corpus);
             }
         }));
     }
@@ -1578,6 +1611,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     let b_clock = std::time::Instant::now();
     let b_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(other) = &other {
+        let previous = other.account_client_test_hook.lock().unwrap().clone();
         *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let critical = b_critical.clone();
             let active = b_active.clone();
@@ -1585,6 +1619,9 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let source_a = owner.identity.public();
             let own = other.identity.public();
             move |peer, phase| {
+                if let Some(previous) = &previous {
+                    previous(peer.clone(), phase.clone());
+                }
                 let side = if peer == requester {
                     "B_to_requester"
                 } else if peer == source_a {
@@ -2268,6 +2305,45 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 )),
                 "A is terminal before B is admitted"
             );
+            let held_before_b_setup = if matches!(scenario, SameSourceScenario::OtherSelected) {
+                // This variant measures the requester's selected-B preemption.
+                // Let B's existing worker finish its unrelated A scope, including
+                // the exact newly introduced tail, while that requester resume
+                // remains held. PaidBoundary separately faults B's incoming lane.
+                assert!(second_id.is_none());
+                let held = held_pages.lock().unwrap().last().unwrap().0;
+                let checkpoint = checkpoints.lock().unwrap().last().unwrap().clone();
+                assert!(control_pages.lock().unwrap().is_active(held));
+                let keys = partial_keys.lock().unwrap().clone();
+                assert_eq!(keys.len(), 66);
+                let tail = owner.account_document_meta(keys.last().unwrap()).unwrap();
+                let expected = ColdControlCorpus {
+                    rows: keys.len(),
+                    tail: Some((tail.revision, tail.content_hash)),
+                };
+                let scope = &cold_scopes
+                    .iter()
+                    .find(|(node, peer, _)| {
+                        node.user_id() == other.user_id() && peer.user_id() == owner.user_id()
+                    })
+                    .unwrap()
+                    .2;
+                super::cold_account_setup(async {
+                    while !scope.lock().unwrap().ready_for(expected)
+                        || other.account_document_meta(&tail.key).as_ref() != Some(&tail)
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("B's exact unrelated Control scope must settle before B admission");
+                assert!(owner.account_document_meta(&tail.key).as_ref() == Some(&tail));
+                assert!(!resumed_release.is_closed());
+                assert!(control_pages.lock().unwrap().is_active(held));
+                Some((held, checkpoint))
+            } else {
+                None
+            };
             if paid_boundary {
                 // This variant faults B's unrelated incoming-hint scheduler,
                 // not the parent's selected-B-vs-held-A boundary. Finish that
@@ -2401,6 +2477,11 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                                 .last()
                                 .expect("the exact paired resume is held")
                                 .0;
+                            if let Some((held, checkpoint)) = &held_before_b_setup {
+                                assert_eq!(task, *held);
+                                assert!(checkpoints.lock().unwrap().last() == Some(checkpoint));
+                                assert!(!resumed_release.is_closed());
+                            }
                             assert!(
                                 control_pages.lock().unwrap().is_active(task),
                                 "the exact paired resume must be live at B admission"
@@ -2453,12 +2534,16 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                         );
                         boundary.resume.close();
                     }
+                    // Observe this one submitted B demand without generating
+                    // retry nonces and additional signed request publications.
+                    // A's timed public polling above still tests that repeated
+                    // reads cannot restart its selected executor.
                     loop {
                         let local = reference
-                            .account_group_operation_status(&account.account_id(), second)
+                            .retained_account_group_operation_status(&account.account_id(), second)
                             .unwrap();
                         let remote = other
-                            .account_group_operation_status(&account.account_id(), second)
+                            .retained_account_group_operation_status(&account.account_id(), second)
                             .unwrap();
                         if !executor_committed_observed
                             && remote.as_ref().is_some_and(|status| {
@@ -2583,9 +2668,9 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
-        .cloned()
         .collect::<Vec<_>>();
     release.close();
     resumed_release.close();
@@ -2766,7 +2851,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         } else {
             1
         },
-        "the captured held tasks yield exactly once each despite repeated status polling; unrelated metadata preemptions remain visible in abort_trace={:?}",
+        "the captured held tasks yield exactly once each while A retains repeated public status polling; unrelated metadata preemptions remain visible in abort_trace={:?}",
         abort_trace.lock().unwrap()
     );
     assert!(
@@ -2778,7 +2863,22 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; held_tasks={held_abort_counts:?}"));
         assert_eq!(events.len(), 1);
         let other = other.as_ref().unwrap();
-        let event = other.log.lock().unwrap().get(&events[0]).unwrap().clone();
+        for node in [&reference, other] {
+            let public = node
+                .account_group_operation_status(&account.account_id(), second_id.unwrap())
+                .unwrap()
+                .expect("the public status API must retain the observed B receipt");
+            assert_eq!(public.phase, AccountGroupOperationPhase::Committed);
+            assert_eq!(public.committed_events, events);
+        }
+        let event = other
+            .log
+            .lock()
+            .unwrap()
+            .get(&events[0])
+            .unwrap()
+            .unwrap()
+            .clone();
         assert!(event.verify_integrity() && event.verify_signature());
         assert_eq!(
             event.author.ed25519_pub(),

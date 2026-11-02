@@ -1,3 +1,9 @@
+# Keep a stuck registered metadata IPC case from consuming the whole serial
+# Windows shard. Timeout is a failed case, never permission to skip its result.
+[[profile.default.overrides]]
+filter = 'package(=mesh-talk) & test(=owner_commands::tests::registered_channel_metadata_preserves_versions_and_owner_admission)'
+slow-timeout = { period = "15s", terminate-after = 4, grace-period = "5s" }
+
 # Each mutated test runs in its own process so a busy loop cannot starve an
 # async timeout or block the remaining tests until the whole-suite deadline.
 [profile.mutants]

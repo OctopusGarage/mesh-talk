@@ -1,41 +1,63 @@
-//! A local, password-encrypted store of the avatars peers PROPAGATED to us, keyed by the
-//! sender's account id. One current avatar per account (newest `updated_at` wins);
-//! obsolete versions are periodically compacted on disk. Survives restart.
-//!
-//! On-disk framing is the shared [`EncryptedRecordLog`] (append-only); on load and on
-//! `record` we collapse to the newest record per account, so reads are O(1) and an old
-//! update that arrived after a newer one never overwrites it. Never synced or served.
+//! Current compatibility avatars, selected from the participant's encrypted index.
+//! The legacy encrypted record writer remains available to migration fixtures;
+//! live readers use bounded pages or one account lookup and preserve clear ties.
 
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
+#[cfg(test)]
 use crate::{eventlog::LogError, node::profile::MAX_AVATAR_BYTES};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
+
+mod indexed;
+#[cfg(test)]
+pub(crate) fn reset_indexed_body_reads() {
+    indexed::reset_body_reads();
+}
+#[cfg(test)]
+pub(crate) fn indexed_body_reads() -> usize {
+    indexed::body_reads()
+}
+
+pub(super) use indexed::IndexedProfileStore;
 
 const MAGIC: &[u8; 6] = b"MTPROF";
 
 /// One account's current avatar, as last received.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ProfileEntry {
-    account_id: String,
-    updated_at: u64,
+pub(in crate::node) struct ProfileEntry {
+    pub(in crate::node) account_id: String,
+    pub(in crate::node) updated_at: u64,
     /// The avatar data-URL bytes, or `None` if the peer CLEARED their avatar.
-    avatar: Option<Vec<u8>>,
+    pub(in crate::node) avatar: Option<Vec<u8>>,
+}
+
+fn avatar_order(revision: u64, avatar: &Option<Vec<u8>>) -> (u64, bool, Option<&[u8]>) {
+    (revision, avatar.is_none(), avatar.as_deref())
 }
 
 /// The received-profiles store: append-only on disk, collapsed to newest-per-account
 /// in memory.
+#[cfg(test)]
 pub struct ProfileStore {
     file: EncryptedRecordLog<ProfileEntry>,
     by_account: HashMap<String, ProfileEntry>,
     records: usize,
+    revision: u64,
 }
 
+pub(super) struct AvatarPage {
+    pub rows: Vec<(String, Option<Vec<u8>>)>,
+    pub after: Option<String>,
+    pub complete: bool,
+    pub revision: u64,
+}
+
+#[cfg(test)]
 impl ProfileStore {
-    #[cfg(test)]
-    pub(super) fn fail_appends_for_test(&mut self, enabled: bool) {
-        self.file.fail_appends_for_test(enabled).unwrap();
-    }
     /// Open (or create) the store at `path`, collapsing stored records to the newest
     /// per account.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -49,6 +71,7 @@ impl ProfileStore {
             file,
             by_account,
             records,
+            revision: records as u64,
         };
         // Upgrade older append-only journals, preserving clear tombstones.
         if store.records > store.by_account.len() {
@@ -59,16 +82,13 @@ impl ProfileStore {
 
     /// Signed revisions order profiles; equal revisions use a deterministic
     /// content order, with clear tombstones winning so replay cannot resurrect them.
-    fn order(revision: u64, avatar: &Option<Vec<u8>>) -> (u64, bool, Option<&[u8]>) {
-        (revision, avatar.is_none(), avatar.as_deref())
-    }
-
+    ///
     /// Use the same total order during journal replay and live admission.
     fn merge(by_account: &mut HashMap<String, ProfileEntry>, entry: ProfileEntry) {
         match by_account.get(&entry.account_id) {
             Some(cur)
-                if Self::order(cur.updated_at, &cur.avatar)
-                    >= Self::order(entry.updated_at, &entry.avatar) => {}
+                if avatar_order(cur.updated_at, &cur.avatar)
+                    >= avatar_order(entry.updated_at, &entry.avatar) => {}
             _ => {
                 by_account.insert(entry.account_id.clone(), entry);
             }
@@ -91,7 +111,7 @@ impl ProfileStore {
             return Ok(false);
         }
         // Stale/duplicate? Don't write — keeps the log from growing on a replay.
-        if matches!(self.by_account.get(account_id), Some(cur) if Self::order(cur.updated_at, &cur.avatar) >= Self::order(updated_at, &avatar))
+        if matches!(self.by_account.get(account_id), Some(cur) if avatar_order(cur.updated_at, &cur.avatar) >= avatar_order(updated_at, &avatar))
         {
             return Ok(false);
         }
@@ -107,6 +127,7 @@ impl ProfileStore {
         }
         self.file.append_durable(&entry)?;
         self.records += 1;
+        self.revision = self.revision.wrapping_add(1);
         self.by_account.insert(account_id.to_string(), entry);
         Ok(true)
     }
@@ -140,6 +161,50 @@ impl ProfileStore {
             .filter_map(|(id, e)| e.avatar.clone().map(|a| (id.clone(), a)))
             .collect()
     }
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+    /// Select only bounded key references before cloning current avatar bytes.
+    /// Obsolete profile versions never enter this presentation page.
+    pub(super) fn page(&self, after: Option<&str>) -> Result<AvatarPage, LogError> {
+        const ROWS: usize = 16;
+        const BYTES: usize = 1024 * 1024;
+        let mut selected = std::collections::BTreeMap::new();
+        let mut candidates = 0usize;
+        for (id, entry) in &self.by_account {
+            if after.is_some_and(|after| id.as_str() <= after) {
+                continue;
+            }
+            candidates += 1;
+            selected.insert(id.as_str(), entry);
+            if selected.len() > ROWS {
+                selected.pop_last();
+            }
+        }
+        let mut rows = Vec::new();
+        let mut charged = 0;
+        let mut cursor = after.map(str::to_owned);
+        for (id, entry) in selected {
+            let charge = id
+                .len()
+                .saturating_add(entry.avatar.as_ref().map_or(0, Vec::len));
+            if charge > BYTES - charged {
+                if rows.is_empty() {
+                    return Err(LogError::PageBudgetTooSmall { required: charge });
+                }
+                break;
+            }
+            charged += charge;
+            cursor = Some(id.to_owned());
+            rows.push((id.to_owned(), entry.avatar.clone()));
+        }
+        Ok(AvatarPage {
+            complete: rows.len() == candidates,
+            rows,
+            after: cursor,
+            revision: self.revision,
+        })
+    }
 
     /// Current profile state including clear tombstones and their timestamps.
     pub(crate) fn snapshot_entries(&self) -> Vec<(String, u64, Option<Vec<u8>>)> {
@@ -161,7 +226,99 @@ impl ProfileStore {
 
 #[cfg(test)]
 mod tests {
+    pub(super) fn profile(
+        root: &std::path::Path,
+        identity: &crate::identity::device::DeviceIdentity,
+        account: &Account,
+    ) -> std::sync::Arc<crate::storage::profile::context::ProfileStorage> {
+        let profile = crate::storage::profile::context::ProfileStorage::open_participant(
+            crate::storage::profile::ProfileStorageLease::acquire(root).unwrap(),
+            &identity.public(),
+            &account.public(),
+            &root.join("messages.log"),
+            &root.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        profile.complete_participant("pw", None).unwrap();
+        profile
+    }
+    #[test]
+    fn warm_open_reads_no_avatar_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("avatars");
+        let mut store = ProfileStore::open(&path, "pw").unwrap();
+        for n in 0..64 {
+            store
+                .record(&format!("{n:032x}"), 1, Some(vec![7; 8192]))
+                .unwrap();
+        }
+        drop(store);
+        let identity = crate::identity::device::DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &identity, &account);
+        let imported = IndexedProfileStore::from_profile(owner.clone(), &path, "pw").unwrap();
+        drop(imported);
+        drop(owner);
+        indexed::reset_body_reads();
+        crate::storage::record_log::frame_observations::reset();
+        let owner = profile(root.path(), &identity, &account);
+        let store = IndexedProfileStore::from_profile(owner, &path, "pw").unwrap();
+        assert_eq!(indexed::body_reads(), 0);
+        let page = store.page(None).unwrap();
+        assert_eq!(page.rows.len(), 16);
+        assert_eq!(indexed::body_reads(), 16);
+        assert_eq!(
+            crate::storage::record_log::frame_observations::maximum_capacity(),
+            0,
+            "warm current-avatar open must not decrypt every account payload"
+        );
+    }
+
     use super::*;
+    use crate::identity::account::Account;
+
+    #[test]
+    fn current_pages_bound_rows_and_bytes_and_include_clear_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProfileStore::open(&dir.path().join("profiles"), "pw").unwrap();
+        for n in 0..40 {
+            store
+                .record(
+                    &format!("account-{n:02}"),
+                    1,
+                    Some(vec![42; MAX_AVATAR_BYTES]),
+                )
+                .unwrap();
+        }
+        store.record("account-05", 2, None).unwrap();
+        let revision = store.revision();
+        let mut after = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = store.page(after.as_deref()).unwrap();
+            assert!(page.rows.len() <= 16);
+            assert!(
+                page.rows
+                    .iter()
+                    .map(|(id, avatar)| id.len() + avatar.as_ref().map_or(0, Vec::len))
+                    .sum::<usize>()
+                    <= 1024 * 1024
+            );
+            assert_eq!(page.revision, revision);
+            observed.extend(page.rows);
+            if page.complete {
+                break;
+            }
+            assert_ne!(page.after, after);
+            after = page.after;
+        }
+        assert_eq!(observed.len(), 40);
+        assert_eq!(observed[5], ("account-05".into(), None));
+        assert!(observed.windows(2).all(|rows| rows[0].0 < rows[1].0));
+        assert!(!store.record("account-05", 1, Some(vec![1])).unwrap());
+        assert_eq!(store.revision(), revision);
+    }
 
     #[test]
     fn repeated_avatar_updates_have_bounded_journal_and_keep_clear_tombstones() {

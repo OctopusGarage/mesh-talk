@@ -97,14 +97,14 @@ pub(super) fn validate_parent_view(
     log: &PersistentEventLog,
 ) -> Result<Vec<PublicIdentity>, LogError> {
     validate_bound(operation, request, input, witness, event, recall)?;
-    let mut ancestors: HashMap<EventId, &Event> = HashMap::new();
+    let mut ancestors: HashMap<EventId, Event> = HashMap::new();
     let mut pending = witness.parents.clone();
     while let Some(id) = pending.pop() {
         if ancestors.contains_key(&id) {
             continue;
         }
         let parent = log
-            .get(&id)
+            .get(&id)?
             .ok_or_else(|| invalid("message action causal parent missing"))?;
         if parent.conversation_id != operation.group || parent.id == event.id {
             return Err(invalid("invalid message action causal parent"));
@@ -112,7 +112,7 @@ pub(super) fn validate_parent_view(
         pending.extend(parent.parents.iter().copied());
         ancestors.insert(id, parent);
     }
-    let events: Vec<_> = ancestors.values().copied().collect();
+    let events: Vec<_> = ancestors.values().collect();
     let projection = ChannelBook::project_membership(operation.group, &events);
     let mut source = Node::public_account_group_source(
         operation.group,
@@ -145,7 +145,7 @@ pub(super) fn validate_parent_view(
         return Err(invalid("message action recipients changed"));
     }
     if let Some(target) = &witness.target
-        && ancestors.get(&target.original.id).copied() != Some(&target.original)
+        && ancestors.get(&target.original.id) != Some(&target.original)
     {
         return Err(invalid("recall target missing from saved causal view"));
     }
@@ -508,6 +508,7 @@ mod tests {
             assert_eq!(
                 f.log
                     .events(&f.operation.group)
+                    .unwrap()
                     .iter()
                     .filter(|event| event.id == event_id)
                     .count(),
@@ -570,7 +571,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(delivery.pending_transactions()[0].id(), event_id);
-        assert!(f.log.get(&event_id).is_some());
+        assert!(f.log.get(&event_id).unwrap().is_some());
         drop((delivery, terminal, recalls, ratchet, sent, received));
         let mut delivery = store(&f);
         f.log = PersistentEventLog::open(&f._dir.path().join("events"), "pw").unwrap();
@@ -606,6 +607,7 @@ mod tests {
         assert_eq!(
             f.log
                 .events(&f.operation.group)
+                .unwrap()
                 .iter()
                 .filter(|event| event.kind == crate::eventlog::EventKind::Delete)
                 .count(),
@@ -638,7 +640,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(f.log.get(&f.event.id).is_none());
+        assert!(f.log.get(&f.event.id).unwrap().is_none());
         assert_eq!(delivery.pending_transactions()[0].id(), f.event.id);
     }
     #[test]
@@ -681,6 +683,6 @@ mod tests {
             );
             assert_eq!(delivery.pending_transactions()[0].id(), f.event.id);
         }
-        assert!(f.log.get(&f.event.id).is_none());
+        assert!(f.log.get(&f.event.id).unwrap().is_none());
     }
 }

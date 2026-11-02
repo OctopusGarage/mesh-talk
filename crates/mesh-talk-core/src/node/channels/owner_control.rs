@@ -356,7 +356,7 @@ impl Node {
             .map_err(NodeError::Log)?;
         let prepared = {
             let log = self.log.lock().expect("log mutex");
-            let projection = ChannelBook::project_membership(channel, &log.events(&channel));
+            let projection = ChannelBook::project_membership(channel, &log.events(&channel)?);
             let prepared =
                 self.prepare_owner_control(channel, &log, &projection, input, &proofs)?;
             log.sync().map_err(NodeError::Log)?;
@@ -377,13 +377,27 @@ impl Node {
             .map_err(NodeError::Log)?;
         drop(delivery);
         self.process_channel(channel);
-        let projection = self.account_group_projection(channel);
-        if !projection.authorized.contains(&id) {
+        Ok(AccountChannelMutation::CommittedControl {
+            event: id,
+            recipients: prepared.recipients,
+        })
+    }
+
+    /// Finish the exact committed event through bounded preparation, after the
+    /// synchronous authorization and membership guards have been released.
+    pub(in crate::node) async fn await_account_owner_control(
+        &self,
+        channel: ConversationId,
+        event: EventId,
+    ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
+        let projection = self.account_group_projection(channel)?;
+        if !projection.is_authorized(event)? {
             return Err(NodeError::Channel(
                 "channel owner control was not admitted".into(),
             ));
         }
-        Ok(AccountChannelMutation::Changed(prepared.recipients))
+        Ok(())
     }
     /// Capture current signed identities before taking the public log lock.
     pub(in crate::node) fn owner_control_proof_snapshot(&self) -> OwnerControlProofSnapshot {
@@ -469,7 +483,7 @@ impl Node {
             projection,
             input,
             &witness,
-            super::super::join_history::policy(&log.events(&group)),
+            super::super::join_history::policy(&log.events(&group)?.iter().collect::<Vec<_>>()),
         )?
         else {
             return Ok(None);

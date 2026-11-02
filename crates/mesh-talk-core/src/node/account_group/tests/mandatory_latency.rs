@@ -199,7 +199,7 @@ async fn reference_owner_rename_overtakes_blocked_optional_document_page_over_no
         AccountGroupRole::Owner
     );
     assert!(reference.channel_members(group).is_empty());
-    assert!(!reference.channel_can_manage(group));
+    assert!(!reference.channel_can_manage(group).unwrap());
     let id = reference
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
@@ -275,9 +275,9 @@ async fn reference_owner_rename_overtakes_blocked_optional_document_page_over_no
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
-        .cloned()
         .collect();
     assert_eq!(events.len(), 1);
     assert!(events[0].verify_signature() && events[0].verify_integrity());

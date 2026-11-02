@@ -12,6 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 // The staging area is scoped to one authenticated sync connection. An unrelated
 // group can consume at most this much memory and is forgotten when it disconnects.
+mod network;
+mod principal;
+
 const MAX_PENDING_CHANNEL_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
@@ -107,85 +110,58 @@ impl Node {
     pub(super) fn pending_file_message_identities(
         &self,
         peer: &PublicIdentity,
-    ) -> Vec<(ConversationId, EventId)> {
+    ) -> Result<Vec<(ConversationId, EventId)>, LogError> {
         let sibling = self.certified_sibling(peer);
-        let peer_account = self
+        let peer_host = self
             .historical_author(&peer.ed25519_pub)
-            .and_then(|proof| proof.account_id());
-        let peer_host = peer_account.map(|account| {
-            super::conversation::account_conversation_id(&self.account_id(), &account)
-        });
-        let snapshot = {
-            let rows = self.received_files.lock().expect("received files lock");
-            let mut hosts = rows.conversations();
-            hosts.sort_unstable_by_key(|host| *host.as_bytes());
-            let total: usize = hosts.iter().map(|host| rows.entries_ref(host).len()).sum();
-            let offset = self.sessions.file_identity_scan_offset(peer, 0, total, 256);
-            let mut remaining = total.min(256);
-            let mut snapshot = Vec::new();
-            for start in [offset, 0] {
-                let mut skip = start;
-                for host in &hosts {
-                    let entries = rows.entries_ref(host);
-                    if skip >= entries.len() {
-                        skip -= entries.len();
-                        continue;
-                    }
-                    let count = remaining.min(entries.len() - skip);
-                    snapshot.extend(
-                        entries[skip..skip + count]
-                            .iter()
-                            .filter(|row| {
-                                sibling
-                                    || row.from == peer.user_id()
-                                        && Some(row.conversation) == peer_host
-                            })
-                            .cloned(),
-                    );
-                    remaining -= count;
-                    skip = 0;
-                    if remaining == 0 {
-                        break;
-                    }
-                }
-                if remaining == 0 {
-                    break;
-                }
-            }
-            snapshot
-        };
+            .and_then(|proof| proof.account_id())
+            .map(|account| {
+                super::conversation::account_conversation_id(&self.account_id(), &account)
+            });
+        let after = self.sessions.file_identity_scan_after(peer);
+        let page = self
+            .received_files
+            .lock()
+            .expect("received files lock")
+            .scan_page(
+                None,
+                after,
+                super::transcript_repository::TranscriptPageLimit::new(16, 8 * 1024 * 1024)?,
+            )?;
         let personal_host =
             super::conversation::account_conversation_id(&self.account_id(), &self.account_id());
-        let mut candidates: Vec<_> = snapshot
-            .into_iter()
-            .filter(|row| {
-                row.conversation != personal_host
-                    && self
-                        .channels
-                        .lock()
-                        .expect("channels lock")
-                        .state(&row.conversation)
-                        .is_none()
-            })
-            .filter(|row| !self.has_file_message_identity(row.conversation, row.event_id))
-            .filter(|row| !self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock))
-            .filter(|row| {
-                let logical = self.file_message_row_logical_id(row);
-                let delivery = self.delivery.lock().expect("delivery lock");
-                if delivery.file_erased(row.conversation, row.event_id)
-                    || delivery.manifest_event_erased(row.event_id)
-                {
-                    return false;
-                }
-                let suppression = self.account_suppression.lock().expect("suppression lock");
-                !suppression.contains(row.conversation, row.event_id)
-                    && !suppression.contains(row.conversation, logical)
-            })
-            .filter_map(|row| {
-                super::files::validated_manifest(&row.plaintext)
-                    .map(|manifest| (manifest.file_conv(), row.event_id))
-            })
-            .collect();
+        let mut candidates = Vec::new();
+        for row in page.rows {
+            if !(sibling || row.from == peer.user_id() && Some(row.conversation) == peer_host)
+                || row.conversation == personal_host
+                || self
+                    .channels
+                    .lock()
+                    .expect("channels lock")
+                    .state(&row.conversation)
+                    .is_some()
+                || self.has_file_message_identity(row.conversation, row.event_id)?
+                || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+            {
+                continue;
+            }
+            let logical = self.file_message_row_logical_id(&row)?;
+            let delivery = self.delivery.lock().expect("delivery lock");
+            if delivery.file_erased(row.conversation, row.event_id)
+                || delivery.manifest_event_erased(row.event_id)
+            {
+                continue;
+            }
+            let suppression = self.account_suppression.lock().expect("suppression lock");
+            if suppression.contains(row.conversation, row.event_id)?
+                || suppression.contains(row.conversation, logical)?
+            {
+                continue;
+            }
+            if let Some(manifest) = super::files::validated_manifest(&row.plaintext) {
+                candidates.push((manifest.file_conv(), row.event_id));
+            }
+        }
         if !candidates.is_empty() {
             let offset = self.sessions.file_identity_scan_offset(
                 peer,
@@ -196,14 +172,15 @@ impl Node {
             candidates.rotate_left(offset);
             candidates.truncate(super::session::MAX_FILE_IDENTITIES);
         }
-        candidates
+        self.sessions.advance_file_identity_scan(peer, page.next);
+        Ok(candidates)
     }
 
     pub(super) fn file_message_identity_controls_for(
         &self,
         peer: &PublicIdentity,
         missing_only: bool,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         let manifests: Vec<_> = {
             let delivery = self.delivery.lock().expect("delivery lock");
             let total = delivery.file_cards().count();
@@ -231,21 +208,24 @@ impl Node {
                 })
                 .collect()
         };
-        let manifests = manifests
-            .into_iter()
-            .filter(|(host, _, manifest)| {
-                !missing_only || !self.has_file_message_identity(*host, *manifest)
-            })
-            .take(super::session::MAX_FILE_IDENTITIES);
         let store = self.sync_store(peer);
-        manifests
-            .filter_map(|(_, file, manifest)| {
-                store
-                    .lock()
-                    .expect("sync store lock")
-                    .file_message_identity(&file, &manifest)
-            })
-            .collect()
+        let mut selected = Vec::new();
+        for (host, file, manifest) in manifests {
+            if missing_only && self.has_file_message_identity(host, manifest)? {
+                continue;
+            }
+            if let Some(event) = store
+                .lock()
+                .expect("sync store lock")
+                .file_message_identity(&file, &manifest)?
+            {
+                selected.push(event);
+            }
+            if selected.len() == super::session::MAX_FILE_IDENTITIES {
+                break;
+            }
+        }
+        Ok(selected)
     }
 
     /// Exchange supplemental identities without changing existing media/history bytes.
@@ -320,7 +300,7 @@ impl Node {
             if !store
                 .lock()
                 .expect("sync store lock")
-                .accept_file_message_identity(bundle)
+                .accept_file_message_identity(bundle)?
             {
                 return Err(super::session::SessionError::UnexpectedMessage);
             }
@@ -333,36 +313,31 @@ impl Node {
         channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
         manifest: EventId,
     ) -> Result<(), super::session::SessionError> {
-        if let Some(bundle) = self.file_message_identity_bundle(manifest) {
+        if let Some(bundle) = self.file_message_identity_bundle(manifest)? {
             self.exchange_file_message_identities(channel, vec![], vec![bundle])
                 .await?;
         }
         Ok(())
     }
 
-    pub(in crate::node) fn shares_replica(&self, conversation: &ConversationId) -> bool {
+    pub(in crate::node) fn shares_replica(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<bool, LogError> {
         let me = self.user_id();
         let book = self.channels.lock().expect("channels lock not poisoned");
         if book.state(conversation).is_some() {
-            return book.replica_enabled(*conversation, &me);
+            return Ok(book.replica_enabled(*conversation, &me));
         }
         drop(book);
-        let manifests = self
-            .files
-            .lock()
-            .expect("files lock not poisoned")
-            .manifest_events(*conversation);
-        let parents: Vec<_> = {
-            let log = self.log.lock().expect("log lock not poisoned");
-            manifests
-                .iter()
-                .filter_map(|id| log.get(id).map(|event| event.conversation_id))
-                .collect()
-        };
-        let book = self.channels.lock().expect("channels lock not poisoned");
-        parents
-            .into_iter()
-            .all(|parent| book.state(&parent).is_none() || book.replica_enabled(parent, &me))
+        for scope in self.manifest_scopes(*conversation) {
+            let parent = scope?.parent;
+            let book = self.channels.lock().expect("channels lock");
+            if book.state(&parent).is_some() && !book.replica_enabled(parent, &me) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 impl GuardedSyncStore<'_> {
@@ -380,16 +355,20 @@ impl GuardedSyncStore<'_> {
             }
             let meta = crate::channel::ChannelMeta::decode(&event.ciphertext)?;
             let me = self.node.identity.public();
+            let existing = match self
+                .node
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .events(&conversation)
+            {
+                Ok(events) => events,
+                Err(error) => return Some(Err(error)),
+            };
             if meta.is_member(&me.user_id())
                 || meta.owner != event.author.user_id()
                 || !meta.is_member(&meta.owner)
-                || !self
-                    .node
-                    .log
-                    .lock()
-                    .expect("log lock not poisoned")
-                    .events(&conversation)
-                    .is_empty()
+                || !existing.is_empty()
             {
                 return None;
             }
@@ -440,10 +419,9 @@ impl GuardedSyncStore<'_> {
             > MAX_PENDING_CHANNEL_BYTES
         {
             self.denied = true;
-            return Some(Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "uninvited channel staging limit exceeded",
-            ))));
+            return Some(Err(LogError::AdmissionRejected(
+                "uninvited channel staging limit exceeded".into(),
+            )));
         }
         match pending.log.append(event.clone()) {
             Ok(AppendOutcome::Duplicate) => {
@@ -461,7 +439,7 @@ impl GuardedSyncStore<'_> {
         pending.bytes += size;
         pending.events.push(event.clone());
 
-        let approved = {
+        let approval = {
             let guard = self
                 .node
                 .privacy
@@ -471,7 +449,7 @@ impl GuardedSyncStore<'_> {
             guard
                 .as_ref()
                 .filter(|state| state.policy.snapshot().invisible)
-                .and_then(|state| {
+                .map(|state| -> Result<Option<HashSet<EventId>>, LogError> {
                     let invitation = event.kind == EventKind::MembershipChange
                         && crate::channel::ChannelMeta::is_invitation(&event.ciphertext)
                         && crate::channel::ChannelMeta::decode(&event.ciphertext)
@@ -487,11 +465,16 @@ impl GuardedSyncStore<'_> {
                                 .invitation_for_device(&own_proof.public(), &own_proof)
                                 .is_some());
                     if !invitation && !account_grant {
-                        return None;
+                        return Ok(None);
                     }
-                    let allowed = self.projection(state, &conversation, &pending.events);
-                    allowed.contains(&event.id).then_some(allowed)
+                    let allowed = self.projection(state, &conversation, &pending.events)?;
+                    Ok(allowed.contains(&event.id).then_some(allowed))
                 })
+                .transpose()
+        };
+        let approved = match approval {
+            Ok(approved) => approved.flatten(),
+            Err(error) => return Some(Err(error)),
         };
         if let Some(allowed) = approved {
             // The proof itself and every committed ancestor have passed both the
@@ -502,19 +485,21 @@ impl GuardedSyncStore<'_> {
                 .state
                 .read()
                 .expect("privacy lock not poisoned");
-            let still_allowed = guard
+            let still_allowed = match guard
                 .as_ref()
                 .filter(|state| state.policy.snapshot().invisible)
-                .is_some_and(|state| {
-                    self.projection(state, &conversation, &pending.events)
-                        .contains(&event.id)
-                });
+            {
+                Some(state) => match self.projection(state, &conversation, &pending.events) {
+                    Ok(allowed) => allowed.contains(&event.id),
+                    Err(error) => return Some(Err(error)),
+                },
+                None => false,
+            };
             if !still_allowed {
                 self.denied = true;
-                return Some(Err(LogError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "channel invitation permission changed",
-                ))));
+                return Some(Err(LogError::AdmissionRejected(
+                    "channel invitation permission changed".into(),
+                )));
             }
             let accepted: Vec<_> = pending
                 .events
@@ -543,7 +528,7 @@ impl GuardedSyncStore<'_> {
         state: &PrivacyState,
         conversation: &ConversationId,
         events: &[Event],
-    ) -> HashSet<EventId> {
+    ) -> Result<HashSet<EventId>, LogError> {
         let me = self.node.identity.public();
         let own_account = self.node.account_id();
         let peer_proof = state
@@ -601,7 +586,7 @@ impl GuardedSyncStore<'_> {
                     }
                 }
             }
-            return allowed;
+            return Ok(allowed);
         }
         if let Some(target) = target {
             if self.peer == target.public() || own_peer || relay {
@@ -623,7 +608,7 @@ impl GuardedSyncStore<'_> {
                     }
                 }
             }
-            return allowed;
+            return Ok(allowed);
         }
         // A configured private post office may relay a receipt between two
         // other explicitly permitted principals. Group membership confers no
@@ -660,25 +645,26 @@ impl GuardedSyncStore<'_> {
                     allowed.insert(event.id);
                 }
             }
-            return allowed;
+            return Ok(allowed);
         }
         // A file conversation inherits its verified manifest's parent scope.
-        if let Some(scopes) = state.file_scopes.get(conversation) {
+        if self.node.has_file_scope(*conversation)? {
+            let scopes = self.node.manifest_scopes(*conversation);
             let mut authors = HashSet::new();
             for scope in scopes {
+                let scope = scope?;
                 let parent_events: Vec<_> = self
                     .node
                     .log
                     .lock()
                     .expect("log lock not poisoned")
-                    .events(&scope.parent)
+                    .events(&scope.parent)?
                     .into_iter()
-                    .cloned()
                     .collect();
                 if scope.parent != *conversation
-                    && !state.file_scopes.contains_key(&scope.parent)
+                    && !self.node.has_file_scope(scope.parent)?
                     && self
-                        .projection(state, &scope.parent, &parent_events)
+                        .projection(state, &scope.parent, &parent_events)?
                         .contains(&scope.event)
                 {
                     authors.insert(scope.author);
@@ -692,9 +678,9 @@ impl GuardedSyncStore<'_> {
                     allowed.insert(event.id);
                 }
             }
-            return allowed;
+            return Ok(allowed);
         }
-        self.channel_projection(conversation, events, relay, own_peer, Some(state))
+        Ok(self.channel_projection(conversation, events, relay, own_peer, Some(state)))
     }
 
     /// Signed channel authority applies in public and invisible presence modes.
@@ -797,331 +783,12 @@ impl GuardedSyncStore<'_> {
                 .copied()
                 .collect();
         }
-        let mut allowed = HashSet::new();
-        // Established channel metadata pins its owner. Historical membership only
-        // authorizes that channel's history; it never grants DM/account permission.
-        let established = {
-            let book = self
-                .node
-                .channels
-                .lock()
-                .expect("channels lock not poisoned");
-            book.state(conversation)
-                .map(|s| (s.genesis_owner().to_string(), s.members().to_vec()))
-        };
-        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, event)).collect();
-        // A newly invited device is absent from the genesis snapshot. Validate
-        // the later membership chain before projecting its metadata ancestors;
-        // otherwise dependency closure prevents the invite event from syncing.
-        let future_pair = {
-            let mut future: Option<crate::channel::ChannelState> = None;
-            let mut future_departures: Vec<(String, EventId)> = Vec::new();
-            for event in events {
-                let author = event.author.user_id();
-                match event.kind {
-                    EventKind::MembershipChange => {
-                        if let Some(mut meta) =
-                            crate::channel::ChannelMeta::decode(&event.ciphertext)
-                        {
-                            let original_member_count = meta.members.len();
-                            meta.members.retain(|member| {
-                                !future_departures.iter().any(|(uid, leave_id)| {
-                                    uid == &member.user_id()
-                                        && !super::channel::descends_from(event, *leave_id, &by_id)
-                                })
-                            });
-                            if let Some(current) = future.as_mut() {
-                                if author == current.owner() {
-                                    let old: HashSet<_> = current
-                                        .members()
-                                        .iter()
-                                        .map(PublicIdentity::user_id)
-                                        .collect();
-                                    let invited = crate::channel::ChannelMeta::is_invitation(
-                                        &event.ciphertext,
-                                    );
-                                    if meta.members.len() < original_member_count {
-                                        current.apply_meta_after_concurrent_leave(meta);
-                                    } else {
-                                        current.apply_meta(meta);
-                                    }
-                                    let added: Vec<_> = current
-                                        .members()
-                                        .iter()
-                                        .map(PublicIdentity::user_id)
-                                        .filter(|uid| !old.contains(uid))
-                                        .collect();
-                                    for uid in added {
-                                        if invited {
-                                            current.mark_invited(&uid);
-                                        } else {
-                                            current.auto_accept_legacy_member(&uid);
-                                        }
-                                    }
-                                }
-                            } else if event.parents.is_empty()
-                                && author == meta.owner
-                                && meta.is_member(&author)
-                                && established
-                                    .as_ref()
-                                    .is_none_or(|(owner, _)| owner == &author)
-                            {
-                                let invited =
-                                    crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
-                                let mut initial =
-                                    crate::channel::ChannelState::from_meta(*conversation, meta);
-                                if invited {
-                                    let invitees: Vec<_> = initial
-                                        .members()
-                                        .iter()
-                                        .map(PublicIdentity::user_id)
-                                        .filter(|uid| uid != &author)
-                                        .collect();
-                                    for uid in invitees {
-                                        initial.mark_invited(&uid);
-                                    }
-                                }
-                                future = Some(initial);
-                            }
-                        }
-                    }
-                    EventKind::ChannelOwnerTransfer => {
-                        if let Some(current) = future.as_mut()
-                            && author == current.owner()
-                            && let Ok(next) = std::str::from_utf8(&event.ciphertext)
-                        {
-                            current.transfer_owner(next);
-                        }
-                    }
-                    EventKind::ChannelAccept => {
-                        if event.ciphertext.is_empty()
-                            && let Some(current) = future.as_mut()
-                        {
-                            current.accept_invite(&author, event.id);
-                        }
-                    }
-                    EventKind::ChannelLeave => {
-                        if let Some(current) = future.as_mut()
-                            && event.ciphertext.is_empty()
-                            && current.leave_member(&author)
-                        {
-                            future_departures.push((author, event.id));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            future.is_some_and(|current| {
-                current.is_member(&me.user_id())
-                    && (current.is_member(&self.peer.user_id()) || relay)
-            })
-        };
-        let mut membership: Option<crate::channel::ChannelState> = None;
-        let mut dissolved = false;
-        let mut departed_actor: Option<String> = None;
-        let mut departures: Vec<(String, EventId)> = Vec::new();
-        let mut removed_self = false;
-        for event in events {
-            if dissolved {
-                continue;
-            }
-            if !event.parents.iter().all(|id| allowed.contains(id)) {
-                continue;
-            }
-            if removed_self && event.kind != EventKind::MembershipChange {
-                continue;
-            }
-            let author = event.author.user_id();
-            if departed_actor.is_some()
-                && !matches!(
-                    event.kind,
-                    EventKind::MembershipChange
-                        | EventKind::ChannelOwnerTransfer
-                        | EventKind::ChannelAccept
-                )
-            {
-                continue;
-            }
-            let accepted = if event.kind == EventKind::MembershipChange {
-                if let Some(mut meta) = crate::channel::ChannelMeta::decode(&event.ciphertext) {
-                    let original_member_count = meta.members.len();
-                    meta.members.retain(|member| {
-                        !departures.iter().any(|(uid, leave_id)| {
-                            uid == &member.user_id()
-                                && !super::channel::descends_from(event, *leave_id, &by_id)
-                        })
-                    });
-                    if let Some(current) = membership.as_mut() {
-                        if author == current.owner()
-                            && meta.owner == current.owner()
-                            && (!removed_self || meta.is_member(&me.user_id()))
-                        {
-                            let was_member = current.is_member(&me.user_id());
-                            let prior: HashSet<_> = current
-                                .members()
-                                .iter()
-                                .map(PublicIdentity::user_id)
-                                .collect();
-                            let invited =
-                                crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
-                            if meta.members.len() < original_member_count {
-                                current.apply_meta_after_concurrent_leave(meta);
-                            } else {
-                                current.apply_meta(meta);
-                            }
-                            let added: Vec<_> = current
-                                .members()
-                                .iter()
-                                .map(PublicIdentity::user_id)
-                                .filter(|uid| !prior.contains(uid))
-                                .collect();
-                            for uid in added {
-                                if invited {
-                                    current.mark_invited(&uid);
-                                } else {
-                                    current.auto_accept_legacy_member(&uid);
-                                }
-                            }
-                            removed_self =
-                                (removed_self || was_member) && !current.is_member(&me.user_id());
-                            if departed_actor
-                                .as_ref()
-                                .is_some_and(|id| current.is_member(id))
-                            {
-                                departed_actor = None;
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        let pinned = established
-                            .as_ref()
-                            .is_some_and(|(owner, _)| owner == &author);
-                        let owner_allowed = private_state.is_none_or(|state| {
-                            state.proofs.announcements().iter().any(|a| {
-                                a.ed25519_pub == *event.author.ed25519_pub()
-                                    && a.account_id().is_some_and(|id| {
-                                        id == self.node.account_id() || state.policy.allows(&id)
-                                    })
-                            })
-                        });
-                        if event.parents.is_empty()
-                            && meta.owner == author
-                            && meta.is_member(&author)
-                            && (meta.is_member(&me.user_id()) || future_pair)
-                            && if established.is_some() {
-                                pinned
-                            } else {
-                                owner_allowed
-                            }
-                        {
-                            let invited =
-                                crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
-                            let mut initial =
-                                crate::channel::ChannelState::from_meta(*conversation, meta);
-                            if invited {
-                                let invitees: Vec<_> = initial
-                                    .members()
-                                    .iter()
-                                    .map(PublicIdentity::user_id)
-                                    .filter(|uid| uid != &author)
-                                    .collect();
-                                for uid in invitees {
-                                    initial.mark_invited(&uid);
-                                }
-                            }
-                            membership = Some(initial);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                } else {
-                    false
-                }
-            } else if matches!(
-                event.kind,
-                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
-            ) {
-                // A rejected account control cannot fall through as ordinary
-                // legacy member content. Valid controls use the shared reducer.
-                false
-            } else if event.kind == EventKind::ChannelOwnerTransfer {
-                membership.as_mut().is_some_and(|current| {
-                    author == current.owner()
-                        && std::str::from_utf8(&event.ciphertext)
-                            .ok()
-                            .is_some_and(|next| current.transfer_owner(next))
-                })
-            } else if event.kind == EventKind::ChannelLeave {
-                membership.as_mut().is_some_and(|current| {
-                    let leaving = event.ciphertext.is_empty() && current.leave_member(&author);
-                    if leaving {
-                        departures.push((author.clone(), event.id));
-                    }
-                    if leaving && (author == me.user_id() || author == self.peer.user_id()) {
-                        departed_actor = Some(author.clone());
-                    }
-                    leaving
-                })
-            } else if event.kind == EventKind::ChannelAccept {
-                if event.ciphertext.is_empty() {
-                    membership.as_mut().is_some_and(|current| {
-                        if current.is_member(&author) {
-                            current.accept_invite(&author, event.id);
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                } else {
-                    false
-                }
-            } else {
-                membership.as_ref().is_some_and(|s| {
-                    s.is_accepted_member(&author)
-                        && (!matches!(
-                            event.kind,
-                            EventKind::ChannelRename | EventKind::ChannelDissolve
-                        ) || author == s.owner())
-                        && (event.kind != EventKind::ChannelDissolve || event.ciphertext.is_empty())
-                        && event.kind != EventKind::Profile
-                })
-            };
-            if accepted && event.parents.iter().all(|id| allowed.contains(id)) {
-                allowed.insert(event.id);
-                if event.kind == EventKind::ChannelDissolve {
-                    dissolved = true;
-                }
-            }
-        }
-        let current = membership
-            .as_ref()
-            .map(|s| s.members().to_vec())
-            .or_else(|| established.as_ref().map(|(_, members)| members.clone()));
-        let current_pair = current.as_ref().is_some_and(|members| {
-            members.contains(&me) && (members.contains(&self.peer) || relay || own_peer)
-        });
-        let departure_pair = departed_actor.as_ref().is_some_and(|departed| {
-            current.as_ref().is_some_and(|members| {
-                (departed == &me.user_id() && members.contains(&self.peer))
-                    || (departed == &self.peer.user_id() && members.contains(&me))
-            })
-        });
-        let removal_pair = removed_self
-            && current
-                .as_ref()
-                .is_some_and(|members| members.contains(&self.peer) || relay);
-        if !current_pair && !departure_pair && !removal_pair {
-            allowed.clear();
-        }
-        allowed
+        principal::legacy::project(self, *conversation, events, relay, own_peer, private_state)
     }
     fn public_projection_key(
         &self,
         conversation: &ConversationId,
-    ) -> Option<super::channel_projection_cache::ProjectionKey> {
+    ) -> Result<Option<super::channel_projection_cache::ProjectionKey>, LogError> {
         let guard = self
             .node
             .privacy
@@ -1133,7 +800,7 @@ impl GuardedSyncStore<'_> {
             .is_some_and(|state| state.policy.snapshot().invisible)
             || self.pending_channels.contains_key(conversation)
         {
-            return None;
+            return Ok(None);
         }
         let privacy_configured = guard.is_some();
         let privacy_generation = self
@@ -1141,7 +808,7 @@ impl GuardedSyncStore<'_> {
             .privacy
             .generation
             .load(std::sync::atomic::Ordering::SeqCst);
-        let sharing = self.node.shares_replica(conversation);
+        let sharing = self.node.shares_replica(conversation)?;
         let established = self
             .node
             .channels
@@ -1166,8 +833,8 @@ impl GuardedSyncStore<'_> {
             .log
             .lock()
             .expect("log lock not poisoned")
-            .fingerprint_and_len(conversation);
-        Some(super::channel_projection_cache::ProjectionKey {
+            .fingerprint_and_len(conversation)?;
+        Ok(Some(super::channel_projection_cache::ProjectionKey {
             conversation: *conversation,
             raw,
             peer: self.peer.clone(),
@@ -1178,14 +845,16 @@ impl GuardedSyncStore<'_> {
             privacy_configured,
             inbound: self.inbound,
             sharing,
-        })
+        }))
     }
 
     fn public_projection_metadata(
         &self,
         conversation: &ConversationId,
-    ) -> Option<super::channel_projection_cache::ProjectionMetadata> {
-        let key = self.public_projection_key(conversation)?;
+    ) -> Result<Option<super::channel_projection_cache::ProjectionMetadata>, LogError> {
+        let Some(key) = self.public_projection_key(conversation)? else {
+            return Ok(None);
+        };
         let cached = self
             .node
             .channel_projection_cache
@@ -1193,10 +862,10 @@ impl GuardedSyncStore<'_> {
             .expect("projection cache lock not poisoned")
             .get(&key);
         if let Some(metadata) = cached {
-            if self.public_projection_key(conversation).as_ref() == Some(&key) {
-                return Some(metadata);
+            if self.public_projection_key(conversation)?.as_ref() == Some(&key) {
+                return Ok(Some(metadata));
             }
-            return None;
+            return Ok(None);
         }
         // On a miss, detect signed channel ancestry directly in the durable log.
         // ChannelBook may lag behind the append; it is not the public authority.
@@ -1206,13 +875,13 @@ impl GuardedSyncStore<'_> {
                 .log
                 .lock()
                 .expect("log lock not poisoned")
-                .events(conversation)
+                .events(conversation)?
                 .iter()
                 .any(|event| event.kind == EventKind::MembershipChange);
         if !channel {
-            return None;
+            return Ok(None);
         }
-        let visible = self.visible(conversation);
+        let visible = self.visible(conversation)?;
         let metadata = super::channel_projection_cache::ProjectionMetadata {
             fingerprint: crate::eventlog::sync::fingerprint(
                 visible.iter().map(|event| event.id).collect(),
@@ -1237,15 +906,15 @@ impl GuardedSyncStore<'_> {
                 .iter()
                 .any(|event| event.kind == EventKind::ChannelReplica),
         };
-        if self.public_projection_key(conversation).as_ref() != Some(&key) {
-            return None;
+        if self.public_projection_key(conversation)?.as_ref() != Some(&key) {
+            return Ok(None);
         }
         self.node
             .channel_projection_cache
             .lock()
             .expect("projection cache lock not poisoned")
             .insert(key, metadata);
-        Some(metadata)
+        Ok(Some(metadata))
     }
 
     fn outgoing_projection(
@@ -1253,17 +922,17 @@ impl GuardedSyncStore<'_> {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
         payloads: bool,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         if self.pull_only {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut events = self.visible_projection(conversation, payloads);
+        let mut events = self.visible_projection(conversation, payloads)?;
         // Recheck each payload page in either direction, including pooled sessions.
         // Preserve the actual possession inventory/fingerprint: hiding retained IDs
         // would make peers push these same chunks back to a metered holder.
         if self
             .node
-            .restricts_group_file_replica(conversation, &self.peer)
+            .restricts_group_file_replica(conversation, &self.peer)?
         {
             let own = self.node.identity.public().ed25519_pub;
             events.retain(|event| event.author.ed25519_pub() == &own);
@@ -1291,14 +960,14 @@ impl GuardedSyncStore<'_> {
                 allowed
             });
         }
-        if !self.inbound && !self.node.shares_replica(conversation) {
+        if !self.inbound && !self.node.shares_replica(conversation)? {
             // Share-off applies to outbound retries and explicit sends too.
             // Own records can advance only across parents the receiver already
             // has, or other eligible own records in this same ordered batch.
             // Missing third-party ancestry must come from a sharing holder.
             let mut available = have.clone();
             let own = self.node.identity.public().ed25519_pub;
-            return events
+            return Ok(events
                 .into_iter()
                 .filter(|event| {
                     let eligible = event.author.ed25519_pub() == &own
@@ -1311,12 +980,12 @@ impl GuardedSyncStore<'_> {
                     }
                     eligible && !have.contains(&event.id)
                 })
-                .collect();
+                .collect());
         }
-        events
+        Ok(events
             .into_iter()
             .filter(|event| !have.contains(&event.id))
-            .collect()
+            .collect())
     }
 
     /// Authorized identities without cloning large message/file ciphertext.
@@ -1326,11 +995,12 @@ impl GuardedSyncStore<'_> {
     pub(in crate::node) fn authorized_event_ids(
         &self,
         conversation: &ConversationId,
-    ) -> Vec<EventId> {
-        self.outgoing_projection(conversation, &HashSet::new(), false)
+    ) -> Result<Vec<EventId>, LogError> {
+        Ok(self
+            .outgoing_projection(conversation, &HashSet::new(), false)?
             .into_iter()
             .map(|event| event.id)
-            .collect()
+            .collect())
     }
 
     pub(in crate::node) fn authorized_event_page(
@@ -1338,32 +1008,36 @@ impl GuardedSyncStore<'_> {
         conversation: &ConversationId,
         wanted: &HashSet<EventId>,
         budget: usize,
-    ) -> Vec<Event> {
-        let ids = self.authorized_event_ids(conversation);
+    ) -> Result<Vec<Event>, LogError> {
+        let ids = self.authorized_event_ids(conversation)?;
         let log = self.node.log.lock().expect("log lock not poisoned");
         let mut used = 0usize;
-        ids.into_iter()
-            .filter(|id| wanted.contains(id))
-            .filter_map(|id| log.get(&id))
-            .take_while(|event| {
-                let bytes = event.ciphertext.len().saturating_add(512);
-                if used > 0 && used.saturating_add(bytes) > budget {
-                    return false;
-                }
-                used = used.saturating_add(bytes);
-                true
-            })
-            .cloned()
-            .collect()
+        let mut events = Vec::new();
+        for id in ids.into_iter().filter(|id| wanted.contains(id)) {
+            let Some(event) = log.get(&id)? else {
+                continue;
+            };
+            let bytes = event.ciphertext.len().saturating_add(512);
+            if used > 0 && used.saturating_add(bytes) > budget {
+                break;
+            }
+            used = used.saturating_add(bytes);
+            events.push(event);
+        }
+        Ok(events)
     }
 
-    fn visible(&self, conversation: &ConversationId) -> Vec<Event> {
+    fn visible(&self, conversation: &ConversationId) -> Result<Vec<Event>, LogError> {
         self.visible_projection(conversation, true)
     }
 
-    fn visible_projection(&self, conversation: &ConversationId, payloads: bool) -> Vec<Event> {
-        if self.inbound && !self.node.shares_replica(conversation) {
-            return Vec::new();
+    fn visible_projection(
+        &self,
+        conversation: &ConversationId,
+        payloads: bool,
+    ) -> Result<Vec<Event>, LogError> {
+        if self.inbound && !self.node.shares_replica(conversation)? {
+            return Ok(Vec::new());
         }
         let guard = self
             .node
@@ -1371,35 +1045,21 @@ impl GuardedSyncStore<'_> {
             .state
             .read()
             .expect("privacy lock not poisoned");
-        let mut events = crate::eventlog::sync::causal_events(
-            self.node
-                .log
-                .lock()
-                .expect("log lock not poisoned")
-                .events(conversation),
-        )
-        .into_iter()
-        .map(|event| {
-            if payloads
-                || event.kind != EventKind::Message
-                || super::delivery_receipt::valid_sealed_wire(&event.ciphertext)
-            {
-                return event.clone();
-            }
-            Event {
-                id: event.id,
-                conversation_id: event.conversation_id,
-                author: event.author,
-                seq: event.seq,
-                parents: event.parents.clone(),
-                lamport: event.lamport,
-                wall_clock: event.wall_clock,
-                kind: event.kind,
-                ciphertext: Vec::new(),
-                sig: event.sig.clone(),
-            }
-        })
-        .collect::<Vec<_>>();
+        let projected = self
+            .node
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .project_events(conversation, |mut event| {
+                if !payloads
+                    && event.kind == EventKind::Message
+                    && !super::delivery_receipt::valid_sealed_wire(&event.ciphertext)
+                {
+                    event.ciphertext = Vec::new();
+                }
+                event
+            })?;
+        let mut events = crate::eventlog::sync::causal_events(projected);
         if guard
             .as_ref()
             .is_none_or(|state| !state.policy.snapshot().invisible)
@@ -1416,10 +1076,10 @@ impl GuardedSyncStore<'_> {
         {
             let allowed =
                 self.channel_projection(conversation, &events, false, false, guard.as_ref());
-            return events
+            return Ok(events
                 .into_iter()
                 .filter(|event| allowed.contains(&event.id))
-                .collect();
+                .collect());
         }
         // Local erase cancels receipt retries, while preserving encrypted chat
         // history's established non-recall semantics. Apply this in public mode
@@ -1463,79 +1123,82 @@ impl GuardedSyncStore<'_> {
         });
         drop(controls);
         let Some(state) = guard.as_ref().filter(|s| s.policy.snapshot().invisible) else {
-            return events;
+            return Ok(events);
         };
-        let allowed = self.projection(state, conversation, &events);
-        events
+        let allowed = self.projection(state, conversation, &events)?;
+        Ok(events
             .into_iter()
             .filter(|e| allowed.contains(&e.id))
-            .collect()
+            .collect())
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
-    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return metadata.requires_v5;
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
+            return Ok(metadata.requires_v5);
         }
         if !self
             .node
             .log
             .lock()
             .expect("log lock")
-            .requires_channel_v5(conversation)
+            .requires_channel_v5(conversation)?
         {
-            return false;
+            return Ok(false);
         }
-        self.visible(conversation)
+        Ok(self
+            .visible(conversation)?
             .iter()
-            .any(|event| event.kind == EventKind::ChannelMetadata)
+            .any(|event| event.kind == EventKind::ChannelMetadata))
     }
-    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return metadata.requires_v4;
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
+            return Ok(metadata.requires_v4);
         }
         if !self
             .node
             .log
             .lock()
             .expect("log lock not poisoned")
-            .requires_channel_v4(conversation)
+            .requires_channel_v4(conversation)?
         {
-            return false;
+            return Ok(false);
         }
-        // A private/rejected control must not reveal itself to this principal.
-        self.visible(conversation).iter().any(|event| {
-            matches!(
-                event.kind,
-                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
-            )
-        })
+        Ok(
+            // A private/rejected control must not reveal itself to this principal.
+            self.visible(conversation)?.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
+                )
+            }),
+        )
     }
 
-    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return metadata.requires_v3;
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
+            return Ok(metadata.requires_v3);
         }
         if !self
             .node
             .log
             .lock()
             .expect("log lock not poisoned")
-            .requires_channel_v3(conversation)
+            .requires_channel_v3(conversation)?
         {
-            return false;
+            return Ok(false);
         }
-        self.visible(conversation).iter().any(|event| {
+        Ok(self.visible(conversation)?.iter().any(|event| {
             matches!(
                 event.kind,
                 EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
             )
-        })
+        }))
     }
 
-    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return metadata.requires_v2;
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
+            return Ok(metadata.requires_v2);
         }
         // Inspect the peer's projection: a hidden event must not affect the
         // compatibility response or reveal that it exists.
@@ -1544,48 +1207,56 @@ impl SyncStore for GuardedSyncStore<'_> {
             .log
             .lock()
             .expect("log lock not poisoned")
-            .requires_channel_v2(conversation)
+            .requires_channel_v2(conversation)?
         {
-            return false;
+            return Ok(false);
         }
-        self.visible(conversation)
+        Ok(self
+            .visible(conversation)?
             .iter()
-            .any(|event| event.kind == EventKind::ChannelReplica)
+            .any(|event| event.kind == EventKind::ChannelReplica))
     }
-    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return (metadata.fingerprint, metadata.len);
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
+            return Ok((metadata.fingerprint, metadata.len));
         }
-        let ids = self.event_ids(conversation);
+        let ids = self.event_ids(conversation)?;
         let len = ids.len();
-        (crate::eventlog::sync::fingerprint(ids), len)
+        Ok((crate::eventlog::sync::fingerprint(ids), len))
     }
     fn file_consent(
         &self,
         file: &ConversationId,
         manifest: &EventId,
-    ) -> crate::eventlog::sync::FileConsentStatus {
+    ) -> Result<crate::eventlog::sync::FileConsentStatus, LogError> {
         use crate::eventlog::sync::FileConsentStatus;
-        match self
-            .node
-            .attachment_consent_for_peer(*file, *manifest, &self.peer)
-        {
-            super::attachment_consent::ReceiveDecision::Pending => FileConsentStatus::Pending,
-            super::attachment_consent::ReceiveDecision::Accepted => FileConsentStatus::Accepted,
-            super::attachment_consent::ReceiveDecision::Declined => FileConsentStatus::Declined,
-        }
+        Ok(
+            match self
+                .node
+                .attachment_consent_for_peer(*file, *manifest, &self.peer)?
+            {
+                super::attachment_consent::ReceiveDecision::Pending => FileConsentStatus::Pending,
+                super::attachment_consent::ReceiveDecision::Accepted => FileConsentStatus::Accepted,
+                super::attachment_consent::ReceiveDecision::Declined => FileConsentStatus::Declined,
+            },
+        )
     }
     fn signed_file_consent(
         &self,
         file: &ConversationId,
         manifest: &EventId,
-    ) -> Option<crate::eventlog::Event> {
+    ) -> Result<Option<crate::eventlog::Event>, LogError> {
         self.node
             .direct_file_consent_control(&self.peer, *file, *manifest)
-            .ok()
-            .flatten()
     }
-    fn file_message_identity(&self, file: &ConversationId, manifest: &EventId) -> Option<Event> {
+    fn file_message_identity(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Event>, LogError> {
         if self.denied
             || self
                 .node
@@ -1593,77 +1264,87 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .load(std::sync::atomic::Ordering::Acquire)
             || !self.node.known_account_allowed(&self.peer)
         {
-            return None;
+            return Ok(None);
         }
-        let bundle = self.node.file_message_identity_bundle(*manifest)?;
+        let Some(bundle) = self.node.file_message_identity_bundle(*manifest)? else {
+            return Ok(None);
+        };
         if !super::file_message_identity::bundle_covers(&bundle, *file, *manifest) {
-            return None;
+            return Ok(None);
         }
-        let (source_account, recipient_account) =
-            super::file_message_identity::bundle_accounts(&bundle)?;
+        let Some((source_account, recipient_account)) =
+            super::file_message_identity::bundle_accounts(&bundle)
+        else {
+            return Ok(None);
+        };
         let sibling = self.node.certified_sibling(&self.peer);
         if sibling {
             let policy = self.node.device_sync_policy();
             if !policy.history && !policy.attachments {
-                return None;
+                return Ok(None);
             }
         } else {
-            let peer_account = self
+            let Some(peer_account) = self
                 .node
                 .historical_author(&self.peer.ed25519_pub)
                 .filter(|proof| proof.public() == self.peer)
-                .and_then(|proof| proof.account_id())?;
+                .and_then(|proof| proof.account_id())
+            else {
+                return Ok(None);
+            };
             if source_account != self.node.account_id() || recipient_account != peer_account {
-                return None;
+                return Ok(None);
             }
         }
         let references = super::file_message_identity::bundle_references(&bundle);
-        let alias_ids: HashSet<_> = references.iter().map(|(_, alias)| *alias).collect();
         let local_source = source_account == self.node.account_id();
         let host =
             super::conversation::account_conversation_id(&source_account, &recipient_account);
-        let rows = {
-            let files = self
-                .node
-                .received_files
-                .lock()
-                .expect("received files lock");
-            let mut rows: Vec<_> = files
-                .entries_ref(&host)
-                .iter()
-                .filter(|row| alias_ids.contains(&row.event_id))
-                .take(64)
-                .cloned()
-                .collect();
-            if rows.is_empty() && local_source {
-                rows = references
-                    .iter()
-                    .filter_map(|(_, alias)| files.entry(*alias).cloned())
-                    .collect();
+        for (_, alias) in references {
+            let row = {
+                let files = self
+                    .node
+                    .received_files
+                    .lock()
+                    .expect("received files lock");
+                match files.entry_in(&host, alias)? {
+                    Some(row) => Some(row),
+                    None if local_source => files.entry(alias)?,
+                    None => None,
+                }
+            };
+            let Some(row) = row else {
+                continue;
+            };
+            if !(super::file_message_identity::bundle_matches_row(&bundle, &row)
+                || local_source
+                    && super::file_message_identity::bundle_matches_source_row(&bundle, &row))
+                || self
+                    .node
+                    .recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+            {
+                continue;
             }
-            rows
-        };
-        let delivery = self.node.delivery.lock().expect("delivery lock");
-        let suppression = self
-            .node
-            .account_suppression
-            .lock()
-            .expect("suppression lock");
-        rows.iter()
-            .any(|row| {
-                (super::file_message_identity::bundle_matches_row(&bundle, row)
-                    || local_source
-                        && super::file_message_identity::bundle_matches_source_row(&bundle, row))
-                    && !self
-                        .node
-                        .recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
-                    && !delivery.file_erased(row.conversation, row.event_id)
-                    && !delivery.manifest_event_erased(row.event_id)
-                    && !suppression.contains(row.conversation, row.event_id)
-            })
-            .then_some(bundle)
+            let delivery = self.node.delivery.lock().expect("delivery lock");
+            if delivery.file_erased(row.conversation, row.event_id)
+                || delivery.manifest_event_erased(row.event_id)
+            {
+                continue;
+            }
+            if !self
+                .node
+                .account_suppression
+                .lock()
+                .expect("suppression lock")
+                .contains(row.conversation, row.event_id)?
+            {
+                return Ok(Some(bundle));
+            }
+        }
+        Ok(None)
     }
-    fn accept_file_message_identity(&mut self, bundle: Event) -> bool {
+
+    fn accept_file_message_identity(&mut self, bundle: Event) -> Result<bool, LogError> {
         if self.denied
             || self.pull_only
             || self
@@ -1672,16 +1353,16 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .load(std::sync::atomic::Ordering::Acquire)
             || !self.node.known_account_allowed(&self.peer)
         {
-            return false;
+            return Ok(false);
         }
         let Some((source_account, _)) = super::file_message_identity::bundle_accounts(&bundle)
         else {
-            return false;
+            return Ok(false);
         };
         if self.node.certified_sibling(&self.peer) {
             let policy = self.node.device_sync_policy();
             if !policy.history && !policy.attachments {
-                return false;
+                return Ok(false);
             }
         } else if self
             .node
@@ -1691,13 +1372,21 @@ impl SyncStore for GuardedSyncStore<'_> {
             .as_deref()
             != Some(source_account.as_str())
         {
-            return false;
+            return Ok(false);
         }
-        self.node.import_file_message_identity(bundle).is_ok()
+        match self.node.import_file_message_identity(bundle) {
+            Ok(()) => Ok(true),
+            Err(super::NodeError::Log(error)) if !error.is_peer_rejection() => Err(error),
+            Err(_) => Ok(false),
+        }
     }
-    fn sticker_file_proof(&self, file: &ConversationId, manifest: &EventId) -> Option<Vec<Event>> {
+    fn sticker_file_proof(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Vec<Event>>, LogError> {
         if self.denied || !self.node.known_account_allowed(&self.peer) {
-            return None;
+            return Ok(None);
         }
         let authorized = self
             .node
@@ -1713,78 +1402,84 @@ impl SyncStore for GuardedSyncStore<'_> {
                 })
             });
         if !authorized {
-            return None;
+            return Ok(None);
         }
         let host =
             super::conversation::dm_conversation_id(&self.node.identity.public(), &self.peer);
         if !self
-            .visible_projection(&host, false)
+            .visible_projection(&host, false)?
             .iter()
             .any(|event| event.id == *manifest && event.kind == EventKind::FileManifest)
         {
-            return None;
+            return Ok(None);
         }
-        let headers = self.node.sticker_chunk_proof(*file)?;
+        let Some(headers) = self.node.sticker_chunk_proof(*file)? else {
+            return Ok(None);
+        };
         let visible: HashSet<_> = self
-            .visible_projection(file, false)
+            .visible_projection(file, false)?
             .into_iter()
             .map(|event| event.id)
             .collect();
-        headers
+        Ok(headers
             .iter()
             .all(|event| visible.contains(&event.id))
-            .then_some(headers)
+            .then_some(headers))
     }
     fn sticker_file_consent(
         &mut self,
         file: &ConversationId,
         manifest: &EventId,
         headers: Vec<Event>,
-    ) -> Option<Event> {
+    ) -> Result<Option<Event>, LogError> {
         if self.denied || self.pull_only {
-            return None;
+            return Ok(None);
         }
         if let Some(chunks) = self
             .node
-            .reconstruct_sticker_proof(*file, *manifest, &self.peer, headers)
+            .reconstruct_sticker_proof(*file, *manifest, &self.peer, headers)?
         {
             for chunk in chunks {
-                self.ingest(chunk).ok()?;
+                self.ingest(chunk)?;
             }
             self.node.persist_media_if_complete(*file);
             self.node.note_file_change();
         }
         self.signed_file_consent(file, manifest)
     }
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
-        if !self.visible(conversation).iter().any(|e| e.id == *id) {
-            return !self.denied
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
+        if !self
+            .visible_projection(conversation, false)?
+            .iter()
+            .any(|e| e.id == *id)
+        {
+            return Ok(!self.denied
                 && self
                     .node
-                    .historical_file_completion(*conversation, *id, &self.peer);
+                    .historical_file_completion(*conversation, *id, &self.peer)?);
         }
         self.node
             .log
             .lock()
             .expect("log lock not poisoned")
-            .sync()
-            .is_ok()
+            .sync()?;
+        Ok(true)
     }
     fn admission_denied(&self) -> bool {
         self.denied
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
-        let mut ids: Vec<_> = self.visible(conversation).iter().map(|e| e.id).collect();
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
+        let mut ids: Vec<_> = self.visible(conversation)?.iter().map(|e| e.id).collect();
         if let Some(pending) = self.pending_channels.get(conversation) {
             ids.extend(pending.events.iter().map(|event| event.id));
         }
-        ids
+        Ok(ids)
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         self.outgoing_projection(conversation, have, true)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
@@ -1813,8 +1508,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&event.conversation_id)
-                .is_some()
+                .contains_file(event.conversation_id)?
         };
         // A chunk-first legacy sender must not fill the recipient's log before
         // its offer has arrived. Ordinary messages have an authenticated DM,
@@ -1841,7 +1535,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                     .log
                     .lock()
                     .expect("log lock not poisoned")
-                    .events(&event.conversation_id)
+                    .events(&event.conversation_id)?
                     .iter()
                     .any(|entry| entry.kind == EventKind::MembershipChange);
             let relay = self
@@ -1854,25 +1548,24 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .is_some_and(|state| state.own.post_office);
             if !direct && !channel && !relay && event.author.ed25519_pub() != &own.ed25519_pub {
                 self.denied = true;
-                return Err(LogError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "unknown attachment conversation",
-                )));
+                return Err(LogError::AdmissionRejected(
+                    "unknown attachment conversation".into(),
+                ));
             }
         }
         // A legacy peer can skip the optional consent query and push chunks through
         // ordinary sync. Enforce the same receive decision at the durable log gate.
         if event.kind == EventKind::Message
             && known_file
-            && !self
-                .node
-                .attachment_chunk_author_allowed(event.conversation_id, event.author.ed25519_pub())
+            && !self.node.attachment_chunk_author_allowed(
+                event.conversation_id,
+                event.author.ed25519_pub(),
+            )?
         {
             self.denied = true;
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "attachment awaiting recipient approval",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "attachment awaiting recipient approval".into(),
+            ));
         }
         if event.kind == EventKind::Message && known_file {
             let manifest = self
@@ -1880,22 +1573,20 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&event.conversation_id)
-                .cloned();
+                .manifest(event.conversation_id)?;
             if let Some(manifest) = manifest.filter(super::media_store::automatic_inline_image) {
                 let first_chunk = self
                     .node
                     .log
                     .lock()
                     .expect("log lock not poisoned")
-                    .events(&event.conversation_id)
+                    .events(&event.conversation_id)?
                     .is_empty();
                 if first_chunk && (event.seq != 1 || !event.parents.is_empty()) {
                     self.denied = true;
-                    return Err(LogError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "automatic image must start at chunk one",
-                    )));
+                    return Err(LogError::AdmissionRejected(
+                        "automatic image must start at chunk one".into(),
+                    ));
                 }
                 if event.seq == 1 {
                     let valid = crate::file::open_chunk_for(&manifest, 0, &event.ciphertext)
@@ -1905,10 +1596,9 @@ impl SyncStore for GuardedSyncStore<'_> {
                         });
                     if !valid {
                         self.denied = true;
-                        return Err(LogError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "automatic image has invalid image signature",
-                        )));
+                        return Err(LogError::AdmissionRejected(
+                            "automatic image has invalid image signature".into(),
+                        ));
                     }
                 }
             }
@@ -1941,36 +1631,31 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .log
                 .lock()
                 .expect("log lock not poisoned")
-                .events(&event.conversation_id)
+                .events(&event.conversation_id)?
                 .into_iter()
-                .cloned()
                 .collect();
             events.push(event.clone());
             events.sort_by_key(|e| (e.lamport, e.id));
             if !self
-                .projection(state, &event.conversation_id, &events)
+                .projection(state, &event.conversation_id, &events)?
                 .contains(&event.id)
             {
                 self.denied = true;
-                return Err(LogError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "event admission denied",
-                )));
+                return Err(LogError::AdmissionRejected("event admission denied".into()));
             }
         }
         let mut log = self.node.log.lock().expect("log lock not poisoned");
         if event.kind == EventKind::Message
             && known_file
             && log
-                .events(&event.conversation_id)
+                .events(&event.conversation_id)?
                 .iter()
                 .any(|chunk| chunk.author != event.author)
         {
             self.denied = true;
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "attachment chunk stream already belongs to another sender",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "attachment chunk stream already belongs to another sender".into(),
+            ));
         }
         if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
             log.append_durable(event)
@@ -2030,7 +1715,7 @@ mod causal_export_tests {
             let mut log = node.log.lock().unwrap();
             log.append_durable(initial.clone()).unwrap();
             log.append_durable(rejected.clone()).unwrap();
-            assert!(log.requires_channel_v4(&channel));
+            assert!(log.requires_channel_v4(&channel).unwrap());
         }
         for private in [false, true] {
             if private {
@@ -2056,13 +1741,13 @@ mod causal_export_tests {
             }
             let guarded = node.sync_store(&peer.public());
             let store = guarded.lock().unwrap();
-            assert_eq!(store.event_ids(&channel), vec![initial.id]);
-            assert!(!store.requires_channel_v4(&channel));
+            assert_eq!(store.event_ids(&channel).unwrap(), vec![initial.id]);
+            assert!(!store.requires_channel_v4(&channel).unwrap());
             assert!(
-                !store.requires_channel_v4(&channel),
+                !store.requires_channel_v4(&channel).unwrap(),
                 "cached projection must stay principal-scoped"
             );
-            assert!(!store.event_ids(&channel).contains(&rejected.id));
+            assert!(!store.event_ids(&channel).unwrap().contains(&rejected.id));
         }
     }
     #[tokio::test]
@@ -2113,16 +1798,20 @@ mod causal_export_tests {
         let guarded = node.sync_store(&peer.public());
         let store = guarded.lock().unwrap();
         assert_eq!(
-            store.authorized_event_ids(&conversation),
-            store.event_ids(&conversation)
+            store.authorized_event_ids(&conversation).unwrap(),
+            store.event_ids(&conversation).unwrap()
         );
         let wanted = HashSet::from([parent.id, child.id]);
         assert_eq!(
-            store.authorized_event_page(&conversation, &wanted, 50_000),
+            store
+                .authorized_event_page(&conversation, &wanted, 50_000)
+                .unwrap(),
             vec![parent]
         );
         assert_eq!(
-            store.authorized_event_page(&conversation, &HashSet::from([child.id]), 50_000),
+            store
+                .authorized_event_page(&conversation, &HashSet::from([child.id]), 50_000)
+                .unwrap(),
             vec![child]
         );
     }
@@ -2262,12 +1951,13 @@ mod causal_export_tests {
         for expected in [parent.id, child.id] {
             let response = handle_request_bounded(
                 &*guarded.lock().unwrap(),
-                &build_request(&target, conversation),
+                &build_request(&target, conversation).unwrap(),
                 1,
-            );
+            )
+            .unwrap();
             assert_eq!(response.events.len(), 1);
             assert_eq!(response.events[0].id, expected);
-            let (report, _) = handle_response(&mut target, &response);
+            let (report, _) = handle_response(&mut target, &response).unwrap();
             assert_eq!(report.applied, 1);
             assert!(report.rejected.is_empty());
         }

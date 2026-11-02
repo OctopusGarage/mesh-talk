@@ -183,6 +183,8 @@ test("scrolling away and returning to latest reuses media without changing row h
   await expect(row).toHaveCount(0);
   await page.getByTestId("jump-to-latest").click();
   await expect(row.getByTestId("file-image")).toBeVisible();
+  // The virtualizer can replace this row after visibility but before geometry
+  // is read. A missing box is pending, never a successful height measurement.
   await expect
     .poll(async () => (await row.boundingBox())?.height)
     .toBe(initialHeight);

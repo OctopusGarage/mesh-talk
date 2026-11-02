@@ -2,10 +2,10 @@
 //! uses verified peer proofs and durable account history; routing remains separate.
 
 use super::conversation::{account_conversation_id, dm_conversation_id};
-use super::queries::decode_account_entry;
-use super::{MessageBody, Node, SearchHit};
+use super::{Node, SearchHit};
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
+use crate::node::NodeError;
 
 const RECENT_HISTORY_LIMIT: usize = 2000;
 
@@ -60,26 +60,26 @@ impl Node {
     /// Scans the sent + received stores by reference without cloning their
     /// entry vectors. It resolves channel sent event IDs only when a matching
     /// channel has recalls; other searches skip the history log scan.
-    pub fn search(&self, query: &str) -> Vec<SearchHit> {
+    pub fn search(&self, query: &str) -> Result<Vec<SearchHit>, super::NodeError> {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         const PER_CONV: usize = 2000;
         let mut hits: Vec<SearchHit> = Vec::new();
 
-        for conversation in self.search_conversations() {
+        for conversation in self.search_conversations()? {
             let scope = match &conversation.source {
                 SearchSource::Account(account) => SearchScope::Account(account),
                 SearchSource::Channel => SearchScope::Channel,
                 SearchSource::LegacyDevice(_) => SearchScope::LegacyDm,
             };
-            for line in self.scan_conversation(conversation.id, &q, PER_CONV, scope) {
+            for line in self.scan_conversation(conversation.id, &q, PER_CONV, scope)? {
                 hits.push(conversation.hit(line.from_me, line.who, line.text, line.wall_clock));
             }
         }
         hits.sort_by_key(|b| std::cmp::Reverse(b.wall_clock));
-        hits
+        Ok(hits)
     }
 
     /// Search the latest 2,000 canonical history entries per eligible conversation.
@@ -90,7 +90,7 @@ impl Node {
     ///
     /// Canonical projection scans retained metadata and decodes only the selected
     /// window. Scan time and identity/causal metadata remain proportional to history.
-    pub fn search_recent(&self, query: &str) -> RecentSearchResults {
+    pub fn search_recent(&self, query: &str) -> Result<RecentSearchResults, super::NodeError> {
         self.search_recent_limited(query, usize::MAX)
     }
 
@@ -98,24 +98,30 @@ impl Node {
     /// [`Node::search_recent`]. Retains at most `limit` accumulated hits between
     /// conversations, plus the current conversation's 2,000-entry window.
     /// Metadata scans still cover retained history in every eligible conversation.
-    pub fn search_recent_limited(&self, query: &str, limit: usize) -> RecentSearchResults {
+    pub fn search_recent_limited(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<RecentSearchResults, super::NodeError> {
         let q = query.trim().to_lowercase();
         let mut response = RecentSearchResults {
             hits: Vec::new(),
             per_conversation_limit: RECENT_HISTORY_LIMIT,
         };
         if q.is_empty() || limit == 0 {
-            return response;
+            return Ok(response);
         }
-        for conversation in self.search_conversations() {
+        for conversation in self.search_conversations()? {
             let history = match &conversation.source {
                 SearchSource::Account(account) => {
-                    self.account_history(account, RECENT_HISTORY_LIMIT)
+                    self.account_history(account, RECENT_HISTORY_LIMIT)?
                 }
                 SearchSource::Channel => {
-                    self.channel_history(conversation.id, RECENT_HISTORY_LIMIT)
+                    self.channel_history(conversation.id, RECENT_HISTORY_LIMIT)?
                 }
-                SearchSource::LegacyDevice(public) => self.dm_history(public, RECENT_HISTORY_LIMIT),
+                SearchSource::LegacyDevice(public) => {
+                    self.dm_history(public, RECENT_HISTORY_LIMIT)?
+                }
             };
             for entry in history.into_iter().rev() {
                 if entry.recalled
@@ -156,7 +162,7 @@ impl Node {
         response
             .hits
             .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
-        response
+        Ok(response)
     }
 
     /// Return protected image bytes only for an exact currently eligible retained message.
@@ -164,93 +170,112 @@ impl Node {
     pub fn protected_image_protection(
         &self,
         reference: &SearchReference,
-    ) -> Option<super::MessageProtection> {
-        let context = self.reference_context(reference, true)?;
-        let entry = context.messages.into_iter().next()?;
-        let protection = entry.protection?;
-        let file = entry.file?;
+    ) -> Result<Option<super::MessageProtection>, super::NodeError> {
+        let Some(context) = self.reference_context(reference, true)? else {
+            return Ok(None);
+        };
+        let Some(entry) = context.messages.into_iter().next() else {
+            return Ok(None);
+        };
+        let (Some(protection), Some(file)) = (entry.protection, entry.file) else {
+            return Ok(None);
+        };
         if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
-            return None;
+            return Ok(None);
         }
-        let manifest = self
+        let Some(manifest) = self
             .files
             .lock()
             .expect("files lock")
-            .manifest(&file.file_conv)
-            .cloned()?;
-        if manifest.protection() != Some(protection)
-            || !crate::node::media_store::automatic_inline_image(&manifest)
-        {
-            return None;
-        }
-        Some(protection)
+            .manifest(file.file_conv)?
+        else {
+            return Ok(None);
+        };
+        Ok((manifest.protection() == Some(protection)
+            && crate::node::media_store::automatic_inline_image(&manifest))
+        .then_some(protection))
     }
 
     pub fn protected_image_content(
         &self,
         reference: &SearchReference,
-    ) -> Option<(super::MessageProtection, Vec<u8>)> {
-        let context = self.reference_context(reference, true)?;
-        let entry = context.messages.into_iter().next()?;
-        let protection = entry.protection?;
-        let file = entry.file?;
+    ) -> Result<Option<(super::MessageProtection, Vec<u8>)>, super::NodeError> {
+        let Some(context) = self.reference_context(reference, true)? else {
+            return Ok(None);
+        };
+        let Some(entry) = context.messages.into_iter().next() else {
+            return Ok(None);
+        };
+        let (Some(protection), Some(file)) = (entry.protection, entry.file) else {
+            return Ok(None);
+        };
         if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
-            return None;
+            return Ok(None);
         }
-        let manifest = self
+        let Some(manifest) = self
             .files
             .lock()
             .expect("files lock")
-            .manifest(&file.file_conv)
-            .cloned()?;
+            .manifest(file.file_conv)?
+        else {
+            return Ok(None);
+        };
         if manifest.protection() != Some(protection)
             || !crate::node::media_store::automatic_inline_image(&manifest)
         {
-            return None;
+            return Ok(None);
         }
-        let bytes = self
-            .media
-            .read(file.file_conv)
-            .or_else(|| self.read_file_internal(file.file_conv).ok())?;
+        let bytes = match self.media.read(file.file_conv) {
+            Some(bytes) => bytes,
+            None => match self.read_file_internal(file.file_conv) {
+                Ok(bytes) => bytes,
+                Err(error @ super::NodeError::Log(_)) => return Err(error),
+                Err(_) => return Ok(None),
+            },
+        };
         if bytes.len() as u64 != manifest.size()
             || crate::file::file_checksum(&bytes) != manifest.checksum()
+            || !crate::node::media_store::raster_signature_matches(manifest.mime(), &bytes)
+            || self.protected_image_protection(reference)? != Some(protection)
         {
-            return None;
+            return Ok(None);
         }
-        if !crate::node::media_store::raster_signature_matches(manifest.mime(), &bytes)
-            || self.protected_image_protection(reference) != Some(protection)
-        {
-            return None;
-        }
-        Some((protection, bytes))
+        Ok(Some((protection, bytes)))
     }
 
     /// Explicit retained content lookup. Hosts must authorize each reveal before calling.
     pub fn protected_message_content(
         &self,
         reference: &SearchReference,
-    ) -> Option<(super::MessageProtection, Vec<u8>)> {
-        let context = self.reference_context(reference, true)?;
-        let id = match reference {
-            SearchReference::Account { message_id, .. }
-            | SearchReference::Channel { message_id, .. }
-            | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+    ) -> Result<Option<(super::MessageProtection, Vec<u8>)>, super::NodeError> {
+        let Some(context) = self.reference_context(reference, true)? else {
+            return Ok(None);
         };
-        let entry = context
-            .messages
-            .into_iter()
-            .find(|entry| entry.id == id && !entry.recalled)?;
-        if entry.file.is_some() {
-            return None;
-        }
-        Some((entry.protection?, entry.text))
+        Ok((|| {
+            let id = match reference {
+                SearchReference::Account { message_id, .. }
+                | SearchReference::Channel { message_id, .. }
+                | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+            };
+            let entry = context
+                .messages
+                .into_iter()
+                .find(|entry| entry.id == id && !entry.recalled)?;
+            if entry.file.is_some() {
+                return None;
+            }
+            Some((entry.protection?, entry.text))
+        })())
     }
 
     /// Resolve an exact reference against currently eligible canonical history.
     /// Returns at most 25 entries on each side, preserving canonical order. The
     /// retained projection scans identity/order metadata, then decodes only the
     /// context window. Scan time and metadata still scale with retained history.
-    pub fn search_context(&self, reference: &SearchReference) -> Option<SearchContext> {
+    pub fn search_context(
+        &self,
+        reference: &SearchReference,
+    ) -> Result<Option<SearchContext>, super::NodeError> {
         self.reference_context(reference, false)
     }
 
@@ -258,14 +283,19 @@ impl Node {
         &self,
         reference: &SearchReference,
         reveal: bool,
-    ) -> Option<SearchContext> {
+    ) -> Result<Option<SearchContext>, super::NodeError> {
         let message_id = match reference {
             SearchReference::Account { message_id, .. }
             | SearchReference::Channel { message_id, .. }
-            | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+            | SearchReference::LegacyDevice { message_id, .. } => {
+                let Some(id) = *message_id else {
+                    return Ok(None);
+                };
+                id
+            }
         };
         if message_id == EventId::new([0; 32]) {
-            return None;
+            return Ok(None);
         }
         if let SearchReference::Account { account_id, .. } = reference
             && account_id == &self.account_id()
@@ -281,7 +311,7 @@ impl Node {
             );
         }
         let conversation = self
-            .search_conversations()
+            .search_conversations()?
             .into_iter()
             .find(|conversation| match (reference, &conversation.source) {
                 (SearchReference::Account { account_id, .. }, SearchSource::Account(account)) => {
@@ -295,7 +325,10 @@ impl Node {
                     SearchSource::LegacyDevice(public),
                 ) => *device_id == public.user_id(),
                 _ => false,
-            })?;
+            });
+        let Some(conversation) = conversation else {
+            return Ok(None);
+        };
         let account = match &conversation.source {
             SearchSource::Account(account) => Some(account.as_str()),
             _ => None,
@@ -313,7 +346,7 @@ impl Node {
 
     // Candidate eligibility is shared; canonical projection and the legacy fast
     // scan retain their separate coverage/cost contracts.
-    fn search_conversations(&self) -> Vec<SearchConversation> {
+    fn search_conversations(&self) -> Result<Vec<SearchConversation>, NodeError> {
         let mut conversations = Vec::new();
         let peers = self
             .roster
@@ -383,7 +416,7 @@ impl Node {
             }
         }
         let mut accounts: std::collections::BTreeSet<String> =
-            self.known_account_ids().into_iter().collect();
+            self.known_account_ids()?.into_iter().collect();
         accounts.extend(
             account_labels
                 .iter()
@@ -406,7 +439,7 @@ impl Node {
                 source: SearchSource::Account(acct),
             });
         }
-        for ch in self.list_channels() {
+        for ch in self.list_channels()? {
             conversations.push(SearchConversation {
                 id: ch.id,
                 target: hex::encode(ch.id.as_bytes()),
@@ -415,7 +448,7 @@ impl Node {
                 source: SearchSource::Channel,
             });
         }
-        conversations
+        Ok(conversations)
     }
 
     /// Scan one conversation's sent + received plaintext for a lowercased substring `q`,
@@ -430,128 +463,33 @@ impl Node {
         q: &str,
         limit: usize,
         scope: SearchScope<'_>,
-    ) -> Vec<ScanMatch> {
-        let my_account = self.account.account_id();
-        let own_devices: std::collections::HashSet<_> = self
-            .linked_devices()
-            .into_iter()
-            .map(|device| device.public.user_id())
-            .collect();
-        // Decode text from the borrowed stores, then apply the same recent-message
-        // window as history before checking the query. Recalled rows occupy a
-        // window slot even though search must omit their text.
-        let mut lines = Vec::new();
-        {
-            let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            for e in sentlog.entries_ref(&conv) {
-                if super::expiry_policy::plaintext_deadline(&e.plaintext)
-                    .is_some_and(|deadline| deadline <= self.expiry_now())
-                {
-                    continue;
-                }
-                let (id, body, sent_seq) = if matches!(scope, SearchScope::Account(_)) {
-                    let (id, body) = decode_account_entry(&e.plaintext);
-                    (Some(id), body.text, None)
-                } else {
-                    (None, MessageBody::decode(&e.plaintext).text, Some(e.seq))
-                };
-                lines.push(ScanMatch {
-                    from_me: true,
-                    who: "you".to_string(),
-                    text: body,
-                    wall_clock: e.wall_clock,
-                    id,
-                    sent_seq,
-                });
-            }
-        }
-        {
-            let received = self.received.lock().expect("received mutex not poisoned");
-            for e in received.entries_ref(&conv) {
-                let envelope = super::DmEnvelope::decode(&e.plaintext);
-                let inner = envelope
-                    .as_ref()
-                    .map_or(e.plaintext.as_slice(), |env| env.body.as_slice());
-                if self.recipient_expired(inner, e.event_id, e.wall_clock) {
-                    continue;
-                }
-                let (from_me, who, body, id) = if matches!(scope, SearchScope::Account(_)) {
-                    let (id, body) = decode_account_entry(&e.plaintext);
-                    let from_me = e.from == my_account;
-                    let who = if from_me {
-                        "you".to_string()
-                    } else {
-                        e.from.clone()
-                    };
-                    (from_me, who, body.text, id)
-                } else {
-                    let from_me = own_devices.contains(&e.from);
-                    let who = if from_me {
-                        "you".to_string()
-                    } else {
-                        e.from.clone()
-                    };
-                    (
-                        from_me,
-                        who,
-                        MessageBody::decode(&e.plaintext).text,
-                        e.event_id,
-                    )
-                };
-                lines.push(ScanMatch {
-                    from_me,
-                    who,
-                    text: body,
-                    wall_clock: e.wall_clock,
-                    id: Some(id),
-                    sent_seq: None,
-                });
-            }
-        }
-        lines.sort_by_key(|line| line.wall_clock);
-        if lines.len() > limit {
-            lines.drain(0..lines.len() - limit);
-        }
-        let mut matches: Vec<_> = lines
-            .into_iter()
-            .filter(|line| {
-                String::from_utf8_lossy(&line.text)
-                    .to_lowercase()
-                    .contains(q)
-            })
-            .collect();
-        if matches.is_empty() {
-            return matches;
-        }
-        let recalled = match scope {
-            SearchScope::LegacyDm => return matches,
-            SearchScope::Account(peer) => self.recalled_targets_account(peer),
-            SearchScope::Channel => self.recalled_targets_channel(conv),
+    ) -> Result<Vec<ScanMatch>, super::NodeError> {
+        let account = match scope {
+            SearchScope::Account(peer) => Some(peer),
+            _ => None,
         };
-        if recalled.is_empty() {
-            return matches;
-        }
-        // Channel sent entries store sequence numbers, while recall markers
-        // name event IDs. Reuse the history resolver only for channel matches
-        // that might contain recalled text.
-        let recalled_sent_sequences: std::collections::HashSet<u64> =
-            if matches!(scope, SearchScope::Channel)
-                && matches.iter().any(|line| line.sent_seq.is_some())
-            {
-                self.raw_sent_history(conv)
-                    .into_iter()
-                    .filter_map(|(id, entry)| recalled.contains(&id).then_some(entry.seq))
-                    .collect()
-            } else {
-                Default::default()
-            };
-        matches.retain(|line| {
-            !line.id.is_some_and(|id| recalled.contains(&id))
-                && !line
-                    .sent_seq
-                    .is_some_and(|seq| recalled_sent_sequences.contains(&seq))
-        });
-        matches
+        Ok(self
+            .project_history(
+                conv,
+                account,
+                super::queries::HistorySelection::Recent(limit),
+            )?
+            .into_iter()
+            .flat_map(|context| context.messages)
+            .filter(|row| {
+                !row.recalled
+                    && row.file.is_none()
+                    && String::from_utf8_lossy(&row.text)
+                        .to_lowercase()
+                        .contains(q)
+            })
+            .map(|row| ScanMatch {
+                from_me: row.from_me,
+                who: row.who,
+                text: row.text,
+                wall_clock: row.wall_clock,
+            })
+            .collect())
     }
 }
 
@@ -568,8 +506,6 @@ struct ScanMatch {
     who: String,
     text: Vec<u8>,
     wall_clock: u64,
-    id: Option<crate::eventlog::event::EventId>,
-    sent_seq: Option<u64>,
 }
 
 #[cfg(test)]

@@ -687,6 +687,20 @@ group connection or consume the connection budget reserved for ordinary delivery
 Private route rounds launch at most two probes concurrently and advance their
 cursor only for launched work; canceled queued routes retain their next turn.
 
+Account maintenance and bounded local channel recovery are sibling futures owned
+by the same recovery task. A held maintenance peer exchange cannot delay local
+checkpoint/presentation progress or its mandatory Directory publication. The
+maintenance owner retains one state and uses independent broadcast/watch receivers
+plus the existing three-second Skip clock; it never consumes local recovery or
+roster Notify permits. Each bounded turn yields, and parent cancellation drops
+both futures. During an ordinary recovery network turn, the same parent polls its
+existing local-work notification alongside the pinned network future. Each local
+wake advances one bounded checkpoint/presentation turn and yields. The network
+turn retains its original leases, cursors, ordering and deadlines. If local work
+consumed a notification, replay one coalesced wake after the network turn completes
+so queued network targets retain their next turn. No extra worker or queue owns
+this progress, and parent cancellation drops the active exchange.
+
 New account-group creation gives invitation-target verification one twenty-second
 deadline across the complete selected account set and its device routes. Every
 required account must pass the existing authenticated binding and capability
@@ -911,7 +925,7 @@ clients need the updated behavior; existing opaque post offices are reused.
 
 Each accepted member controls **Share a copy**. A receiver can obtain its own authorized events while declining to serve retained history. Recovery automatically selects accepted sharing members from signed group state; users need not inspect individual members or grant separate DM permissions. Lower-frequency reconciliation still checks known non-sharing members so a later sharing change can be learned. The serving peer always enforces current authority and sharing preference.
 
-Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules.
+Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules. Source-revision preparation resumes through the existing bounded work and coalesced wake; it does not count as a persistence failure. Actual I/O, database and encrypted-storage failures retain their catch-up provenance and capped exponential plaintext retry schedule.
 
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
@@ -2256,12 +2270,107 @@ A deleted local record or recalled event does not recall already copied data fro
 | Directory presence                   | At most 15 seconds.                                                                                                                                           | Origin freshness is not renewed by forwarding. Refresh and network delays can still affect observed liveness.                                                                                             |
 | Relay seed probes / reconciliation   | Eight concurrent probes and eight relay sync operations, separately. Coalesced durable/directory/route wakes; immediate bounded-batch continuation; adaptive jittered idle fallback.             | Not a fixed five-second end-to-end convergence promise or a global eight-socket cap for the relay process.                                                                                 |
 | Relay storage                        | Soft limits of 100,000 events and 512 MiB, with 5,000-event / 16 MiB compaction slack.                                                                        | Storage can temporarily exceed soft limits; capacity may evict younger copies before their age limit.                                                                                                     |
+| Indexed relay Have memory            | Four shared, nonwaiting 32 MiB logical reservations per endpoint. | Reservations span receive/conversion/use; overload is retryable. The 128 MiB accounting budget excludes other process memory and is not an RSS measurement. |
+| Indexed federation staging           | 512 outstanding sessions, 262,144 entries and 64 MiB accounted storage; 256 current inbound/eight outbound directions. | Remote inventory and selected local snapshots share charges. Cancellation revokes authority immediately; bounded cleanup releases charges later. |
+| Indexed relay maintenance            | Separate slices of up to 512 raw producer rows and 512 retained IDs hashed per pass; minimum 10 ms pause and three times slice duration; retry backoff 100 ms–5 s. | Interleaves retention, preparation and cleanup. Pacing is not a total service CPU or hard transaction latency cap. |
+| Indexed physical page reclamation   | Mode 2; start at 256 free pages, drain to at most 64, up to 64 iterations per eligible slice; 100 ms successful cooldown plus measured duty. | Only already-free pages. One background PASSIVE completion attempt can copy uncapped WAL work; partial transfer/typed contention retries independently at 100 ms–5 s. Page counts and file lengths are distinct from filesystem block release. |
 | Maximum relay event age              | Thirty days from retained original arrival semantics.                                                                                                         | Upper age bound, not minimum guaranteed retention. Forwarding/restart must preserve expiry behavior.                                                                                                      |
 | Group initial text/sticker seeding   | Small-group threshold five members; larger groups normally seed two peers.                                                                                    | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                 |
 | Group recovery                       | Three peers per channel recovery step; coalesced wakes visit up to eight joined channels; jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                      | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                        |
 | Group control fanout                 | At most four concurrent contacts.                                                                                                                             | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                |
 
-The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+
+### Idle mailbox work and rejected pages
+
+Post offices answer capability and whole-mailbox fingerprint probes through the
+persistent event log's indexed metadata and cached digest. A probe for unchanged
+mail must not export or clone ciphertext history. Appends, retention rewrites and
+reopening retain the persistent log's existing cache invalidation rules. Unknown
+and empty mailbox probes do not populate the retained digest cache.
+Post-office and unfiltered event-log responses select a causal prefix within the
+existing frame and burst budgets before cloning ciphertext; unrelated tail
+payloads remain borrowed. Custom policy projections retain their admission rules
+through the default bounded-export adapter.
+
+The paged network-store contract separates those collecting SDK operations from
+bounded ID and event pages. Its unfiltered SQL path reads a covering commit index,
+skips peer-known IDs, and fetches headers and bodies only for selected unknown
+events. Examined rows and selected bytes have separate budgets. Empty scanning
+pages with continuations mean progress, not an empty history. Existing participant
+policy projections use an explicit legacy adapter until their own owners adopt
+the paged contract.
+
+The SDK's `node::request_round` accepts a caller-owned authenticated
+`SecureChannel`, selected conversation and `SyncStore`. The caller retains
+admission and disclosure policy responsibility. This existing collecting
+compatibility path also lets external acceptance rigs observe a live relay over
+its normal authenticated protocol; it does not open retired legacy paths or
+acquire a second profile writer lease. Production participant and relay workers
+continue to use their bounded network stores.
+
+Durable admission assigns a commit ordinal only after every same-conversation
+parent exists. Commit-order export therefore supplies the required topological
+prefix even when signed clocks are inverted. Deterministic timeline ordering is
+a separate contract. A sync view captures a finite exclusive commit cutoff plus
+store, domain, conversation and destructive-generation binding; later appends
+belong to a later exchange. Destructive or authorization changes invalidate the
+view. No database transaction or mutex spans network I/O.
+
+Paged exchanges retain one ID chunk and bounded event frames rather than all
+local IDs. Existing peer Have chunk and aggregate limits remain enforced.
+An unavailable current fingerprint bypasses the optional probe; it cannot become
+a fabricated digest or an empty-set match. Availability, fingerprints and view
+completion never replace a fresh durable custody qualification. Local page or
+decode failures abort the exchange while preserving any committed received prefix.
+The dedicated post-office CLI uses the direct indexed path. Participant and
+collecting SDK paths retain their separate adoption boundary; this does not
+establish their startup or resident-memory bounds. The shared endpoint's Have
+reservations bound concurrent aggregate reception as well as each individual
+peer's existing aggregate limit.
+
+The internal indexed relay policy applies persisted monotonic expiry before an
+exact custody result or eligible body read. Its policy views also bind arrival
+and cutoff identities; an old view cannot freeze eligibility across expiry,
+origin correction or retirement. Capacity charges hidden rows until bounded
+reclamation removes them. Temporary pressure requests persistent draining and
+returns a local retryable error; a permanently oversized event has a distinct
+local resource failure. Neither outcome is a rejected peer event or successful
+custody. Arrival removal and graph finalization commit together. The
+[storage owner](ARCHITECTURE.md#storage-replay-and-query-budgets) defines these
+transactions and budgets. The dedicated runtime's paced maintenance owner
+advances reclamation and demanded digests without inline history hashing. Scoped
+queue saturation leaves optional fingerprint readiness pending for a later probe;
+only explicit federation demand starts global inventory preparation. Typed local
+failures do not select older wire versions. The runtime stops admission on a
+faulted profile and joins owned work before releasing its lease during
+cooperative shutdown.
+
+An opaque mailbox exchange retains IDs of wrappers whose inner events cannot yet
+be admitted, so a rejected page cannot repeatedly occupy every response while
+later valid events wait. These hints belong only to that mailbox operation and
+remain bounded; they do not claim acceptance, custody or recipient delivery.
+A later operation retries the rejected events after permissions, causal parents
+or local storage recover. Existing signature, conversation and attachment policy
+checks remain authoritative.
+
+Successfully opened wrappers whose inner events are retained in the local event
+log also produce optional encrypted receive hints in a sidecar next to that log.
+Hints bind the complete local device, account and derived mailbox identity. On
+Node recreation, only mappings whose inner IDs still exist after local replay
+seed the receive set. Missing local history therefore remains recoverable even
+when an older hint file survives. Invalid envelopes, ignored file-consent controls,
+staged events outside the main log and rejected admissions are not persisted as
+receive hints. Existing operation-local retry rules continue to apply.
+
+The sidecar appends only new ID mappings, without storing message content or
+rewriting history. It is limited to 250,000 mappings and 64 MiB; saturation stops
+new hint writes. Duplicate hints perform no disk writes. Corrupt, foreign-owner
+or unavailable files are preserved and disable this optimization for that run;
+receive continues through ordinary validation. Hints need no per-event fsync and
+may be lost on a crash: they never acknowledge custody or delivery. This reduces
+repeat mailbox transfer after restart, while encrypted history replay, local
+index reconstruction and uncached controls still require startup work.
 
 ### Session reuse contract
 
@@ -2413,10 +2522,19 @@ validation failures retain their error paths. The socket and authentication
 limits are unchanged.
 
 Account group fanout retains the same committed journal revision after local
-admission backpressure on direct or eligible relay paths. The existing bounded
+admission backpressure on direct or eligible relay paths. Direct control rounds
+also retain that revision after a local `StaleCursor` or a retryable closed-session
+transport error. A responder whose finite view becomes invalid can close Noise
+before sending an application error; that failed round cannot acknowledge completed
+fanout. The shared session classifier keeps policy and protocol rejections outside
+this transport retry. The existing bounded
 queue retries after one second without blocking other ready groups; queue
 overflow returns the revision to its durable journal cursor. Successful rounds
 remain deduplicated, and retry never invents custody or recipient confirmation.
+Other transport failures keep their existing recovery policy. This
+continuation preserves the original operation, effect and journal sequence; it
+does not replace the independent ten-second departure retry or change peer and
+foreground-operation deadlines.
 
 Historical-route rounds launch at most two device probes concurrently. Each may
 race at most two candidates, so this producer alone consumes at most four of the
@@ -2648,8 +2766,12 @@ UI projection once. Linked imports respect account-personal conversation removal
 local committed mutations wake publication immediately.
 
 Federation wakes on durable mailbox, directory and effective route changes,
-coalesces bursts, caches unchanged inventories and continues full mailbox batches
-without waiting for the idle fallback. Complete outgoing and inbound exchanges
+coalesces bursts and caches unchanged inventories. Consecutive full mailbox
+batches continue with a per-edge delay growing from 100 milliseconds to at most
+five seconds, so inconsistent inventories or retention churn cannot create
+unbounded immediate reconciliation. A drained batch resets that delay. Mail and
+presence notifications do not bypass a saturated edge's continuation deadline;
+other healthy edges retain independent progress. Complete outgoing and inbound exchanges
 have absolute deadlines and rotate mailbox attempts across failures. Bridge
 negotiation distinguishes transport/malformed/policy failures from supported
 compatibility fallback and retains bounded per-relay retry state. Discovery keeps

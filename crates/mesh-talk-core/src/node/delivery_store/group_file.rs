@@ -85,7 +85,7 @@ pub(super) fn validate_parent_view(
             continue;
         }
         let event = log
-            .get(&id)
+            .get(&id)?
             .ok_or_else(|| invalid("file causal parent missing"))?;
         if event.conversation_id != operation.group || effects.contains(&id) {
             return Err(invalid("invalid file causal parent"));
@@ -93,7 +93,7 @@ pub(super) fn validate_parent_view(
         pending.extend(event.parents.iter().copied());
         ancestors.insert(id, event);
     }
-    let parents: Vec<_> = ancestors.values().copied().collect();
+    let parents: Vec<_> = ancestors.values().collect();
     let projection = ChannelBook::project_membership(operation.group, &parents);
     let mut source = Node::public_account_group_source(
         operation.group,
@@ -153,12 +153,12 @@ pub(super) fn validate_parent_view(
         }
     }
     let receipt = &witness.ready;
-    if log.fingerprint_and_len(&receipt.file_conv)
+    if log.fingerprint_and_len(&receipt.file_conv)?
         != (receipt.fingerprint, receipt.event_count as usize)
     {
         return Err(invalid("file ciphertext differs from ready receipt"));
     }
-    if log.events(&receipt.file_conv).iter().any(|event| {
+    if log.events(&receipt.file_conv)?.iter().any(|event| {
         event.kind != crate::eventlog::EventKind::Message
             || event.author.ed25519_pub() != &operation.executor.device.ed25519_pub
     }) {
@@ -304,7 +304,7 @@ mod tests {
         log.append(genesis.clone()).unwrap();
         log.append(chunk).unwrap();
         log.sync().unwrap();
-        let (fingerprint, event_count) = log.fingerprint_and_len(&file);
+        let (fingerprint, event_count) = log.fingerprint_and_len(&file).unwrap();
         let ready = GroupFileAssetsReceipt {
             file_conv: file,
             fingerprint,
@@ -446,7 +446,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(f.log.get(&f.request.message_id).is_some());
+        assert!(f.log.get(&f.request.message_id).unwrap().is_some());
         assert!(files.entry(f.request.message_id).is_some_and(
             |row| row.plaintext == f.witness.payload.descriptor.as_ref().unwrap().manifest
         ));
@@ -481,13 +481,16 @@ mod tests {
         assert_eq!(
             f.log
                 .events(&f.operation.group)
+                .unwrap()
                 .iter()
                 .filter(|event| event.kind == EventKind::FileManifest)
                 .count(),
             1
         );
         assert_eq!(
-            f.log.fingerprint_and_len(&f.witness.ready.file_conv),
+            f.log
+                .fingerprint_and_len(&f.witness.ready.file_conv)
+                .unwrap(),
             (
                 f.witness.ready.fingerprint,
                 f.witness.ready.event_count as usize

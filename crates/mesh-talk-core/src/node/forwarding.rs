@@ -602,8 +602,10 @@ impl Node {
                         if let MessageDestination::Channel(group) = destination(target)? {
                             let local_execution = {
                                 let book = self.channels.lock().expect("channels lock");
-                                book.state(&group)
-                                    .is_some_and(|state| self.channel_identity_is_current(state))
+                                match book.state(&group) {
+                                    Some(state) => self.channel_identity_is_current(state)?,
+                                    None => false,
+                                }
                             };
                             // Keep sequential local acceptance for an executable device;
                             // logical siblings use the existing delegated operation owner.
@@ -716,6 +718,14 @@ impl Node {
                 }
             }
             MessageDestination::Channel(channel) => {
+                let local = {
+                    let log = self.log.lock().expect("log mutex");
+                    log.repository()?
+                        .has_kind(channel, crate::eventlog::EventKind::MembershipChange)?
+                };
+                if local {
+                    self.await_channel_metadata(*channel).await?;
+                }
                 if !AccountGroupOperationKind::File
                     .admits_role(self.account_group_access(*channel)?.role)
                 {
@@ -869,7 +879,7 @@ impl Node {
         {
             let files = self.files.lock().expect("files lock");
             let manifest = files
-                .manifest(&conv)
+                .manifest(conv)?
                 .ok_or_else(|| invalid("Archive unavailable"))?;
             if manifest.size() > 64 * 1024 * 1024 {
                 return Err(invalid("Archive exceeds budget"));

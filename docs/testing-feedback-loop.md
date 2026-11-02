@@ -218,8 +218,10 @@ The Optional bootstrap must also be currently settled in both directions: a new
 pass clears that observation, and only full UpToDate completion restores it. A
 completed Custody page can precede unfinished DmRecall work and its backoff in the
 same lane. Hold a real authenticated DmRecall response after a prior empty baseline
-to prove the earlier setup predicates cannot admit the observation window. The
-channel-specific heads establish post-create freshness; do not require an extra
+to prove the earlier setup predicates cannot admit the observation window. A
+paid GroupActivity continuation on that same Optional lane must also keep setup
+pending while its real response is held; release it before admitting the window.
+The channel-specific heads establish post-create freshness; do not require an extra
 periodic bootstrap pass or manually warm the data path.
 Aggregate document status includes independent lanes and is not this setup proof.
 After actual startup, a held Directory/DeviceHostname update must allow setup and
@@ -386,6 +388,93 @@ explicit rationale and review; this process does not automatically rewrite rules
 relax thresholds or infer a speedup or zero omissions from a small sample.
 
 Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. The generic History-off/signed-provenance functional fixture uses a thirty-second watchdog around source and requester commitment, exact effect IDs and durable private projections. This is a functional completion bound, not an eight-second business latency guarantee. Dedicated request/result and held-traffic performance fixtures retain their independent eight-second assertions. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
+
+Selected-source fixtures retain the eight-second foreground receipt assertion.
+The two-executor fixture keeps A's repeated public status polling. B's timed
+observer reads its retained receipt for one submitted demand, without generating
+retry nonces and additional signed publications; both public status APIs must
+then return that same committed event. This isolates preemption evidence and does
+not claim throughput for repeated B retry queries.
+After releasing held traffic, complete public fanout, signed background rows and
+both preserved comparisons under the existing thirty-second recovery watchdog.
+Require exact continuation replay and pair retirement throughout this recovery;
+paid background pages retain their ordinary cross-peer scheduling priority.
+Silent join-history loopbacks use a thirty-second functional receive watchdog
+while preserving authority, protected-content filtering and provenance checks.
+Background departure retries use a thirty-second functional watchdog,
+allowing the existing fifteen-second peer exchange and bounded local continuation.
+Independent simulated hosts use four Tokio workers. Discovery-triggered peer
+history recovery keeps one original five-second absolute deadline across content,
+batch completion and the first ready history snapshot; exact `StaleCursor` may
+defer that snapshot, but a ready result is asserted immediately. The offline
+author, discovery-only trigger, exact event and batch identities, catch-up
+provenance, original-push and retirement guards, and foreground-operation
+deadlines remain unchanged. The departure watchdog is not a new end-to-end
+latency guarantee.
+The dedicated notification-driven gossip fixture excludes both periodic recovery
+clocks and expired fallback work in its existing worker, then requires all five
+receivers to expose the same canonical message within an eight-second functional
+watchdog. Setup queues its channel before the worker starts; no post-send manual
+recovery, resend, or roster change is allowed. The fixture also rejects fallback
+or custody-tick work during propagation. Its recorded two-second comparison is a
+performance observation, not an end-to-end latency SLA; disabling periodic rescue
+proves notification-driven progress directly instead of inferring it from timing.
+All listeners must be bound before cold exchanges start. Initial authenticated
+recovery has a separate thirty-second setup watchdog, accommodating the existing
+fifteen-second peer exchange; it does not consume or extend the post-send window.
+Keep the bounded phase trace with elapsed time and fixture peer indices so a
+setup failure identifies the unfinished exchange without logging identities.
+
+Mixed indexed/legacy TCP compatibility fixtures prepare both complete durable
+inventories before their one shared sixty-second exchange watchdog. Preserve the
+1501-event inventory that crosses the 1500-ID Have chunk, both request directions,
+durable Have and convergence assertions. Record setup separately from exchange
+time and join or cancel all server tasks before dropping profile leases. This
+functional exchange bound does not impose a durable fixture-ingestion SLA.
+Local recovery scheduling requires a real authenticated peer response held after
+its exact group fingerprint request. Append a different signed group only after
+that hold enters, notify the existing producer once, and require multiple bounded
+local turns, source-authenticated Directory publication and exact sibling import
+within the original eight-second watchdog. Keep the peer held throughout; peer
+timeout, completion, manual preparation and optional-history transfer cannot
+satisfy the test. Join every owned task before reporting a failure. Pair this
+regression with quiet/deduplication, network wake/backoff, maintenance isolation,
+plaintext storage-failure and custody-denial coverage.
+Verify completion handoff with two queued identities, repeated completion of a
+missing identity and an empty queue. A coalesced wake consumed by a completed
+identity must continue the remaining durable work without creating an idle loop.
+The federation notification fixture observes a completed empty exchange and
+quiescence before ingesting its twenty preconstructed envelopes. Disable idle
+fallback for that invocation, then require a new dirty turn, a full mailbox
+batch, a drained continuation and every exact target ID under one thirty-second
+functional watchdog. A fixed startup sleep or a shorter wall-clock timeout does
+not prove notification ownership. Removing mail-change scheduling must fail this
+oracle; keep ordinary jitter and continuation pacing in the other fixtures.
+
+Post-create custody setup requires the selected channel's authenticated inventory
+and control head floors plus exact bidirectional device capabilities within its
+thirty-second watchdog, with the current whole-Optional bootstrap complete in
+both directions. A same-lane DmRecall or GroupActivity hold keeps setup pending.
+An independent Directory hold may keep aggregate document status catching up;
+its later display-only heads do not replace the authenticated bootstrap floor.
+Before taking a real holder offline or changing its certificate binding, observe
+the exact positive source custody count within a separate thirty-second setup
+watchdog. A send makes one bounded attempt and does not promise custody; the
+existing peer exchange may itself use fifteen seconds. This setup observer uses
+only custody-change notifications and reads, without manual recovery or warmup.
+An authenticated custody-response hold keeps the exact source observation absent
+on the sibling until the real holder has stopped and drained; the sibling has no
+independent holder route. Release that hold only at the offline cut, then require
+the source's valid signed observation at the captured or newer order under the
+original custody deadline. Independent held document lanes stay held throughout.
+The custody scenario's independent eight-second assertions remain unchanged.
+The group-forwarding loopback completes profile and signed-membership setup
+under a thirty-second setup watchdog before its existing twenty-second
+content-operation watchdog; fixture retirement has a separate fifteen-second
+watchdog that retains the original failure phase. Independent hosts
+use the production multithread executor; all original ordered-text, archive,
+exact-history and consent assertions remain. Failure reports retain the last
+operation phase, and every exit joins admitted fixture producers before teardown.
 
 When a reference-device fixture requires a synchronous capability-cache override
 and admission on one current-thread runtime, keep that requester and its watchers
@@ -945,6 +1034,15 @@ writing and preserves file ownership and permissions. This avoids a slow
 runner-image mirror consuming the existing job budget; browser workers, retries,
 test inventories and deadlines are unchanged.
 
+The Windows workspace producer runs `scripts/ci/windows-native-deps.mjs` before
+Cargo. It probes installed Perl executables for native `MSWin32` execution and
+the `IPC::Cmd` / `Locale::Maketext::Simple` modules, then pins the validated
+absolute path through `OPENSSL_SRC_PERL` and `PERL`. This avoids Git Bash's partial
+MSYS Perl during vendored OpenSSL configuration without changing vendoring,
+compiler settings or test gates. Missing or incomplete native installations
+fail the dependency step. Portable probe fixtures do not replace the hosted
+Windows build.
+
 Windows full-regression runners expand the IPv4 TCP client port pool to
 10000–65534 before browser execution. Repeated fresh contexts load Vite's module
 graph over loopback; the default 16K pool can exhaust while closed connections
@@ -1106,18 +1204,25 @@ See [Cargo debug profiles](https://doc.rust-lang.org/cargo/reference/profiles.ht
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.148 and
-cargo-llvm-cov 0.8.7, then publishes one immutable archive. Two fresh consumers
+cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
-another test on that machine. Nextest uses a fresh process per test, so tests
+another test on that machine. The four-way split bounds aggregate measured serial
+work within the existing sixty-minute jobs; it does not extend case deadlines or
+omit slow tests. Nextest uses a fresh process per test, so tests
 must not depend on another test's process-local state.
+The registered channel-metadata IPC regression has a sixty-second isolated
+watchdog and command/lifecycle phase diagnostics. A stuck command fails that
+case instead of consuming the complete serial shard; it does not produce a
+successful or complete execution receipt. Longer existing core fixtures retain
+their own budgets.
 The producer retains the former Windows workspace cache namespace through an
 explicit shared key. Only the cache step normalizes the inherited color/thread
 environment to its previous key inputs; actual tests keep serial execution and
 plain diagnostic output. Pull requests restore caches; only main publishes them.
 
 The owning `scripts/ci/windows-coverage.mjs` helper validates every default Cargo test target, the full inventory,
-default ignored markers and the exact disjoint union of both runnable partitions.
+default ignored markers and the exact disjoint union of all four runnable partitions.
 Producer and consumers must match source/run/attempt, compiler, Cargo, dev/test
 profile environment, feature
 resolution, lock/config/helper hashes, platform and the original absolute checkout
@@ -1131,9 +1236,16 @@ official binary/Cargo metadata and offline reporting must work from a fresh Carg
 home. Execution receipts verify each selected test starts and passes exactly
 once; missing, duplicate, failed or skipped selected cases fail the check.
 Each consumer validates and uploads its partial LCOV plus source/inventory/digest
-receipts. Both consumer checks and the producer are directly required; a skipped
+receipts. All four consumer checks and the producer are directly required; a skipped
 consumer after a failed build cannot certify acceptance. Diagnostic timing keeps
 machine-readable events separate from successful-test phase output.
+
+Consumers persist expected inventory before extraction, validated selected
+inventory before execution, and timestamped child phases plus streamed output
+during listing, execution and reporting. Cancellation preserves this partial
+diagnostic evidence and terminates the owned child tree. Only successful complete
+execution and coverage validation produce an acceptance receipt; partial output
+never certifies a shard. Each output stream remains bounded to 128 MiB.
 
 The producer executes a tiny real archive/consumer CLI regression before expensive
 workspace compilation or accepting the full archive. Its local Git fixture, both partitions, runtime and compiled

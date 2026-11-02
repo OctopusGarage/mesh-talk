@@ -6,6 +6,10 @@ use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 
+mod selected;
+pub(in crate::node) use selected::ReactionQueryWork;
+pub use selected::{ReactionSummary, ReactionSummaryPage};
+
 #[cfg(test)]
 thread_local! {
     static REACTION_PROJECTION_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
@@ -17,12 +21,6 @@ pub(in crate::node) fn take_reaction_projection_work_for_test() -> (usize, usize
 }
 
 impl Node {
-    /// Aggregated reactions in the DM with `peer` (derives the conversation id).
-    pub fn reactions_dm(&self, peer: &PublicIdentity) -> Vec<ReactionView> {
-        let conv = dm_conversation_id(&self.identity.public(), peer);
-        self.reactions(conv)
-    }
-
     /// React to a message in a DM (toggle off with `remove = true`).
     pub async fn react_dm(
         &self,
@@ -151,7 +149,8 @@ impl Node {
     /// `React` events across every device-pair conversation between us and that
     /// account's devices (and our own devices), opens each account reaction envelope,
     /// keys it by its logical target + reacting account, and merges our own.
-    pub fn account_reactions(&self, peer_account_id: &str) -> Vec<ReactionView> {
+    #[cfg(test)]
+    pub fn account_reactions(&self, peer_account_id: &str) -> Result<Vec<ReactionView>, NodeError> {
         let my_account = self.account.account_id();
         let me = self.identity.public().user_id();
         // The device-pair conversations whose React events can carry this account's
@@ -176,14 +175,13 @@ impl Node {
                 .collect()
         };
         let mut decoded: Vec<(String, u64, ReactionPayload)> =
-            self.private_account_reactions(peer_account_id);
+            self.private_account_reactions(peer_account_id)?;
         for (conv, author, peer_account) in convs {
             let react_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
-                log.events(&conv)
+                log.events(&conv)?
                     .into_iter()
                     .filter(|e| e.kind == EventKind::React)
-                    .cloned()
                     .collect()
             };
             for event in &react_events {
@@ -219,20 +217,27 @@ impl Node {
         }
         // Merge our own account reactions (sealed to peers; not openable from our log).
         let acct_conv = account_conversation_id(&my_account, peer_account_id);
-        for ((c, _, _), (w, p)) in self
-            .my_dm_reactions
-            .lock()
-            .expect("my_dm_reactions mutex not poisoned")
-            .iter()
-        {
-            if *c == acct_conv {
-                decoded.push((my_account.clone(), *w, p.clone()));
+        let mut after = None;
+        loop {
+            let page = self.my_dm_reactions.lock().expect("reactions mutex").page(
+                Some(acct_conv),
+                None,
+                after,
+                128,
+                8 * 1024 * 1024,
+            )?;
+            if page.rows.is_empty() {
+                break;
+            }
+            after = page.next;
+            for row in page.rows {
+                decoded.push((my_account.clone(), row.wall, row.payload));
             }
         }
         for (_, _, payload) in &mut decoded {
-            payload.target = self.file_message_logical_id(acct_conv, payload.target);
+            payload.target = self.file_message_logical_id(acct_conv, payload.target)?;
         }
-        aggregate(&decoded)
+        Ok(aggregate(&decoded))
     }
 
     /// React to a message in a channel we hold the key for.
@@ -257,6 +262,10 @@ impl Node {
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
+        // A prior local send may have advanced the signed source. Finish its
+        // bounded metadata continuation before sealing; durable acceptance below
+        // still rechecks the exact epoch and current membership.
+        self.await_channel_metadata(channel).await?;
         let payload = ReactionPayload {
             target,
             emoji: emoji.to_string(),
@@ -267,13 +276,13 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !self.channel_identity_is_current(state) {
+            if !self.channel_identity_is_current(state)? {
                 return Err(NodeError::Channel("not a channel member".into()));
             }
             (state.recipient_members(), state.epoch())
         };
-        // Reactions must be re-readable by every member (aggregated on each `reactions`
-        // call), so they are sealed per-member with the DM sealed box, not the
+        // Reactions must be re-readable by every member for summary queries,
+        // so they are sealed per-member with the DM sealed box, not the
         // single-use sender-key ratchet used for messages.
         let sealed =
             crate::node::channel::SealedPayload::seal(&self.identity, &members, &payload.encode())
@@ -288,7 +297,7 @@ impl Node {
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-                if state.epoch() != epoch || !self.channel_identity_is_current(state) {
+                if state.epoch() != epoch || !self.channel_identity_is_current(state)? {
                     return Err(NodeError::Channel(
                         "channel membership changed; retry the operation".into(),
                     ));
@@ -304,19 +313,29 @@ impl Node {
     /// Aggregated reactions for a conversation (DM or channel). Opens each `React`
     /// event with the conversation crypto, merges our own (un-openable) DM reactions,
     /// and folds them per `(target, emoji)`.
-    pub fn reactions(&self, conv: ConversationId) -> Vec<ReactionView> {
-        let content_gate = self.channel_content_gate(conv);
+    #[cfg(test)]
+    pub fn reactions(&self, conv: ConversationId) -> Result<Vec<ReactionView>, NodeError> {
+        let content_gate = self.channel_content_gate(conv)?;
         let state = self
             .channels
             .lock()
             .expect("channels mutex not poisoned")
             .state(&conv)
             .map(|state| state.members().to_vec());
-        let private = self
-            .my_dm_reactions
-            .lock()
-            .expect("reaction projection mutex")
-            .channel_entries_with_account(conv);
+        let mut private = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .my_dm_reactions
+                .lock()
+                .expect("reaction projection mutex")
+                .channel_page(conv, after, 128, 8 * 1024 * 1024)?;
+            if page.rows.is_empty() {
+                break;
+            }
+            after = page.next;
+            private.extend(page.rows);
+        }
         let bound: std::collections::HashMap<_, _> = private
             .iter()
             .filter_map(|(source, effect, _, _, account)| {
@@ -383,7 +402,7 @@ impl Node {
         };
         let events = {
             let log = self.log.lock().expect("log mutex not poisoned");
-            let events = log.events(&conv);
+            let events = log.events(&conv)?;
             let modern = state.is_some()
                 && events
                     .iter()
@@ -400,7 +419,7 @@ impl Node {
                     // Only modern groups have historical account authority to
                     // replay. Legacy and DM reads stay linear in stored effects.
                     if !modern {
-                        return (event.clone(), None, None);
+                        return Ok((event.clone(), None, None));
                     }
                     let mut ancestors = std::collections::HashMap::new();
                     let mut pending = event.parents.clone();
@@ -413,8 +432,9 @@ impl Node {
                         if ancestors.contains_key(&id) {
                             continue;
                         }
-                        if let Some(parent) =
-                            log.get(&id).filter(|parent| parent.conversation_id == conv)
+                        if let Some(parent) = log
+                            .get(&id)?
+                            .filter(|parent| parent.conversation_id == conv)
                         {
                             pending.extend(parent.parents.iter().copied());
                             ancestors.insert(id, parent);
@@ -427,7 +447,7 @@ impl Node {
                     });
                     let projection = super::channel::ChannelBook::project_membership(
                         conv,
-                        &ancestors.values().copied().collect::<Vec<_>>(),
+                        &ancestors.values().collect::<Vec<_>>(),
                     );
                     let source = projection.state.as_ref().and_then(|state| {
                         state
@@ -449,9 +469,9 @@ impl Node {
                     } else {
                         None
                     };
-                    (event.clone(), source, account)
+                    Ok::<_, NodeError>((event.clone(), source, account))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, NodeError>>()?
         };
         let mut decoded = Vec::new();
         for (event, causal_source, causal_account) in events {
@@ -505,14 +525,21 @@ impl Node {
             }
         }
         if state.is_none() {
-            for ((conversation, _, _), (wall, payload)) in self
-                .my_dm_reactions
-                .lock()
-                .expect("reaction projection mutex")
-                .iter()
-            {
-                if *conversation == conv {
-                    decoded.push((self.user_id(), *wall, payload.clone()));
+            let mut after = None;
+            loop {
+                let page = self.my_dm_reactions.lock().expect("reactions mutex").page(
+                    Some(conv),
+                    None,
+                    after,
+                    128,
+                    8 * 1024 * 1024,
+                )?;
+                if page.rows.is_empty() {
+                    break;
+                }
+                after = page.next;
+                for row in page.rows {
+                    decoded.push((self.user_id(), row.wall, row.payload));
                 }
             }
         }
@@ -532,15 +559,12 @@ impl Node {
                     )
                 }),
         );
-        aggregate(&decoded)
+        Ok(aggregate(&decoded))
     }
 
-    /// Record one of OUR OWN reactions (sealed to the peer, so un-openable from our log)
-    /// for later merge in `reactions`/`account_reactions`. Collapsed to the latest action
-    /// per `(conv, target, emoji)` — newer wall_clock wins, and on an exact tie a `remove`
-    /// beats an `add` — so the map matches `aggregate`'s per-author max-reduction and
-    /// stays bounded by the number of distinct (conv, target, emoji) keys (no per-toggle
-    /// growth, no linear scan blow-up).
+    /// Persist our own sealed-to-peer reaction for selected summary queries. SQL
+    /// retains the latest action per `(conversation, target, emoji)`, with a remove
+    /// winning an exact clock tie. Repeated toggles replace the same current row.
     fn record_my_reaction(
         &self,
         conv: ConversationId,
@@ -560,6 +584,45 @@ mod acceptance_tests {
     use super::*;
     use crate::discovery::Announce;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[test]
+    fn indexed_authored_reactions_warm_node_reads_no_historical_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "peer", 1);
+        let open = || {
+            super::super::test_support::node_with_files(
+                dir.path(),
+                DeviceIdentity::from_secret_bytes([91; 32], [90; 32]),
+                Account::from_secret_bytes([92; 32]),
+                &proof,
+            )
+            .0
+        };
+        let node = open();
+        let conversation = ConversationId::new([93; 32]);
+        for n in 0..64 {
+            node.record_my_reaction(
+                conversation,
+                u64::from(n),
+                ReactionPayload {
+                    target: EventId::new([n; 32]),
+                    emoji: "x".repeat(8192),
+                    remove: false,
+                },
+            )
+            .unwrap();
+        }
+        drop(node);
+        drop(open());
+        crate::storage::record_log::frame_observations::reset();
+        let node = open();
+        assert!(
+            crate::storage::record_log::frame_observations::maximum_capacity() < 8192,
+            "ordinary Node reopen must not read historical reaction frames"
+        );
+        assert_eq!(node.my_dm_reactions.lock().unwrap().len(), 64);
+    }
 
     #[tokio::test]
     async fn channel_content_controls_recheck_membership_at_durable_acceptance() {
@@ -596,6 +659,7 @@ mod acceptance_tests {
                 };
                 node.append_event(channel, EventKind::MembershipChange, metadata.encode())?;
                 node.process_channel(channel);
+                super::super::test_support::settle_group_metadata(&node, channel);
                 commit()
             };
             let result = if recall {
@@ -613,6 +677,7 @@ mod acceptance_tests {
                     .lock()
                     .unwrap()
                     .events(&channel)
+                    .unwrap()
                     .iter()
                     .any(|event| { matches!(event.kind, EventKind::React | EventKind::Delete) }),
                 "a pre-change sealed control must never be committed after the authority changes"

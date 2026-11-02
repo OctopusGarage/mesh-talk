@@ -2,6 +2,18 @@ use super::*;
 use store::AccountDocumentStore;
 #[path = "inventory_causality_tests.rs"]
 mod inventory_causality;
+// A positive asynchronous history observer may see an unfinished projection.
+// Keep Pending distinct from ready-empty history and propagate every real error.
+fn ready_history(
+    result: Result<Vec<crate::node::HistoryEntry>, crate::node::NodeError>,
+) -> Option<Vec<crate::node::HistoryEntry>> {
+    match result {
+        Ok(history) => Some(history),
+        Err(crate::node::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => None,
+        Err(error) => panic!("history observation failed: {error}"),
+    }
+}
+
 fn key() -> AccountDocumentKey {
     AccountDocumentKey::Draft {
         conversation: DocumentConversation::Account("a".repeat(32)),
@@ -89,6 +101,73 @@ pub(super) fn node_with_identity(
     .unwrap()
 }
 
+pub(super) use super::super::test_support::settle_group_metadata;
+
+#[test]
+fn completed_channel_metadata_wakes_deferred_inventory_without_an_idle_loop() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+    };
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let source = node(directory.path(), &Account::generate());
+    let group = new_channel_id();
+    let initial = Event::new(
+        &source.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Deferred inventory".into(),
+            members: vec![source.identity.public()],
+            epoch: 0,
+            owner: source.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append(initial).unwrap();
+    while source
+        .account_sync_notify
+        .notified()
+        .now_or_never()
+        .is_some()
+    {}
+    assert!(matches!(
+        source.try_publish_group_inventory_groups(&[group]),
+        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor))
+    ));
+    assert!(
+        source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_none()
+    );
+    settle_group_metadata(&source, group);
+    assert!(
+        source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some(),
+        "completed metadata must resume the publisher that observed Pending"
+    );
+    source.refresh_channel_control_metadata(group).unwrap();
+    assert!(
+        source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_none(),
+        "an unchanged ready read must not create a publication wake loop"
+    );
+    group_inventory_source_document(&source, group);
+}
+
 #[tokio::test]
 async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
     use crate::{discovery::Announce, node::account_devices::AccountDevice};
@@ -144,23 +223,21 @@ async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
         Some((1, 0)),
         "one real routed sibling was attempted but the original exchange never completed"
     );
-    let event = source.channel_history(group, 10)[0].id;
+    let event = source.channel_history(group, 10).unwrap()[0].id;
     assert!(source.channel_custody_observations(group, event).is_empty());
-    assert_eq!(source.channel_custody_count(group, event), Some(0));
+    assert_eq!(source.channel_custody_count(group, event).unwrap(), Some(0));
     let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
     let sibling_server = tokio::spawn(sibling.clone().run_accept_loop(sibling_listener));
     let history = tokio::time::timeout(Duration::from_secs(8), async {
-        while !sibling
-            .channel_history(group, 10)
-            .iter()
-            .any(|row| row.id == event && row.from_me)
+        while !ready_history(sibling.channel_history(group, 10))
+            .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
         {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await;
     let repaired = tokio::time::timeout(Duration::from_secs(8), async {
-        while sibling.channel_custody_count(group, event) != Some(0) {
+        while sibling.channel_custody_count(group, event).unwrap() != Some(0) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -199,7 +276,7 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         .send_channel_message(group, b"before the new device linked")
         .await
         .unwrap();
-    let event = source.channel_history(group, 10)[0].id;
+    let event = source.channel_history(group, 10).unwrap()[0].id;
     assert!(
         source
             .channels
@@ -270,12 +347,11 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         }
     });
     let sibling_history = tokio::spawn(sibling.clone().run_account_history_loop());
+    let mut history = false;
     let recovered = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let history = sibling
-                .channel_history(group, 10)
-                .iter()
-                .any(|row| row.id == event && row.from_me);
+            history = ready_history(sibling.channel_history(group, 10))
+                .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me));
             let reports = source.channel_custody_observations(group, event);
             let shared = sibling.channel_custody_observations(group, event);
             if history && reports.len() == 1 && reports[0].tombstone && reports == shared {
@@ -285,11 +361,7 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         }
     })
     .await;
-    let history = sibling
-        .channel_history(group, 10)
-        .iter()
-        .any(|row| row.id == event && row.from_me);
-    let original_present = sibling.log.lock().unwrap().get(&event).is_some();
+    let original_present = sibling.log.lock().unwrap().get(&event).unwrap().is_some();
     let physically_enrolled = source
         .channels
         .lock()
@@ -300,7 +372,7 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         .contains(&sibling.identity.public());
     let reports = source.channel_custody_observations(group, event);
     let shared_reports = sibling.channel_custody_observations(group, event);
-    let shared_count = sibling.channel_custody_count(group, event);
+    let shared_count = sibling.channel_custody_count(group, event).unwrap();
     let positive = if recovered.is_ok() {
         // The existing original-event durability boundary, separate from
         // History's plaintext-only import, is required for a positive reply.
@@ -309,8 +381,8 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
-            .cloned()
             .collect();
         for original in originals {
             sibling
@@ -343,8 +415,8 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         Some((
             query.is_ok(),
             shared.is_ok(),
-            source.channel_custody_count(group, event),
-            sibling.channel_custody_count(group, event),
+            source.channel_custody_count(group, event).unwrap(),
+            sibling.channel_custody_count(group, event).unwrap(),
         ))
     } else {
         None
@@ -376,7 +448,7 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         shared_reports, reports,
         "the exact signed negative report is shared through ordinary private documents"
     );
-    assert_eq!(source.channel_custody_count(group, event), Some(0));
+    assert_eq!(source.channel_custody_count(group, event).unwrap(), Some(0));
     assert_eq!(
         shared_count,
         Some(0),
@@ -438,18 +510,22 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             .send_channel_message(channel, b"actual holder custody before blob repair")
             .await
             .unwrap();
-        let event = source.channel_history(channel, 10)[0].id;
+        let event = source.channel_history(channel, 10).unwrap()[0].id;
         assert!(
-            holder.log.lock().unwrap().get(&event).is_some(),
+            holder.log.lock().unwrap().get(&event).unwrap().is_some(),
             "the real holder must retain the exact original encrypted event"
         );
         assert!(
             holder
                 .channel_history(channel, 10)
+                .unwrap()
                 .iter()
                 .any(|row| row.id == event)
         );
-        assert_eq!(source.channel_custody_count(channel, event), Some(1));
+        assert_eq!(
+            source.channel_custody_count(channel, event).unwrap(),
+            Some(1)
+        );
         let key = AccountDocumentKey::ChannelCustody {
             channel: hex::encode(channel.as_bytes()),
             event: event.to_hex(),
@@ -473,7 +549,7 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             .unwrap();
         }
         assert_eq!(
-            source.channel_custody_count(channel, event),
+            source.channel_custody_count(channel, event).unwrap(),
             None,
             "unreadable positive evidence is unknown, never zero confirmed copies"
         );
@@ -490,7 +566,10 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             source.account_document(&key).unwrap().unwrap().payload(),
             payload.as_slice()
         );
-        assert_eq!(source.channel_custody_count(channel, event), Some(1));
+        assert_eq!(
+            source.channel_custody_count(channel, event).unwrap(),
+            Some(1)
+        );
         source.runtime_work.close();
         source.runtime_work.drain().await;
         *source.account_documents.lock().unwrap() = AccountDocumentStore::open(
@@ -505,7 +584,10 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             payload.as_slice(),
             "the repaired original witness must survive encrypted-store reopening"
         );
-        assert_eq!(source.channel_custody_count(channel, event), Some(1));
+        assert_eq!(
+            source.channel_custody_count(channel, event).unwrap(),
+            Some(1)
+        );
     })
     .catch_unwind()
     .await;
@@ -582,7 +664,7 @@ async fn sibling_custody_report_queries_never_replicate_the_missing_original() {
         .send_channel_message(group, b"original absent at query recipient")
         .await
         .unwrap();
-    let event = source.channel_history(group, 10)[0].id;
+    let event = source.channel_history(group, 10).unwrap()[0].id;
     // Reserve both endpoints together so each independent query has a fresh
     // real route; a responder close cannot race pooled-channel reuse.
     let listeners = [
@@ -597,8 +679,8 @@ async fn sibling_custody_report_queries_never_replicate_the_missing_original() {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
-                .cloned()
                 .collect();
             for event in events {
                 sibling.log.lock().unwrap().append_durable(event).unwrap();
@@ -634,7 +716,7 @@ async fn sibling_custody_report_queries_never_replicate_the_missing_original() {
             .await;
         responder.await.unwrap();
         assert_eq!(
-            sibling.log.lock().unwrap().get(&event).is_some(),
+            sibling.log.lock().unwrap().get(&event).unwrap().is_some(),
             index == 1,
             "a read-only query cannot replicate an absent original"
         );
@@ -646,7 +728,7 @@ async fn sibling_custody_report_queries_never_replicate_the_missing_original() {
             "the published report must match the actual durable storage at query time"
         );
         assert_eq!(
-            source.channel_custody_count(group, event),
+            source.channel_custody_count(group, event).unwrap(),
             Some(0),
             "authenticated own-sibling custody never becomes an external replica"
         );
@@ -705,8 +787,7 @@ async fn channel_custody_never_counts_sender_sibling_as_other_member() {
     channel_custody_sibling_scenario(false).await;
 }
 
-// Kept only as the negative control for the old aggregate prerequisite.
-// Production aggregate progress includes unrelated independent document lanes.
+// Post-create custody observes exact authenticated peer capabilities.
 fn custody_linked_capabilities_ready(source: &Node, sibling: &Node) -> bool {
     [(source, sibling), (sibling, source)]
         .into_iter()
@@ -718,6 +799,8 @@ fn custody_linked_capabilities_ready(source: &Node, sibling: &Node) -> bool {
                 .is_some_and(|support| support.public == peer.identity.public())
         })
 }
+// Kept only as the negative control for the old aggregate prerequisite.
+// Production aggregate progress includes unrelated independent document lanes.
 fn custody_linked_routes_ready(source: &Node, sibling: &Node) -> bool {
     custody_linked_capabilities_ready(source, sibling)
         && [(source, sibling), (sibling, source)]
@@ -823,6 +906,97 @@ fn custody_channel_setup_keys(
     ]
 }
 
+// Preserve an existing independent-lane hold while preventing this fresh
+// source custody observation from reaching the sibling before the offline cut.
+struct CustodyTransferHold<'a> {
+    source: &'a Node,
+    previous: Option<std::sync::Arc<crate::node::account_session::AccountSessionTestHook>>,
+    release: std::sync::Arc<tokio::sync::Semaphore>,
+    entered: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl<'a> CustodyTransferHold<'a> {
+    fn new(source: &'a Node, sibling: &Node) -> Self {
+        let previous = source.account_session_test_hook.lock().unwrap().clone();
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let (arrived, entered) = tokio::sync::oneshot::channel();
+        let arrived = std::sync::Arc::new(std::sync::Mutex::new(Some(arrived)));
+        let peer = sibling.identity.public();
+        *source.account_session_test_hook.lock().unwrap() = Some(std::sync::Arc::new({
+            let release = release.clone();
+            let previous = previous.clone();
+            move |observed, frame| {
+                let release = release.clone();
+                let arrived = arrived.clone();
+                let previous = previous.clone();
+                let peer = peer.clone();
+                Box::pin(async move {
+                    if observed == peer
+                        && matches!(&frame, crate::node::account_sync_wire::AccountHistoryFrame::DocumentsRequest { body }
+                            if wire::DocumentRequest::decode(body).is_some_and(|request| request.domain == AccountDocumentDomain::ChannelCustody))
+                    {
+                        if let Some(arrived) = arrived.lock().unwrap().take() {
+                            let _ = arrived.send(());
+                        }
+                        let _ = release.acquire().await;
+                    }
+                    if let Some(previous) = previous {
+                        previous(observed, frame).await;
+                    }
+                })
+            }
+        }));
+        Self {
+            source,
+            previous,
+            release,
+            entered: Some(entered),
+        }
+    }
+
+    async fn wait_entered(&mut self, deadline: tokio::time::Instant) {
+        tokio::time::timeout_at(deadline, self.entered.take().unwrap())
+            .await
+            .expect("a real authenticated custody request must reach the offline-cut hold")
+            .expect("the custody provider must remain alive until the offline cut");
+    }
+}
+
+impl Drop for CustodyTransferHold<'_> {
+    fn drop(&mut self) {
+        *self.source.account_session_test_hook.lock().unwrap() = self.previous.take();
+        self.release.close();
+    }
+}
+
+// Observes the real owner's durable confirmation without driving network work.
+// Register before the read: a publication between the read and await must wake us.
+async fn wait_custody_source_count(
+    source: &Node,
+    channel: crate::eventlog::ConversationId,
+    event: crate::eventlog::EventId,
+    expected: usize,
+    deadline: tokio::time::Instant,
+) -> Result<(), tokio::time::error::Elapsed> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            let changed = source.delivery_status_notify.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let observed = source.channel_custody_count(channel, event).unwrap();
+            if observed == Some(expected) {
+                break;
+            }
+            assert!(
+                observed.is_none_or(|count| count < expected),
+                "custody source setup exceeded its exact expected count"
+            );
+            changed.await;
+        }
+    })
+    .await
+}
+
 async fn wait_custody_channel_setup(
     source: &Node,
     sibling: &Node,
@@ -851,6 +1025,7 @@ async fn wait_custody_channel_setup_at_floor(
     // A held Directory lane may prevent importing later display-only inventory
     // publications. Retain its already authenticated pre-hold bootstrap floor.
     let mut required = bootstrap_floor;
+    let mut imported = false;
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if required.is_none() {
@@ -859,7 +1034,7 @@ async fn wait_custody_channel_setup_at_floor(
                     .map(|key| source.account_document_meta(key))
                     .collect::<Option<Vec<_>>>();
             }
-            let imported = required.as_ref().is_some_and(|heads| {
+            imported = required.as_ref().is_some_and(|heads| {
                 heads.iter().all(|head| {
                     sibling
                         .account_document(&head.key)
@@ -889,35 +1064,37 @@ async fn wait_custody_channel_setup_at_floor(
     })
     .await;
     if result.is_err() {
-        let capabilities = [(source, sibling), (sibling, source)].map(|(node, peer)| {
-            node.account_group_versions
+        let routes = [(source, sibling), (sibling, source)].map(|(node, peer)| {
+            let capability = node
+                .account_group_versions
                 .lock()
                 .unwrap()
                 .get(&peer.user_id())
-                .map(|support| support.public == peer.identity.public())
+                .is_some_and(|support| support.public == peer.identity.public());
+            let status = node
+                .device_sync_status()
+                .into_iter()
+                .find(|status| status.device_id == peer.user_id());
+            (
+                capability,
+                status.map(|status| {
+                    (
+                        status.document_phase,
+                        status.document_error.is_some(),
+                        status.document_requires_upgrade,
+                    )
+                }),
+            )
         });
-        let heads = keys
-            .iter()
-            .map(|key| {
-                (
-                    source.account_document_meta(key),
-                    sibling.account_document_meta(key),
-                    sibling
-                        .account_document(key)
-                        .map(|document| document.map(|document| document.payload().len())),
-                )
-            })
-            .collect::<Vec<_>>();
         let custody_settled = *observation.settled.lock().unwrap();
         let optional_settled = *observation.optional_settled.lock().unwrap();
         let phases = observation.phases.lock().unwrap().clone();
         eprintln!(
-            "custody setup timeout required={required:?} heads={heads:?} exact_capabilities={capabilities:?} custody_settled={custody_settled:?} optional_settled={optional_settled:?} source_status={:?} sibling_status={:?} phases={phases:?}",
-            source.device_sync_status(),
-            sibling.device_sync_status(),
+            "custody setup required-heads={} imported={imported} routes(capability,phase,error,upgrade)={routes:?} custody_settled={custody_settled:?} optional_settled={optional_settled:?} phases={phases:?}",
+            required.as_ref().map_or(0, Vec::len),
         );
     }
-    result.expect("the new channel's signed inventory/control heads, exact capabilities and reciprocal Optional baseline must be ready before the custody scenario");
+    result.expect("the new channel's signed inventory/control heads, exact bidirectional capabilities and reciprocal Optional baseline must be ready before the custody scenario");
 }
 
 #[tokio::test]
@@ -938,7 +1115,10 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
     use futures_util::FutureExt;
     use std::{
         net::IpAddr,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::Duration,
     };
     use tokio::{
@@ -949,6 +1129,12 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
     impl Drop for ReleaseOnDrop {
         fn drop(&mut self) {
             self.0.close();
+        }
+    }
+    struct ActiveHold(Arc<AtomicUsize>);
+    impl Drop for ActiveHold {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -997,6 +1183,10 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
     }
     let release = Arc::new(Semaphore::new(0));
     let _release_on_drop = ReleaseOnDrop(release.clone());
+    let optional_release = Arc::new(Semaphore::new(0));
+    let _optional_release_on_drop = ReleaseOnDrop(optional_release.clone());
+    let optional_paid = Arc::new(AtomicBool::new(false));
+    let optional_active = Arc::new(AtomicUsize::new(0));
     let observed = std::panic::AssertUnwindSafe(async {
         let precreate = CustodySetupObservation::new(&source, &sibling);
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -1009,26 +1199,73 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
         }).await.expect("real reciprocal capability and empty custody startup precede channel creation");
         let (arrived, held) = oneshot::channel();
         let arrived = Arc::new(Mutex::new(Some(arrived)));
+        let (optional_arrived, optional_held) = oneshot::channel();
+        let optional_arrived = Arc::new(Mutex::new(Some(optional_arrived)));
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let exact_sibling = sibling.identity.public();
+        let optional_custody_ready = Arc::new(AtomicBool::new(false));
+        let previous_client_hook = sibling.account_client_test_hook.lock().unwrap().clone();
+        *sibling.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let exact_source = source.identity.public();
+            let optional_paid = optional_paid.clone();
+            let optional_custody_ready = optional_custody_ready.clone();
+            move |peer, phase| {
+                if peer == exact_source {
+                    if phase == "custody_setup_exchange_started" {
+                        optional_custody_ready.store(false, Ordering::Release);
+                    } else if phase.starts_with("custody_setup_exchange_completed settled=") {
+                        optional_custody_ready.store(phase.ends_with("=true"), Ordering::Release);
+                    }
+                }
+                // page_end reports the next domain after a real successful
+                // page. The worker publishes this pending cursor before it
+                // dispatches GroupActivity, so an old UpToDate projection
+                // cannot masquerade as the held optional continuation.
+                // A pre-create cursor may already be past Custody. Let that
+                // older Optional sweep finish before holding a later request;
+                // otherwise the hold prevents this epoch's required Custody
+                // exchange from ever running on the same Optional lane.
+                if peer == exact_source
+                    && optional_custody_ready.load(Ordering::Acquire)
+                    && phase.starts_with("page_end ")
+                    && phase.contains("outcome=ok ")
+                    && phase.contains("domain=GroupActivity pending=true ")
+                {
+                    optional_paid.store(true, Ordering::Release);
+                }
+                if let Some(previous) = &previous_client_hook {
+                    previous(peer, phase);
+                }
+            }
+        }));
         *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
             let release = release.clone();
+            let optional_release = optional_release.clone();
+            let optional_paid = optional_paid.clone();
+            let optional_active = optional_active.clone();
             let active = active.clone();
             move |peer, frame| {
                 let release = release.clone();
                 let active = active.clone();
                 let arrived = arrived.clone();
+                let optional_release = optional_release.clone();
+                let optional_arrived = optional_arrived.clone();
+                let optional_paid = optional_paid.clone();
+                let optional_active = optional_active.clone();
                 let exact_sibling = exact_sibling.clone();
                 Box::pin(async move {
-                    if peer == exact_sibling && matches!(frame, AccountHistoryFrame::DocumentsRequest { ref body } if wire::DocumentRequest::decode(body).is_some_and(|request| request.domain == held_domain)) {
-                        struct Active(Arc<std::sync::atomic::AtomicUsize>);
-                        impl Drop for Active {
-                            fn drop(&mut self) {
-                                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                            }
-                        }
-                        active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        let _active = Active(active);
+                    if peer != exact_sibling {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                        return;
+                    };
+                    let Some(request) = wire::DocumentRequest::decode(&body) else {
+                        return;
+                    };
+                    if request.domain == held_domain {
+                        active.fetch_add(1, Ordering::AcqRel);
+                        let _active = ActiveHold(active);
                         let signal = arrived.lock().unwrap().take();
                         if let Some(signal) = signal {
                             let _ = signal.send(());
@@ -1036,6 +1273,17 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
                         // A replacement request must retain the hold too; a
                         // historical first-arrival signal is not a live gate.
                         let _ = release.acquire().await;
+                    } else if held_domain == AccountDocumentDomain::GroupInventory
+                        && request.domain == AccountDocumentDomain::GroupActivity
+                        && optional_paid.load(Ordering::Acquire)
+                    {
+                        optional_active.fetch_add(1, Ordering::AcqRel);
+                        let _active = ActiveHold(optional_active);
+                        let signal = optional_arrived.lock().unwrap().take();
+                        if let Some(signal) = signal {
+                            let _ = signal.send(());
+                        }
+                        let _ = optional_release.acquire().await;
                     }
                 })
             }
@@ -1062,7 +1310,7 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     let imported = source_heads.iter().all(|head| {
-                        sibling.account_document(&head.key).ok().flatten().is_some_and(|document| {
+                        sibling.account_document(&head.key).unwrap().is_some_and(|document| {
                             let meta = &document.meta;
                             !meta.tombstone && meta.valid(&account.public().ed25519_pub)
                                 && meta.writer_device == head.writer_device && meta.order() >= head.order()
@@ -1077,32 +1325,90 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
             assert!(!release.is_closed());
             assert!(!observation.optional_ready(), "the live DmRecall hold must keep the whole Optional baseline unsettled despite historical custody readiness");
         }
-        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0, "the authenticated setup handler must still be held");
-        let setup = wait_custody_channel_setup(&source, &sibling, channel, &observation);
-        tokio::pin!(setup);
-        assert!(futures_util::poll!(setup.as_mut()).is_pending(), "a completed pre-create bootstrap must not admit message/custody work while authenticated post-create setup is held");
-        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0, "the setup predicate must remain pending during the live hold");
+        assert!(active.load(Ordering::Acquire) > 0, "the authenticated setup handler must still be held");
+        {
+            // Observe Pending without carrying this timer through a second
+            // separately observed live hold.
+            let setup = wait_custody_channel_setup(&source, &sibling, channel, &observation);
+            tokio::pin!(setup);
+            assert!(futures_util::poll!(setup.as_mut()).is_pending(), "a completed pre-create bootstrap must not admit message/custody work while authenticated post-create setup is held");
+        }
+        assert!(active.load(Ordering::Acquire) > 0, "the setup predicate must remain pending during the live hold");
         release.close();
-        setup.await;
+        if held_domain == AccountDocumentDomain::GroupInventory {
+            let optional_started = std::time::Instant::now();
+            let mut optional_phase = "waiting_for_paid_hold";
+            let mut optional_evidence = (false, false, false);
+            let optional_result = tokio::time::timeout(Duration::from_secs(30), async {
+                optional_held.await.expect("a paid optional continuation must reach the same-lane live hold");
+                optional_phase = "waiting_for_heads_capabilities_and_status";
+                loop {
+                    let imported = source_heads.iter().all(|head| {
+                        sibling.account_document(&head.key).unwrap().is_some_and(|document| {
+                            let meta = &document.meta;
+                            !meta.tombstone && meta.valid(&source.account.public().ed25519_pub)
+                                && meta.writer_device == head.writer_device && meta.order() >= head.order()
+                        })
+                    });
+                    let optional_pending = sibling.device_sync_status().into_iter().any(|status| {
+                        status.device_id == source.user_id()
+                            && status.document_phase == crate::node::SyncPhase::CatchingUp
+                            && status.document_error.is_none() && !status.document_requires_upgrade
+                    });
+                    let capabilities = custody_linked_capabilities_ready(&source, &sibling);
+                    optional_evidence = (imported, capabilities, optional_pending);
+                    if imported && capabilities && optional_pending {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await;
+            if optional_result.is_err() {
+                let status = sibling.device_sync_status().into_iter()
+                    .find(|status| status.device_id == source.user_id())
+                    .map(|status| (status.document_phase, status.document_error.is_some(), status.document_requires_upgrade));
+                let custody = *observation.settled.lock().unwrap();
+                let optional = *observation.optional_settled.lock().unwrap();
+                let phases = observation.phases.lock().unwrap().clone();
+                eprintln!("custody optional boundary phase={optional_phase} elapsed_ms={} evidence(imported,capabilities,clean_catching_up)={optional_evidence:?} status(phase,error,upgrade)={status:?} paid={} active={} released={} custody={custody:?} optional={optional:?} phases={phases:?}", optional_started.elapsed().as_millis(), optional_paid.load(Ordering::Acquire), optional_active.load(Ordering::Acquire), optional_release.is_closed());
+            }
+            optional_result.expect("real authenticated head floors and capabilities must arrive while same-lane optional work is pending");
+            assert!(optional_paid.load(Ordering::Acquire));
+            assert!(optional_active.load(Ordering::Acquire) > 0);
+            assert!(!optional_release.is_closed());
+            assert!(!custody_linked_routes_ready(&source, &sibling), "the aggregate criterion must observe the actual held Optional continuation");
+            assert!(!observation.optional_ready());
+            {
+                let setup = wait_custody_channel_setup(&source, &sibling, channel, &observation);
+                tokio::pin!(setup);
+                assert!(futures_util::poll!(setup.as_mut()).is_pending(), "GroupActivity shares the Optional lane and must finish before its bootstrap is ready");
+            }
+            assert!(optional_active.load(Ordering::Acquire) > 0);
+            optional_release.close();
+        }
+        wait_custody_channel_setup(&source, &sibling, channel, &observation).await;
         *source.account_session_test_hook.lock().unwrap() = None;
         if held_domain == AccountDocumentDomain::DmRecall {
             assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must import source custody rather than query the external holder");
             source.send_channel_message(channel, b"after real Optional bootstrap").await.unwrap();
-            let event = source.channel_history(channel, 10)[0].id;
+            let event = source.channel_history(channel, 10).unwrap()[0].id;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            wait_custody_source_count(&source, channel, event, 1, deadline).await.expect("the actual external holder must confirm before the fresh custody import observation");
             let external_head = source.channel_custody_observations(channel, event).into_iter().find(|meta| {
                 meta.writer_device == source.user_id()
                     && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if *holder == external.user_id())
                     && !meta.tombstone
             }).expect("public delivery must publish the source's authenticated external custody observation");
+            assert!(external_head.valid(&account.public().ed25519_pub));
             tokio::time::timeout(Duration::from_secs(8), async {
                 loop {
-                    let imported = sibling.account_document(&external_head.key).ok().flatten().is_some_and(|document| {
+                    let imported = sibling.account_document(&external_head.key).unwrap().is_some_and(|document| {
                         let meta = &document.meta;
                         !meta.tombstone && meta.valid(&account.public().ed25519_pub)
                             && meta.writer_device == external_head.writer_device && meta.order() >= external_head.order()
                     });
-                    if imported && sibling.channel_custody_count(channel, event) == Some(1)
-                        && sibling.channel_history(channel, 10).iter().any(|row| row.id == event && row.from_me)
+                    if imported && sibling.channel_custody_count(channel, event).unwrap() == Some(1)
+                        && ready_history(sibling.channel_history(channel, 10)).is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
                     {
                         break;
                     }
@@ -1115,7 +1421,9 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
         })
     }).catch_unwind().await;
     release.close();
+    optional_release.close();
     *source.account_session_test_hook.lock().unwrap() = None;
+    *sibling.account_client_test_hook.lock().unwrap() = None;
     for current in [&source, &sibling, &external] {
         current.runtime_work.close();
     }
@@ -1293,9 +1601,28 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         // Advance actual descriptive inventory after the Directory lane is
         // parked on hostname. This later display publication must not move the
         // already authenticated channel-bootstrap barrier.
+        let before_display = source.account_document_meta(&keys[0]).unwrap();
         source.set_profile_display_name("post-hold inventory display").unwrap();
         source.publish_group_inventory_for(channel);
-        let later_inventory = source.account_document_meta(&keys[0]).unwrap();
+        // The publisher may defer to bounded source/directory preparation. Its
+        // void return is not a durable-publication receipt. Observe the actual
+        // signed display update without driving another publication turn.
+        let later_inventory = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if source.account_document_meta(&keys[0]).is_some_and(|meta| meta.order() > before_display.order()) {
+                    let document = source.account_document(&keys[0]).unwrap().expect("the locally published inventory body must be durable");
+                    let meta = &document.meta;
+                    assert!(!meta.tombstone && meta.valid(&account.public().ed25519_pub) && meta.writer_device == source.user_id(), "the later inventory must retain its exact authenticated source");
+                    let reference: GroupInventoryReference = serde_json::from_slice(document.payload()).unwrap();
+                    if meta.order() > before_display.order()
+                        && reference.members.iter().any(|member| member.public == source.identity.public() && member.name.as_deref() == Some("post-hold inventory display"))
+                    {
+                        break meta.clone();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the owning publisher must advance the real signed display inventory after the hold");
         assert!(later_inventory.order() > bootstrap_floor[0].order(), "the owning publisher must advance the real signed inventory after the hold");
         assert!(sibling.account_document_meta(&keys[0]).unwrap().order() < later_inventory.order(), "the held Directory lane must retain its already imported bootstrap inventory");
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -1312,16 +1639,22 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         assert!(futures_util::poll!(setup.as_mut()).is_ready(), "the authenticated pre-hold bootstrap floor must allow setup while later Directory publication is held");
         assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must have no route for an independent external-holder query");
+        let mut custody_hold = CustodyTransferHold::new(&source, &sibling);
         source.send_channel_message(channel, b"independent custody progress").await.unwrap();
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "public send must not teach the sibling an external-holder route");
-        let event = source.channel_history(channel, 10)[0].id;
-        assert_eq!(source.channel_custody_count(channel, event), Some(1));
-        assert!(external.channel_history(channel, 10).iter().any(|row| row.id == event));
+        let event = source.channel_history(channel, 10).unwrap()[0].id;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        wait_custody_source_count(&source, channel, event, 1, deadline).await.expect("the real external holder must confirm while the independent directory remains held");
+        assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
+        assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event));
         let external_head = source.channel_custody_observations(channel, event).into_iter().find(|meta| {
             meta.writer_device == source.user_id()
                 && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if *holder == external.user_id())
                 && !meta.tombstone
         }).expect("the source must publish its actual authenticated external-holder observation");
+        assert!(external_head.valid(&account.public().ed25519_pub));
+        custody_hold.wait_entered(deadline).await;
+        assert!(sibling.account_document_meta(&external_head.key).is_none(), "the new source observation must remain unimported while the holder is online");
         // Preserve the original offline-holder proof and prevent a competing
         // sibling-authored observation from replacing the source's signed row.
         external_server.take().unwrap().abort();
@@ -1329,8 +1662,12 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         tokio::time::timeout(Duration::from_secs(5), external.runtime_work.drain()).await.expect("external holder must retire before custody observation");
         source.roster.lock().unwrap().forget(&external.identity.public());
         sibling.roster.lock().unwrap().forget(&external.identity.public());
+        assert!(sibling.routing_peer(&external.user_id()).is_none());
+        assert!(sibling.account_document_meta(&external_head.key).is_none(), "the source observation must still be absent at the actual offline cut");
+        drop(custody_hold);
         tokio::time::timeout(Duration::from_secs(8), async {
-            while !sibling.channel_history(channel, 10).iter().any(|row| row.id == event && row.from_me) {
+            while !ready_history(sibling.channel_history(channel, 10))
+                .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me)) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("the exact outgoing event must reach sibling history while directory is held");
@@ -1341,11 +1678,11 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
                     !meta.tombstone && meta.writer_device == source.user_id()
                         && meta.valid(&account.public().ed25519_pub) && meta.order() >= external_head.order()
                 });
-                if sibling.channel_custody_count(channel, event) == Some(1) && imported_source_observation { break; }
+                if sibling.channel_custody_count(channel, event).unwrap() == Some(1) && imported_source_observation { break; }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("actual newly published source-authenticated external custody must converge while directory is held");
-        assert!(external.channel_history(channel, 10).iter().any(|row| row.id == event), "the external member must retain the exact fresh event");
+        assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event), "the external member must retain the exact fresh event");
         assert!(!sibling.channel_custody_observations(channel, event).is_empty(), "fresh external custody must arrive as an actual account-private document");
         assert!(!release.is_closed());
         assert_ne!(sibling.device_hostnames().unwrap().get(&source.user_id()).map(String::as_str), Some("held-directory-update"), "fresh custody must not depend on importing the held directory update");
@@ -1400,7 +1737,11 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         for observer in [&a, &sibling, &bob] {
-            if observer.user_id() != current.user_id() {
+            if observer.user_id() != current.user_id()
+                && !(external_online
+                    && current.user_id() == bob.user_id()
+                    && observer.user_id() == sibling.user_id())
+            {
                 observer.roster.lock().unwrap().update(
                     &Announce::new_with_account(
                         &current.identity,
@@ -1489,19 +1830,65 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         bob.runtime_work.drain().await;
         a.roster.lock().unwrap().forget(&bob.identity.public());
     }
+    let mut custody_hold = external_online.then(|| {
+        assert!(
+            sibling.routing_peer(&bob.user_id()).is_none(),
+            "the sibling must have no independent holder route, including cached routes"
+        );
+        CustodyTransferHold::new(&a, &sibling)
+    });
+    let mut required_source_observation = None;
     a.trace_account_client(&sibling.identity.public(), || "fixture_before_send".into());
     a.send_channel_message(channel, b"synthetic custody fixture")
         .await
         .unwrap();
     a.trace_account_client(&sibling.identity.public(), || "fixture_after_send".into());
-    let event = a.channel_history(channel, 10)[0].id;
+    let event = a.channel_history(channel, 10).unwrap()[0].id;
     if external_online {
         assert!(
             bob.channel_history(channel, 10)
+                .unwrap()
                 .iter()
                 .any(|row| row.id == event)
         );
-        assert_eq!(a.channel_custody_count(channel, event), Some(1));
+        // A successful send does not promise a completed durable-have probe.
+        // Establish the exact receipt while its real holder is still online;
+        // the independent post-stop eight-second observations start afterward.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let confirmed = wait_custody_source_count(&a, channel, event, 1, deadline).await;
+        if confirmed.is_err() {
+            eprintln!(
+                "online holder custody setup count={:?} workers_finished={:?} omitted={} phases={:?}",
+                a.channel_custody_count(channel, event).unwrap(),
+                servers
+                    .iter()
+                    .map(|server| server.as_ref().map(|server| server.is_finished()))
+                    .collect::<Vec<_>>(),
+                custody_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+                custody_trace.lock().unwrap()
+            );
+        }
+        confirmed.expect(
+            "the online external holder must confirm this exact message before going offline",
+        );
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(1));
+        let key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(channel.as_bytes()),
+            event: event.to_hex(),
+            holder: bob.user_id(),
+        };
+        let head = a.account_document_meta(&key).unwrap();
+        assert!(
+            !head.tombstone
+                && head.writer_device == a.user_id()
+                && head.valid(&account.public().ed25519_pub)
+        );
+        custody_hold.as_mut().unwrap().wait_entered(deadline).await;
+        assert!(
+            sibling.account_document_meta(&key).is_none(),
+            "the exact source observation must remain unimported while the holder is online"
+        );
+        assert!(sibling.routing_peer(&bob.user_id()).is_none());
         let server = servers[2].take().unwrap();
         server.abort();
         let _ = server.await;
@@ -1512,15 +1899,20 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .lock()
             .unwrap()
             .forget(&bob.identity.public());
+        assert!(sibling.routing_peer(&bob.user_id()).is_none());
+        assert!(
+            sibling.account_document_meta(&key).is_none(),
+            "the source observation must still be absent at the actual offline cut"
+        );
+        required_source_observation = Some(head);
+        drop(custody_hold.take());
     }
     a.trace_account_client(&sibling.identity.public(), || {
         "fixture_holder_offline".into()
     });
     tokio::time::timeout(Duration::from_secs(8), async {
-        while !sibling
-            .channel_history(channel, 10)
-            .iter()
-            .any(|row| row.id == event && row.from_me)
+        while !ready_history(sibling.channel_history(channel, 10))
+            .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
         {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1550,7 +1942,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .collect::<Vec<_>>()
     };
     let custody_start = (
-        a.channel_custody_count(channel, event),
+        a.channel_custody_count(channel, event).unwrap(),
         custody_metadata(&a),
         custody_metadata(&sibling),
         custody_status(&a),
@@ -1561,7 +1953,23 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     let custody_observation_offset = custody_trace_started.elapsed().as_millis();
     let custody_observation_started = std::time::Instant::now();
     let actual = tokio::time::timeout(Duration::from_secs(8), async {
-        while sibling.channel_custody_count(channel, event) != Some(expected) {
+        loop {
+            let imported_source_observation =
+                required_source_observation.as_ref().is_none_or(|required| {
+                    sibling
+                        .account_document_meta(&required.key)
+                        .is_some_and(|meta| {
+                            !meta.tombstone
+                                && meta.writer_device == a.user_id()
+                                && meta.valid(&account.public().ed25519_pub)
+                                && meta.order() >= required.order()
+                        })
+                });
+            if sibling.channel_custody_count(channel, event).unwrap() == Some(expected)
+                && imported_source_observation
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -1570,8 +1978,8 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         eprintln!(
             "custody observation offset_ms={custody_observation_offset} start={custody_start:?} finish elapsed_ms={} source_count={:?} target_count={:?} source_meta={:?} target_meta={:?} source_status={:?} target_status={:?} omitted={} important={:?} phases={:?}",
             custody_observation_started.elapsed().as_millis(),
-            a.channel_custody_count(channel, event),
-            sibling.channel_custody_count(channel, event),
+            a.channel_custody_count(channel, event).unwrap(),
+            sibling.channel_custody_count(channel, event).unwrap(),
             custody_metadata(&a),
             custody_metadata(&sibling),
             custody_status(&a),
@@ -1586,24 +1994,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     }
     assert!(
         actual.is_ok(),
-        "authenticated external custody must converge before restart: count={:?}, channels={:?}, own_history={}, observations={:?}, sync={:?}",
-        sibling.channel_custody_count(channel, event),
-        sibling.list_channels(),
-        sibling
-            .channel_history(channel, 10)
-            .iter()
-            .any(|row| row.id == event && row.from_me),
-        sibling
-            .channel_custody_observations(channel, event)
-            .iter()
-            .map(|meta| (
-                meta,
-                sibling
-                    .account_document(&meta.key)
-                    .map(|document| document.map(|document| document.payload().len())),
-            ))
-            .collect::<Vec<_>>(),
-        sibling.device_sync_status(),
+        "authenticated external custody must converge before restart"
     );
     if !external_online {
         sibling
@@ -1628,9 +2019,19 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .members()
             .to_vec();
         a.distribute_channel_message(channel, &members, event).await;
-        assert_eq!(a.channel_custody_count(channel, event), Some(1));
+        // Fanout makes one best-effort attempt; authenticated custody is an
+        // independent observation. Let the existing recovery worker finish
+        // the returning holder's exact confirmation. This wait only observes.
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while a.channel_custody_count(channel, event).unwrap() != Some(1) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the returning external holder must confirm this exact message");
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(1));
         assert_eq!(
-            bob.channel_custody_count(channel, event),
+            bob.channel_custody_count(channel, event).unwrap(),
             None,
             "incoming foreign history is never own custody"
         );
@@ -1638,7 +2039,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         let mut cursor = custody_cursor();
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert_eq!(
-            sibling.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "history-off must not import a late confirmation"
         );
@@ -1648,7 +2049,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         let mut cursor = custody_cursor();
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert_eq!(
-            sibling.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event).unwrap(),
             Some(1),
             "confirmation arriving after history must update independently"
         );
@@ -1692,12 +2093,12 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         let lost_server = tokio::spawn(lost.clone().run_accept_loop(listener));
         a.recheck_channel_custody_peer(channel, event, &bob_peer)
             .await;
-        assert_eq!(a.channel_custody_count(channel, event), Some(0));
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(0));
         let negative_version = a.account_document_meta(&held.key).unwrap().version();
         let mut cursor = custody_cursor();
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert_eq!(
-            a.channel_custody_count(channel, event),
+            a.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "source reacquired a durable external copy during the negative snapshot check"
         );
@@ -1709,7 +2110,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             "the explicit custody exchange must import the exact signed negative version"
         );
         assert_eq!(
-            sibling.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "negative evidence must propagate after the earlier positive"
         );
@@ -1722,7 +2123,10 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 .unwrap(),
             "stale positive replay cannot undo the shared tombstone"
         );
-        assert_eq!(sibling.channel_custody_count(channel, event), Some(0));
+        assert_eq!(
+            sibling.channel_custody_count(channel, event).unwrap(),
+            Some(0)
+        );
         a.channel_custody
             .lock()
             .unwrap()
@@ -1730,7 +2134,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .unwrap();
         a.migrate_channel_custody(&mut None);
         assert_eq!(
-            a.channel_custody_count(channel, event),
+            a.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "an old journal positive cannot resurrect the newer shared negative"
         );
@@ -1741,13 +2145,14 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         let _ = server.await;
         sibling.runtime_work.drain().await;
         let secret = sibling.identity.secret_bytes();
+        drop(sibling);
         sibling = node_with_identity(
             &dir.path().join("sibling"),
             &account,
             DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         );
         assert_eq!(
-            sibling.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "the negative survives a fresh encrypted-store open"
         );
@@ -1767,7 +2172,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .is_none()
         );
         assert!(
-            lost.log.lock().unwrap().get(&event).is_some(),
+            lost.log.lock().unwrap().get(&event).unwrap().is_some(),
             "a shared negative must allow retry despite an old local journal positive"
         );
         // Apply the receiver's retained controls before asking it to qualify
@@ -1783,14 +2188,16 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .is_none()
         );
         assert_eq!(
-            a.channel_custody_count(channel, event),
+            a.channel_custody_count(channel, event).unwrap(),
             Some(1),
-            "a fresh authenticated probe repairs the negative; receiver={:?}",
-            lost.list_channels()
+            "a fresh authenticated probe repairs the negative"
         );
         let mut cursor = custody_cursor();
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
-        assert_eq!(sibling.channel_custody_count(channel, event), Some(1));
+        assert_eq!(
+            sibling.channel_custody_count(channel, event).unwrap(),
+            Some(1)
+        );
         final_expected = 1;
         lost.runtime_work.close();
         lost_server.abort();
@@ -1810,21 +2217,22 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         current.runtime_work.drain().await;
     }
     let secret = sibling.identity.secret_bytes();
+    drop(sibling);
     let reopened = node_with_identity(
         &dir.path().join("sibling"),
         &account,
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
     );
     assert_eq!(
-        reopened.channel_custody_count(channel, event),
+        reopened.channel_custody_count(channel, event).unwrap(),
         Some(final_expected),
         "a fresh node must retain synchronized observations and tombstones"
     );
     assert_eq!(
-        a.channel_custody_count(channel, event),
+        a.channel_custody_count(channel, event).unwrap(),
         Some(final_expected),
         "sender siblings do not count as another member account; sibling status={:?}",
-        sibling.channel_custody_count(channel, event)
+        reopened.channel_custody_count(channel, event).unwrap()
     );
 }
 #[tokio::test]
@@ -2993,7 +3401,7 @@ async fn private_dm_reaction_catches_up_through_a_third_certified_device() {
         .react_to_account(&peer_account, target, "👍", false)
         .await
         .unwrap();
-    let expected = source.account_reactions(&peer_account);
+    let expected = source.account_reactions(&peer_account).unwrap();
     assert_eq!(expected.len(), 1);
     for (from, to) in [(&source, &relay), (&relay, &fresh)] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3019,7 +3427,7 @@ async fn private_dm_reaction_catches_up_through_a_third_certified_device() {
         let _ = task.await;
     }
     assert_eq!(
-        fresh.account_reactions(&peer_account),
+        fresh.account_reactions(&peer_account).unwrap(),
         expected,
         "a newly linked device must recover old reactions from any certified sibling"
     );
@@ -3121,6 +3529,7 @@ async fn private_dm_recall_catches_up_before_a_late_original_message() {
     assert!(
         fresh
             .account_history(&peer, 10)
+            .unwrap()
             .iter()
             .all(|m| m.id != crate::eventlog::EventId::new(target) || m.recalled),
         "catch-up must never show the late recalled plaintext"
@@ -3194,7 +3603,9 @@ async fn private_peer_reaction_witness_reaches_an_offline_linked_device() {
         .fail_index_for_test(false);
     observer.emit_new_messages(conv);
     pull_control_documents(&observer, &fresh, &account).await;
-    let got = fresh.account_reactions(&actor_account.account_id());
+    let got = fresh
+        .account_reactions(&actor_account.account_id())
+        .unwrap();
     assert_eq!(
         got.len(),
         1,
@@ -3226,7 +3637,7 @@ fn private_control_original_order_removal_and_generic_write_guards() {
         .publish_own_account_reaction(&peer, 20, &action(false))
         .unwrap();
     assert!(
-        source.account_reactions(&peer).is_empty(),
+        source.account_reactions(&peer).unwrap().is_empty(),
         "late/tied adds cannot resurrect a removal"
     );
     let key = AccountDocumentKey::DmReaction {
@@ -3342,13 +3753,13 @@ async fn private_controls_obey_history_policy_survive_restart_and_reject_another
         .set_device_sync_category(SyncCategory::History, false)
         .unwrap();
     pull_control_documents(&source, &fresh, &account).await;
-    assert!(fresh.account_reactions(&peer).is_empty());
+    assert!(fresh.account_reactions(&peer).unwrap().is_empty());
     source
         .set_device_sync_category(SyncCategory::History, true)
         .unwrap();
     pull_control_documents(&source, &fresh, &account).await;
-    let expected = source.account_reactions(&peer);
-    assert_eq!(fresh.account_reactions(&peer), expected);
+    let expected = source.account_reactions(&peer).unwrap();
+    assert_eq!(fresh.account_reactions(&peer).unwrap(), expected);
     let key = AccountDocumentKey::DmReaction {
         peer_account: peer.clone(),
         target: target.to_hex(),
@@ -3372,13 +3783,13 @@ async fn private_controls_obey_history_policy_survive_restart_and_reject_another
         &account,
         DeviceIdentity::from_secret_bytes(identity.0, identity.1),
     );
-    assert_eq!(reopened.account_reactions(&peer), expected);
+    assert_eq!(reopened.account_reactions(&peer).unwrap(), expected);
     source
         .react_to_account(&peer, target, "👍", true)
         .await
         .unwrap();
     pull_control_documents(&source, &reopened, &account).await;
-    assert!(reopened.account_reactions(&peer).is_empty());
+    assert!(reopened.account_reactions(&peer).unwrap().is_empty());
     assert!(
         !reopened
             .account_documents
@@ -3388,7 +3799,7 @@ async fn private_controls_obey_history_policy_survive_restart_and_reject_another
             .unwrap(),
         "an old witnessed add cannot overtake the later removal"
     );
-    assert!(reopened.account_reactions(&peer).is_empty());
+    assert!(reopened.account_reactions(&peer).unwrap().is_empty());
 }
 
 #[test]
@@ -3547,6 +3958,7 @@ fn private_peer_control_ingress_rejects_wrong_actor_and_unrelated_route() {
     assert!(
         observer
             .account_reactions(&actor_account.account_id())
+            .unwrap()
             .is_empty()
     );
 }
@@ -3960,12 +4372,18 @@ fn private_recall_witness_cannot_recall_another_accounts_target() {
     assert!(
         !observer
             .recalled_targets_account(&peer.account_id())
+            .unwrap()
             .contains(&target)
     );
-    assert!(!observer.private_dm_message_recalled(&peer.account_id(), target, &own.account_id()));
+    assert!(
+        !observer
+            .private_dm_message_recalled(&peer.account_id(), target, &own.account_id())
+            .unwrap()
+    );
     assert!(
         observer
             .account_history(&peer.account_id(), 10)
+            .unwrap()
             .iter()
             .all(|message| !message.recalled)
     );
@@ -4038,9 +4456,18 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         .send_channel_message(channel, b"synthetic certificate refresh")
         .await
         .unwrap();
-    let event = source.channel_history(channel, 10)[0].id;
+    let event = source.channel_history(channel, 10).unwrap()[0].id;
+    wait_custody_source_count(
+        &source,
+        channel,
+        event,
+        2,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect("both real legacy holders must confirm before their certificate bindings change");
     assert_eq!(
-        source.channel_custody_count(channel, event),
+        source.channel_custody_count(channel, event).unwrap(),
         Some(2),
         "unbound explicit legacy members have separate device principals"
     );
@@ -4053,7 +4480,10 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
     let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
     let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
     pull_custody_page(&sibling, &source_peer, &mut cursor).await;
-    assert_eq!(sibling.channel_custody_count(channel, event), Some(2));
+    assert_eq!(
+        sibling.channel_custody_count(channel, event).unwrap(),
+        Some(2)
+    );
     for (holder, address) in [(&bob, addresses[2]), (&bob2, addresses[3])] {
         source.roster.lock().unwrap().update(
             &Announce::new_with_account(&holder.identity, &bob_account, "Bob", address.port()),
@@ -4080,7 +4510,7 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
     let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
     pull_custody_page(&sibling, &source_peer, &mut cursor).await;
     assert_eq!(
-        sibling.channel_custody_count(channel, event),
+        sibling.channel_custody_count(channel, event).unwrap(),
         Some(1),
         "positive runtime rechecks upgrade the sibling's certified principal projection"
     );
@@ -4100,23 +4530,367 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
             .is_err()
     );
     assert_eq!(
-        source.channel_custody_count(channel, EventId::new([0; 32])),
+        source
+            .channel_custody_count(channel, EventId::new([0; 32]))
+            .unwrap(),
         None
     );
-    for server in servers {
+    for current in [&source, &sibling, &bob, &bob2] {
+        current.runtime_work.close();
+    }
+    for server in &servers {
         server.abort();
     }
+    for server in servers {
+        let _ = server.await;
+    }
+    for current in [&source, &sibling, &bob, &bob2] {
+        current.runtime_work.drain().await;
+    }
     let secret = sibling.identity.secret_bytes();
+    drop(sibling);
     let reopened = node_with_identity(
         &dir.path().join("sibling"),
         &account,
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
     );
     assert_eq!(
-        reopened.channel_custody_count(channel, event),
+        reopened.channel_custody_count(channel, event).unwrap(),
         Some(1),
         "certified explicit members deduplicate after discovery is forgotten"
     );
+}
+
+#[tokio::test]
+async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_held() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        discovery::{Announce, DiscoveryVisibility},
+        eventlog::{Event, EventKind, LogError},
+        node::{NodeError, account_devices::AccountDevice},
+    };
+    use futures_util::FutureExt;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::net::TcpListener;
+    struct Held(Arc<AtomicBool>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let peer_account = Account::generate();
+    let source_path = dir.path().join("source");
+    let target_path = dir.path().join("target");
+    let peer_path = dir.path().join("peer");
+    let source = node(&source_path, &account);
+    let target = node(&target_path, &account);
+    let peer = node(&peer_path, &peer_account);
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_proof = Announce::new_with_account(
+        &source.identity,
+        &account,
+        "source",
+        source_listener.local_addr().unwrap().port(),
+    );
+    let target_proof = Announce::new_with_account(
+        &target.identity,
+        &account,
+        "target",
+        target_listener.local_addr().unwrap().port(),
+    );
+    let peer_proof = Announce::new_with_account(
+        &peer.identity,
+        &peer_account,
+        "peer",
+        peer_listener.local_addr().unwrap().port(),
+    );
+    for (node, path, proof) in [
+        (&source, &source_path, &source_proof),
+        (&target, &target_path, &target_proof),
+        (&peer, &peer_path, &peer_proof),
+    ] {
+        node.configure_privacy(path, "pw", proof, Arc::new(DiscoveryVisibility::default()))
+            .unwrap();
+    }
+    for (node, other) in [(&source, &target), (&target, &source)] {
+        node.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: other.identity.public(),
+                certificate: account.certify(&other.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        for category in [
+            SyncCategory::History,
+            SyncCategory::Attachments,
+            SyncCategory::Appearance,
+            SyncCategory::Contacts,
+            SyncCategory::Profile,
+        ] {
+            node.set_device_sync_category(category, false).unwrap();
+        }
+    }
+    for (node, proof) in [
+        (&source, &target_proof),
+        (&target, &source_proof),
+        (&source, &peer_proof),
+        (&peer, &source_proof),
+    ] {
+        node.roster
+            .lock()
+            .unwrap()
+            .update(proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    }
+    let held_group = new_channel_id();
+    let initial = Event::new(
+        &peer.identity,
+        held_group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "unrelated peer recovery".into(),
+            members: vec![source.identity.public(), peer.identity.public()],
+            epoch: 0,
+            owner: peer.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append_durable(initial).unwrap();
+    // Only the unrelated group's existing source is prepared before the worker.
+    // The later new group must be prepared and published by the live owner.
+    source.await_channel_metadata(held_group).await.unwrap();
+    let active = Arc::new(AtomicBool::new(false));
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let mut tasks = tokio::task::JoinSet::new();
+    let held = active.clone();
+    let peer_server = peer.clone();
+    let expected_source = source.identity.public();
+    tasks.spawn(async move {
+        loop {
+            let (stream, _) = peer_listener.accept().await.unwrap();
+            let Ok(mut channel) = peer_server.privacy_accept(stream).await else {
+                continue;
+            };
+            assert_eq!(channel.peer_identity(), &expected_source);
+            let Ok(first) = channel.recv().await else {
+                continue;
+            };
+            if super::super::session::fingerprint_request_conversation(&first) != Some(held_group) {
+                // A separate metadata query cannot satisfy the sync hold.
+                continue;
+            }
+            held.store(true, Ordering::Release);
+            let _held = Held(held);
+            let _ = entered.send(());
+            // Hold this authenticated response until the fixture parent cancels
+            // it; no response, grant or history body is fabricated.
+            std::future::pending::<()>().await;
+            drop(channel);
+            break;
+        }
+    });
+    let new_group = new_channel_id();
+    let key = AccountDocumentKey::GroupInventory {
+        channel: hex::encode(new_group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let armed = Arc::new(AtomicBool::new(false));
+    let turns = Arc::new(AtomicUsize::new(0));
+    let first_pending = Arc::new(AtomicBool::new(false));
+    let peer_ends = Arc::new(AtomicUsize::new(0));
+    let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let started = std::time::Instant::now();
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let weak = Arc::downgrade(&source);
+        let armed = armed.clone();
+        let turns = turns.clone();
+        let first_pending = first_pending.clone();
+        let peer_ends = peer_ends.clone();
+        let phases = phases.clone();
+        let end = format!("channel_recovery_peer_end channel={held_group:?}");
+        move |_, phase| {
+            if phase.starts_with(&end) {
+                peer_ends.fetch_add(1, Ordering::Relaxed);
+            }
+            if armed.load(Ordering::Acquire)
+                && phase == "channel_recovery_plaintext_done"
+                && turns.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                let node = weak.upgrade().unwrap();
+                let pending = match node.channel_checkpoints.source_binding(new_group) {
+                    Ok(None) | Err(LogError::StaleCursor) => true,
+                    Ok(Some(_)) => false,
+                    Err(_) => panic!("first local turn failed outside bounded preparation"),
+                };
+                first_pending.store(pending, Ordering::Relaxed);
+            }
+            if phase.starts_with("channel_recovery_") || phase.starts_with("inventory_publication_")
+            {
+                let mut phases = phases.lock().unwrap();
+                if phases.len() == 64 {
+                    phases.pop_front();
+                }
+                phases.push_back((started.elapsed().as_millis(), phase));
+            }
+        }
+    }));
+    source.schedule_channel_recovery(held_group);
+    tasks.spawn(source.clone().run_accept_loop(source_listener));
+    tasks.spawn(target.clone().run_accept_loop(target_listener));
+    let observed = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(30), entry)
+            .await
+            .expect("the unrelated authenticated sync request must enter its real peer hold")
+            .unwrap();
+        assert!(active.load(Ordering::Acquire));
+        assert_eq!(peer_ends.load(Ordering::Relaxed), 0);
+        let event = Event::new(
+            &peer.identity,
+            new_group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "new local inventory during peer hold".into(),
+                members: vec![source.identity.public(), peer.identity.public()],
+                epoch: 0,
+                owner: peer.user_id(),
+            }
+            .encode(),
+        );
+        // The source is a legacy member, never the owner: its certified sibling
+        // receives descriptive Directory state without automatic membership.
+        assert!(event.verify_signature() && event.verify_integrity());
+        source.log.lock().unwrap().append_durable(event).unwrap();
+        assert!(
+            source
+                .channel_checkpoints
+                .source_binding(new_group)
+                .unwrap()
+                .is_none()
+        );
+        assert!(source.account_document_meta(&key).is_none());
+        assert!(target.account_document_meta(&key).is_none());
+        armed.store(true, Ordering::Release);
+        // One retained-input notification, with no manual local or network turn.
+        source.channel_recovery_notify.notify_one();
+        let delivered = tokio::time::timeout(Duration::from_secs(8), async {
+            let mut required = None;
+            loop {
+                if required.is_none() {
+                    required = source.account_document_meta(&key);
+                }
+                let imported = required.as_ref().is_some_and(|head| {
+                    !head.tombstone
+                        && head.writer_device == source.user_id()
+                        && head.valid(&account.public().ed25519_pub)
+                        && target
+                            .account_document(&key)
+                            .unwrap()
+                            .is_some_and(|document| document.meta == *head)
+                });
+                let presented = match target.list_channels() {
+                    Ok(rows) => rows.iter().any(|row| {
+                        row.id == new_group
+                            && row.name == "new local inventory during peer hold"
+                            && row.archived
+                    }),
+                    Err(NodeError::Log(LogError::StaleCursor)) => false,
+                    Err(error) => panic!("Directory presentation failed: {error}"),
+                };
+                if imported && presented {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            active.load(Ordering::Acquire),
+            "the unrelated peer response must remain held"
+        );
+        assert_eq!(
+            peer_ends.load(Ordering::Relaxed),
+            0,
+            "peer timeout or completion cannot rescue local publication"
+        );
+        delivered.expect(
+            "new signed Directory publication must not wait for an unrelated peer sync response",
+        );
+        assert!(
+            first_pending.load(Ordering::Relaxed),
+            "the first bounded local turn must leave the new source unfinished"
+        );
+        assert!(
+            turns.load(Ordering::Relaxed) > 1,
+            "new local preparation must resume across bounded turns"
+        );
+    })
+    .catch_unwind()
+    .await;
+    eprintln!(
+        "held peer publication turns={} first_pending={} peer_ends={} held={} source_head={} target_head={} policy_ready={} phases={:?}",
+        turns.load(Ordering::Relaxed),
+        first_pending.load(Ordering::Relaxed),
+        peer_ends.load(Ordering::Relaxed),
+        active.load(Ordering::Acquire),
+        source.account_document_meta(&key).is_some(),
+        target.account_document_meta(&key).is_some(),
+        source
+            .channel_checkpoints
+            .prepared_history_policy(new_group)
+            .is_ok(),
+        phases.lock().unwrap()
+    );
+    *source.account_client_test_hook.lock().unwrap() = None;
+    for node in [&source, &target, &peer] {
+        node.runtime_work.close();
+        node.sessions.clear();
+    }
+    tasks.abort_all();
+    let failures = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut failures = 0;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                failures += 1;
+            }
+        }
+        for node in [&source, &target, &peer] {
+            node.runtime_work.drain().await;
+        }
+        failures
+    })
+    .await
+    .expect("all held-peer fixture owners must join");
+    assert_eq!(
+        failures, 0,
+        "a worker panic must not masquerade as blocked local publication"
+    );
+    assert!(
+        !active.load(Ordering::Acquire),
+        "parent cancellation must drop the held peer response"
+    );
+    if let Err(panic) = observed {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
@@ -4171,6 +4945,9 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     // The exact legacy device grant remains valid after this device adopts the
     // current root; reconstruct its metadata rather than copying old-root docs.
     source.prepare_account_transition(&account).unwrap();
+    source
+        .persist_account_adoption(&account.public(), || Ok(()), || Ok(source.account.public()))
+        .unwrap();
     let secret = source.identity.secret_bytes();
     drop(source);
     let source = node_with_identity(
@@ -4216,9 +4993,11 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_address = target_listener.local_addr().unwrap();
     for (node, path, name, port) in [
         (&source, &source_path, "source", address.port()),
-        (&target, &target_path, "target", 4243),
+        (&target, &target_path, "target", target_address.port()),
     ] {
         node.configure_privacy(
             path,
@@ -4240,29 +5019,132 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
         address.ip(),
         &target.user_id(),
     );
+    source.roster.lock().unwrap().update(
+        &Announce::new_with_account(&target.identity, &account, "target", target_address.port()),
+        target_address.ip(),
+        &source.user_id(),
+    );
+    let source_phase = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let publication_trace =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let publication_started = std::time::Instant::now();
+    *source.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new({
+        let phase = source_phase.clone();
+        let trace = publication_trace.clone();
+        move |_, event| {
+            if event.starts_with("channel_recovery_") || event.starts_with("inventory_publication_")
+            {
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 64 {
+                    trace.pop_front();
+                }
+                trace.push_back((publication_started.elapsed().as_millis(), event.clone()));
+            }
+            let value = match event.as_str() {
+                "channel_recovery_maintenance_begin" => 1,
+                "channel_recovery_maintenance_done" => 2,
+                "channel_recovery_plaintext_done" => 3,
+                "channel_recovery_join_history_done" => 4,
+                "channel_recovery_group_metadata_done" => 5,
+                "channel_recovery_membership_done" => 6,
+                "channel_recovery_fallback_done" => 7,
+                _ => return,
+            };
+            phase.store(value, std::sync::atomic::Ordering::Relaxed);
+        }
+    }));
     let server = tokio::spawn(source.clone().run_accept_loop(listener));
-    let source_worker = tokio::spawn(source.clone().run_account_history_loop());
-    let worker = tokio::spawn(target.clone().run_account_history_loop());
+    // Both hosts must receive authenticated publication wakes. A target-only
+    // pull worker can finish an empty Directory sweep before source publication
+    // and then wait for the ten-second periodic repair instead of the live wake.
+    let worker = tokio::spawn(target.clone().run_accept_loop(target_listener));
     let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
-        while !ids
-            .iter()
-            .all(|id| target.list_channels().iter().any(|row| row.id == *id))
-        {
+        while !ids.iter().all(|id| {
+            target
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|row| row.id == *id)
+        }) {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await;
+    if result.is_err() || std::env::var_os("MESH_TALK_INVENTORY_TRACE").is_some() {
+        // Selected scalars distinguish publication, transport and presentation
+        // without printing signed payloads, identifiers or credentials.
+        let rows = ids
+            .iter()
+            .map(|id| {
+                let key = AccountDocumentKey::GroupInventory {
+                    channel: hex::encode(id.as_bytes()),
+                    source_device: source.user_id(),
+                };
+                [&source, &target].map(|node| {
+                    let checkpoint = match node.channel_checkpoints.source_binding(*id) {
+                        Ok(Some(_)) => 1,
+                        Ok(None) => 0,
+                        Err(crate::eventlog::LogError::StaleCursor) => 2,
+                        Err(_) => 3,
+                    };
+                    (
+                        checkpoint,
+                        node.account_document_meta(&key).is_some(),
+                        node.account_document(&key)
+                            .is_ok_and(|value| value.is_some()),
+                        node.list_channels()
+                            .is_ok_and(|rows| rows.iter().any(|row| row.id == *id)),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let prepared = ids
+            .iter()
+            .map(|id| {
+                let policy = match source.channel_checkpoints.prepared_history_policy(*id) {
+                    Ok(_) => 1,
+                    Err(crate::eventlog::LogError::StaleCursor) => 2,
+                    Err(_) => 3,
+                };
+                let projection = match source.channel_checkpoints.published_projection(*id) {
+                    Ok(Some(_)) => 1,
+                    Ok(None) => 0,
+                    Err(crate::eventlog::LogError::StaleCursor) => 2,
+                    Err(_) => 3,
+                };
+                (policy, projection)
+            })
+            .collect::<Vec<_>>();
+        let routes = target
+            .device_sync_status()
+            .into_iter()
+            .filter(|status| status.device_id == source.user_id())
+            .map(|status| {
+                (
+                    status.document_phase,
+                    status.document_error.is_some(),
+                    status.document_requires_upgrade,
+                )
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "inventory progress source_phase={} selected(checkpoint,meta,body,presentation)={rows:?} prepared(policy,projection)={prepared:?} target_routes(phase,error,upgrade)={routes:?} phases={:?}",
+            source_phase.load(std::sync::atomic::Ordering::Relaxed),
+            publication_trace.lock().unwrap()
+        );
+    }
+    *source.account_client_test_hook.lock().unwrap() = None;
+    source.runtime_work.close();
+    target.runtime_work.close();
     worker.abort();
-    source_worker.abort();
     server.abort();
     let _ = worker.await;
-    let _ = source_worker.await;
     let _ = server.await;
+    source.runtime_work.drain().await;
+    target.runtime_work.drain().await;
     assert!(
         result.is_ok(),
-        "same-account descriptive inventory must include both distinct legacy groups with their owner offline: expected channels={}; actual channels={}",
-        ids.len(),
-        target.list_channels().len()
+        "same-account descriptive inventory must include both distinct legacy groups with their owner offline"
     );
     if optional_off {
         assert!(
@@ -4273,6 +5155,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     for id in &ids {
         let row = target
             .list_channels()
+            .unwrap()
             .into_iter()
             .find(|row| row.id == *id)
             .unwrap();
@@ -4286,7 +5169,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
                     && member.name.as_deref() == Some("Owner canonical")),
             "offline owner display names must come from the certified source snapshot"
         );
-        assert!(!target.channel_can_manage(*id));
+        assert!(!target.channel_can_manage(*id).unwrap());
         assert!(
             target.channel_members(*id).is_empty(),
             "display references must never become membership"
@@ -4298,7 +5181,13 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     drop(source);
     let reopened = node_with_identity(&target_path, &account, identity);
     for id in ids {
-        assert!(reopened.list_channels().iter().any(|row| row.id == id));
+        assert!(
+            reopened
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|row| row.id == id)
+        );
     }
 }
 
@@ -4330,13 +5219,54 @@ fn group_inventory_legacy_fixture(
     );
     source.log.lock().unwrap().append(event).unwrap();
     source.process_channel(id);
+    settle_group_metadata(source, id);
     id
 }
-fn group_inventory_source_document(
+pub(super) fn group_inventory_source_document(
     source: &Node,
     id: crate::eventlog::ConversationId,
 ) -> AccountDocument {
-    source.publish_group_inventory(&mut None);
+    let count = source
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .metadata(&id)
+        .unwrap()
+        .map_or(0, |meta| meta.count);
+    for turn in 0..count.saturating_mul(16).saturating_add(1024) {
+        {
+            let log = source.log.lock().unwrap();
+            let repository = log.repository().unwrap();
+            if source
+                .channel_checkpoints
+                .project_step(repository, &source.identity, id)
+                .unwrap()
+            {
+                source
+                    .channel_checkpoints
+                    .prepare_presentation_step(
+                        repository,
+                        &source.identity,
+                        id,
+                        crate::eventlog::sync::network::PreparationBudget::default(),
+                    )
+                    .unwrap();
+            }
+        }
+        match source.try_publish_group_inventory_groups(&[id]) {
+            Ok(()) => break,
+            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+            Err(NodeError::Log(crate::eventlog::LogError::Io(error)))
+                if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("directory fixture publication failed: {error}"),
+        }
+        assert!(
+            turn + 1 < count.saturating_mul(16).saturating_add(1024),
+            "finite directory fixture did not settle"
+        );
+    }
     source
         .account_document(&AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
@@ -4352,19 +5282,21 @@ fn copy_public_group(source: &Node, target: &Node, group: crate::eventlog::Conve
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     for event in events {
         target.log.lock().unwrap().append(event).unwrap();
     }
     target.process_channel(group);
+    settle_group_metadata(target, group);
 }
 
 fn group_control_source_document(
     source: &Node,
     group: crate::eventlog::ConversationId,
 ) -> AccountDocument {
+    settle_group_metadata(source, group);
     source.publish_account_group_access(&mut None);
     source
         .account_document(&AccountDocumentKey::GroupControl {
@@ -4679,6 +5611,7 @@ fn group_control_old_head_replay_and_reopen_preserve_the_latest_signed_observati
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let current = group_control_source_document(&owner, group);
     let store_path = dir.path().join("store");
     let mut store =
@@ -4732,6 +5665,7 @@ fn group_control_restored_older_public_state_cannot_republish_a_newer_own_head_a
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let current = group_control_source_document(&owner, group);
     restored
         .account_documents
@@ -4822,6 +5756,7 @@ fn group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_r
         source.log.lock().unwrap().append(event.clone()).unwrap();
     }
     source.process_channel(group);
+    settle_group_metadata(&source, group);
     assert_eq!(source.channel_owner(group), source.user_id());
     let keys = source.identity.secret_bytes();
     let restored = node_with_identity(
@@ -4847,8 +5782,10 @@ fn group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_r
             applied_seq,
         )
         .unwrap()
+        .unwrap()
         .id;
     source.process_channel(group);
+    settle_group_metadata(&source, group);
     assert_eq!(
         source.channel_owner(group),
         recipient.user_id(),
@@ -4857,8 +5794,9 @@ fn group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_r
     assert!(
         !source
             .account_group_projection(group)
-            .authorized
-            .contains(&applied),
+            .unwrap()
+            .is_authorized(applied)
+            .unwrap(),
         "the rejected competing parent means the historical authorized index omits this applied decision"
     );
     let latest = group_control_source_document(&source, group);
@@ -4903,6 +5841,7 @@ fn group_control_unreadable_latest_own_head_cannot_be_overwritten_by_a_restored_
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let latest = group_control_source_document(&owner, group);
     restored
         .account_documents
@@ -4963,6 +5902,7 @@ async fn group_control_source_leave_is_individual_and_all_known_left_sources_pro
     for node in [&owner, &first, &second] {
         node.log.lock().unwrap().append(genesis.clone()).unwrap();
         node.process_channel(group);
+        settle_group_metadata(node, group);
     }
     for source in [&first, &second] {
         let document = group_control_source_document(source, group);
@@ -5040,6 +5980,7 @@ async fn sequential_legacy_departures_retain_only_a_whole_account_closed_source(
     for source in [&first, &second] {
         source.log.lock().unwrap().append(genesis.clone()).unwrap();
         source.process_channel(group);
+        settle_group_metadata(source, group);
     }
     // Each physical source must actually know its sibling's certified binding,
     // otherwise its individual departure cannot observe that remaining member.
@@ -5085,12 +6026,14 @@ async fn sequential_legacy_departures_retain_only_a_whole_account_closed_source(
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::ChannelLeave)
         .unwrap()
         .clone();
     second.log.lock().unwrap().append(first_leave).unwrap();
     second.process_channel(group);
+    settle_group_metadata(&second, group);
     second
         .account_documents
         .lock()
@@ -5148,16 +6091,18 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     for event in &initial {
         member.log.lock().unwrap().append(event.clone()).unwrap();
     }
     member.process_channel(group);
+    settle_group_metadata(&member, group);
     assert!(
         member
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event()
             .is_none()
@@ -5173,7 +6118,7 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         .rename_channel(group, "Owner comparison branch")
         .await
         .unwrap();
-    let legacy = owner.account_group_projection(group);
+    let legacy = owner.account_group_projection(group).unwrap();
     let mut grants = std::collections::BTreeMap::new();
     let mut bindings = Vec::new();
     for accepted in &legacy.accepted {
@@ -5218,14 +6163,17 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::ChannelAccountAuthority)
         .unwrap()
         .id;
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     assert_eq!(
         owner
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event(),
         Some(upgrade_id),
@@ -5236,12 +6184,13 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     assert!(
         member
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event()
             .is_none(),
@@ -5267,6 +6216,7 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         member.log.lock().unwrap().append(event).unwrap();
     }
     member.process_channel(group);
+    settle_group_metadata(&member, group);
     let after = member.account_group_access_with_closed(group).unwrap();
     assert_eq!(
         after.role,
@@ -5306,7 +6256,7 @@ async fn initial_upgrade_after_observed_departure_preserves_legacy_cleanup_prove
         .lifetime
         .clone();
     copy_public_group(&member, &owner, group);
-    let projection = owner.account_group_projection(group);
+    let projection = owner.account_group_projection(group).unwrap();
     assert!(projection.authority.current_event().is_none());
     let accepted = projection
         .accepted
@@ -5338,9 +6288,11 @@ async fn initial_upgrade_after_observed_departure_preserves_legacy_cleanup_prove
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     assert!(
         owner
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event()
             .is_some(),
@@ -5399,7 +6351,7 @@ async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
         first.leave_channel(group).await.unwrap();
         copy_public_group(&first, &owner, group);
     }
-    let legacy = owner.account_group_projection(group);
+    let legacy = owner.account_group_projection(group).unwrap();
     let mut grants = std::collections::BTreeMap::new();
     let mut bindings = vec![];
     for accepted in legacy.accepted.iter().filter(|member| {
@@ -5455,8 +6407,10 @@ async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let upgrade = owner
         .account_group_projection(group)
+        .unwrap()
         .authority
         .current_event()
         .unwrap();
@@ -5472,6 +6426,7 @@ async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .find(|event| event.kind == EventKind::ChannelLeave)
                 .unwrap()
@@ -5486,6 +6441,7 @@ async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
     );
     first.log.lock().unwrap().append(leaves[1].clone()).unwrap();
     first.process_channel(group);
+    settle_group_metadata(&first, group);
     assert_eq!(
         first.account_group_access_with_closed(group).unwrap().role,
         AccountGroupRole::Left
@@ -5560,7 +6516,13 @@ async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
     assert_eq!(closed.role, AccountGroupRole::Left);
     assert!(!closed.sources.is_empty());
     assert!(
-        reference.log.lock().unwrap().events(&group).is_empty(),
+        reference
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .unwrap()
+            .is_empty(),
         "mandatory authority proof must work without optional history"
     );
 }
@@ -5610,6 +6572,7 @@ async fn group_control_terminal_source_case(acknowledge: bool) {
     );
     owner.log.lock().unwrap().append(genesis).unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     for source in [&first, &second] {
         copy_public_group(&owner, source, group);
     }
@@ -5647,6 +6610,7 @@ async fn group_control_terminal_source_case(acknowledge: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     copy_public_group(&owner, &first, group);
     let terminal = group_control_source_document(&first, group);
     reference
@@ -5708,6 +6672,7 @@ async fn group_control_terminal_source_case(acknowledge: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     copy_public_group(&owner, &second, group);
     let invited = group_control_source_document(&second, group);
     reference
@@ -5841,6 +6806,7 @@ fn group_control_equivalent_source_knowledge_reaches_a_publication_fixed_point()
     for source in [&first, &second] {
         source.log.lock().unwrap().append(genesis.clone()).unwrap();
         source.process_channel(group);
+        settle_group_metadata(source, group);
     }
     let exchange = || {
         let left = group_control_source_document(&first, group);
@@ -5938,8 +6904,9 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     if multifrontier {
-        let parents = owner.log.lock().unwrap().heads(&group);
+        let parents = owner.log.lock().unwrap().heads(&group).unwrap();
         let first = crate::eventlog::Event::new(
             &owner.identity,
             group,
@@ -5984,8 +6951,9 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
         );
         owner.log.lock().unwrap().append(first).unwrap();
         owner.log.lock().unwrap().append(second).unwrap();
-        assert_eq!(owner.log.lock().unwrap().heads(&group).len(), 2);
+        assert_eq!(owner.log.lock().unwrap().heads(&group).unwrap().len(), 2);
         owner.process_channel(group);
+        settle_group_metadata(&owner, group);
     }
     let unavailable = group_control_source_document(&owner, group);
     assert!(unavailable.meta.revision > prior.meta.revision);
@@ -6019,8 +6987,8 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
-            .cloned()
             .collect();
         events.retain(|event| event.parents.is_empty());
         for event in events {
@@ -6046,9 +7014,22 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
             .append_event(group, EventKind::Message, b"different event two".to_vec())
             .unwrap();
         restored.process_channel(group);
+        settle_group_metadata(&restored, group);
         assert_eq!(
-            restored.log.lock().unwrap().fingerprint_and_len(&group).1,
-            owner.log.lock().unwrap().fingerprint_and_len(&group).1
+            restored
+                .log
+                .lock()
+                .unwrap()
+                .fingerprint_and_len(&group)
+                .unwrap()
+                .1,
+            owner
+                .log
+                .lock()
+                .unwrap()
+                .fingerprint_and_len(&group)
+                .unwrap()
+                .1
         );
         restored
             .account_documents
@@ -6089,6 +7070,7 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let secrets = owner.identity.secret_bytes();
     drop(owner);
     let owner = node_with_identity(
@@ -6162,6 +7144,7 @@ fn group_control_acknowledges_present_owner_decisions_that_lose_a_canonical_fork
         .unwrap();
     owner.log.lock().unwrap().append(old.clone()).unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     owner.roster.lock().unwrap().update(
         &Announce::new_with_account(&sibling.identity, &account, "Actual owner adoption", 9),
         "127.0.0.1".parse().unwrap(),
@@ -6201,14 +7184,16 @@ fn group_control_acknowledges_present_owner_decisions_that_lose_a_canonical_fork
         .expect("deterministic signed competing decision");
     owner.log.lock().unwrap().append(winning).unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     copy_public_group(&owner, &sibling, group);
     assert!(
         !sibling
             .account_group_projection(group)
-            .authorized
-            .contains(&old.id)
+            .unwrap()
+            .is_authorized(old.id)
+            .unwrap()
     );
-    assert!(sibling.log.lock().unwrap().get(&old.id).is_some());
+    assert!(sibling.log.lock().unwrap().get(&old.id).unwrap().is_some());
     sibling.roster.lock().unwrap().update(
         &Announce::new_with_account(
             &foreign.identity,
@@ -6248,6 +7233,7 @@ fn group_control_private_messages_and_reactions_do_not_republish_role_metadata()
             .append_event(group, kind, b"private payload".to_vec())
             .unwrap();
         owner.process_channel(group);
+        settle_group_metadata(&owner, group);
         assert_eq!(
             group_control_source_document(&owner, group).meta,
             prior.meta
@@ -6372,7 +7358,7 @@ fn group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_
     let reference = node(&dir.path().join("reference"), &account);
     let group = group_inventory_legacy_fixture(&owner, &external, "Large authorization frontier");
     copy_public_group(&external, &owner, group);
-    let parents = owner.log.lock().unwrap().heads(&group);
+    let parents = owner.log.lock().unwrap().heads(&group).unwrap();
     for seq in 2..=4098 {
         let event = Event::new(
             &owner.identity,
@@ -6387,6 +7373,7 @@ fn group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_
         owner.log.lock().unwrap().append(event).unwrap();
     }
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let prior = group_control_source_document(&owner, group);
     let signed = crate::node::account_group::wire::GroupControlHead::decode(
         prior.payload(),
@@ -6429,6 +7416,7 @@ fn group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let current = group_control_source_document(&owner, group);
     assert!(
         current.meta.revision > prior.meta.revision,
@@ -6520,7 +7508,7 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
             .encode(),
         )
         .unwrap();
-    let parents = owner.log.lock().unwrap().heads(&group);
+    let parents = owner.log.lock().unwrap().heads(&group).unwrap();
     for seq in 3..=4099 {
         owner
             .log
@@ -6539,6 +7527,7 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
             .unwrap();
     }
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let negative = group_control_source_document(&owner, group);
     let head = crate::node::account_group::wire::GroupControlHead::decode(
         negative.payload(),
@@ -6570,6 +7559,7 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let secrets = owner.identity.secret_bytes();
     drop(owner);
     let owner = node_with_identity(
@@ -6631,6 +7621,7 @@ fn group_control_normal_authorization_history_growth_keeps_bounded_current_heads
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     assert_eq!(
         owner.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
@@ -6953,7 +7944,7 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         .unwrap();
     let mut maintenance =
         crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
-    for _ in 0..source.list_channels().len() {
+    for _ in 0..source.list_channels().unwrap().len() {
         source.maintain_account_channels(&mut maintenance).await;
     }
     assert!(source.channel_owner_account_id(modern).is_some());
@@ -6962,7 +7953,7 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         .create_channel("Current account invited", vec![])
         .await
         .unwrap();
-    for _ in 0..source.list_channels().len() {
+    for _ in 0..source.list_channels().unwrap().len() {
         source.maintain_account_channels(&mut maintenance).await;
     }
     source
@@ -6975,6 +7966,9 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
     copy_public_group(&source, &current_sibling, invited_modern);
     let old_document = group_inventory_source_document(&source, legacy);
     source.prepare_account_transition(&current).unwrap();
+    source
+        .persist_account_adoption(&current.public(), || Ok(()), || Ok(source.account.public()))
+        .unwrap();
     let secret = source.identity.secret_bytes();
     drop(source);
     let adopted = node_with_identity(
@@ -6988,18 +7982,23 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
             .is_none(),
         "old root documents must not be copied on adoption"
     );
+    // This bare reopened node has no recovery worker. Complete only the three
+    // retained groups before reading their strict account-scoped projections.
+    for group in [modern, legacy, invited_modern] {
+        settle_group_metadata(&adopted, group);
+    }
     assert_eq!(
-        adopted.channel_previous_account(modern),
+        adopted.channel_previous_account(modern).unwrap(),
         Some(previous.account_id()),
         "old modern grants remain a previous-account archive after device adoption"
     );
     assert_eq!(
-        adopted.channel_previous_account(legacy),
+        adopted.channel_previous_account(legacy).unwrap(),
         None,
         "a real legacy device membership survives account adoption"
     );
     assert_eq!(
-        adopted.channel_previous_account(invited_modern),
+        adopted.channel_previous_account(invited_modern).unwrap(),
         None,
         "a current-account invitation addressed to a certified sibling takes precedence"
     );
@@ -7009,10 +8008,11 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         .unwrap();
     copy_public_group(&current_sibling, &adopted, invited_modern);
     assert_eq!(
-        adopted.channel_previous_account(invited_modern),
+        adopted.channel_previous_account(invited_modern).unwrap(),
         None,
         "an accepted current-account grant on a certified sibling takes precedence"
     );
+    let _ = group_inventory_source_document(&adopted, legacy);
     adopted.publish_group_inventory(&mut None);
     let new_document = adopted
         .account_document(&old_document.meta.key)
@@ -7036,7 +8036,7 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         .unwrap();
     let mut current_maintenance =
         crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
-    for _ in 0..adopted.list_channels().len() {
+    for _ in 0..adopted.list_channels().unwrap().len() {
         adopted
             .maintain_account_channels(&mut current_maintenance)
             .await;
@@ -7045,7 +8045,10 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         adopted.channel_owner_account_id(current_modern),
         Some(current.account_id())
     );
-    assert_eq!(adopted.channel_previous_account(current_modern), None);
+    assert_eq!(
+        adopted.channel_previous_account(current_modern).unwrap(),
+        None
+    );
     let sibling = node(&dir.path().join("sibling"), &current);
     sibling
         .account_documents
@@ -7054,8 +8057,8 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         .merge(new_document.meta.clone(), new_document.payload())
         .unwrap();
     assert!(sibling.channel_shared_reference(legacy).is_some());
-    assert!(!sibling.channel_can_send(legacy));
-    assert!(!sibling.channel_can_manage(legacy));
+    assert!(!sibling.channel_can_send(legacy).unwrap());
+    assert!(!sibling.channel_can_manage(legacy).unwrap());
     assert!(sibling.channel_members(legacy).is_empty());
 }
 
@@ -7291,7 +8294,7 @@ fn group_inventory_archive_projection_is_coherent_and_real_local_state_wins() {
         .unwrap()
         .merge(document.meta.clone(), document.payload())
         .unwrap();
-    let rows = target.list_channels();
+    let rows = target.list_channels().unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     let reference = target.channel_shared_reference(id).unwrap();
@@ -7300,15 +8303,15 @@ fn group_inventory_archive_projection_is_coherent_and_real_local_state_wins() {
     assert_eq!(row.owner, reference.owner);
     assert!(row.archived);
     // A real local book remains the authority for the native/UI projection.
-    let event = source.log.lock().unwrap().events(&id)[0].clone();
+    let event = source.log.lock().unwrap().events(&id).unwrap()[0].clone();
     target.log.lock().unwrap().append(event).unwrap();
     // The target is absent from this legacy event, so merely retaining that event
     // must not install membership or make the reference writable.
     target.process_channel(id);
-    assert!(!target.channel_can_send(id));
+    assert!(!target.channel_can_send(id).unwrap());
     assert!(target.channel_members(id).is_empty());
     assert!(source.channel_shared_reference(id).is_none());
-    assert!(!source.list_channels()[0].archived);
+    assert!(!source.list_channels().unwrap()[0].archived);
 }
 
 #[test]
@@ -7420,7 +8423,8 @@ fn group_inventory_publishes_validated_departure_and_dissolution_without_grantin
     );
     source.log.lock().unwrap().append(departure).unwrap();
     source.process_channel(id);
-    assert!(!source.channel_can_send(id));
+    settle_group_metadata(&source, id);
+    assert!(!source.channel_can_send(id).unwrap());
     let left = group_inventory_source_document(&source, id);
     assert!(left.meta.revision > initial.meta.revision);
     target
@@ -7459,13 +8463,13 @@ fn group_inventory_publishes_validated_departure_and_dissolution_without_grantin
         .unwrap();
     assert!(target.channel_shared_reference(id).unwrap().dissolved);
     assert!(
-        target.list_channels()[0].archived
-            && target.list_channels()[0].left
-            && target.list_channels()[0].dissolved
+        target.list_channels().unwrap()[0].archived
+            && target.list_channels().unwrap()[0].left
+            && target.list_channels().unwrap()[0].dissolved
     );
     assert!(target.channel_members(id).is_empty());
-    assert!(!target.channel_can_send(id));
-    assert!(!target.channel_can_manage(id));
+    assert!(!target.channel_can_send(id).unwrap());
+    assert!(!target.channel_can_manage(id).unwrap());
 }
 
 #[test]
@@ -7513,8 +8517,9 @@ fn group_inventory_post_office_display_fact_keeps_existing_member_count_consiste
         ))
         .unwrap();
     source.process_channel(id);
-    assert_eq!(source.list_channels()[0].member_count, 2);
-    source.publish_group_inventory(&mut None);
+    settle_group_metadata(&source, id);
+    assert_eq!(source.list_channels().unwrap()[0].member_count, 2);
+    let _ = group_inventory_source_document(&source, id);
     let key = AccountDocumentKey::GroupInventory {
         channel: hex::encode(id.as_bytes()),
         source_device: source.user_id(),
@@ -7542,7 +8547,7 @@ fn group_inventory_post_office_display_fact_keeps_existing_member_count_consiste
         .unwrap()
         .merge(document.meta.clone(), document.payload())
         .unwrap();
-    assert_eq!(target.list_channels()[0].member_count, 2);
+    assert_eq!(target.list_channels().unwrap()[0].member_count, 2);
     assert!(
         target.channel_members(id).is_empty(),
         "infrastructure display facts cannot become memberships"
@@ -7610,8 +8615,9 @@ fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required
             ))
             .unwrap();
         source.process_channel(id);
-        let count = source.list_channels()[0].member_count;
-        source.publish_group_inventory(&mut None);
+        settle_group_metadata(&source, id);
+        let count = source.list_channels().unwrap()[0].member_count;
+        let _ = group_inventory_source_document(&source, id);
         let key = AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
             source_device: source.user_id(),
@@ -7659,14 +8665,14 @@ fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required
             .unwrap()
             .merge(document.meta.clone(), document.payload())
             .unwrap();
-        assert_eq!(target.list_channels()[0].member_count, count);
+        assert_eq!(target.list_channels().unwrap()[0].member_count, count);
         assert!(
             !target
                 .channel_shared_reference(id)
                 .unwrap()
                 .members_complete
         );
-        assert!(!target.channel_can_send(id));
+        assert!(!target.channel_can_send(id).unwrap());
     }
 }
 
@@ -7688,7 +8694,7 @@ async fn group_inventory_display_labels_cover_real_create_and_rename_without_cha
     ];
     for name in cases {
         let id = source.create_channel(name, vec![]).await.unwrap();
-        source.publish_group_inventory(&mut None);
+        let _ = group_inventory_source_document(&source, id);
         let key = AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
             source_device: source.user_id(),
@@ -8045,7 +9051,7 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
                 .append_durable(event.clone())
                 .unwrap();
         }
-        target.process_channel(f.group);
+        settle_group_metadata(target, f.group);
         assert_eq!(
             target.account_group_access(f.group).unwrap().role,
             AccountGroupRole::Member
@@ -8079,7 +9085,7 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
         .unwrap()
         .append_durable(leave.clone())
         .unwrap();
-    source.process_channel(f.group);
+    settle_group_metadata(&source, f.group);
     source.publish_account_group_access_for(f.group);
     assert_eq!(
         source.account_group_access(f.group).unwrap().role,
@@ -8099,6 +9105,7 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
     assert!(
         stale
             .account_group_projection(f.group)
+            .unwrap()
             .authority
             .is_member(&stale.identity.public(), &stale.own_group_proof()),
         "the real physical public cut deliberately still grants this device"
@@ -8200,7 +9207,7 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
             .append_durable(event.clone())
             .unwrap();
     }
-    stale.process_channel(f.group);
+    settle_group_metadata(&stale, f.group);
     stale.publish_account_group_access_for(f.group);
     let current = stale.account_group_access(f.group).unwrap();
     assert_eq!(current.role, AccountGroupRole::Member);

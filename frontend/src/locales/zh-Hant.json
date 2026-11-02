@@ -382,7 +382,13 @@
     "reEdit": "重新編輯",
     "mentionedYou": "提及了你",
     "reactionAdd": "加入 {{emoji}} 表情回應",
-    "reactionRemove": "移除你的 {{emoji}} 表情回應"
+    "reactionRemove": "移除你的 {{emoji}} 表情回應",
+    "reactionsTitle": "回應",
+    "reactionsDescription": "此訊息的回應數量。選擇回應可新增或移除自己的回應。",
+    "reactionsEmpty": "尚無回應",
+    "reactionsStart": "從頭查看",
+    "reactionsNext": "下一頁",
+    "reactionsMore": "更多回應"
   },
   "transfer": {
     "preparing": "正在準備檔案…",
@@ -524,6 +530,12 @@
     "changeFolder": "變更",
     "sectionChat": "聊天記錄",
     "retention": "保留時長",
+    "storageRefresh": "重新整理",
+    "storageUsage": "本機儲存的資料",
+    "storageUsageDesc": "本機帳戶目錄中的檔案，包括歷史、索引和設定，不含子資料夾。",
+    "storageReview": "儲存的資料已超過 1 GiB。可檢查歷史保留期限或建立備份。變更保留期限不一定會立即減少磁碟用量。",
+    "storageAtLeast": "至少 {{size}}",
+    "storageUnavailable": "暫時無法讀取儲存用量",
     "retentionDesc": "自動刪除本機上早於此時長的訊息。",
     "retentionForever": "永久",
     "retentionDays": "{{count}} 天",

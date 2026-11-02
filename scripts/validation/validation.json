@@ -365,6 +365,8 @@
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
         "scripts/ci/ubuntu-apt-source.mjs",
+        "scripts/ci/windows-native-deps.mjs",
+        "scripts/diagnostics/windows-native-deps.test.mjs",
         "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
         ".gitleaks.toml",
@@ -394,6 +396,7 @@
       ],
       "node": [
         "scripts/ci/ubuntu-apt-source.test.mjs",
+        "scripts/diagnostics/windows-native-deps.test.mjs",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",

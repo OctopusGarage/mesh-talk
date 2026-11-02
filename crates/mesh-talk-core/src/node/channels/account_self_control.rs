@@ -121,14 +121,14 @@ impl Node {
         group: ConversationId,
         input: AccountSelfControlInput,
         own: &Announce,
-    ) -> Result<Vec<PublicIdentity>, NodeError> {
+    ) -> Result<(Vec<PublicIdentity>, EventId), NodeError> {
         let mut delivery = self.delivery.lock().expect("delivery mutex");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         let (transaction, recipients, id) = {
             let log = self.log.lock().expect("log mutex");
             let projection =
-                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group)?);
             let PreparedAccountSelfControl {
                 event,
                 witness,
@@ -151,17 +151,9 @@ impl Node {
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         drop(delivery);
-        self.process_channel(group);
-        if !self
-            .account_group_projection(group)
-            .authorized
-            .contains(&id)
-        {
-            return Err(NodeError::Channel(
-                "account self control was not admitted".into(),
-            ));
-        }
-        Ok(recipients)
+        // The async entrypoint releases membership/delivery guards before
+        // advancing bounded canonical turns and checking this exact event.
+        Ok((recipients, id))
     }
 
     /// Caller owns membership/delivery allocation and this immutable log view.
@@ -345,14 +337,14 @@ impl Node {
         &self,
         group: ConversationId,
         own: &Announce,
-    ) -> Result<Vec<PublicIdentity>, NodeError> {
+    ) -> Result<(Vec<PublicIdentity>, EventId), NodeError> {
         let mut delivery = self.delivery.lock().expect("delivery mutex");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         let (transaction, recipients, event_id) = {
             let log = self.log.lock().expect("log mutex");
             let projection =
-                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group)?);
             let prepared =
                 self.prepare_legacy_member_leave_locked(group, &log, &projection, own)?;
             let event_id = prepared.event.id;
@@ -370,17 +362,9 @@ impl Node {
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         drop(delivery);
-        self.process_channel(group);
-        if !self
-            .account_group_projection(group)
-            .authorized
-            .contains(&event_id)
-        {
-            return Err(NodeError::Channel(
-                "legacy departure was not admitted".into(),
-            ));
-        }
-        Ok(recipients)
+        // The async entrypoint releases membership/delivery guards before
+        // advancing bounded canonical turns and checking this exact event.
+        Ok((recipients, event_id))
     }
 }
 
@@ -678,9 +662,9 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.kind == input.event_kind())
-                .cloned()
                 .collect::<Vec<_>>();
             assert_eq!(effects.len(), 1);
             assert!(
@@ -701,13 +685,14 @@ pub(in crate::node) mod tests {
                     .lock()
                     .unwrap()
                     .events(&group)
+                    .unwrap()
                     .into_iter()
                     .filter(|event| event.kind == input.event_kind())
                     .map(|event| event.id)
                     .collect::<Vec<_>>(),
                 vec![effects[0].id]
             );
-            let projection = node.account_group_projection(group);
+            let projection = node.account_group_projection(group).unwrap();
             assert_eq!(projection.authority.is_member(&own.public(), &own), pending);
         }
     }
@@ -736,6 +721,7 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .any(|event| event.kind == EventKind::ChannelLeave)
         );
@@ -770,8 +756,10 @@ pub(in crate::node) mod tests {
         let other_proof = Announce::new_with_account(&impostor, &node.account, "other device", 1);
         {
             let log = node.log.lock().unwrap();
-            let projection =
-                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+            let projection = crate::node::channel::ChannelBook::project_membership(
+                group,
+                &log.events(&group).unwrap(),
+            );
             assert!(
                 node.prepare_legacy_member_leave_locked(group, &log, &projection, &other_proof)
                     .is_err()
@@ -805,9 +793,9 @@ pub(in crate::node) mod tests {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::ChannelLeave)
-            .cloned()
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 1);
         assert!(
@@ -852,6 +840,7 @@ pub(in crate::node) mod tests {
             node.log.lock().unwrap().append_durable(parent).unwrap();
         }
         node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
         let operation = if pending {
             AccountGroupOperation::AcceptInvitation
         } else {
@@ -883,9 +872,9 @@ pub(in crate::node) mod tests {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == kind)
-            .cloned()
             .collect();
         assert_eq!(effects.len(), 1);
         assert!(effects[0].ciphertext.is_empty());
@@ -895,6 +884,7 @@ pub(in crate::node) mod tests {
             &node.identity.public().ed25519_pub
         );
         assert_eq!(status.committed_events, vec![effects[0].id]);
+        node.await_channel_metadata(group).await.unwrap();
         assert_eq!(
             node.account_group_access(group).unwrap().role,
             if pending {
@@ -914,6 +904,7 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.kind == kind)
                 .count(),
@@ -942,6 +933,7 @@ pub(in crate::node) mod tests {
                 node.log.lock().unwrap().append_durable(parent).unwrap();
             }
             node.process_channel(group);
+            crate::node::test_support::settle_group_metadata(&node, group);
             let operation = if pending {
                 AccountGroupOperation::AcceptInvitation
             } else {
@@ -964,9 +956,9 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.kind == kind)
-                .cloned()
                 .collect();
             assert_eq!(
                 effects.len(),
@@ -1013,6 +1005,7 @@ pub(in crate::node) mod tests {
                     .lock()
                     .unwrap()
                     .events(&group)
+                    .unwrap()
                     .into_iter()
                     .filter(|event| event.kind == kind)
                     .map(|event| event.id)
@@ -1212,12 +1205,9 @@ pub(in crate::node) mod tests {
             .account_channel_maintenance_test_hook
             .lock()
             .unwrap() = Some(std::sync::Arc::new(move |channel| {
-            let release = membership_release.clone();
-            Box::pin(async move {
-                if channel == group {
-                    let _ = release.acquire().await;
-                }
-            })
+            // Keep public inheritance gated without suspending the worker
+            // that must project the reference's newly received signed controls.
+            channel != group || membership_release.is_closed()
         }));
         let extra = (!pending).then(|| {
             direct_node(
@@ -1285,6 +1275,8 @@ pub(in crate::node) mod tests {
         let trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let operation_trace =
             std::sync::Arc::new(std::sync::Mutex::new(SelfControlOperationTrace::default()));
+        let external_trace =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let request_hold = hold_request.then(|| std::sync::Arc::new(SelfControlRequestHold::new()));
         // The hooks and held server future retain the observer. A separate
         // owner must release its response even if the caller panics first.
@@ -1304,6 +1296,8 @@ pub(in crate::node) mod tests {
             let client_labels = peer_labels.clone();
             let client_omitted = trace_omitted.clone();
             let client_operation_trace = operation_trace.clone();
+            let client_external_trace = external_trace.clone();
+            let owner_public = owner.identity.public();
             let client_request_hold = request_hold.clone();
             let weak = std::sync::Arc::downgrade(node);
             let client_selected_trace_peer = selected_trace_peer.clone();
@@ -1380,6 +1374,29 @@ pub(in crate::node) mod tests {
                         if let Some(scope) = scope {
                             let direction = usize::from(own_public != reference_public);
                             completed_scopes.lock().unwrap()[direction][scope] = true;
+                        }
+                    }
+                    let external_pair = client_selected_trace_peer
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|online| {
+                            (&own_public == online && peer == owner_public)
+                                || (own_public == owner_public && &peer == online)
+                        });
+                    let external_phase = (external_pair
+                        && ["dial_", "session_", "control_fanout_"]
+                            .iter()
+                            .any(|prefix| event.starts_with(prefix)))
+                        || (own_public == owner_public && event.starts_with("responder_"));
+                    if external_phase {
+                        let started = client_operation_trace.lock().unwrap().started;
+                        if let Some(started) = started {
+                            let mut tail = client_external_trace.lock().unwrap();
+                            if tail.len() == 64 {
+                                tail.pop_front();
+                            }
+                            tail.push_back((started.elapsed().as_millis(), label, event.clone()));
                         }
                     }
                     if event.starts_with("control_queue") || event.starts_with("control_refresh") {
@@ -1647,13 +1664,18 @@ pub(in crate::node) mod tests {
             .unwrap();
         let archive = archive_source
             .history(group, 100)
+            .unwrap()
             .into_iter()
             .find(|row| row.text == b"unrelated retained archive")
             .unwrap()
             .id;
         if !pending {
             wait_self_control_noise(|| nodes.iter().filter(|(_, node)| node.user_id() != reference.user_id())
-                .all(|(_, node)| node.history(group, 100).iter().any(|row| row.id == archive)),
+                .all(|(_, node)| match node.history(group, 100) {
+                    Ok(rows) => rows.iter().any(|row| row.id == archive),
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                    Err(error) => panic!("archive marker history failed: {error}"),
+                }),
                 "the archive marker must be fully retained by physical sources before reference enrollment").await;
         }
         // Keep the original signed Member head through a real account exchange
@@ -1739,12 +1761,18 @@ pub(in crate::node) mod tests {
             exact_protocol && exact_route && settled.into_iter().all(|complete| complete)
         };
         let readiness = || {
-            let role_ready = reference.account_group_access(group).unwrap().role
-                == if pending {
-                    AccountGroupRole::Invited
-                } else {
-                    AccountGroupRole::Member
-                };
+            let role_ready = match reference.account_group_access(group) {
+                Ok(access) => {
+                    access.role
+                        == if pending {
+                            AccountGroupRole::Invited
+                        } else {
+                            AccountGroupRole::Member
+                        }
+                }
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                Err(error) => panic!("reference readiness failed: {error}"),
+            };
             let capability_ready = reference
                 .group_operation_versions
                 .lock()
@@ -1886,19 +1914,46 @@ pub(in crate::node) mod tests {
             operation_trace.record("reference", "admission_started".to_owned());
         }
         let admission_started = std::time::Instant::now();
-        let admitted = reference
-            .submit_account_group_operation_if(&shared.account_id(), id, group, operation.clone(), |commit| {
-                if let Some(hold) = request_hold.as_ref() {
-                    let original = hold.original.lock().unwrap().clone().unwrap();
+        let operation_budget = std::time::Duration::from_secs(8);
+        let admitted = loop {
+            let result = reference.submit_account_group_operation_if(
+                &shared.account_id(), id, group, operation.clone(), |commit| {
+                    if let Some(hold) = request_hold.as_ref() {
+                        let original = hold.original.lock().unwrap().clone().unwrap();
+                        assert!(
+                            original.1.upgrade().is_some() && hold.pages.lock().unwrap().is_active(original.0),
+                            "the original executor read must remain live at the exact operation admission"
+                        );
+                    }
+                    let result = commit();
+                    if result.is_ok() && let Some(hold) = request_hold.as_ref() {
+                        hold.admitted.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    result
+                },
+            );
+            match result {
+                Ok(admitted) => break admitted,
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
                     assert!(
-                        original.1.upgrade().is_some() && hold.pages.lock().unwrap().is_active(original.0),
-                        "the original executor read must remain live at the exact operation admission"
+                        reference
+                            .account_group_operation_status(&shared.account_id(), id)
+                            .unwrap()
+                            .is_none(),
+                        "Pending must precede durable operation admission"
                     );
-                    hold.admitted.store(true, std::sync::atomic::Ordering::Release);
+                    assert!(
+                        admission_started.elapsed() < operation_budget,
+                        "selected metadata must become ready within the original operation deadline"
+                    );
+                    // The synchronous API retains no intent on Pending. Retry
+                    // the same identity after yielding to its existing worker;
+                    // every authorization still observes the original held read.
+                    tokio::task::yield_now().await;
                 }
-                commit()
-            })
-            .unwrap();
+                Err(error) => panic!("self-control admission failed: {error}"),
+            }
+        };
         operation_trace
             .lock()
             .unwrap()
@@ -1927,7 +1982,7 @@ pub(in crate::node) mod tests {
         let full_source = executor.identity.public();
         let canonical = Node::public_account_group_source(
             group,
-            &executor.account_group_projection(group),
+            &executor.account_group_projection(group).unwrap(),
             &full_source,
             &executor.own_group_proof(),
         )
@@ -1941,7 +1996,8 @@ pub(in crate::node) mod tests {
             }
         );
         let event_kind = input.event_kind();
-        let convergence = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let remaining = operation_budget.saturating_sub(admission_started.elapsed());
+        let convergence = tokio::time::timeout(remaining, async {
             let mut previous_phase = None;
             loop {
                 let phase = executor
@@ -1969,23 +2025,24 @@ pub(in crate::node) mod tests {
                     .is_some_and(|status| {
                         status.phase == AccountGroupOperationPhase::Committed
                             && status.committed_events.len() == 1
-                            && status
-                                .committed_events
-                                .iter()
-                                .all(|event| owner.log.lock().unwrap().get(event).is_some())
+                            && status.committed_events.iter().all(|event| {
+                                owner.log.lock().unwrap().get(event).unwrap().is_some()
+                            })
                     })
-                    && reference.account_group_access(group).unwrap().role
-                        == if accepted_after {
-                            AccountGroupRole::Member
-                        } else {
-                            AccountGroupRole::Left
+                    && [&reference, &executor].into_iter().all(|node| {
+                        match node.account_group_access(group) {
+                            Ok(access) => {
+                                access.role
+                                    == if accepted_after {
+                                        AccountGroupRole::Member
+                                    } else {
+                                        AccountGroupRole::Left
+                                    }
+                            }
+                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                            Err(error) => panic!("self-control role observation failed: {error}"),
                         }
-                    && executor.account_group_access(group).unwrap().role
-                        == if accepted_after {
-                            AccountGroupRole::Member
-                        } else {
-                            AccountGroupRole::Left
-                        };
+                    });
                 if ready {
                     operation_trace
                         .lock()
@@ -2011,12 +2068,12 @@ pub(in crate::node) mod tests {
                 let status = node.account_group_operation_status(&shared.account_id(), id).ok().flatten();
                 let phase = status.as_ref().map(|status| &status.phase);
                 let committed_count = status.as_ref().map_or(0, |status| status.committed_events.len());
-                let effects_local = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| node.log.lock().unwrap().get(event).is_some()));
-                let effects_external = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| owner.log.lock().unwrap().get(event).is_some()));
-                let effects = node.log.lock().unwrap().events(&group).into_iter()
+                let effects_local = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| node.log.lock().unwrap().get(event).unwrap().is_some()));
+                let effects_external = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| owner.log.lock().unwrap().get(event).unwrap().is_some()));
+                let effects = node.log.lock().unwrap().events(&group).unwrap().into_iter()
                     .filter(|event| event.kind == event_kind).count();
                 let role = node.account_group_access(group).map(|access| access.role);
-                let source_role = Node::public_account_group_source(group, &node.account_group_projection(group), &full_source, &executor.own_group_proof()).map(|source| source.role);
+                let source_role = Node::public_account_group_source(group, &node.account_group_projection(group).unwrap(), &full_source, &executor.own_group_proof()).map(|source| source.role);
                 let sync: Vec<_> = node.device_sync_status().into_iter().map(|status|
                     (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
                 format!("node={label} phase={phase:?} role={role:?} source_role={source_role:?} effects={effects} committed_count={committed_count} effects_local={effects_local} effects_external={effects_external} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
@@ -2025,11 +2082,36 @@ pub(in crate::node) mod tests {
             // must not turn the original failure into unrelated poison panics.
             let failure_trace = trace.lock().unwrap().iter().cloned().collect::<Vec<_>>();
             let operation_trace = format!("{:?}", operation_trace.lock().unwrap());
+            let external_trace = external_trace
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let listeners_finished: Vec<_> = handles
+                .iter()
+                .map(|handle| handle.as_ref().map(|handle| handle.is_finished()))
+                .collect();
+            let exact_owner_route = executor
+                .routing_peer(&owner.user_id())
+                .is_some_and(|route| route.public == owner.identity.public());
+            let selected_owner = executor
+                .channel_members(group)
+                .contains(&owner.identity.public());
+            let departure_retry = executor
+                .channels
+                .lock()
+                .unwrap()
+                .pending_departures(&executor.user_id())
+                .iter()
+                .any(|(channel, _)| *channel == group);
+            let source_capacity = executor.sessions.test_capacity_snapshot();
+            let owner_capacity = owner.sessions.test_capacity_snapshot();
             if let Some(hold) = request_hold.as_ref() {
                 hold.release.close();
             }
             panic!(
-                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace} trace={failure_trace:?}"
+                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace} trace={failure_trace:?} external_trace={external_trace:?} listeners_finished={listeners_finished:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
             );
         }
         if let Some(hold) = request_hold.as_ref() {
@@ -2077,6 +2159,7 @@ pub(in crate::node) mod tests {
             .unwrap()
             .get(&status.committed_events[0])
             .unwrap()
+            .unwrap()
             .clone();
         assert_eq!(event.kind, event_kind);
         assert!(
@@ -2085,12 +2168,14 @@ pub(in crate::node) mod tests {
                 && event.verify_signature()
         );
         if input == AccountSelfControlInput::Decline {
+            owner.await_channel_metadata(group).await.unwrap();
             assert!(
                 owner
                     .log
                     .lock()
                     .unwrap()
                     .events(&group)
+                    .unwrap()
                     .iter()
                     .all(|event| event.kind != EventKind::ChannelAccept),
                 "explicit decline must never manufacture acceptance before removing the invitation"
@@ -2098,6 +2183,7 @@ pub(in crate::node) mod tests {
             assert!(
                 owner
                     .account_group_projection(group)
+                    .unwrap()
                     .authority
                     .account_grant(&shared.public().ed25519_pub)
                     .is_none()
@@ -2112,6 +2198,7 @@ pub(in crate::node) mod tests {
                         .lock()
                         .unwrap()
                         .events(&group)
+                        .unwrap()
                         .into_iter()
                         .filter(|event| {
                             event.kind == EventKind::Message
@@ -2145,9 +2232,13 @@ pub(in crate::node) mod tests {
                 );
             }
         }
+        // The exact accepted effect is already retained above. Complete only
+        // this owner's selected metadata before checking its derived authority.
+        owner.await_channel_metadata(group).await.unwrap();
         assert_eq!(
             owner
                 .account_group_projection(group)
+                .unwrap()
                 .authority
                 .is_member(&full_source, &executor.own_group_proof()),
             accepted_after
@@ -2158,11 +2249,27 @@ pub(in crate::node) mod tests {
                 .unwrap(),
             status
         );
+        // Public control propagation may leave this pure history read pending
+        // after the exact operation/role assertions above. Observe only the
+        // existing worker, within the original deadline; accept the first ready
+        // snapshot so an incorrectly imported archive cannot be polled away.
+        let history = tokio::time::timeout(
+            operation_budget.saturating_sub(admission_started.elapsed()),
+            async {
+                loop {
+                    match reference.history(group, 100) {
+                        Ok(history) => break history,
+                        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                        Err(_) => panic!("reference history failed outside bounded preparation"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .expect("reference history must become readable within the original operation deadline");
         assert!(
-            !reference
-                .history(group, 100)
-                .iter()
-                .any(|row| row.id == archive),
+            !history.iter().any(|row| row.id == archive),
             "explicit self control must not grant optional archive history"
         );
         for (_, node) in &nodes {

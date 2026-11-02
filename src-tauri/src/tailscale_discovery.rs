@@ -87,12 +87,21 @@ fn cli_locations() -> Vec<PathBuf> {
 }
 
 async fn local_inventory(port: u16) -> Vec<SocketAddr> {
-    local_inventory_from(cli_locations(), port).await
+    local_inventory_from(
+        cli_locations()
+            .into_iter()
+            .map(crate::background_command::command)
+            .collect(),
+        port,
+    )
+    .await
 }
 
-async fn local_inventory_from(executables: Vec<PathBuf>, port: u16) -> Vec<SocketAddr> {
-    for executable in executables {
-        let mut command = crate::background_command::command(executable);
+async fn local_inventory_from(
+    commands: Vec<tokio::process::Command>,
+    port: u16,
+) -> Vec<SocketAddr> {
+    for mut command in commands {
         command
             .args(["status", "--json"])
             .env("TAILSCALE_BE_CLI", "1")
@@ -132,15 +141,14 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    fn fake_cli(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn fake_cli(dir: &std::path::Path, name: &str, body: &str) -> tokio::process::Command {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&path, permissions).unwrap();
-        path
+        // Exercise the real subprocess boundary without making OS first-run
+        // executable assessment consume the production inventory deadline.
+        let mut command = crate::background_command::command("/bin/sh");
+        command.arg(path);
+        command
     }
 
     #[test]
@@ -208,7 +216,11 @@ mod tests {
             "printf '%s' '{\"BackendState\":\"Running\",\"Peer\":{\"peer\":{\"Online\":true,\"TailscaleIPs\":[\"100.101.2.3\"]}}}'",
         );
         let candidates = local_inventory_from(
-            vec![dir.path().join("missing-client"), failed, ready],
+            vec![
+                crate::background_command::command(dir.path().join("missing-client")),
+                failed,
+                ready,
+            ],
             47474,
         )
         .await;

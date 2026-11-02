@@ -485,8 +485,7 @@ impl DocumentSyncCursor {
             && self.personal_upgrade
             && self.scope.mask() & (1 << AccountDocumentDomain::GroupControl as usize) != 0)
             || self.requires_upgrade
-                && ((policy.history || policy.appearance) && !self.control_upgrade
-                    || policy.history && self.control_upgrade)
+                && (policy.history || policy.appearance && !self.control_upgrade)
             || self.custody_upgrade && policy.history && self.scope.mask() & 64 != 0
             || self.inventory_upgrade && self.scope.mask() & 128 != 0
             || self.group_upgrade
@@ -4929,7 +4928,7 @@ mod group_control_tests {
                 .create_channel("bounded observed activity", vec![])
                 .await
                 .unwrap();
-            fixture.source.publish_group_inventory_for(group);
+            super::super::super::tests::group_inventory_source_document(&fixture.source, group);
             fixture.source.publish_group_activity_for(group);
             let key = AccountDocumentKey::GroupActivity {
                 channel: hex::encode(group.as_bytes()),

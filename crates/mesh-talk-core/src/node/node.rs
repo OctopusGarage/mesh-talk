@@ -14,14 +14,15 @@ use crate::eventlog::persist::PersistentEventLog;
 use crate::identity::account::Account;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::channel::{ChannelBook, ReceivedChannelMessage};
-use crate::node::channel_custody::ChannelCustodyStore;
+use crate::node::channel_custody::IndexedChannelCustodyStore as ChannelCustodyStore;
 use crate::node::channel_senders::ChannelSenderStore;
 use crate::node::dm_ratchet::DmRatchet;
-use crate::node::filebook::{FileBook, ReceivedFile};
+use crate::node::filebook::ReceivedFile;
+use crate::node::filebook::indexed::IndexedFileBook;
 use crate::node::pairing::PendingLink;
 use crate::node::ratchet_sessions::RatchetSessions;
-use crate::node::received_log::ReceivedLog;
-use crate::node::sentlog::SentLog;
+use crate::node::received_store::ReceivedStore as ReceivedLog;
+use crate::node::sent_store::SentStore as SentLog;
 use crate::node::session::SessionError;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -86,14 +87,20 @@ pub struct ChannelSummary {
     pub pending_invite: bool,
 }
 
-fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> Vec<ChannelSummary> {
-    log.conversations()
-        .into_iter()
-        .filter(|id| book.state(id).is_none())
-        .filter_map(|id| {
-            let state = ChannelBook::projected_metadata(id, &log.events(&id))?;
-            Some(ChannelSummary {
-                id,
+fn archived_channel_summaries(
+    checkpoints: &super::channel::checkpoint::ChannelCheckpointStore,
+) -> Result<Vec<ChannelSummary>, LogError> {
+    let mut summaries = Vec::new();
+    let mut after = None;
+    loop {
+        let page = checkpoints.metadata_page(after, false)?;
+        if page.is_empty() {
+            break;
+        }
+        for state in page {
+            after = Some(state.id());
+            summaries.push(ChannelSummary {
+                id: state.id(),
                 name: state.name().to_string(),
                 member_count: state.members().len(),
                 owner: state.owner().to_string(),
@@ -101,9 +108,10 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
                 dissolved: state.is_dissolved(),
                 left: false,
                 pending_invite: false,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(summaries)
 }
 
 /// A search match: a message whose text contains the query, with enough context to
@@ -212,7 +220,22 @@ impl std::fmt::Display for NodeError {
     }
 }
 
-impl std::error::Error for NodeError {}
+impl std::error::Error for NodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Log(error) => Some(error),
+            Self::Session(error) => Some(error),
+            Self::Linking(error) => Some(error),
+            Self::Seal(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<crate::eventlog::LogError> for NodeError {
+    fn from(error: crate::eventlog::LogError) -> Self {
+        Self::Log(error)
+    }
+}
 
 #[cfg(test)]
 type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
@@ -232,7 +255,13 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) group_file_asset_recv_test_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) channel_metadata_install_test_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) withheld_file_scopes: Mutex<HashSet<ConversationId>>,
+    #[cfg(test)]
+    pub(in crate::node) untracked_chunk_validations: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(in crate::node) before_sent_delete_hook: BlockingTestHook,
     #[cfg(test)]
@@ -241,6 +270,8 @@ pub struct Node {
     pub(in crate::node) profile_prepare_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) peer_snapshot_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) expiry_cleanup_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) remember_peer_hook: BlockingTestHook,
     #[cfg(test)]
@@ -263,9 +294,9 @@ pub struct Node {
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
-    /// Session-only IDs of relay envelopes already processed. Losing this cache
-    /// on restart causes a safe re-download, never a lost inner event.
-    pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
+    /// Optional disk hints, checked against retained history during mailbox sync.
+    pub(in crate::node) opaque_receive_cache:
+        Mutex<super::opaque_receive_cache::OpaqueReceiveCache>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
     // private to the `node` module (no wider exposure).
@@ -292,7 +323,8 @@ pub struct Node {
     pub(in crate::node) operation_seen: Mutex<HashMap<String, [u8; 32]>>,
     pub(in crate::node) group_operation_versions:
         Mutex<HashMap<String, super::account_documents::sync::GroupOperationSupport>>,
-    pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
+    pub(in crate::node) account_suppression:
+        Mutex<super::account_suppression::IndexedAccountSuppression>,
     pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
     pub(in crate::node) favorite_media: super::media_store::MediaStore,
     pub(in crate::node) account_sync_policy:
@@ -303,12 +335,12 @@ pub struct Node {
     pub(in crate::node) account_preferences: Mutex<super::account_preferences::AccountPreferences>,
     pub(in crate::node) file_message_identity_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_message_identities:
-        Mutex<super::file_message_identity::FileMessageIdentities>,
-    pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
+        Mutex<super::file_message_identity::IndexedFileMessageIdentities>,
+    pub(in crate::node) account_file_proofs:
+        Mutex<super::account_file_repository::IndexedAccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
     pub(in crate::node) account_history_revision: std::sync::atomic::AtomicU64,
     pub(in crate::node) account_archive_cache: Mutex<super::account_sync::ArchiveCache>,
-    pub(in crate::node) known_account_cache: Mutex<super::recovery::KnownAccountCache>,
     pub(in crate::node) account_sync_commit: Mutex<()>,
     pub(in crate::node) account_wake: super::account_sync::AccountWake,
     pub(in crate::node) account_sync_status:
@@ -321,14 +353,18 @@ pub struct Node {
     pub(in crate::node) roster: Arc<Mutex<Roster>>,
     /// Session-local preferred address after a successful pinned Noise handshake.
     pub(in crate::node) preferred_routes: Mutex<HashMap<UserId, std::net::SocketAddr>>,
-    pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
-    pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
+    pub(in crate::node) incoming: super::runtime_delivery::HostPayload<ReceivedDm>,
+    pub(in crate::node) channel_incoming:
+        super::runtime_delivery::HostPayload<ReceivedChannelMessage>,
+    pub(in crate::node) reception_effects: super::reception_effects::ReceptionEffects,
     /// Serialize owner membership commits with conditional sibling enrollment.
     pub(in crate::node) channel_membership_commit: Mutex<()>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
+    pub(in crate::node) pending_channel_files: Mutex<Option<super::files::ChannelFileTurn>>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
+    pub(in crate::node) raw_group_views: Mutex<super::account_group::RawViewCache>,
     pub(in crate::node) group_metadata_cache: Mutex<super::group_metadata::MetadataCache>,
     #[cfg(test)]
     pub(in crate::node) channel_projection_replays: std::sync::atomic::AtomicUsize,
@@ -339,7 +375,7 @@ pub struct Node {
     pub(in crate::node) recovery_origins: Vec<crate::eventlog::Author>,
     pub(in crate::node) recovery_contacts: Vec<String>,
     pub(in crate::node) recovered_sent_ids:
-        Mutex<Option<super::recovered_sent_ids::RecoveredSentIds>>,
+        Mutex<Option<super::recovered_sent_ids::IndexedRecoveredSentIds>>,
     /// Durable, encrypted store of this node's per-channel sending keys (`my_sender`).
     /// `my_sender` is in-memory only and rebuilt empty on restart; persisting it here
     /// lets us resume our sending chains so receivers (first-wins on chains they hold)
@@ -347,21 +383,16 @@ pub struct Node {
     pub(in crate::node) channel_migration:
         Mutex<super::channel_account_maintenance::ChannelMigrationStore>,
     pub(in crate::node) channel_senders: Mutex<ChannelSenderStore>,
+    pub(in crate::node) channel_checkpoints: super::channel::checkpoint::ChannelCheckpointStore,
     /// Last confirmed durable holders of our own channel events.
     pub(in crate::node) channel_custody: Mutex<ChannelCustodyStore>,
     #[cfg(test)]
     pub(in crate::node) channel_last_send: Mutex<Option<(usize, u64)>>,
-    pub(in crate::node) emitted: Mutex<HashSet<EventId>>,
-    pub(in crate::node) file_incoming: mpsc::UnboundedSender<ReceivedFile>,
-    pub(in crate::node) files: Mutex<FileBook>,
+    pub(in crate::node) file_incoming: super::runtime_delivery::HostPayload<ReceivedFile>,
+    pub(in crate::node) files: Mutex<IndexedFileBook>,
+    pub(in crate::node) manifest_scopes: super::filebook::scopes::IndexedManifestScopes,
     pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
-    /// Per-file conversations we've seen a manifest for but don't yet hold all chunks of —
-    /// surfaced this session and awaiting their data. A background task pulls these DIRECTLY
-    /// from peers (the post-office drain only covers files when a PO exists; on a plain
-    /// peer-to-peer LAN the sender's one-shot push is otherwise the only delivery, so a
-    /// missed push would strand the file at 0 chunks). Cleared once a file completes; not
-    /// seeded from saved files (whose chunks are pruned), so we never re-pull a saved file.
-    pub(in crate::node) pending_files: Mutex<HashSet<ConversationId>>,
+    /// Coalesced hint for the durable download work owned by `files`.
     pub(in crate::node) file_pull_notify: tokio::sync::Notify,
     pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
@@ -371,7 +402,8 @@ pub struct Node {
     pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
     pub(in crate::node) file_changes: tokio::sync::watch::Sender<u64>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
-    pub(in crate::node) attachment_consent: Mutex<super::attachment_consent::AttachmentConsent>,
+    pub(in crate::node) attachment_consent:
+        Mutex<super::attachment_consent::IndexedAttachmentConsent>,
     /// Durable pairwise file-consent controls, separate from local receive policy.
     pub(in crate::node) file_consent: Mutex<super::file_consent_store::FileConsentStore>,
     /// Durable chat-media store under `<account_dir>/media`: the plaintext bytes of
@@ -393,7 +425,11 @@ pub struct Node {
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
     pub(in crate::node) channel_changes: tokio::sync::broadcast::Sender<ConversationId>,
     pub(in crate::node) channel_recovery_pending: Mutex<HashSet<ConversationId>>,
+    pub(in crate::node) join_history_work: Mutex<super::join_history::indexed::HistoryWork>,
     pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
+    /// Captured when a test starts its recovery worker; excludes periodic rescue.
+    #[cfg(test)]
+    pub(in crate::node) channel_recovery_periodic_disabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) channel_recovery:
         Mutex<HashMap<ConversationId, super::channels::ChannelRecovery>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
@@ -415,8 +451,7 @@ pub struct Node {
     pub(in crate::node) bridge_refresh:
         tokio::sync::Mutex<super::bridge_client::BridgeRefreshState>,
     pub(in crate::node) bridge_generation: std::sync::atomic::AtomicU64,
-    pub(in crate::node) delivery_control_ids:
-        Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
+    pub(in crate::node) delivery_control_ids: Mutex<super::delivery_store::DeliveryControlIndex>,
     pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
     /// Decrypted received-message plaintext, for serving history after the wire key is gone.
     pub(in crate::node) received: Mutex<ReceivedLog>,
@@ -427,33 +462,86 @@ pub struct Node {
     /// Durable record of OUR OWN recalls (sealed to peers, so un-openable from our own log).
     /// `history`/`account_history` read this to tombstone our recalled messages; it survives
     /// restart (unlike own reactions).
-    pub(in crate::node) recalls: Mutex<crate::node::recall::RecallLog>,
+    pub(in crate::node) recalls: Mutex<crate::node::recall::IndexedRecallLog>,
     /// Owns profile journals, local publication and coordinated account transitions.
-    pub(in crate::node) trust_cards: Mutex<super::trust_card::TrustCardStore>,
-    pub(in crate::node) profiles: Mutex<super::account_profile_data::AccountProfileStore>,
+    pub(in crate::node) trust_cards: Mutex<super::trust_card::IndexedTrustCardStore>,
+    pub(in crate::node) profiles: Mutex<super::account_profile_data::IndexedAccountProfileStore>,
     pub(in crate::node) account_profiles: super::account_profile::AccountProfiles,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
     /// is unchanged across its many call sites; the runtime claims the receiver once via
     /// [`Node::take_profile_receiver`].
-    pub(in crate::node) profile_incoming: mpsc::UnboundedSender<ReceivedProfile>,
+    pub(in crate::node) profile_incoming: super::runtime_delivery::HostPayload<ReceivedProfile>,
     pub(in crate::node) profile_rx: Mutex<Option<mpsc::UnboundedReceiver<ReceivedProfile>>>,
     /// Live stream of inbound call signals (WebRTC SDP/bye), surfaced to the app. Like
     /// `profile_incoming`, the node owns BOTH ends (created in `open_with_account`) so the
     /// constructor signature is unchanged; the runtime claims the receiver once via
     /// [`Node::take_call_signal_receiver`]. Ephemeral — never touches the event log.
-    pub(in crate::node) call_signal_incoming:
-        mpsc::UnboundedSender<crate::node::call::ReceivedCallSignal>,
+    pub(in crate::node) call_signal_incoming: super::runtime_delivery::CallInbox,
     pub(in crate::node) call_signal_rx:
         Mutex<Option<mpsc::UnboundedReceiver<crate::node::call::ReceivedCallSignal>>>,
-    /// Profile events we've already surfaced this session (dedup), so re-syncing a peer's
-    /// device-pair conversation doesn't re-emit a profile we already applied.
-    pub(in crate::node) profiles_emitted: Mutex<HashSet<EventId>>,
+    /// Exact profile receive facts and bounded metadata discovery/retry.
+    pub(in crate::node) profile_receive_work:
+        Mutex<super::profile_receive_work::ProfileReceiveWork>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
-    pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::ReactionStore>,
+    pub(in crate::node) reaction_queries: Mutex<super::reactions::ReactionQueryWork>,
+    pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::IndexedReactionStore>,
+    // Declared last so every legacy handle drops before the connection and lease.
+    pub(in crate::node) storage: Arc<crate::storage::profile::context::ProfileStorage>,
+}
+
+/// Explicit participant inputs for a caller that already owns the profile lease.
+/// Exact event and sent paths are preserved, including external sent roots.
+pub struct NodeOpenRequest<'a> {
+    pub identity: DeviceIdentity,
+    pub account: Account,
+    pub roster: Arc<Mutex<Roster>>,
+    pub incoming: mpsc::UnboundedSender<ReceivedDm>,
+    pub channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
+    pub file_incoming: mpsc::UnboundedSender<ReceivedFile>,
+    pub log_path: &'a Path,
+    pub sent_path: &'a Path,
+    pub password: &'a str,
+}
+
+/// Production hosts observe durable reception/current state on demand. This
+/// constructor has no caller-owned payload queues; legacy constructors remain
+/// live-only SDK collecting APIs with caller-owned unbounded delivery.
+pub struct BoundedNodeOpenRequest<'a> {
+    pub identity: DeviceIdentity,
+    pub account: Account,
+    pub roster: Arc<Mutex<Roster>>,
+    pub log_path: &'a Path,
+    pub sent_path: &'a Path,
+    pub password: &'a str,
+}
+
+pub(crate) struct LegacyPayloadTargets {
+    pub incoming: mpsc::UnboundedSender<ReceivedDm>,
+    pub channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
+    pub file_incoming: mpsc::UnboundedSender<ReceivedFile>,
 }
 
 impl Node {
+    /// Close every legacy handle and the encrypted connection before directory
+    /// relocation. Independently retained Node/facade owners prevent publication.
+    pub fn close_profile(self: Arc<Self>) -> Result<(), LogError> {
+        let node = Arc::try_unwrap(self).map_err(|_| {
+            LogError::Io(std::io::Error::other(
+                "profile still has retained Node handles",
+            ))
+        })?;
+        let storage = node.storage.clone();
+        drop(node);
+        Arc::try_unwrap(storage)
+            .map_err(|_| {
+                LogError::Io(std::io::Error::other(
+                    "profile still has retained storage work",
+                ))
+            })?
+            .close()
+    }
+
     /// Open a node backed by a durable event log at `log_path` and a sent-plaintext
     /// sidecar at `sent_path` (both encrypted with `password`). Restored history is
     /// seeded into the already-emitted set so it is NOT re-streamed — only events
@@ -499,14 +587,140 @@ impl Node {
         sent_path: &Path,
         password: &str,
     ) -> Result<Arc<Self>, LogError> {
+        crate::storage::profile::participant::validate_authority_leaves(log_path, sent_path)?;
         let dir = log_path
             .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let lease = crate::storage::profile::ProfileStorageLease::acquire(dir)?;
+        Self::open_with_profile_lease(
+            lease,
+            NodeOpenRequest {
+                identity,
+                account,
+                roster,
+                incoming,
+                channel_incoming,
+                file_incoming,
+                log_path,
+                sent_path,
+                password,
+            },
+        )
+    }
+
+    /// Consume a pre-keystore owner once. Compatibility constructors acquire
+    /// their own lease and never bypass exclusion for the current process.
+    pub fn open_with_profile_lease(
+        lease: crate::storage::profile::ProfileStorageLease,
+        request: NodeOpenRequest<'_>,
+    ) -> Result<Arc<Self>, LogError> {
+        let storage = crate::storage::profile::context::ProfileStorage::open_participant(
+            lease,
+            &request.identity.public(),
+            &request.account.public(),
+            request.log_path,
+            request.sent_path,
+            request.password,
+        )?;
+        Self::open_in_storage(storage, request)
+    }
+
+    pub fn open_bounded_with_profile_lease(
+        lease: crate::storage::profile::ProfileStorageLease,
+        request: BoundedNodeOpenRequest<'_>,
+    ) -> Result<Arc<Self>, LogError> {
+        let storage = crate::storage::profile::context::ProfileStorage::open_participant(
+            lease,
+            &request.identity.public(),
+            &request.account.public(),
+            request.log_path,
+            request.sent_path,
+            request.password,
+        )?;
+        Self::open_in_storage_delivery(storage, request, None)
+    }
+
+    pub(crate) fn open_in_storage(
+        storage: Arc<crate::storage::profile::context::ProfileStorage>,
+        request: NodeOpenRequest<'_>,
+    ) -> Result<Arc<Self>, LogError> {
+        let NodeOpenRequest {
+            identity,
+            account,
+            roster,
+            incoming,
+            channel_incoming,
+            file_incoming,
+            log_path,
+            sent_path,
+            password,
+        } = request;
+        Self::open_in_storage_delivery(
+            storage,
+            BoundedNodeOpenRequest {
+                identity,
+                account,
+                roster,
+                log_path,
+                sent_path,
+                password,
+            },
+            Some(LegacyPayloadTargets {
+                incoming,
+                channel_incoming,
+                file_incoming,
+            }),
+        )
+    }
+
+    pub(crate) fn open_in_storage_delivery(
+        storage: Arc<crate::storage::profile::context::ProfileStorage>,
+        request: BoundedNodeOpenRequest<'_>,
+        targets: Option<LegacyPayloadTargets>,
+    ) -> Result<Arc<Self>, LogError> {
+        let BoundedNodeOpenRequest {
+            identity,
+            account,
+            roster,
+            log_path,
+            sent_path,
+            password,
+        } = request;
+        let legacy_delivery = targets.is_some();
+        let ui_changes = tokio::sync::watch::channel(0).0;
+        let (incoming, channel_incoming, file_incoming) = match targets {
+            Some(targets) => (
+                super::runtime_delivery::HostPayload::legacy(targets.incoming, ui_changes.clone()),
+                super::runtime_delivery::HostPayload::legacy(
+                    targets.channel_incoming,
+                    ui_changes.clone(),
+                ),
+                super::runtime_delivery::HostPayload::legacy(
+                    targets.file_incoming,
+                    ui_changes.clone(),
+                ),
+            ),
+            None => (
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+            ),
+        };
+        storage.validate_participant_request(
+            &identity.public(),
+            &account.public(),
+            log_path,
+            sent_path,
+        )?;
+        let dir = log_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         // Each store does its own slow, CPU-bound password KDF over an independent
         // file. Open them on scoped threads so the KDFs run in parallel: on a
         // multi-core machine the wall-clock cost collapses to roughly one KDF.
         let (
-            log_res,
             sent_res,
             sessions_res,
             received_res,
@@ -521,36 +735,51 @@ impl Node {
             contacts_res,
             recovered_ids_res,
         ) = std::thread::scope(|s| {
-            let h_log = s.spawn(|| PersistentEventLog::open(log_path, password));
-            let h_sent = s.spawn(|| SentLog::open(sent_path, password));
+            let h_sent = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::sentlog::SentEntry>(&storage,sent_path,password,super::transcript_repository::SENT,b"MTSENT"));
             let h_sess = s.spawn(|| RatchetSessions::open(&dir.join("ratchet.sessions"), password));
-            let h_recv = s.spawn(|| ReceivedLog::open(&dir.join("received.log"), password));
-            let h_csnd =
-                s.spawn(|| ChannelSenderStore::open(&dir.join("channel.senders"), password));
-            let h_custody =
-                s.spawn(|| ChannelCustodyStore::open(&dir.join("channel.custody"), password));
+            let h_recv = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received.log"),password,super::transcript_repository::RECEIVED,b"MTRECV"));
+            let h_csnd = s.spawn(|| {
+                ChannelSenderStore::authenticate_legacy(
+                    &storage,
+                    &dir.join("channel.senders"),
+                    password,
+                )
+            });
+            let h_custody = s.spawn(|| {
+                ChannelCustodyStore::authenticate_legacy(
+                    &storage,
+                    &dir.join("channel.custody"),
+                    password,
+                )
+            });
             // Durable record of surfaced file manifests (reuses the ReceivedLog format),
             // so the file book's emitted set survives restart WITHOUT marking unopened
             // manifests as emitted — see the seeding below.
             let h_files =
-                s.spawn(|| ReceivedLog::open_file_cards(&dir.join("received_files.log"), password));
+                s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received_files.log"),password,super::transcript_repository::FILES,b"MTRECV"));
             // Durable store of avatars peers propagated to us (one per account, newest-wins).
             let h_profiles = s.spawn(|| {
-                crate::node::profile_store::ProfileStore::open(&dir.join("profiles.log"), password)
+                crate::node::profile_store::IndexedProfileStore::authenticate_legacy(
+                    &storage,
+                    &dir.join("profiles.log"),
+                    password,
+                )
             });
             // Durable record of OUR OWN recalls: our recall payloads are sealed to peers (we
             // can't open them from our own log), so this is how `history` knows which of our
             // messages we recalled — and it must survive restart.
             let h_recalls = s
-                .spawn(|| crate::node::recall::RecallLog::open(&dir.join("recalls.log"), password));
+                .spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::recall::RecallMark>(&storage,&dir.join("recalls.log"),password,super::transcript_repository::RECALL_MARKS,b"MTRECL"));
             let h_consent = s.spawn(|| {
-                super::attachment_consent::AttachmentConsent::open(
+                super::attachment_consent::IndexedAttachmentConsent::authenticate_legacy(
+                    &storage,
                     &dir.join("attachment-consent.log"),
                     password,
                 )
             });
             let h_consent_controls = s.spawn(|| {
-                super::file_consent_store::FileConsentStore::open(
+                super::file_consent_store::FileConsentStore::authenticate_legacy(
+                    &storage,
                     &dir.join("file-consent-controls.log"),
                     password,
                 )
@@ -566,14 +795,11 @@ impl Node {
             });
             let h_recovered_ids = s.spawn(|| {
                 let path = dir.join("recovery-sent-ids.log");
-                if path.exists() {
-                    super::recovered_sent_ids::RecoveredSentIds::open(&path, password).map(Some)
-                } else {
-                    Ok(None)
-                }
+                super::recovered_sent_ids::IndexedRecoveredSentIds::authenticate_legacy(
+                    &storage, &path, password,
+                )
             });
             (
-                h_log.join(),
                 h_sent.join(),
                 h_sess.join(),
                 h_recv.join(),
@@ -591,34 +817,33 @@ impl Node {
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
-        let mut log = log_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let mut channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let account_profiles = super::account_profile::AccountProfiles::new(&account, profiles);
-        let trust_cards = Mutex::new(super::trust_card::TrustCardStore::open(
+        received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        super::trust_card::IndexedTrustCardStore::authenticate_legacy(
+            &storage,
             &dir.join("trust-cards.log"),
             password,
-        )?);
-        let profiles = Mutex::new(super::account_profile_data::AccountProfileStore::open(
+        )?;
+        super::account_profile_data::IndexedAccountProfileStore::authenticate_legacy(
+            &storage,
             &dir.join("account-profiles.log"),
             password,
-        )?);
-        let mut recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        )?;
+        recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
             .unwrap_or_else(|e| std::panic::resume_unwind(e))?
             .into_iter()
             .map(crate::eventlog::Author::from_ed25519)
             .collect();
         let recovery_contacts = contacts_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let recovered_sent_ids =
-            recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
         let mut group_operations =
             super::account_group::operations::journal::OperationJournal::open(
@@ -628,16 +853,245 @@ impl Node {
                 identity.public(),
             )?;
         let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
-        delivery.bind_profile(
+        let previous_account = storage
+            .participant_database()
+            .map(|database| {
+                crate::storage::profile::participant::previous_account(database, &account.public())
+            })
+            .transpose()?
+            .flatten();
+        let legacy_previous = delivery.bind_profile_authorized(
             log_path,
             password,
             &identity.public(),
             &account.account_id(),
+            previous_account.as_deref(),
+            storage.participant_database().is_none(),
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
+        storage.validate_legacy_events(password)?;
+        // Authenticate every remaining legacy owner before first SQL source
+        // publication. Keep these handles for recovery instead of opening twice.
+        let mut account_devices = super::account_devices::AccountDevices::open(
+            &super::account_devices::file_path(dir, &account.account_id()),
+            password,
+            &account.account_id(),
+        )?;
+        account_devices.insert(super::account_devices::AccountDevice {
+            public: identity.public(),
+            certificate: account.certify(&identity.public().ed25519_pub),
+        })?;
+        super::account_suppression::IndexedAccountSuppression::authenticate_legacy(
+            &storage,
+            &dir.join("account-suppression.log"),
+            password,
+        )?;
+        super::account_file_repository::IndexedAccountFileProofs::authenticate(
+            &storage,
+            &dir.join("account-file-proofs.log"),
+            password,
+        )?;
+        super::file_message_identity::IndexedFileMessageIdentities::authenticate(
+            &storage,
+            &dir.join("file-message-identities.log"),
+            password,
+        )?;
+        super::filebook::scopes::IndexedManifestScopes::authenticate(
+            &storage,
+            &dir.join("sent-manifest-scopes.log"),
+            password,
+        )?;
+        let forwarding = super::forwarding::ForwardStore::open(
+            &dir.join(format!("forwarding-{}.log", account.account_id())),
+            password,
+        )?;
+        let favorites = super::favorites::FavoriteStore::open(
+            &dir.join(format!("favorites-{}.log", account.account_id())),
+            password,
+        )?;
+        let account_sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
+            &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
+            password,
+        )?;
+        let account_preferences = super::account_preferences::AccountPreferences::open_for_account(
+            dir,
+            password,
+            &account.account_id(),
+        )?;
+        let account_access = super::account_access::AccountAccessStore::open(
+            &dir.join("account-access.log"),
+            password,
+        )?;
+        let account_access_updates =
+            tokio::sync::watch::channel(account_access.current(&account.account_id())).0;
+        let reaction_path =
+            log_path.with_extension(format!("{}-reactions.log", account.account_id()));
+        super::reaction_store::IndexedReactionStore::authenticate_legacy(
+            &storage,
+            &reaction_path,
+            password,
+            account.public().ed25519_pub,
+        )?;
+        let channel_migration = super::channel_account_maintenance::ChannelMigrationStore::open(
+            &dir.join(format!("channel-migration-{}.log", account.account_id())),
+            password,
+            account.public().ed25519_pub,
+            &identity.public(),
+        )?;
+        let mut account_transitions =
+            super::account_transition_store::AccountTransitionStore::open(
+                &dir.join("account-binding-transitions.log"),
+                password,
+            )?;
+        account_transitions.commit_own(&identity.public(), &account.public().ed25519_pub)?;
+        account_transitions.discard_pending(&identity.public(), &account.public().ed25519_pub)?;
+        let account_document_updates = tokio::sync::watch::channel(0).0;
+        super::account_documents::store::AccountDocumentStore::authenticate_legacy(
+            &storage,
+            dir,
+            password,
+            &account.public().ed25519_pub,
+        )?;
+        storage.complete_participant(password, legacy_previous.as_deref())?;
+        let media = super::media_store::MediaStore::open_profile(
+            storage.clone(),
+            dir,
+            password,
+            &identity.user_id(),
+            None,
+        )
+        .map_err(LogError::Io)?;
+        let favorite_media = super::media_store::MediaStore::open_profile(
+            storage.clone(),
+            &dir.join(format!("favorites-{}", account.account_id())),
+            password,
+            &account.account_id(),
+            None,
+        )
+        .map_err(LogError::Io)?;
+        let account_documents =
+            super::account_documents::store::AccountDocumentStore::open_profile(
+                storage.clone(),
+                dir,
+                password,
+                &account.public().ed25519_pub,
+            )?;
+
+        let channel_custody = ChannelCustodyStore::from_profile(
+            storage.clone(),
+            &dir.join("channel.custody"),
+            password,
+        )?;
+        let my_dm_reactions = super::reaction_store::IndexedReactionStore::from_profile(
+            storage.clone(),
+            &reaction_path,
+            password,
+            account.public().ed25519_pub,
+        )?;
+        let avatars = super::profile_store::IndexedProfileStore::from_profile(
+            storage.clone(),
+            &dir.join("profiles.log"),
+            password,
+        )?;
+        let account_profiles = super::account_profile::AccountProfiles::new(&account, avatars)?;
+        let trust_cards = Mutex::new(super::trust_card::IndexedTrustCardStore::from_profile(
+            storage.clone(),
+            &dir.join("trust-cards.log"),
+            password,
+        )?);
+        let profiles = Mutex::new(
+            super::account_profile_data::IndexedAccountProfileStore::from_profile(
+                storage.clone(),
+                &dir.join("account-profiles.log"),
+                password,
+            )?,
+        );
+
+        let profile_receive_work =
+            super::profile_receive_work::ProfileReceiveWork::open(storage.clone())?;
+        let reception_effects = super::reception_effects::ReceptionEffects::open(storage.clone())?;
+        let account_file_proofs =
+            super::account_file_repository::IndexedAccountFileProofs::from_profile(
+                storage.clone(),
+                &dir.join("account-file-proofs.log"),
+                password,
+            )?;
+        let file_message_identities =
+            super::file_message_identity::IndexedFileMessageIdentities::from_profile(
+                storage.clone(),
+                &dir.join("file-message-identities.log"),
+                password,
+            )?;
+        let mut sentlog = SentLog::from_profile(storage.clone(), sent_path, password)?;
+        let mut received =
+            ReceivedLog::from_profile(storage.clone(), &dir.join("received.log"), password)?;
+        let mut received_files = ReceivedLog::file_cards_from_profile(
+            storage.clone(),
+            &dir.join("received_files.log"),
+            password,
+        )?;
+        let account_suppression =
+            super::account_suppression::IndexedAccountSuppression::from_profile(
+                storage.clone(),
+                &dir.join("account-suppression.log"),
+                password,
+            )?;
+        let mut recalls = super::recall::IndexedRecallLog::from_profile(
+            storage.clone(),
+            &dir.join("recalls.log"),
+            password,
+        )?;
+        let recovered_sent_ids = Some(
+            super::recovered_sent_ids::IndexedRecoveredSentIds::from_profile(
+                storage.clone(),
+                &dir.join("recovery-sent-ids.log"),
+                password,
+            )?,
+        );
+        let mut channel_senders = ChannelSenderStore::from_profile(
+            storage.clone(),
+            &dir.join("channel.senders"),
+            password,
+        )?;
+        let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
+        let manifest_scopes = super::filebook::scopes::IndexedManifestScopes::from_profile(
+            storage.clone(),
+            &dir.join("sent-manifest-scopes.log"),
+            password,
+            log.repository()?,
+            crate::eventlog::Author::from_ed25519(identity.public().ed25519_pub),
+        )?;
+        // Derived file eligibility must exist before a manifest WAL intent can
+        // install its body, exact evidence and reception effect atomically.
+        let files = IndexedFileBook::open(storage.clone())?;
+        let attachment_consent = super::attachment_consent::IndexedAttachmentConsent::from_profile(
+            storage.clone(),
+            &dir.join("attachment-consent.log"),
+            password,
+        )?;
+        let file_consent = super::file_consent_store::FileConsentStore::from_profile(
+            storage.clone(),
+            &dir.join("file-consent-controls.log"),
+            password,
+        )?;
+        log.repository()?.initialize_ancestry()?;
+        let channel_checkpoints =
+            super::channel::checkpoint::ChannelCheckpointStore::open(storage.clone())?;
+        // At most the existing bounded WAL cohort contributes channel IDs.
+        // Restored historical channels are not added to this recovery allowance.
+        let mut recovered_control_channels = std::collections::BTreeSet::new();
         loop {
             if let Some(tx) = delivery.pending_transactions().first() {
                 delivery.validate_message_action_transaction(tx, &log, &identity)?;
+                use super::delivery_store::DeliveryTransaction;
+                if let DeliveryTransaction::ChannelControl { events }
+                | DeliveryTransaction::AccountSelfControl { events, .. }
+                | DeliveryTransaction::LegacyMemberLeave { events, .. }
+                | DeliveryTransaction::AccountOwnerControl { events, .. } = tx.body()
+                    && let Some(event) = events.first()
+                {
+                    recovered_control_channels.insert(*event.conversation_id.as_bytes());
+                }
             }
             let recall = delivery
                 .pending_transactions()
@@ -671,205 +1125,57 @@ impl Node {
                 break;
             }
         }
-        received_files
-            .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
+        for (conversation, id) in delivery.file_erasures() {
+            received_files.remove_exact(conversation, id)?;
+        }
         let delivery_control_ids = delivery.control_ids();
-        // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
-        // every id in the log. An event that was ingested durably but never recorded (it
-        // arrived before we learned its author — the DM-convergence race — or before its
-        // ratchet key was derivable) must stay eligible for `emit_new_messages` to retry after
-        // a restart; seeding it as emitted here would drop it from history forever. Self-
-        // authored events are excluded by the author check in `emit_new_messages`, so they
-        // need not be seeded.
-        let emitted: HashSet<EventId> = received
-            .conversations()
-            .iter()
-            .flat_map(|c| received.entries(c))
-            .map(|e| e.event_id)
-            .collect();
-        let mut account_devices = super::account_devices::AccountDevices::open(
-            &super::account_devices::file_path(dir, &account.account_id()),
-            password,
-            &account.account_id(),
+        // Startup restores only last validated current presentation after the
+        // account adoption commit below. Historical authority/receiver work is
+        // resumed by the existing bounded channel recovery loop.
+        let channels = ChannelBook::new();
+        let archived_channels = Vec::new();
+        super::files::import_file_book(
+            &files,
+            &received_files,
+            &log,
+            &account_file_proofs,
+            &delivery,
+            &file_message_identities,
+            &account_suppression,
         )?;
-        account_devices.insert(super::account_devices::AccountDevice {
-            public: identity.public(),
-            certificate: account.certify(&identity.public().ed25519_pub),
-        })?;
-        let account_suppression = super::account_suppression::AccountSuppression::open(
-            &dir.join("account-suppression.log"),
+        // The existing FILES reference owner is consulted in bounded background
+        // turns; warm startup only schedules a persisted inventory cutoff.
+        media.schedule_gc().map_err(LogError::Io)?;
+        let (profile_tx, profile_rx, call_signal_tx, call_signal_rx) = if legacy_delivery {
+            let (profile_tx, profile_rx) = mpsc::unbounded_channel();
+            let (call_tx, call_rx) = mpsc::unbounded_channel();
+            (
+                super::runtime_delivery::HostPayload::legacy(profile_tx, ui_changes.clone()),
+                Some(profile_rx),
+                super::runtime_delivery::CallInbox::legacy(call_tx),
+                Some(call_rx),
+            )
+        } else {
+            (
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+                None,
+                super::runtime_delivery::CallInbox::bounded(ui_changes.clone()),
+                None,
+            )
+        };
+        favorite_media.schedule_gc().map_err(LogError::Io)?;
+        let opaque_receive_cache = super::opaque_receive_cache::OpaqueReceiveCache::open(
+            storage.clone(),
+            log_path,
             password,
-        )?;
-        let own_device_ids: HashSet<_> = account_devices
-            .devices()
-            .into_iter()
-            .map(|device| device.public.user_id())
-            .collect();
-        let mut channels = ChannelBook::new();
-        for conv in log.conversations() {
-            let events = log.events(&conv);
-            let mut replay = super::channel::ChannelReplay::new(&events);
-            // Reinstall projections lost between signed-log ingestion and a
-            // failed/crashed sidecar write. Erases are authoritative; recipient
-            // deadlines keep the existing conservative restart policy.
-            loop {
-                let (messages, limited) = channels.process_replay(
-                    &identity,
-                    conv,
-                    &mut replay,
-                    64,
-                    super::channel::CHANNEL_PENDING_BYTES,
-                );
-                let done = !limited;
-                for msg in messages {
-                    if received.entry(msg.event_id).is_some()
-                        || account_suppression.contains(conv, msg.event_id)
-                    {
-                        continue;
-                    }
-                    let own = own_device_ids.contains(&msg.from);
-                    if !own && crate::expiry::deadline(&msg.wrapped).is_some() {
-                        continue;
-                    }
-                    received.record_durable(&super::received_log::ReceivedEntry {
-                        event_id: msg.event_id,
-                        conversation: conv,
-                        from: msg.from,
-                        wall_clock: msg.wall_clock,
-                        plaintext: msg.wrapped,
-                    })?;
-                }
-                if done {
-                    break;
-                }
-            }
-        }
-        let archived_channels = archived_channel_summaries(&log, &channels);
-        // Restore our persisted sending chains into each channel state. The event log
-        // only carries OTHER members' sender keys, so `my_sender` rebuilds empty above;
-        // without this, a post-restart send would mint a fresh chain that receivers
-        // (first-wins on the chain they already hold) cannot follow.
-        for channel in channels.channel_ids() {
-            for (epoch, bytes) in channel_senders.get(&channel) {
-                if let Some(sk) = SenderKey::deserialize(&bytes)
-                    && let Some(state) = channels.state_mut(&channel)
-                {
-                    state.import_my_sender(epoch, sk);
-                }
-            }
-        }
-        // Seed the file book from the durable `received_files` record — the manifests we
-        // actually SURFACED last session (restoring them so they stay saveable), and only
-        // THOSE ids into the emitted set. A manifest that was ingested durably but never
-        // opened (its author not yet in the roster — the DM-convergence race) is absent
-        // here, so `process_file_events` retries it after restart instead of dropping the
-        // file forever. (Mirrors the message-path `emitted` seeding above.)
-        let account_file_proofs = super::account_file_proofs::AccountFileProofs::open(
-            &dir.join("account-file-proofs.log"),
-            password,
-        )?;
-        let file_message_identities = super::file_message_identity::FileMessageIdentities::open(
-            &dir.join("file-message-identities.log"),
-            password,
-        )?;
-        let mut files = FileBook::new();
-        for c in received_files.conversations() {
-            for entry in received_files.entries(&c) {
-                if delivery.file_erased(entry.conversation, entry.event_id)
-                    || delivery.manifest_event_erased(entry.event_id)
-                    || file_message_identities.row_suppressed(&entry, &account_suppression)
-                {
-                    continue;
-                }
-                let decoded = super::files::validated_manifest(&entry.plaintext);
-                let existing = decoded
-                    .as_ref()
-                    .and_then(|m| files.manifest(&m.file_conv()));
-                let proof = log
-                    .get(&entry.event_id)
-                    .or_else(|| account_file_proofs.get(&entry.event_id));
-                if let Some(manifest) = super::files::eligible_manifest_row(&entry, proof, existing)
-                {
-                    files.record_event(entry.event_id, proof.unwrap().author, manifest);
-                    files.mark_emitted(entry.event_id);
-                }
-            }
-        }
-        // Durable encrypted media survives chunk prune and restart.
-        let media = crate::node::media_store::MediaStore::open(dir, password, &identity.user_id())
-            .map_err(|e| LogError::Io(std::io::Error::other(format!("media store open: {e}"))))?;
-        let live_media: std::collections::HashSet<_> = received_files
-            .conversations()
-            .iter()
-            .flat_map(|conversation| received_files.entries(conversation))
-            .filter(|row| !file_message_identities.row_suppressed(row, &account_suppression))
-            .filter_map(|row| {
-                super::files::validated_manifest(&row.plaintext)
-                    .map(|manifest| manifest.file_conv())
-            })
-            .collect();
-        media
-            .prune_unreferenced(&live_media)
-            .map_err(|e| LogError::Io(std::io::Error::other(format!("media prune: {e}"))))?;
-        let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
-        let (call_signal_tx, call_signal_rx) =
-            mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
-        let forwarding = super::forwarding::ForwardStore::open(
-            &dir.join(format!("forwarding-{}.log", account.account_id())),
-            password,
-        )?;
-        let favorites = super::favorites::FavoriteStore::open(
-            &dir.join(format!("favorites-{}.log", account.account_id())),
-            password,
-        )?;
-        let favorite_media = super::media_store::MediaStore::open(
-            &dir.join(format!("favorites-{}", account.account_id())),
-            password,
-            &account.account_id(),
-        )
-        .map_err(LogError::Io)?;
-        favorite_media
-            .prune_unreferenced(&favorites.live_files(now_millis()))
-            .map_err(LogError::Io)?;
-        let account_sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
-            &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
-            password,
-        )?;
-        let account_preferences = super::account_preferences::AccountPreferences::open_for_account(
-            dir,
-            password,
-            &account.account_id(),
-        )?;
-        let account_access = super::account_access::AccountAccessStore::open(
-            &dir.join("account-access.log"),
-            password,
-        )?;
-        let account_access_updates =
-            tokio::sync::watch::channel(account_access.current(&account.account_id())).0;
-        let my_dm_reactions = super::reaction_store::ReactionStore::open(
-            &log_path.with_extension(format!("{}-reactions.log", account.account_id())),
-            password,
-        )?;
-        let channel_migration = super::channel_account_maintenance::ChannelMigrationStore::open(
-            &dir.join(format!("channel-migration-{}.log", account.account_id())),
-            password,
-            account.public().ed25519_pub,
             &identity.public(),
-        )?;
-        let mut account_transitions =
-            super::account_transition_store::AccountTransitionStore::open(
-                &dir.join("account-binding-transitions.log"),
-                password,
-            )?;
-        account_transitions.commit_own(&identity.public(), &account.public().ed25519_pub)?;
-        account_transitions.discard_pending(&identity.public(), &account.public().ed25519_pub)?;
-        let account_documents = super::account_documents::store::AccountDocumentStore::open(
-            dir,
-            password,
-            &account.public().ed25519_pub,
-        )?;
-        let account_document_updates = tokio::sync::watch::channel(0).0;
-        let node = Arc::new(Self {
+            &account.account_id(),
+        );
+        let privacy = Arc::new(super::privacy_runtime::PrivacyControl::with_storage(
+            storage.clone(),
+        ));
+        let mut node = Self {
+            storage,
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
@@ -878,7 +1184,13 @@ impl Node {
             #[cfg(test)]
             group_file_asset_recv_test_hook: Mutex::new(None),
             #[cfg(test)]
+            channel_metadata_install_test_hook: Mutex::new(None),
+            #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            withheld_file_scopes: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            untracked_chunk_validations: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             before_sent_delete_hook: Mutex::new(None),
             #[cfg(test)]
@@ -887,6 +1199,8 @@ impl Node {
             profile_prepare_hook: Mutex::new(None),
             #[cfg(test)]
             peer_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            expiry_cleanup_hook: Mutex::new(None),
             #[cfg(test)]
             remember_peer_hook: Mutex::new(None),
             #[cfg(test)]
@@ -901,7 +1215,7 @@ impl Node {
             account_client_test_hook: Mutex::new(None),
             #[cfg(test)]
             account_channel_maintenance_test_hook: Mutex::new(None),
-            privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
+            privacy,
             identity,
             account,
             account_devices: Mutex::new(account_devices),
@@ -928,7 +1242,6 @@ impl Node {
             account_sync_notify: tokio::sync::Notify::new(),
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_archive_cache: Mutex::new(Default::default()),
-            known_account_cache: Mutex::new(Default::default()),
             account_sync_commit: Mutex::new(()),
             account_wake: Default::default(),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
@@ -936,19 +1249,21 @@ impl Node {
             trust_cards,
             profiles,
             profile_incoming: profile_tx,
-            profile_rx: Mutex::new(Some(profile_rx)),
+            profile_rx: Mutex::new(profile_rx),
             call_signal_incoming: call_signal_tx,
-            call_signal_rx: Mutex::new(Some(call_signal_rx)),
-            profiles_emitted: Mutex::new(HashSet::new()),
+            call_signal_rx: Mutex::new(call_signal_rx),
+            profile_receive_work: Mutex::new(profile_receive_work),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
             sentlog: Mutex::new(sentlog),
             roster,
             incoming,
             channel_incoming,
+            reception_effects,
             channel_membership_commit: Mutex::new(()),
             channels: Mutex::new(channels),
             pending_channel_plaintext: Mutex::new(Default::default()),
+            pending_channel_files: Mutex::new(None),
             archived_channels,
             recovery_origins,
             recovery_contacts,
@@ -958,25 +1273,26 @@ impl Node {
             outgoing_requests_gate: tokio::sync::Mutex::new(()),
             channel_migration: Mutex::new(channel_migration),
             channel_senders: Mutex::new(channel_senders),
+            channel_checkpoints,
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),
+            raw_group_views: Mutex::new(Default::default()),
             group_metadata_cache: Mutex::new(Default::default()),
             #[cfg(test)]
             channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             channel_last_send: Mutex::new(None),
-            emitted: Mutex::new(emitted),
             file_incoming,
             files: Mutex::new(files),
+            manifest_scopes,
             group_file_sharing: Default::default(),
-            pending_files: Mutex::new(HashSet::new()),
             file_pull_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
             file_pull_gate: tokio::sync::Mutex::new(()),
             group_file_delivery: Default::default(),
             relay_retry_after: Mutex::new(HashMap::new()),
             relay_drain_cursor: Mutex::new(HashMap::new()),
-            ui_changes: tokio::sync::watch::channel(0).0,
+            ui_changes,
             file_changes: tokio::sync::watch::channel(0).0,
             attachment_consent: Mutex::new(attachment_consent),
             file_consent: Mutex::new(file_consent),
@@ -989,7 +1305,10 @@ impl Node {
             outgoing_file_consents: Mutex::new(HashMap::new()),
             channel_changes: tokio::sync::broadcast::channel(256).0,
             channel_recovery_pending: Mutex::new(HashSet::new()),
+            join_history_work: Mutex::new(Default::default()),
             channel_recovery_notify: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            channel_recovery_periodic_disabled: std::sync::atomic::AtomicBool::new(false),
             channel_recovery: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
             post_office_receive_notify: tokio::sync::Notify::new(),
@@ -1005,34 +1324,121 @@ impl Node {
             bridge_refresh: tokio::sync::Mutex::new(Default::default()),
             sessions: super::session_pool::SessionPool::default(),
             bridge_generation: std::sync::atomic::AtomicU64::new(0),
-            delivery_control_ids: Mutex::new(delivery_control_ids),
+            delivery_control_ids: Mutex::new(super::delivery_store::DeliveryControlIndex::new(
+                delivery_control_ids,
+            )),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
-            opaque_seen: Mutex::new(HashMap::new()),
+            opaque_receive_cache: Mutex::new(opaque_receive_cache),
             preferred_routes: Mutex::new(HashMap::new()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
+            reaction_queries: Mutex::default(),
             my_dm_reactions: Mutex::new(my_dm_reactions),
-        });
+        };
+        node.initialize_public_profile_reconciliation()?;
         node.reconcile_account_profiles_on_open().map_err(|error| {
             LogError::CorruptFile(format!("account profile projection: {error}"))
         })?;
-        if let Err(error) = node.project_public_profile_documents() {
-            log::debug!("contact profile projection deferred: {error}");
-        }
-        if let Err(error) = node.publish_public_profile_documents() {
-            log::debug!("contact profile publication deferred: {error}");
-        }
+        // Optional signed-document repair runs in finite account-sync turns.
+        // Its durable sources and exact receipts survive a stopped runtime.
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         if node.retry_conversation_personal_cleanup().is_err() {
             log::debug!("personal conversation cleanup remains pending");
         }
+        node.storage
+            .complete_participant(password, legacy_previous.as_deref())?;
+        node.delivery
+            .lock()
+            .expect("delivery lock not poisoned")
+            .finish_profile_binding()?;
+        crate::storage::profile::publication::cut("participant-after-legacy-binding")?;
+        crate::storage::profile::participant::finish_adoption(
+            node.storage.database(),
+            &node.account.public(),
+        )?;
+        crate::storage::profile::publication::cut("participant-after-adoption-clear")?;
+        // Schema was initialized before WAL recovery. Capture the final account
+        // only after the existing authenticated adoption owner has committed.
+        node.reception_effects =
+            super::reception_effects::ReceptionEffects::open(node.storage.clone())?;
+        node.channel_checkpoints =
+            super::channel::checkpoint::ChannelCheckpointStore::open(node.storage.clone())?;
+        node.received
+            .lock()
+            .expect("received lock")
+            .recapture_reception_owner(&node.account.public())?;
+        node.received_files
+            .lock()
+            .expect("received files lock")
+            .recapture_reception_owner(&node.account.public())?;
+        node.profile_receive_work = Mutex::new(
+            super::profile_receive_work::ProfileReceiveWork::open(node.storage.clone())?,
+        );
+        node.files = Mutex::new(IndexedFileBook::open(node.storage.clone())?);
+        node.attachment_consent
+            .lock()
+            .expect("consent lock")
+            .recapture()?;
+        node.file_consent
+            .lock()
+            .expect("file consent lock")
+            .recapture()?;
+        node.manifest_scopes.recapture()?;
         node.queue_approved_incomplete_files();
-        Ok(node)
+        node.channel_checkpoints.begin_runtime_reopen()?;
+        {
+            let mut book = node.channels.lock().expect("channels lock");
+            let mut after = None;
+            while let Some(channel) = node.channel_checkpoints.restore_presentation_page(
+                &mut book,
+                &node.user_id(),
+                after,
+            )? {
+                after = Some(channel);
+                if let Some(state) = book.state_mut(&channel)
+                    && let Some(bytes) = node
+                        .channel_senders
+                        .lock()
+                        .expect("sender store lock")
+                        .current(&channel, state.epoch())?
+                {
+                    let key = SenderKey::deserialize(&bytes).ok_or_else(|| {
+                        LogError::CorruptFile("invalid channel sender checkpoint".into())
+                    })?;
+                    state.import_my_sender(state.epoch(), key);
+                }
+            }
+        }
+        // Recovered controls can make the restored presentation stale. Advance
+        // only this bounded cohort under one global canonical allowance; larger
+        // work remains queued and strict readers retain their Pending fence.
+        let mut recovery_budget = crate::eventlog::sync::network::PreparationBudget::default();
+        for channel in recovered_control_channels {
+            let channel = ConversationId::new(channel);
+            match node.prepare_channel_admission(channel, &mut recovery_budget) {
+                Ok(()) | Err(LogError::StaleCursor) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        node.archived_channels = archived_channel_summaries(&node.channel_checkpoints)?;
+        node.channel_recovery_notify.notify_one();
+        node.log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .initialize_receiving(
+                crate::eventlog::Author::from_ed25519(node.identity.public().ed25519_pub),
+                &node.account.public(),
+            )?;
+        node.bootstrap_private_dm_controls().map_err(|error| {
+            LogError::CorruptFile(format!("account control projection: {error}"))
+        })?;
+        Ok(Arc::new(node))
     }
 
     /// This node's own user-id fingerprint.
@@ -1107,23 +1513,12 @@ impl Node {
 
     /// The avatar a peer ACCOUNT propagated to us (data-URL bytes), or `None` if unknown
     /// or cleared. Durable across restart.
-    pub fn peer_avatar(&self, account_id: &str) -> Option<Vec<u8>> {
+    pub fn peer_avatar(&self, account_id: &str) -> Result<Option<Vec<u8>>, LogError> {
         self.account_profiles.avatar(account_id)
     }
 
-    /// Every peer avatar we hold, as `account_id -> data-URL bytes`. For seeding the UI
-    /// on startup so received avatars survive a relaunch.
-    pub fn peer_avatars(&self) -> HashMap<String, Vec<u8>> {
-        self.account_profiles.avatars()
-    }
-
-    /// Durable signed profile state, including clear tombstones for startup reconciliation.
-    pub fn peer_profile_states(&self) -> HashMap<String, Option<Vec<u8>>> {
-        self.account_profiles.avatar_states()
-    }
-
     /// Summaries of all channels this node is a member of.
-    pub fn list_channels(&self) -> Vec<ChannelSummary> {
+    pub fn list_channels(&self) -> Result<Vec<ChannelSummary>, NodeError> {
         let book = self.channels.lock().expect("channels mutex not poisoned");
         let mut channels: Vec<_> = book
             .channel_ids()
@@ -1142,15 +1537,16 @@ impl Node {
             })
             .collect();
         let local_ids: std::collections::HashSet<_> = book.channel_ids().into_iter().collect();
-        channels.extend(
-            self.archived_channels
-                .iter()
-                .filter(|archive| book.state(&archive.id).is_none())
-                .cloned(),
-        );
         drop(book);
+        // Deferred projection can publish an imported channel after open. Read
+        // current indexed summaries instead of freezing that initial empty view.
+        channels.extend(
+            archived_channel_summaries(&self.channel_checkpoints)?
+                .into_iter()
+                .filter(|archive| !local_ids.contains(&archive.id)),
+        );
         for channel in &mut channels {
-            let (accounts, unbound) = self.channel_member_account_sets(channel.id);
+            let (accounts, unbound) = self.channel_member_account_sets(channel.id)?;
             if !channel.archived || !accounts.is_empty() || !unbound.is_empty() {
                 channel.member_count = accounts.len() + unbound.len();
             }
@@ -1183,7 +1579,7 @@ impl Node {
                 );
             }
         }
-        by_id.into_values().collect()
+        Ok(by_id.into_values().collect())
     }
 
     /// Owner account authority from the validated group projection.
@@ -1194,20 +1590,20 @@ impl Node {
             .state(&channel)
             .and_then(|state| state.owner_account_id().map(str::to_owned))
     }
-    pub fn channel_can_manage(&self, channel: ConversationId) -> bool {
-        self.channels
-            .lock()
-            .expect("channels mutex not poisoned")
-            .state(&channel)
-            .is_some_and(|state| self.channel_identity_can_manage(state))
+    pub fn channel_can_manage(&self, channel: ConversationId) -> Result<bool, NodeError> {
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        let Some(state) = book.state(&channel) else {
+            return Ok(false);
+        };
+        Ok(self.channel_identity_can_manage(state)?)
     }
 
-    pub fn channel_can_send(&self, channel: ConversationId) -> bool {
-        self.channels
-            .lock()
-            .expect("channels mutex not poisoned")
-            .state(&channel)
-            .is_some_and(|state| !state.is_dissolved() && self.channel_identity_is_current(state))
+    pub fn channel_can_send(&self, channel: ConversationId) -> Result<bool, NodeError> {
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        let Some(state) = book.state(&channel) else {
+            return Ok(false);
+        };
+        Ok(!state.is_dissolved() && self.channel_identity_is_current(state)?)
     }
     pub fn channel_member_account_binding(
         &self,
@@ -1261,14 +1657,22 @@ impl Node {
             .unwrap_or_default()
     }
 
-    pub fn channel_activity(&self, channel: ConversationId) -> Vec<super::ChannelActivity> {
+    pub fn channel_activity(
+        &self,
+        channel: ConversationId,
+    ) -> Result<Vec<super::ChannelActivity>, super::NodeError> {
+        if self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .is_none()
         {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            if book.state(&channel).is_some() {
-                return book.activity(&channel);
-            }
+            return Ok(self.shared_group_activity(channel));
         }
-        self.shared_group_activity(channel)
+        Ok(self
+            .channel_activity_page(channel, None, Default::default())?
+            .items)
     }
 
     /// The current owner of `channel`, or empty if the channel is unknown.
@@ -1300,9 +1704,14 @@ impl Node {
         ciphertext: Vec<u8>,
         required_profile_parent: Option<EventId>,
     ) -> Result<(u64, EventId), NodeError> {
-        self.append_event_checked(channel, kind, ciphertext, required_profile_parent, |_| {
-            Ok(())
-        })
+        self.append_event_checked(
+            channel,
+            kind,
+            ciphertext,
+            required_profile_parent,
+            None,
+            |_| Ok(()),
+        )
     }
 
     pub(in crate::node) fn append_event_if(
@@ -1312,8 +1721,20 @@ impl Node {
         ciphertext: Vec<u8>,
         check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
     ) -> Result<u64, NodeError> {
-        self.append_event_checked(channel, kind, ciphertext, None, check)
+        self.append_event_checked(channel, kind, ciphertext, None, None, check)
             .map(|(seq, _)| seq)
+    }
+
+    pub(in crate::node) fn append_channel_control_from_source(
+        &self,
+        source: &super::channel::checkpoint::ChannelSource,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+    ) -> Result<(), NodeError> {
+        self.append_event_checked(source.channel, kind, ciphertext, None, Some(source), |_| {
+            Ok(())
+        })?;
+        Ok(())
     }
 
     fn append_event_checked(
@@ -1322,6 +1743,7 @@ impl Node {
         kind: EventKind,
         ciphertext: Vec<u8>,
         required_profile_parent: Option<EventId>,
+        source: Option<&super::channel::checkpoint::ChannelSource>,
         check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
     ) -> Result<(u64, EventId), NodeError> {
         if self
@@ -1346,6 +1768,11 @@ impl Node {
         check(&delivery)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
+        if let Some(source) = source {
+            // The allocation lock excludes remote appends until this control
+            // is installed. Recheck after pending local WAL recovery as well.
+            self.channel_checkpoints.check_source(source)?;
+        }
         let (mut parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
         if independent_profile {
             // Signed profile leaves must remain ingestible while sibling content
@@ -1354,7 +1781,7 @@ impl Node {
         }
         if let Some(parent) = required_profile_parent {
             if kind != EventKind::Profile
-                || !log.get(&parent).is_some_and(|event| {
+                || !log.get(&parent)?.is_some_and(|event| {
                     event.kind == EventKind::Profile
                         && event.conversation_id == channel
                         && event.author == self_author
@@ -1421,3 +1848,7 @@ pub(in crate::node) fn random_msg_id() -> [u8; 32] {
 #[cfg(test)]
 #[path = "node_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "participant_storage_tests.rs"]
+mod participant_storage_tests;

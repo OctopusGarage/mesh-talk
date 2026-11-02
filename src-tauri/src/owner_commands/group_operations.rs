@@ -198,7 +198,7 @@ pub async fn owner_personal_conversation_states(
                 .personal_account_ids()
                 .into_iter()
                 .map(mesh_talk_core::node::DocumentConversation::Account)
-                .chain(handle.list_channels().into_iter().map(|channel| {
+                .chain(handle.list_channels()?.into_iter().map(|channel| {
                     mesh_talk_core::node::DocumentConversation::Channel(hex::encode(
                         channel.id.as_bytes(),
                     ))

@@ -779,7 +779,7 @@ impl Node {
                     selected.file,
                     channel.peer_identity(),
                     Some(selected),
-                )
+                )?
                 .is_some(),
         };
         if !current {
@@ -913,7 +913,7 @@ impl Node {
                 .log
                 .lock()
                 .expect("log mutex not poisoned")
-                .conversations();
+                .conversations()?;
             for conversation in conversations {
                 self.emit_new_messages(conversation);
             }
@@ -928,7 +928,7 @@ impl Node {
                 .log
                 .lock()
                 .expect("log mutex not poisoned")
-                .conversations();
+                .conversations()?;
             for conversation in conversations {
                 self.process_profile_events(conversation);
             }
@@ -1381,27 +1381,17 @@ impl Node {
             return Err(NodeError::Authorization("invalid signed file card".into()));
         }
         if let Some(peer) = &record.peer_account {
-            let own = self.account_id();
-            let author =
-                if self.identity.public().ed25519_pub == *payload.proof.author.ed25519_pub()
-                    || self.linked_devices().iter().any(|device| {
-                        device.public.ed25519_pub == *payload.proof.author.ed25519_pub()
-                    })
-                {
-                    Some(own)
-                } else {
-                    self.historical_author(payload.proof.author.ed25519_pub())
-                        .and_then(|proof| proof.account_id())
-                };
+            let author = self.file_message_row_author_account(&row, Some(&payload.proof))?;
             if author
                 .as_deref()
-                .is_some_and(|author| self.private_dm_message_recalled(peer, event_id, author))
+                .map(|author| self.private_dm_message_recalled(peer, event_id, author))
+                .transpose()?
+                .unwrap_or(false)
                 || self
                     .recalls
                     .lock()
                     .expect("recalls mutex")
-                    .targets(&host)
-                    .contains(&event_id)
+                    .contains(host, event_id)?
             {
                 return Ok(());
             }
@@ -1410,20 +1400,20 @@ impl Node {
             .log
             .lock()
             .expect("log mutex not poisoned")
-            .get(&event_id)
-            && existing != &payload.proof
+            .get(&event_id)?
+            && existing != payload.proof
         {
             return Err(NodeError::Authorization(
                 "file proof conflicts with signed event".into(),
             ));
         }
-        let logical = self.file_message_row_logical_id(&row);
+        let logical = self.file_message_row_logical_id(&row)?;
         let suppressed = {
             let suppression = self
                 .account_suppression
                 .lock()
                 .expect("account suppression mutex not poisoned");
-            suppression.contains(host, event_id) || suppression.contains(host, logical)
+            suppression.contains(host, event_id)? || suppression.contains(host, logical)?
         };
         let erased = {
             let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
@@ -1435,22 +1425,17 @@ impl Node {
         self.account_file_proofs
             .lock()
             .expect("file proofs mutex not poisoned")
-            .insert(payload.proof)
+            .insert(payload.proof.clone())
             .map_err(NodeError::Log)?;
         let mut files = self
             .received_files
             .lock()
             .expect("files mutex not poisoned");
-        let fresh = !files
-            .entries_ref(&host)
-            .iter()
-            .any(|entry| entry.event_id == event_id);
+        let fresh = !files.contains_in(&host, event_id)?;
         files
-            .record_file_alias_durable(&row)
+            .record_file_with_reception(&row, Some(&payload.proof), None)
             .map_err(NodeError::Log)?;
         drop(files);
-        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        self.reseed_live_file_book(&delivery);
         if fresh {
             self.note_account_history_change();
         }
@@ -1467,184 +1452,274 @@ impl Node {
                 DocumentConversation::Account,
             )
     }
-
     fn personal_attachment_allowed(
         &self,
         file: ConversationId,
         cut: &super::account_documents::personal::PersonalHistoryCut,
-    ) -> bool {
-        let hosts: Vec<_> = {
-            let rows = self.received_files.lock().expect("files mutex");
-            rows.conversations()
-                .into_iter()
-                .filter(|host| {
-                    rows.entries_ref(host).iter().any(|row| {
-                        super::files::validated_manifest(&row.plaintext)
-                            .is_some_and(|manifest| manifest.file_conv() == file)
-                    })
-                })
-                .collect()
-        };
-        hosts
-            .into_iter()
-            .any(|host| cut.allows(self, &self.personal_host_conversation(host)))
-    }
-
-    fn has_live_local_file_card(&self, file_conv: ConversationId) -> bool {
-        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        self.has_live_local_file_card_with(file_conv, &delivery)
-    }
-
-    fn has_live_local_file_card_with(
-        &self,
-        file_conv: ConversationId,
-        delivery: &super::delivery_store::DeliveryStore,
-    ) -> bool {
-        let rows = self
-            .received_files
-            .lock()
-            .expect("files mutex not poisoned");
-        let suppression = self
-            .account_suppression
-            .lock()
-            .expect("suppression mutex not poisoned");
-        for host in rows.conversations() {
-            for row in rows.entries_ref(&host) {
-                if delivery.file_erased(host, row.event_id)
-                    || delivery.manifest_event_erased(row.event_id)
-                    || suppression.contains(host, row.event_id)
+    ) -> Result<bool, NodeError> {
+        let file_book = self.files.lock().expect("file book mutex").clone();
+        let mut after = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    after,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )?;
+            if page.rows.is_empty() {
+                return Ok(false);
+            }
+            for header in page.rows {
+                after = Some(header.ordinal);
+                if !file_book.eligible_ordinal(header.ordinal)?
+                    || !cut.allows(self, &self.personal_host_conversation(header.conversation))
                 {
                     continue;
                 }
-                if super::files::validated_manifest(&row.plaintext)
-                    .is_some_and(|manifest| manifest.file_conv() == file_conv)
+                if let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)?
+                    && super::files::validated_manifest(&row.plaintext)
+                        .is_some_and(|manifest| manifest.file_conv() == file)
                 {
-                    return true;
+                    return Ok(true);
                 }
             }
         }
-        false
     }
-
+    fn has_live_local_file_card(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let file_book = self.files.lock().expect("file book mutex").clone();
+        let delivery = self.delivery.lock().expect("delivery mutex");
+        self.has_live_local_file_card_with(file, &delivery, &file_book)
+    }
+    fn has_live_local_file_card_with(
+        &self,
+        file: ConversationId,
+        delivery: &super::delivery_store::DeliveryStore,
+        file_book: &super::filebook::indexed::IndexedFileBook,
+    ) -> Result<bool, NodeError> {
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    cursor,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )?;
+            if page.rows.is_empty() {
+                return Ok(false);
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                if !file_book.eligible_ordinal(header.ordinal)? {
+                    continue;
+                }
+                let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)?
+                else {
+                    continue;
+                };
+                if !delivery.file_erased(row.conversation, row.event_id)
+                    && !delivery.manifest_event_erased(row.event_id)
+                    && !self.file_message_row_suppressed(&row)?
+                    && super::files::validated_manifest(&row.plaintext)
+                        .is_some_and(|m| m.file_conv() == file)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
     fn attachment_for_sibling(
         &self,
-        file_conv: ConversationId,
+        file: ConversationId,
         requester: &PublicIdentity,
-    ) -> Option<crate::file::AnyManifest> {
-        self.select_attachment_for_sibling(file_conv, requester, None)
-            .map(|selected| selected.manifest)
+    ) -> Result<Option<crate::file::AnyManifest>, NodeError> {
+        Ok(self
+            .select_attachment_for_sibling(file, requester, None)?
+            .map(|selected| selected.manifest))
     }
-
     fn select_attachment_for_sibling(
         &self,
-        file_conv: ConversationId,
+        file: ConversationId,
         requester: &PublicIdentity,
         exact: Option<&SelectedAttachment>,
-    ) -> Option<SelectedAttachment> {
-        let (recalled, _) = self.account_archive_recalls();
-        let own = self.account_id();
+    ) -> Result<Option<SelectedAttachment>, NodeError> {
         if !self.account_private_sibling_current(requester) {
-            return None;
+            return Ok(None);
         }
-        let mut hosts = HashSet::new();
-        hosts.insert(account_conversation_id(&own, &own));
-        for other in self.known_account_ids() {
-            hosts.insert(account_conversation_id(&own, &other));
-        }
-        let channel_scopes: HashMap<_, _> = if let Some(selected) = exact {
-            selected
-                .scope
-                .as_ref()
-                .and_then(|_| {
-                    self.account_private_channel_export_scope(selected.row.conversation, requester)
-                })
-                .map(|scope| (selected.row.conversation, scope))
-                .into_iter()
-                .collect()
+        let file_book = self.files.lock().expect("file book mutex").clone();
+        let own = self.account_id();
+        let mut hosts: HashMap<_, Option<String>> = self
+            .known_account_ids()?
+            .into_iter()
+            .map(|peer| (account_conversation_id(&own, &peer), Some(peer)))
+            .collect();
+        hosts.insert(account_conversation_id(&own, &own), Some(own));
+        let mut channel_scopes = HashMap::new();
+        let channels = if let Some(selected) = exact {
+            vec![selected.row.conversation]
         } else {
-            self.account_private_archive_channels(requester)
-                .into_iter()
-                .filter_map(|host| {
-                    self.account_private_channel_export_scope(host, requester)
-                        .map(|scope| (host, scope))
-                })
-                .collect()
+            self.account_private_archive_channels(requester)?
         };
-        hosts.extend(channel_scopes.keys().copied());
-        hosts.retain(|host| {
+        for host in channels {
+            if let Some(scope) = self.account_private_channel_export_scope(host, requester)? {
+                hosts.insert(host, None);
+                channel_scopes.insert(host, scope);
+            }
+        }
+        hosts.retain(|host, _| {
             self.personal_source_applied(
                 &self.personal_host_conversation(*host),
                 &self.identity.public(),
             )
         });
         if let Some(selected) = exact
-            && (!hosts.contains(&selected.row.conversation)
+            && (!hosts.contains_key(&selected.row.conversation)
                 || channel_scopes.get(&selected.row.conversation) != selected.scope.as_ref())
         {
-            return None;
+            return Ok(None);
         }
-        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        let rows = self
-            .received_files
-            .lock()
-            .expect("files mutex not poisoned");
-        let log = self.log.lock().expect("log mutex not poisoned");
-        let proofs = self
-            .account_file_proofs
-            .lock()
-            .expect("file proofs mutex not poisoned");
-        let suppression = self
-            .account_suppression
-            .lock()
-            .expect("suppression mutex not poisoned");
-        for host in hosts {
-            for row in rows.entries_ref(&host) {
-                if exact.is_some_and(|selected| row != &selected.row) {
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    cursor,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )?;
+            if page.rows.is_empty() {
+                return Ok(None);
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                if !file_book.eligible_ordinal(header.ordinal)? {
                     continue;
                 }
-                if delivery.file_erased(host, row.event_id)
-                    || delivery.manifest_event_erased(row.event_id)
-                    || suppression.contains(host, row.event_id)
+                let Some(peer) = hosts.get(&header.conversation) else {
+                    continue;
+                };
+                let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)?
+                else {
+                    continue;
+                };
+                {
+                    let delivery = self.delivery.lock().expect("delivery mutex");
+                    if delivery.file_erased(row.conversation, row.event_id)
+                        || delivery.manifest_event_erased(row.event_id)
+                    {
+                        continue;
+                    }
+                }
+                if exact.is_some_and(|selected| row != selected.row)
                     || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
-                    || recalled
-                        .get(&host)
-                        .is_some_and(|ids| ids.contains(&row.event_id))
+                    || self.file_message_row_suppressed(&row)?
                 {
                     continue;
                 }
-                let proof = log.get(&row.event_id).or_else(|| proofs.get(&row.event_id));
-                if let Some(manifest) = super::files::eligible_manifest_row(row, proof, None)
-                    && manifest.file_conv() == file_conv
+                let selected = self.log.lock().expect("log mutex").get(&row.event_id)?;
+                let proof = match selected {
+                    Some(event) => Some(event),
+                    None => self
+                        .account_file_proofs
+                        .lock()
+                        .expect("proofs mutex")
+                        .get(&row.event_id)?,
+                };
+                let author = self.file_message_row_author_account(&row, proof.as_ref())?;
+                if self.message_recalled_selected(
+                    row.conversation,
+                    row.event_id,
+                    peer.as_deref(),
+                    author.as_deref(),
+                )? {
+                    continue;
+                }
+                if let Some(manifest) =
+                    super::files::eligible_manifest_row(&row, proof.as_ref(), None)
+                    && manifest.file_conv() == file
                 {
                     if exact.is_some_and(|selected| selected.manifest != manifest) {
                         continue;
                     }
-                    return Some(SelectedAttachment {
-                        file: file_conv,
-                        row: row.clone(),
+                    return Ok(Some(SelectedAttachment {
+                        file,
+                        scope: channel_scopes.get(&row.conversation).cloned(),
+                        row,
                         manifest,
-                        scope: channel_scopes.get(&host).cloned(),
-                    });
+                    }));
                 }
             }
         }
-        None
     }
-
-    fn account_recalled_files(&self) -> HashSet<ConversationId> {
-        let (recalled, _) = self.account_archive_recalls();
-        let rows = self.received_files.lock().expect("files mutex");
-        let mut files = HashSet::new();
-        for (host, targets) in recalled {
-            for row in rows.entries_ref(&host) {
-                if targets.contains(&row.event_id)
-                    && let Some(manifest) = super::files::validated_manifest(&row.plaintext)
-                {
-                    files.insert(manifest.file_conv());
+    fn account_file_recalled(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let file_book = self.files.lock().expect("file book mutex").clone();
+        let own = self.account_id();
+        let mut peers: HashMap<_, _> = self
+            .known_account_ids()?
+            .into_iter()
+            .map(|peer| (account_conversation_id(&own, &peer), peer))
+            .collect();
+        peers.insert(account_conversation_id(&own, &own), own);
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    cursor,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )?;
+            if page.rows.is_empty() {
+                return Ok(false);
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                if !file_book.eligible_ordinal(header.ordinal)? {
+                    continue;
+                }
+                let Some(peer) = peers.get(&header.conversation) else {
+                    continue;
+                };
+                let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)?
+                else {
+                    continue;
+                };
+                let author = self.file_message_row_author_account(&row, None)?;
+                if self.message_recalled_selected(
+                    row.conversation,
+                    row.event_id,
+                    Some(peer),
+                    author.as_deref(),
+                )? {
+                    return Ok(true);
                 }
             }
         }
-        files
     }
 
     pub(in crate::node) async fn serve_account_attachment_checked(
@@ -1663,15 +1738,38 @@ impl Node {
             {
                 return false;
             }
-            self.attachment_for_sibling(file_conv, channel.peer_identity())
+            match self.attachment_for_sibling(file_conv, channel.peer_identity()) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    log::warn!("account attachment lookup deferred: {error}");
+                    return false;
+                }
+            }
         };
         // An admitted sibling gets one uniform negative for absent, erased,
         // unshared, or unavailable copies. It learns no existence distinction.
-        let available = manifest.as_ref().is_some_and(|manifest| {
-            self.file_progress(file_conv)
-                .is_some_and(|progress| progress.done == progress.total)
-                || self.managed_media_for_export(file_conv, manifest).is_some()
-        });
+        let available = if let Some(manifest) = manifest.as_ref() {
+            let progress = match self.file_progress(file_conv) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    log::warn!("account attachment storage failure: {error}");
+                    return false;
+                }
+            };
+            if progress.is_some_and(|progress| progress.done == progress.total) {
+                true
+            } else {
+                match self.managed_media_for_export(file_conv, manifest) {
+                    Ok(path) => path.is_some(),
+                    Err(error) => {
+                        log::warn!("account attachment export deferred: {error}");
+                        return false;
+                    }
+                }
+            }
+        } else {
+            false
+        };
         if !policy.attachments || !available {
             return self
                 .send_account_frame(
@@ -1699,12 +1797,13 @@ impl Node {
         account_id: &str,
         file_conv: ConversationId,
     ) -> bool {
-        let size = self
-            .files
-            .lock()
-            .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .map_or(0, |manifest| manifest.size());
+        let size = match self.files.lock().expect("files lock").manifest(file_conv) {
+            Ok(manifest) => manifest.map_or(0, |manifest| manifest.size()),
+            Err(error) => {
+                log::warn!("attachment serving deferred: {error}");
+                return false;
+            }
+        };
         let deadline = attachment_deadline(size);
         tokio::time::timeout(
             deadline,
@@ -1738,7 +1837,7 @@ impl Node {
         let staging = self
             .account_blocking(move |node| {
                 let selected = node
-                    .select_attachment_for_sibling(file_conv, &peer, None)
+                    .select_attachment_for_sibling(file_conv, &peer, None)?
                     .ok_or_else(|| {
                         NodeError::Authorization("attachment no longer shared".into())
                     })?;
@@ -1759,9 +1858,9 @@ impl Node {
         let Ok(mut source) = tokio::fs::File::open(&path).await else {
             return false;
         };
-        if self
+        if !self
             .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
-            .is_none()
+            .is_ok_and(|value| value.is_some())
         {
             return false;
         }
@@ -1794,9 +1893,9 @@ impl Node {
             if read == 0 {
                 break;
             }
-            if self
+            if !self
                 .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
-                .is_none()
+                .is_ok_and(|value| value.is_some())
             {
                 return false;
             }
@@ -1824,7 +1923,7 @@ impl Node {
             && actual == manifest.checksum()
             && self
                 .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
-                .is_some()
+                .is_ok_and(|value| value.is_some())
         {
             self.send_account_content_frame(
                 channel,
@@ -1906,8 +2005,7 @@ impl Node {
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .cloned()
+            .manifest(file_conv)?
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let mut channel = self
             .begin_account_exchange(
@@ -2068,14 +2166,15 @@ impl Node {
             .lock()
             .expect("account sync commit mutex not poisoned");
         if !current()
-            || !self.personal_attachment_allowed(file_conv, personal_cut)
+            || !self.personal_attachment_allowed(file_conv, personal_cut)?
             || self.private_dm_control_revision() != controls
-            || self.account_recalled_files().contains(&file_conv)
+            || self.account_file_recalled(file_conv)?
         {
             return Err(NodeError::Authorization(
                 "attachment recall state changed".into(),
             ));
         }
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
         let policy = self
             .account_sync_policy
@@ -2083,13 +2182,8 @@ impl Node {
             .expect("account sync policy mutex not poisoned");
         if policy.revision() != revision
             || !policy.current().attachments
-            || self
-                .files
-                .lock()
-                .expect("files mutex not poisoned")
-                .manifest(&file_conv)
-                .is_none()
-            || !self.has_live_local_file_card_with(file_conv, &delivery)
+            || !file_book.contains_file(file_conv)?
+            || !self.has_live_local_file_card_with(file_conv, &delivery, &file_book)?
         {
             return Err(NodeError::File("attachment was removed during sync".into()));
         }
@@ -2110,9 +2204,9 @@ impl Node {
         if self.media.contains(file_conv) {
             return Ok(true);
         }
-        if !self.has_live_local_file_card(file_conv)
+        if !self.has_live_local_file_card(file_conv)?
             || self
-                .file_progress(file_conv)
+                .file_progress(file_conv)?
                 .is_none_or(|progress| progress.done != progress.total)
         {
             return Ok(false);
@@ -2121,8 +2215,7 @@ impl Node {
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .cloned()
+            .manifest(file_conv)?
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let controls = self.private_dm_control_revision();
         let personal_cut = self.capture_personal_history_cut(&self.identity.public());
@@ -2200,53 +2293,10 @@ impl Node {
             .collect();
         if policy.history {
             for record in &admitted {
-                if let HistoryRecord::Channel(record) = record {
-                    let channel = ConversationId::new(record.conversation);
-                    let allowed = source.map_or_else(
-                        || {
-                            self.channels
-                                .lock()
-                                .expect("channels mutex not poisoned")
-                                .state(&channel)
-                                .is_some_and(|state| {
-                                    !state.pending_invite()
-                                        && state.is_accepted_member(&self.user_id())
-                                })
-                        },
-                        |proof| self.account_private_channel_import_allowed(channel, proof),
-                    );
-                    if !allowed {
-                        return Err(NodeError::Authorization(
-                            "channel history requires an entitled account source".into(),
-                        ));
-                    }
+                if let HistoryRecord::Direct(record) = record {
+                    self.import_account_backfill(std::slice::from_ref(record))?;
                 }
             }
-            {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                for record in &admitted {
-                    if let HistoryRecord::Channel(record) = record {
-                        let channel = ConversationId::new(record.conversation);
-                        if let Some(event) = log.get(&EventId::new(record.event_id))
-                            && (event.conversation_id != channel
-                                || event.kind != crate::eventlog::EventKind::Message
-                                || event.author.user_id() != record.from)
-                        {
-                            return Err(NodeError::Authorization(
-                                "channel history conflicts with signed event".into(),
-                            ));
-                        }
-                    }
-                }
-            }
-            let direct: Vec<_> = admitted
-                .iter()
-                .filter_map(|record| match record {
-                    HistoryRecord::Direct(record) => Some(record.clone()),
-                    HistoryRecord::Channel(_) | HistoryRecord::FileCard(_) => None,
-                })
-                .collect();
-            self.import_account_backfill(&direct)?;
             for record in &admitted {
                 if let HistoryRecord::Channel(record) = record {
                     self.record_private_channel_plaintext(&super::received_log::ReceivedEntry {
@@ -2259,6 +2309,7 @@ impl Node {
                 }
             }
         }
+
         if version.includes_file_cards(policy.history, policy.attachments) {
             for record in &admitted {
                 if let HistoryRecord::FileCard(record) = record {
@@ -2299,12 +2350,12 @@ impl Node {
                 .account_suppression
                 .lock()
                 .expect("account suppression mutex")
-                .contains(row.conversation, row.event_id)
+                .contains(row.conversation, row.event_id)?
         {
             return Ok(());
         }
         let mut received = self.received.lock().expect("received mutex");
-        if let Some(existing) = received.entry(row.event_id) {
+        if let Some(existing) = received.entry(row.event_id)? {
             // Preserve the live receiver's existing timestamp for the same body.
             if existing.conversation == row.conversation
                 && existing.from == row.from
@@ -2344,19 +2395,22 @@ impl Node {
             let bundles = if policy.history || policy.attachments {
                 let store = self.serve_sync_store(channel.peer_identity());
                 let mut seen = HashSet::new();
-                requests
-                    .into_iter()
-                    .filter_map(|(file, manifest)| {
-                        store
-                            .lock()
-                            .expect("sync store lock")
-                            .file_message_identity(
-                                &ConversationId::new(file),
-                                &EventId::new(manifest),
-                            )
-                    })
-                    .filter(|bundle| seen.insert(bundle.id))
-                    .collect()
+                let mut bundles = Vec::new();
+                for (file, manifest) in requests {
+                    match store
+                        .lock()
+                        .expect("sync store lock")
+                        .file_message_identity(&ConversationId::new(file), &EventId::new(manifest))
+                    {
+                        Ok(Some(bundle)) if seen.insert(bundle.id) => bundles.push(bundle),
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!("file identity lookup deferred: {error}");
+                            return false;
+                        }
+                    }
+                }
+                bundles
             } else {
                 vec![]
             };
@@ -2381,29 +2435,46 @@ impl Node {
         if !self.file_identity_capability_due(peer.addr, &peer.public) {
             return;
         }
-        let mut requests: Vec<_> = requests
-            .iter()
-            .copied()
-            .filter(|(_, manifest)| {
-                let host = self
+        let selected = (|| -> Result<Vec<_>, NodeError> {
+            let mut selected = Vec::new();
+            for request in requests {
+                let Some(row) = self
                     .received_files
                     .lock()
-                    .expect("received files lock")
-                    .entry(*manifest)
-                    .map(|row| row.conversation);
-                host.is_some_and(|host| {
-                    host != account_conversation_id(&self.account_id(), &self.account_id())
-                        && self
-                            .channels
-                            .lock()
-                            .expect("channels lock")
-                            .state(&host)
-                            .is_none()
-                        && !self.has_file_message_identity(host, *manifest)
-                })
-            })
-            .collect();
-        requests.extend(self.pending_file_message_identities(&peer.public));
+                    .expect("files mutex")
+                    .entry(request.1)?
+                else {
+                    continue;
+                };
+                let host = row.conversation;
+                if host != account_conversation_id(&self.account_id(), &self.account_id())
+                    && self
+                        .channels
+                        .lock()
+                        .expect("channels mutex")
+                        .state(&host)
+                        .is_none()
+                    && !self.has_file_message_identity(host, request.1)?
+                {
+                    selected.push(*request);
+                }
+            }
+            Ok(selected)
+        })();
+        let mut requests = match selected {
+            Ok(requests) => requests,
+            Err(error) => {
+                log::warn!("file identity discovery deferred after storage failure: {error}");
+                return;
+            }
+        };
+        match self.pending_file_message_identities(&peer.public) {
+            Ok(pending) => requests.extend(pending),
+            Err(error) => {
+                log::warn!("file identity discovery deferred after storage failure: {error}");
+                return;
+            }
+        }
         requests.sort_unstable_by_key(|(file, manifest)| (*file.as_bytes(), *manifest.as_bytes()));
         requests.dedup();
         if !requests.is_empty() {
@@ -2707,7 +2778,7 @@ impl Node {
 
     // Tests can exclude periodic repair to prove that retained work itself
     // schedules progress, without coupling fixture setup to the first tick.
-    async fn run_account_history_loop_with_tick(
+    pub(in crate::node) async fn run_account_history_loop_with_tick(
         self: Arc<Self>,
         mut tick: Option<tokio::time::Interval>,
     ) {
@@ -2762,6 +2833,7 @@ impl Node {
         let mut custody_migration = None;
         let mut inventory_publication = None;
         let mut public_profile_publication = None;
+        let mut public_profile_projection = None;
         let mut personal_after = None;
         let mut personal_retry_at: Option<std::time::Instant> = None;
         let mut group_access_publication = None;
@@ -2811,6 +2883,14 @@ impl Node {
                 self.publish_public_profile_documents_page(&mut public_profile_publication)
             {
                 log::debug!("contact profile publication deferred: {error}");
+            }
+            {
+                let _commit = self.account_sync_commit.lock().expect("sync commit mutex");
+                if let Err(error) =
+                    self.project_public_profile_documents_page(&mut public_profile_projection)
+                {
+                    log::debug!("contact profile projection deferred: {error}");
+                }
             }
             // Explicit File copies and invitation capability/history preparation
             // share the existing attachment slots. Optional archive policy cannot stop
@@ -3174,24 +3254,25 @@ impl Node {
                 document_owners.insert(task.id(), owner);
             }
             while let Some(group) = fanout.start_next() {
-                // Bootstrap recovery may commit a group outside this turn's
-                // ordinary publication slice. Refresh that exact source before
-                // its owned public distribution can start.
-                self.publish_account_group_access_for(group);
-                self.publish_group_inventory_for(group);
-                self.publish_account_group_operations_for(group);
-                #[cfg(test)]
-                {
-                    let hook = self.control_fanout_start_test_hook.lock().unwrap().take();
-                    if let Some(hook) = hook {
-                        hook();
-                    }
-                }
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
                 };
                 let task = fanout_tasks.spawn(permit.track(async move {
+                    // Bootstrap recovery may commit a group outside this
+                    // turn's publication slice. Its owned worker prepares the
+                    // exact source before claiming readiness or opening a peer.
+                    if let Err(error) = node.prepare_account_group_fanout(group).await {
+                        log::debug!("account group fanout preparation deferred: {error}");
+                        return (group, true);
+                    }
+                    #[cfg(test)]
+                    {
+                        let hook = node.control_fanout_start_test_hook.lock().unwrap().take();
+                        if let Some(hook) = hook {
+                            hook();
+                        }
+                    }
                     let members = node.channel_members(group);
                     let deferred = node.distribute_account_group_effects(group, &members).await;
                     (group, deferred)
@@ -3305,16 +3386,18 @@ impl Node {
                             node.trace_account_client(&node.identity.public(), || {
                                 "attachment_selection_begin".into()
                             });
-                            let recalled = node.account_recalled_files();
-                            let mut missing = node
-                                .files
-                                .lock()
-                                .expect("files mutex not poisoned")
-                                .file_convs();
+                            let files =
+                                node.files.lock().expect("files mutex not poisoned").files();
+                            let mut missing = Vec::new();
+                            for file in files {
+                                let file = file?;
+                                if !node.media.contains(file)
+                                    && !node.account_file_recalled(file)?
+                                {
+                                    missing.push(file);
+                                }
+                            }
                             missing.sort_by_key(|id| *id.as_bytes());
-                            missing.retain(|file| {
-                                !node.media.contains(*file) && !recalled.contains(file)
-                            });
                             let mut queue: Vec<_> =
                                 missing.into_iter().map(|file| (file, false)).collect();
                             if favorites_supported && node.device_sync_policy().history {
@@ -3583,7 +3666,7 @@ impl Node {
                                     let node = self.clone(); let peer = peer.clone(); let id = id.clone();
                                     let version = if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 };
                                     let transfer_size = if favorite { self.favorite_file_size(file).unwrap_or(0) } else { self.files.lock().expect("files mutex not poisoned")
-                                        .manifest(&file).map_or(0, |manifest| manifest.size()) };
+                                        .manifest(file).map(|manifest|manifest.map_or(0,|manifest|manifest.size())).unwrap_or_else(|error| {log::warn!("attachment size lookup deferred: {error}");0}) };
                                     // Bound the complete exchange without rejecting large legitimate
                                     // archives solely because they need more than a fixed short timeout.
                                     let deadline = attachment_deadline(transfer_size);
@@ -4491,8 +4574,8 @@ mod tests {
                     dm,
                     channel,
                     file,
-                    &directory.path().join(format!("{name}-events.log")),
-                    &directory.path().join(format!("{name}-sent.log")),
+                    &directory.path().join(name).join("events.log"),
+                    &directory.path().join(name).join("sent.log"),
                     "pw",
                 )
                 .unwrap()
@@ -4810,6 +4893,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let open = |name: &str| {
+            let profile = directory.path().join(name);
             let (dm, _) = mpsc::unbounded_channel();
             let (channel, _) = mpsc::unbounded_channel();
             let (file, _) = mpsc::unbounded_channel();
@@ -4819,8 +4903,8 @@ mod tests {
                 dm,
                 channel,
                 file,
-                &directory.path().join(format!("{name}-events.log")),
-                &directory.path().join(format!("{name}-sent.log")),
+                &profile.join(format!("{name}-events.log")),
+                &profile.join(format!("{name}-sent.log")),
                 "pw",
             )
             .unwrap()
@@ -4871,7 +4955,7 @@ mod tests {
             contents,
             "the requested attachment actually exists and is readable locally"
         );
-        assert!(!victim.channel_history(group, 10).is_empty());
+        assert!(!victim.channel_history(group, 10).unwrap().is_empty());
         assert!(
             !victim
                 .account_preferences(SyncCategory::Appearance)

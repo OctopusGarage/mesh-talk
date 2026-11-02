@@ -37,6 +37,8 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Validate Windows native build dependencies
+        run: node scripts/ci/windows-native-deps.mjs
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt, llvm-tools-preview
@@ -87,14 +89,14 @@ jobs:
           retention-days: 3
 
   tests:
-    name: Windows workspace tests (${{ matrix.shard }}/2)
+    name: Windows workspace tests (${{ matrix.shard }}/4)
     needs: build
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     defaults:
       run:
         shell: bash

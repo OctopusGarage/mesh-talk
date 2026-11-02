@@ -23,7 +23,9 @@ pub use account_group::{
 };
 pub(crate) mod account_devices;
 mod account_documents;
+#[cfg(test)]
 pub(crate) mod account_file_proofs;
+mod account_file_repository;
 pub(crate) mod account_preferences;
 mod account_profile;
 mod account_session;
@@ -94,7 +96,9 @@ mod message_actions;
 pub(crate) mod name_directory;
 mod network_cost;
 pub use network_cost::{GroupFileSharingStatus, NetworkCost};
+mod host_reception;
 pub(crate) mod node;
+mod opaque_receive_cache;
 mod opaque_relay;
 pub(crate) mod pairing;
 mod participant_runtime;
@@ -109,6 +113,7 @@ pub(crate) mod privacy_runtime;
 pub(crate) mod privacy_sync;
 pub(crate) mod profile;
 pub(crate) mod profile_io;
+mod profile_receive_work;
 pub(crate) mod profile_store;
 pub(crate) mod queries;
 pub(crate) mod ratchet_sessions;
@@ -122,8 +127,18 @@ pub(crate) mod recovery;
 mod relay_policy;
 mod route_timing;
 pub(crate) mod runtime;
+mod runtime_delivery;
+pub use host_reception::{
+    CurrentProfilePage, HostReception, HostReceptionPage, ReceptionConsumer, ReceptionCursor,
+    ReceptionLimit,
+};
+mod runtime_startup;
 mod runtime_work;
+pub use runtime_startup::{RuntimeStartup, StartupCompletion};
+pub(crate) mod received_store;
+pub(crate) mod reception_effects;
 mod search;
+pub(crate) mod sent_store;
 pub(crate) mod sentlog;
 pub(crate) mod serving;
 pub(crate) mod session;
@@ -133,6 +148,7 @@ mod sticker_media;
 mod sticker_media_tests;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod transcript_repository;
 pub(crate) mod transport;
 mod ui_state;
 #[cfg(test)]
@@ -150,6 +166,9 @@ pub use account_sync::{DeviceSyncStatus, SyncPhase};
 pub use account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
+pub use channel::checkpoint::activity::{
+    ChannelActivityCursor, ChannelActivityPage, ChannelActivityPageLimit,
+};
 pub use channel::{ChannelActivity, ReceivedChannelMessage};
 pub use delivery_observation::{
     DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,
@@ -163,8 +182,8 @@ pub use files::{FileProgress, OutgoingFileProgress};
 pub use linking::LinkingError;
 pub use message::{MessageBody, MessageProtection};
 pub use node::{
-    ChannelSummary, FileHistoryInfo, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm,
-    ReceivedProfile, SearchHit,
+    BoundedNodeOpenRequest, ChannelSummary, FileHistoryInfo, HistoryEntry, LinkedAccount, Node,
+    NodeError, NodeOpenRequest, ReceivedDm, ReceivedProfile, SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
 pub use participant_runtime::{
@@ -179,12 +198,17 @@ pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapsh
 pub use privacy_runtime::AccountBindingChange;
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;
-pub use reaction::{ReactionPayload, ReactionView, aggregate};
+pub use reaction::ReactionPayload;
+#[cfg(test)]
+pub use reaction::{ReactionView, aggregate};
+pub use reactions::{ReactionSummary, ReactionSummaryPage};
 pub use received_log::{ReceivedEntry, ReceivedLog};
 pub use runtime::{
-    NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeIdentity, RuntimeNetworkOptions,
+    NodeRuntime, RetiredNode, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeIdentity,
+    RuntimeNetworkOptions,
 };
 pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
+pub use session::request_round;
 
 mod outgoing_message;
 pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessageRequest};

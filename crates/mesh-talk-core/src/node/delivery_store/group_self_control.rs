@@ -102,14 +102,14 @@ fn validate_parent_common(
     use std::collections::{HashMap, HashSet};
     validate_common(operation, input, witness, event)?;
     let group = event.conversation_id;
-    let mut ancestors: HashMap<EventId, &Event> = HashMap::new();
+    let mut ancestors: HashMap<EventId, Event> = HashMap::new();
     let mut pending = witness.parents.clone();
     while let Some(id) = pending.pop() {
         if ancestors.contains_key(&id) {
             continue;
         }
         let parent = log
-            .get(&id)
+            .get(&id)?
             .ok_or_else(|| invalid("self-control causal parent missing"))?;
         if parent.conversation_id != group || parent.id == event.id {
             return Err(invalid("invalid self-control causal parent"));
@@ -117,7 +117,7 @@ fn validate_parent_common(
         pending.extend(parent.parents.iter().copied());
         ancestors.insert(id, parent);
     }
-    let events: Vec<_> = ancestors.values().copied().collect();
+    let events: Vec<_> = ancestors.values().collect();
     let projection = ChannelBook::project_membership(group, &events);
     if let Some(operation) = operation {
         let mut source = Node::public_account_group_source(
@@ -258,7 +258,7 @@ mod tests {
             validate_parent_view(&reference, input, &witness, &event, &log).is_err(),
             "an original intent cannot authorize a self-control effect without its real saved grant ancestry"
         );
-        assert!(log.get(&event.id).is_none());
+        assert!(log.get(&event.id).unwrap().is_none());
     }
 
     #[test]
@@ -415,7 +415,7 @@ mod tests {
                     )
                     .is_err()
             );
-            assert_eq!(log.get(&event.id), Some(&event));
+            assert_eq!(log.get(&event.id).unwrap(), Some(event.clone()));
             assert_eq!(store.pending_transactions()[0].id(), event.id);
             drop((store, log, ratchet, sent, received, terminal));
             let mut store = open();
@@ -445,6 +445,7 @@ mod tests {
             assert!(store.pending_transactions().is_empty());
             assert_eq!(
                 log.events(&reference.group)
+                    .unwrap()
                     .into_iter()
                     .filter(|candidate| candidate.kind == input.event_kind())
                     .map(|candidate| candidate.id)
@@ -513,7 +514,7 @@ mod tests {
             );
             assert!(store.begin(transaction).is_err());
             assert!(store.pending_transactions().is_empty());
-            assert!(log.get(&event.id).is_none());
+            assert!(log.get(&event.id).unwrap().is_none());
         }
     }
 }

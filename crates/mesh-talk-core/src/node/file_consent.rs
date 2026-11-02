@@ -85,11 +85,55 @@ impl Decision {
 }
 
 impl Node {
+    /// One fixed batch per mailbox exchange. The current decisions are refreshed
+    /// before each send; this cursor is discovery progress, never delivery truth.
+    pub(in crate::node) fn file_consent_offers(
+        &self,
+        sender: &PublicIdentity,
+    ) -> Result<Vec<(ConversationId, EventId)>, LogError> {
+        if self
+            .delivery_suspended
+            .load(std::sync::atomic::Ordering::Acquire)
+            || (!self.known_account_allowed(sender) && !self.group_member(sender)?)
+            || self
+                .historical_author(&sender.ed25519_pub)
+                .is_none_or(|proof| proof.public() != *sender)
+        {
+            return Ok(Vec::new());
+        }
+        let before = self
+            .file_consent
+            .lock()
+            .expect("file consent lock")
+            .offer_scan_position(&sender.ed25519_pub)?;
+        let author = crate::eventlog::Author::from_ed25519(sender.ed25519_pub);
+        let files = self.files.lock().expect("files lock").clone();
+        let mut offers = files.offers_page(None, Some(author), Some(before), 8, 8 * 144)?;
+        if offers.is_empty() && before != 0 {
+            offers = files.offers_page(None, Some(author), None, 8, 8 * 144)?;
+        }
+        let Some(after) = offers.last().map(|offer| offer.ordinal) else {
+            // No outbound work requires progress. In particular, a failed
+            // incoming-control writer must not block unrelated chat reception.
+            return Ok(Vec::new());
+        };
+        self.file_consent
+            .lock()
+            .expect("file consent lock")
+            .advance_offer_scan(&sender.ed25519_pub, before, after)?;
+        Ok(offers
+            .into_iter()
+            .map(|offer| (offer.file, offer.event))
+            .collect())
+    }
+
+    #[cfg(test)]
     pub(in crate::node) fn file_consent_events(
         &self,
         sender: &PublicIdentity,
     ) -> Result<Vec<Event>, LogError> {
-        self.file_consent_events_for(sender, None)
+        let offers = self.file_consent_offers(sender)?;
+        self.file_consent_controls(sender, &offers, false)
     }
 
     pub(in crate::node) fn direct_file_consent_control(
@@ -99,20 +143,24 @@ impl Node {
         manifest: EventId,
     ) -> Result<Option<Event>, LogError> {
         Ok(self
-            .file_consent_events_for(sender, Some((file, manifest)))?
+            .file_consent_controls(sender, &[(file, manifest)], true)?
             .into_iter()
             .next())
     }
 
-    fn file_consent_events_for(
+    pub(in crate::node) fn file_consent_controls(
         &self,
         sender: &PublicIdentity,
-        requested: Option<(ConversationId, EventId)>,
+        offers: &[(ConversationId, EventId)],
+        include_pending: bool,
     ) -> Result<Vec<Event>, LogError> {
+        if offers.len() > 8 {
+            return Err(LogError::InvalidPageBudget);
+        }
         if self
             .delivery_suspended
             .load(std::sync::atomic::Ordering::Acquire)
-            || (!self.known_account_allowed(sender) && !self.group_member(sender))
+            || (!self.known_account_allowed(sender) && !self.group_member(sender)?)
         {
             return Ok(Vec::new());
         }
@@ -122,48 +170,33 @@ impl Node {
         else {
             return Ok(Vec::new());
         };
-        let offers = match requested {
-            Some((file, manifest)) => vec![(file, vec![manifest])],
-            None => self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .offers_from(crate::eventlog::Author::from_ed25519(sender.ed25519_pub)),
-        };
         let mut controls = Vec::new();
         let scope = super::conversation::dm_conversation_id(&self.identity.public(), sender);
-        for (file, manifests) in offers {
-            let candidates: Vec<_> = {
-                let log = self.log.lock().expect("log lock not poisoned");
-                manifests
-                    .into_iter()
-                    .filter_map(|id| log.get(&id).map(|event| (id, event.conversation_id)))
-                    .collect()
-            };
-            let manifests: Vec<_> = candidates
-                .into_iter()
-                .filter(|(id, parent)| {
-                    (*parent == scope && self.known_account_allowed(sender))
-                        || self.group_file_offer(file, *id, sender).is_some()
-                })
-                .map(|(id, _)| id)
-                .collect();
-            let Some(first) = manifests.first() else {
+        for &(file, manifest) in offers {
+            let parent = self
+                .log
+                .lock()
+                .expect("log lock")
+                .event_conversation(&manifest)?;
+            let group_offer = self.group_file_offer(file, manifest, sender)?;
+            if !(parent == Some(scope) && self.known_account_allowed(sender))
+                && group_offer.is_none()
+            {
                 continue;
-            };
-            if let Some((event, row)) = self.group_file_offer(file, *first, sender) {
+            }
+            if let Some((event, row)) = group_offer {
                 self.retain_group_file_completion(&event, &row)?;
             }
             let Some((automatic, account, _, _)) =
-                self.incoming_offer(file, Some(*first), Some(sender))
+                self.incoming_offer(file, Some(manifest), Some(sender))?
             else {
                 continue;
             };
-            let aliases = self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .manifest_events(file);
+            let decision = if automatic {
+                ReceiveDecision::Accepted
+            } else {
+                self.consent_for_file_account(self.equivalent_offer_decision(file)?, &account)?
+            };
             let delivery = self.delivery.lock().expect("delivery lock not poisoned");
             if self
                 .delivery_suspended
@@ -175,17 +208,12 @@ impl Node {
                 .attachment_consent
                 .lock()
                 .expect("consent lock not poisoned");
-            let decision = if automatic {
-                ReceiveDecision::Accepted
-            } else {
-                policy.status_for_events(&aliases, &account)
-            };
-            let generation = policy.generation();
+            let generation = policy.generation()?;
             let mut store = self
                 .file_consent
                 .lock()
                 .expect("file consent lock not poisoned");
-            for manifest in manifests {
+            {
                 if delivery.manifest_event_erased(manifest) {
                     continue;
                 }
@@ -208,13 +236,13 @@ impl Node {
                     decision,
                     completion,
                 };
-                let previous = store.published_control(manifest);
-                if decision == ReceiveDecision::Pending && previous.is_none() && requested.is_none()
-                {
+                let previous = store.published_control(manifest)?;
+                let previous_generation = store.published_generation(manifest)?;
+                if decision == ReceiveDecision::Pending && previous.is_none() && !include_pending {
                     continue;
                 }
-                let event = if let Some(event) = previous.filter(|event| {
-                    store.published_generation(manifest) == Some(generation)
+                let event = if let Some(event) = previous.as_ref().filter(|event| {
+                    previous_generation == Some(generation)
                         && Decision::open(event).as_ref() == Some(&payload)
                 }) {
                     event.clone()
@@ -264,7 +292,7 @@ impl Node {
                 .is_some_and(|id| id != self.account_id())
             || (!self.known_account_allowed(peer)
                 && self
-                    .group_file_offer(payload.file, payload.manifest, peer)
+                    .group_file_offer(payload.file, payload.manifest, peer)?
                     .is_none())
             || self.historical_author(&peer.ed25519_pub).is_none_or(|p| {
                 p.public() != *peer
@@ -274,16 +302,20 @@ impl Node {
         {
             return Ok(true);
         }
-        if let Some((original, row)) = self.group_file_offer(payload.file, payload.manifest, peer) {
+        if let Some((original, row)) =
+            self.group_file_offer(payload.file, payload.manifest, peer)?
+        {
+            let invalid_completion = if let Some(id) = payload.completion {
+                let log = self.log.lock().expect("log lock");
+                let chunks = log.events(&payload.file)?;
+                let expected = super::files::validated_manifest(&row.plaintext)
+                    .map(|m| m.chunk_count() as usize);
+                Some(chunks.len()) != expected || chunks.last().map(|event| event.id) != Some(id)
+            } else {
+                false
+            };
             if original.author.ed25519_pub() != &self.identity.public().ed25519_pub
-                || payload.completion.is_some_and(|id| {
-                    let log = self.log.lock().expect("log lock");
-                    let chunks = log.events(&payload.file);
-                    let expected = super::files::validated_manifest(&row.plaintext)
-                        .map(|m| m.chunk_count() as usize);
-                    Some(chunks.len()) != expected
-                        || chunks.last().map(|event| event.id) != Some(id)
-                })
+                || invalid_completion
             {
                 return Ok(true);
             }
@@ -380,6 +412,7 @@ impl Node {
                 // Use the validated durable decision, never an unadmitted payload.
                 let answer = self
                     .outgoing_file_consent_status(card, manifest)
+                    .map_err(SessionError::Store)?
                     .unwrap_or(pending);
                 if answer != status(payload.decision) {
                     return Ok(pending);
@@ -436,35 +469,34 @@ impl Node {
         &self,
         card: EventId,
         manifest: EventId,
-    ) -> Option<crate::eventlog::sync::FileConsentStatus> {
+    ) -> Result<Option<crate::eventlog::sync::FileConsentStatus>, LogError> {
         let durable = self
             .file_consent
             .lock()
             .expect("consent lock not poisoned")
-            .remote_decision(manifest)
+            .remote_decision(manifest)?
             .map(status);
-        durable.or_else(|| {
+        Ok(durable.or_else(|| {
             self.outgoing_file_consents
                 .lock()
                 .expect("outgoing consent lock not poisoned")
                 .get(&(card, manifest))
                 .copied()
-        })
+        }))
     }
 
     pub(in crate::node) fn recipient_completed_file(
         &self,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
-    ) -> bool {
+    ) -> Result<bool, LogError> {
         let binding = &destination.binding;
         let control = self
             .file_consent
             .lock()
             .expect("file consent lock not poisoned")
-            .received_control(binding.event_id)
-            .cloned();
-        control
+            .received_control(binding.event_id)?;
+        Ok(control
             .as_ref()
             .and_then(Decision::open)
             .is_some_and(|payload| {
@@ -482,7 +514,7 @@ impl Node {
                         .is_none_or(|id| id == &payload.recipient_account)
                     && payload.completion.is_some()
                     && payload.completion == file.final_chunk
-            })
+            }))
     }
 }
 
@@ -555,7 +587,11 @@ mod tests {
         let mut store = FileConsentStore::open(&path, "pw").unwrap();
         assert!(!store.receive_control(accepted).unwrap());
         assert_eq!(
-            store.received_control(payload.manifest).unwrap().id,
+            store
+                .received_control(payload.manifest)
+                .unwrap()
+                .unwrap()
+                .id,
             declined.id
         );
     }

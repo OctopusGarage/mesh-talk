@@ -2,9 +2,13 @@
 
 use super::*;
 use crate::discovery::roster::PeerRecord;
-use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
+use crate::eventlog::LogError;
+use crate::eventlog::event::{Author, ConversationId, EventId};
 use crate::node::conversation::account_conversation_id;
-use crate::node::session::{Served, SessionError, request_round, serve_one, serve_wire_bytes};
+use crate::node::session::{
+    Served, SessionError, request_round_paged as request_round, serve_one_paged as serve_one,
+    serve_wire_bytes_paged as serve_wire_bytes,
+};
 use crate::transport::SecureChannel;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,19 +24,46 @@ const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// streams wait in the OS queue; the Node's shared pool also counts handshakes.
 pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS;
 
-// A received event fits one transport frame (<64 KiB). Limiting a processing
-// pass to 64 messages bounds wrapped+decoded failed plaintext to about 8 MiB.
-const CHANNEL_PLAINTEXT_BATCH: usize = 64;
-
+/// Retry scheduling retains a conversation and deadline, never plaintext or
+/// receiver keys. The durable pending row is the complete retry authority.
 #[derive(Default)]
 pub(in crate::node) struct PendingChannelPlaintext {
-    messages: Vec<super::channel::ReceivedChannelMessage>,
+    // Explicit pause used by the owning delivery retry boundary. Per-channel
+    // failures below never stop other current channels from progressing.
     pub(in crate::node) retry_at: Option<std::time::Instant>,
+    lanes: std::collections::HashMap<ConversationId, ChannelPlaintextRetry>,
+    cursor: Option<ConversationId>,
+}
+#[derive(Default)]
+struct ChannelPlaintextRetry {
+    retry_at: Option<std::time::Instant>,
     delay_ms: u64,
-    batch_id: Option<String>,
-    batch_size: usize,
-    // Contains metadata only, never decrypted text or a wrapped body.
-    terminal: Option<super::channel::ReceivedChannelMessage>,
+    continuation: Option<super::reception_effects::ArrivalKind>,
+    // The durable batch can mix silent startup repairs with new arrivals. Keep
+    // legacy terminal visibility until that same batch is committed complete;
+    // its last source row may be old or physically retired in the meantime.
+    legacy_batch_visible: bool,
+}
+
+impl ChannelPlaintextRetry {
+    /// A source revision change resumes the same bounded work; it is not a
+    /// persistence failure and must not inherit exponential storage backoff.
+    fn record_failure(&mut self, error: &NodeError, now: std::time::Instant) -> bool {
+        if matches!(error, NodeError::Log(LogError::StaleCursor)) {
+            return false;
+        }
+        if matches!(
+            error,
+            NodeError::Log(LogError::Io(_) | LogError::Database(_) | LogError::Storage(_))
+        ) && let Some(arrival) = &mut self.continuation
+        {
+            *arrival = super::reception_effects::ArrivalKind::CatchUp;
+        }
+        let delay = self.delay_ms.max(1000);
+        self.retry_at = Some(now + Duration::from_millis(delay));
+        self.delay_ms = (delay * 2).min(30_000);
+        true
+    }
 }
 
 const POST_OFFICE_DRAIN_INTERVAL: Duration = Duration::from_secs(3);
@@ -173,8 +204,8 @@ impl Node {
                         && !self.certified_sibling(&peer.public)
                         && self.file_identity_capability_due(peer.addr, &peer.public)
                     {
-                        let requests = self.pending_file_message_identities(&peer.public);
-                        let offers = self.file_message_identity_controls_for(&peer.public, true);
+                        let requests = self.pending_file_message_identities(&peer.public)?;
+                        let offers = self.file_message_identity_controls_for(&peer.public, true)?;
                         if (!requests.is_empty() || !offers.is_empty())
                             && self
                                 .exchange_file_message_identities(&mut channel, requests, offers)
@@ -335,6 +366,40 @@ impl Node {
     /// Maintenance runs on the blocking pool and stops when this future is dropped;
     /// CLI and SDK hosts get the same log maintenance as the desktop runtime.
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
+        Box::pin(self.run_accept_loop_inner(
+            listener,
+            #[cfg(test)]
+            true,
+        ))
+        .await;
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) async fn run_accept_loop_without_account_repair(
+        self: Arc<Self>,
+        listener: TcpListener,
+    ) {
+        Box::pin(self.run_accept_loop_inner(listener, false)).await;
+    }
+
+    async fn run_accept_loop_inner(
+        self: Arc<Self>,
+        listener: TcpListener,
+        #[cfg(test)] account_periodic_repair: bool,
+    ) {
+        #[cfg(test)]
+        let account_history = {
+            let node = Arc::clone(&self);
+            async move {
+                if account_periodic_repair {
+                    Box::pin(node.run_account_history_loop()).await;
+                } else {
+                    Box::pin(node.run_account_history_loop_with_tick(None)).await;
+                }
+            }
+        };
+        #[cfg(not(test))]
+        let account_history = Arc::clone(&self).run_account_history_loop();
         let changes = self
             .roster
             .lock()
@@ -345,7 +410,7 @@ impl Node {
             _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
-            _ = Arc::clone(&self).run_account_history_loop() => {}
+            _ = account_history => {}
             _ = Arc::clone(&self).run_account_wake_loop() => {}
             _ = Arc::clone(&self).run_expiry_loop() => {}
             _ = self.accept_connections(listener) => {}
@@ -355,8 +420,21 @@ impl Node {
     async fn run_expiry_loop(self: Arc<Self>) {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
             let node = Arc::clone(&self);
-            match tokio::task::spawn_blocking(move || node.prune_expired_received()).await {
+            match work
+                .spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = node.expiry_cleanup_hook.lock().unwrap().take() {
+                        hook();
+                    }
+                    node.prune_expired_received()
+                })
+                .await
+                .map(|value| value.into_inner())
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => log::warn!("message expiry cleanup failed: {error}"),
                 Err(error) => log::warn!("message expiry task failed: {error}"),
@@ -683,7 +761,9 @@ impl Node {
             if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
                 return;
             }
-            self.serve_call_signal(&channel, signal);
+            if self.serve_call_signal(&channel, signal).is_err() {
+                log::warn!("call signal admission rejected: host inbox unavailable or full");
+            }
             return;
         }
         // The first frame may be a Request, which makes serve_wire_bytes await the peer's
@@ -727,275 +807,158 @@ impl Node {
         self.process_file_events_reception(conv, "live");
     }
 
+    fn discover_file_receives(&self) -> Result<(), NodeError> {
+        let files = self.files.lock().expect("files lock").clone();
+        let after = files.receive_after()?;
+        let headers = self
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .committed_headers_page(after, 128)?;
+        files.discover_receives(
+            after,
+            &headers,
+            Author::from_ed25519(self.identity.public().ed25519_pub),
+        )?;
+        Ok(())
+    }
+
+    pub(in crate::node) fn retry_file_receives(&self) {
+        let result = (|| -> Result<(), NodeError> {
+            self.discover_file_receives()?;
+            if let Some(channel) = self.pending_channel_file() {
+                self.process_channel_file_reception(channel, "catch_up")?;
+            }
+            let conversations = self
+                .files
+                .lock()
+                .expect("files lock")
+                .receive_conversations()?;
+            for conversation in conversations {
+                self.process_file_events_reception(conversation, "catch_up");
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("file receive discovery deferred: {error}");
+        }
+    }
+
     pub(in crate::node) fn process_file_events_reception(
         &self,
         conv: ConversationId,
         context: &'static str,
     ) {
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        let all_events: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            let events = log.events(&conv);
-            if !events
-                .iter()
-                .any(|event| event.kind == EventKind::FileManifest && event.author != self_author)
-            {
-                drop(log);
-                let file = self
-                    .files
-                    .lock()
-                    .expect("files lock not poisoned")
-                    .manifest(&conv)
-                    .is_some();
-                if file {
+        let result = (|| -> Result<(), NodeError> {
+            self.discover_file_receives()?;
+            let is_channel = self
+                .channels
+                .lock()
+                .expect("channels lock")
+                .state(&conv)
+                .is_some();
+            if is_channel {
+                // Rotate a fixed generic-discovery page even when channel keys
+                // are unavailable, so other conversations retain a fair turn.
+                self.files.lock().expect("files lock").receive_candidates(
+                    conv,
+                    8,
+                    8 * 1024 * 1024,
+                )?;
+                return self.process_channel_file_reception(conv, context);
+            }
+            let candidates = self.files.lock().expect("files lock").receive_candidates(
+                conv,
+                128,
+                8 * 1024 * 1024,
+            )?;
+            if candidates.is_empty() {
+                if self.files.lock().expect("files lock").contains_file(conv)? {
                     self.persist_media_if_complete(conv);
                     self.note_file_change();
                 }
-                return;
+                return Ok(());
             }
-            events.into_iter().cloned().collect()
-        };
-        // Is this a channel conversation? If so, open with its group key.
-        let is_channel = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.state(&conv).is_some()
-        };
-        if is_channel
-            && !self
-                .pending_channel_plaintext
-                .lock()
-                .expect("pending plaintext lock not poisoned")
-                .messages
-                .is_empty()
-        {
-            return;
-        }
-        let content_gate = self.channel_content_gate(conv);
-        let mut surfaced: Vec<ReceivedFile> = Vec::new();
-        for event in all_events
-            .into_iter()
-            .filter(|event| event.kind == EventKind::FileManifest && event.author != self_author)
-        {
-            if self
-                .account_suppression
-                .lock()
-                .expect("account suppression lock not poisoned")
-                .contains(conv, event.id)
-            {
-                continue;
-            }
-            if content_gate
-                .as_ref()
-                .is_some_and(|ids| !ids.contains(&event.id))
-            {
-                continue;
-            }
-            if self
-                .files
-                .lock()
-                .expect("files mutex not poisoned")
-                .is_emitted(&event.id)
-            {
-                continue;
-            }
-            if !is_channel
-                && self
-                    .historical_author(event.author.ed25519_pub())
-                    .is_some_and(|proof| self.certified_sibling(&proof.public()))
-            {
-                // Sibling file metadata and bytes use the category-negotiated account path.
-                continue;
-            }
-            // NB: we mark emitted only AFTER a successful open+decode (below), so a
-            // manifest we can't open yet — e.g. a DM whose sender isn't in the roster
-            // until discovery catches up — is retried on a later sync, not lost.
-            let plaintext = if is_channel {
-                let mut book = self.channels.lock().expect("channels mutex not poisoned");
-                match book.state_mut(&conv).and_then(|s| {
-                    if s.is_accepted_member(&event.author.user_id()) {
-                        s.open_sender_message(&event.author.user_id(), &event.ciphertext)
-                    } else {
-                        None
-                    }
-                }) {
-                    Some(p) => p,
-                    None => continue,
-                }
-            } else {
-                let sender_x25519 = {
-                    match self.historical_author(event.author.ed25519_pub()) {
-                        Some(p)
-                            if conv
-                                == super::conversation::dm_conversation_id(
-                                    &self.identity.public(),
-                                    &p.public(),
-                                ) =>
-                        {
-                            p.x25519_pub
-                        }
-                        _ => continue, // unknown author or incorrect device pair
-                    }
+            for id in candidates {
+                let selected = match self.log.lock().expect("log lock").get(&id) {
+                    Err(LogError::ConversationRetiring) => None,
+                    result => result?,
                 };
-                match crate::dm::open(&self.identity, &sender_x25519, &event.ciphertext) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                }
-            };
-            let own_device = self
-                .linked_devices()
-                .iter()
-                .any(|device| device.public.user_id() == event.author.user_id());
-            if self.recipient_expired(&plaintext, event.id, event.wall_clock) {
-                self.files
+                let Some(event) = selected else {
+                    self.files.lock().expect("files lock").forget_receive(id)?;
+                    continue;
+                };
+                if self
+                    .account_suppression
                     .lock()
-                    .expect("files mutex not poisoned")
-                    .mark_emitted(event.id);
-                continue;
-            }
-            let Some(manifest) = super::files::validated_manifest(&plaintext) else {
-                continue;
-            };
-            if !self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .accepts(&manifest)
-            {
-                continue;
-            }
-            let received = ReceivedFile {
-                protection: manifest.protection(),
-                expires_at_ms: crate::expiry::deadline(&plaintext),
-                conv,
-                is_channel,
-                from: event.author.user_id(),
-                name: if manifest.protection().is_some() {
-                    "Protected image".into()
-                } else {
-                    manifest.name().to_string()
-                },
-                size: manifest.size(),
-                mime: manifest.mime().to_string(),
-                file_conv: manifest.file_conv(),
-                media: crate::node::media_store::manifest_is_media(&manifest),
-                event_id: event.id,
-                authored_at: event.wall_clock,
-                received_at: super::node::now_millis(),
-                arrival_kind: context,
-                own_device,
-                batch_id: None,
-                batch_complete: true,
-                batch_size: 1,
-            };
-            // The conversation to FILE this manifest under for history. A channel manifest
-            // stays in the channel conv (which is the UI's conversation id). A DM manifest
-            // is account-addressed in this app: map it to the ACCOUNT conversation with the
-            // author's certified account (mirroring `emit_new_messages`), so it lines up
-            // with the account-keyed conversation view on both sides. A DM author with no
-            // known account (or a self-synced copy from our own device) falls back to the
-            // raw conv — it still shows in the tray, just not folded into account history.
-            let host_conv = if is_channel {
-                conv
-            } else {
-                let peer_account = self
-                    .historical_author(event.author.ed25519_pub())
-                    .and_then(|p| p.account_id());
+                    .expect("suppression lock")
+                    .contains(conv, event.id)?
+                    || self.files.lock().expect("files lock").processed(event.id)?
+                {
+                    continue;
+                }
+                let Some(proof) = self.historical_author(event.author.ed25519_pub()) else {
+                    continue;
+                };
+                if self.certified_sibling(&proof.public())
+                    || conv
+                        != super::conversation::dm_conversation_id(
+                            &self.identity.public(),
+                            &proof.public(),
+                        )
+                {
+                    continue;
+                }
+                let Ok(plaintext) =
+                    crate::dm::open(&self.identity, &proof.x25519_pub, &event.ciphertext)
+                else {
+                    continue;
+                };
+                if self.recipient_expired(&plaintext, event.id, event.wall_clock) {
+                    self.files
+                        .lock()
+                        .expect("files lock")
+                        .mark_processed(event.id)?;
+                    continue;
+                }
+                let Some(manifest) = super::files::validated_manifest(&plaintext) else {
+                    continue;
+                };
+                if !self.files.lock().expect("files lock").accepts(&manifest)?
+                    || self
+                        .delivery
+                        .lock()
+                        .expect("delivery lock")
+                        .manifest_event_erased(event.id)
+                {
+                    continue;
+                }
                 let my_account = self.account.account_id();
-                match peer_account {
-                    Some(acct) if acct != my_account => account_conversation_id(&my_account, &acct),
+                let host_conv = match proof.account_id() {
+                    Some(account) if account != my_account => {
+                        account_conversation_id(&my_account, &account)
+                    }
                     _ => conv,
+                };
+                let entry = super::received_log::ReceivedEntry {
+                    event_id: event.id,
+                    conversation: host_conv,
+                    from: event.author.user_id(),
+                    wall_clock: event.wall_clock,
+                    plaintext,
+                };
+                // The existing direct-delivery journal owns publication after
+                // durable FILES/body/effect installation and receiver recovery.
+                self.accept_manifest_event(&event, &proof, entry)?;
+                if let Err(error) = self.complete_sticker_aliases(manifest.file_conv()) {
+                    log::warn!("sticker completion deferred: {error}");
                 }
-            };
-            if self
-                .delivery
-                .lock()
-                .expect("delivery lock not poisoned")
-                .manifest_event_erased(event.id)
-            {
-                continue;
             }
-            // Persist the surfaced manifest durably so the file book's emitted set + this
-            // manifest survive a restart — WITHOUT the old bug of marking never-opened
-            // manifests emitted (which lost the file). Best-effort: a failure here at worst
-            // re-surfaces the file after restart, never loses it.
-            // Key by the HOST (DM/channel/account) conversation, not the per-file conv, so
-            // `conversation_files` can list a conversation's files in time order for
-            // history. Startup FileBook seeding iterates all entries regardless of key.
-            let entry = super::received_log::ReceivedEntry {
-                event_id: event.id,
-                conversation: host_conv,
-                from: event.author.user_id(),
-                wall_clock: event.wall_clock,
-                plaintext,
-            };
-            let installed = if is_channel {
-                let recorded = self
-                    .received_files
-                    .lock()
-                    .expect("files lock not poisoned")
-                    .record_durable(&entry);
-                recorded.and_then(|_| self.retain_group_file_completion(&event, &entry))
-            } else {
-                match self.historical_author(event.author.ed25519_pub()) {
-                    Some(proof) => self.accept_manifest_event(&event, &proof, entry),
-                    None => continue,
-                }
-            };
-            if installed.is_err() {
-                continue;
-            }
-            if !is_channel {
-                self.complete_sticker_aliases(manifest.file_conv());
-                continue;
-            } // live journal recovery owns DM file publication
-            if !own_device {
-                self.note_account_local_change();
-            }
-            self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
-            {
-                let mut files = self.files.lock().expect("files mutex not poisoned");
-                files.mark_emitted(event.id);
-                files.record_event(event.id, event.author, manifest);
-            }
-            surfaced.push(received);
-        }
-        let total = surfaced.len();
-        let kind = if context == "live" && total > 1 {
-            "catch_up"
-        } else {
-            context
-        };
-        let batch = (kind == "catch_up")
-            .then(|| {
-                surfaced
-                    .last()
-                    .map(|file| format!("file:{}", file.event_id.to_hex()))
-            })
-            .flatten();
-        for (index, mut rf) in surfaced.into_iter().enumerate() {
-            rf.arrival_kind = kind;
-            rf.batch_id = batch.clone();
-            rf.batch_complete = index + 1 == total;
-            rf.batch_size = total;
-            // We have the manifest; if its chunks haven't all arrived, queue a direct pull
-            // from peers (the sender's one-shot push may have raced our discovery, and on a
-            // PO-less LAN nothing else fetches them). Cleared once the file completes.
-            let fc = rf.file_conv;
-            if self.attachment_consent_status(fc)
-                == Some(super::attachment_consent::ReceiveDecision::Accepted)
-                && matches!(self.file_progress(fc), Some(p) if p.done < p.total)
-            {
-                self.pending_files
-                    .lock()
-                    .expect("pending_files mutex not poisoned")
-                    .insert(fc);
-                self.file_pull_notify.notify_one();
-            } else {
-                // All chunks already arrived with the manifest (the push landed): if this is
-                // a media file, persist it into the durable store now (and prune its chunks).
-                self.persist_media_if_complete(fc);
-            }
-            let _ = self.file_incoming.send(rf);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("process_file_events_reception deferred after storage failure: {error}");
         }
     }
 
@@ -1013,89 +976,110 @@ impl Node {
             self.retry_group_file_delivery()
         );
     }
-
     async fn pull_pending_files_direct(&self) {
-        use futures_util::stream::{self, StreamExt};
-        let Ok(_pull) = self.file_pull_gate.try_lock() else {
-            return;
-        };
-        let mut pending: Vec<_> = self
-            .pending_files
-            .lock()
-            .expect("pending files mutex not poisoned")
-            .iter()
-            .copied()
-            .collect();
-        pending.sort_unstable_by_key(|id| *id.as_bytes());
-        if pending.is_empty() {
-            return;
-        }
-        let cursor = self
-            .file_pull_cursor
-            .fetch_add(8, std::sync::atomic::Ordering::Relaxed);
-        let offset = cursor % pending.len();
-        pending.rotate_left(offset);
-        pending.truncate(8);
-        stream::iter(pending)
-            .for_each_concurrent(2, |fc| async move {
-                if self.attachment_consent_status(fc)
-                    != Some(super::attachment_consent::ReceiveDecision::Accepted)
-                {
-                    self.pending_files
-                        .lock()
-                        .expect("pending files mutex not poisoned")
-                        .remove(&fc);
-                    return;
-                }
-                if self.local_media_recovery_complete(fc) {
-                    let progressed = self.complete_sticker_aliases(fc);
-                    let pending = self.pending_sticker_aliases(fc);
-                    if !pending {
-                        // Preserve local chunk retirement and the channel replica
-                        // budget without rewriting already durable media bytes.
-                        self.commit_file_completion(fc, &[]);
-                        self.pending_files
-                            .lock()
-                            .expect("pending files mutex not poisoned")
-                            .remove(&fc);
-                    }
-                    if progressed || !pending {
-                        return;
-                    }
-                }
-                if self.file_progress(fc).is_none_or(|p| p.done < p.total) {
-                    let candidates = self.file_recovery_sources(fc, cursor / 8);
-                    let mut pulls = stream::iter(candidates)
-                        .map(|peer| async move {
-                            let _ = tokio::time::timeout(
-                                super::delivery_runtime::FILE_EXCHANGE_TIMEOUT,
-                                async {
-                                    let Ok(mut channel) =
-                                        self.privacy_sync_dial(peer.addr, &peer.public).await
-                                    else {
-                                        return;
-                                    };
-                                    if self.attachment_consent_status(fc)
-                                        != Some(
-                                            super::attachment_consent::ReceiveDecision::Accepted,
-                                        )
-                                    {
+        let result: Result<(), NodeError> = async {
+            use futures_util::stream::{self, StreamExt};
+            let Ok(_pull) = self.file_pull_gate.try_lock() else {
+                return Ok(());
+            };
+            let generation=self.attachment_consent.lock().expect("consent lock").generation()?;
+            let book=self.files.lock().expect("files lock").clone();
+            book.discover_downloads(generation)?;
+            let pending=book.claim_downloads()?;
+            let cursor=self.file_pull_cursor.fetch_add(8,std::sync::atomic::Ordering::Relaxed);
+            stream::iter(pending)
+                .for_each_concurrent(2, |work| async move {
+                    let fc=work.file;
+                    let result: Result<(), NodeError> = async {
+                        if match self.attachment_consent_status(fc) {
+                            Ok(status) => status,
+                            Err(error) => {
+                                log::warn!("attachment consent lookup deferred: {error}");
+                                return Ok(());
+                            }
+                        } != Some(super::attachment_consent::ReceiveDecision::Accepted)
+                        {
+                            self.files.lock().expect("files lock").finish_download(work)?;
+                            return Ok(());
+                        }
+                        if self.local_media_recovery_complete(fc)? {
+                            let progressed = match self.complete_sticker_aliases(fc) {
+                                Ok(progressed) => progressed,
+                                Err(error) => {
+                                    log::warn!("sticker completion deferred: {error}");
+                                    return Ok(());
+                                }
+                            };
+                            let pending = self.pending_sticker_aliases(fc)?;
+                            if !pending {
+                                self.commit_file_completion(fc, &[])?;
+                                self.files.lock().expect("files lock").finish_download(work)?;
+                            }
+                            if progressed || !pending {
+                                return Ok(());
+                            }
+                        }
+                        if self.file_progress(fc)?.is_none_or(|p| p.done < p.total) {
+                            let candidates = match self.file_recovery_sources(fc, cursor / 8) {
+                                Ok(candidates) => candidates,
+                                Err(error) => {
+                                    log::warn!("file recovery deferred: {error}");
+                                    return Ok(());
+                                }
+                            };
+                            let mut pulls = stream::iter(candidates)
+                                .map(|peer| async move {
+                                    let _ = tokio::time::timeout(
+                                        super::delivery_runtime::FILE_EXCHANGE_TIMEOUT,
+                                        async {
+                                            let Ok(mut channel) = self
+                                                .privacy_sync_dial(peer.addr, &peer.public)
+                                                .await
+                                            else {
+                                                return;
+                                            };
+                                            if match self.attachment_consent_status(fc) {
+                                        Ok(status) => status,
+                                        Err(error) => {
+                                            log::warn!(
+                                                "attachment consent lookup deferred: {error}"
+                                            );
+                                            return;
+                                        }
+                                    } != Some(
+                                        super::attachment_consent::ReceiveDecision::Accepted,
+                                    ) {
                                         return;
                                     }
                                     let store = self.sync_store(channel.peer_identity());
-                                    let manifests = self.files.lock().expect("files lock").manifest_events(fc);
-                                    if let Some(manifest) = manifests.into_iter().find(|manifest| self.incoming_offer(fc, Some(*manifest), Some(&peer.public)).is_some())
+                                    let manifests = self.files.lock().expect("files lock").offers(Some(fc),None);
+                                    let mut offered_manifest = None;
+                                    for offer in manifests {
+                                        let manifest=match offer {Ok(offer)=>offer.event,Err(error)=>{log::warn!("file offer lookup deferred: {error}");return;}};
+                                        match self.incoming_offer(fc, Some(manifest), Some(&peer.public)) {
+                                            Ok(Some(_)) => { offered_manifest = Some(manifest); break; },
+                                            Ok(None) => {},
+                                            Err(error) => { log::warn!("file offer lookup deferred: {error}"); return; }
+                                        }
+                                    }
+                                    if let Some(manifest) = offered_manifest
                                         && self.exchange_file_message_identities(&mut channel, vec![(fc, manifest)], vec![]).await.is_err() {
                                         drop(channel);
                                         let Ok(reconnected) = self.privacy_sync_dial(peer.addr, &peer.public).await else { return; };
                                         channel = reconnected;
                                     }
-                                    if let Some(manifest) = self.sticker_recovery_offer(fc, &peer.public) {
+                                    let sticker_offer = match self.sticker_recovery_offer(fc, &peer.public) {
+                                        Ok(offer) => offer,
+                                        Err(error) => { log::warn!("sticker recovery deferred: {error}"); return; }
+                                    };
+                                    if let Some(manifest) = sticker_offer {
                                         match super::session::request_sticker_file_proof(&mut channel, fc, manifest).await {
                                             Ok(Some(headers)) => {
                                                 use crate::eventlog::sync::SyncStore;
-                                                store.lock().expect("sync store lock").sticker_file_consent(&fc, &manifest, headers);
-                                                if self.media.contains(fc) && self.has_verified_file_completion(fc) && !self.pending_sticker_aliases(fc) {
+                                                if let Err(error) = store.lock().expect("sync store lock").sticker_file_consent(&fc, &manifest, headers) {
+                                                    log::warn!("sticker consent deferred: {error}"); return;
+                                                }
+                                                if self.media.contains(fc) && self.has_verified_file_completion(fc) && match self.pending_sticker_aliases(fc) { Ok(pending) => !pending, Err(error) => { log::warn!("sticker completion deferred: {error}"); return; } } {
                                                     self.recycle_sync_channel(channel);
                                                     return;
                                                 }
@@ -1105,108 +1089,99 @@ impl Node {
                                                 drop(channel);
                                                 let Ok(reconnected) = self.privacy_sync_dial(peer.addr, &peer.public).await else { return; };
                                                 channel = reconnected;
-                                                if self.attachment_consent_status(fc) != Some(super::attachment_consent::ReceiveDecision::Accepted) {
+                                                if !matches!(self.attachment_consent_status(fc), Ok(Some(super::attachment_consent::ReceiveDecision::Accepted))) {
                                                     return;
                                                 }
                                             }
                                         }
                                     }
-                                    if super::session::request_file_round(&mut channel, &store, fc)
-                                        .await
-                                        .is_ok()
-                                    {
-                                        self.recycle_sync_channel(channel);
-                                    }
-                                },
-                            )
-                            .await;
-                        })
-                        .buffer_unordered(2);
-                    while pulls.next().await.is_some() {
-                        self.note_file_change();
-                        if self.file_progress(fc).is_some_and(|p| p.done >= p.total) {
-                            break;
+                                            if super::session::request_file_round_paged(
+                                                &mut channel,
+                                                &store,
+                                                fc,
+                                            )
+                                            .await
+                                            .is_ok()
+                                            {
+                                                self.recycle_sync_channel(channel);
+                                            }
+                                        },
+                                    )
+                                    .await;
+                                })
+                                .buffer_unordered(2);
+                            while pulls.next().await.is_some() {
+                                self.note_file_change();
+                                if self.file_progress(fc)?.is_some_and(|p| p.done >= p.total) {
+                                    break;
+                                }
+                            }
                         }
+                        if self.file_progress(fc)?.is_some_and(|p| p.done >= p.total) {
+                            self.persist_media_if_complete(fc);
+                            let managed = self
+                                .files
+                                .lock()
+                                .expect("files lock not poisoned")
+                                .manifest(fc)?
+                                .as_ref().is_some_and(super::media_store::manifest_is_media);
+                            if !managed || self.local_media_recovery_complete(fc)?
+                            {
+                                self.files.lock().expect("files lock").finish_download(work)?;
+                            } else {
+                                // The byte store may succeed before completion metadata.
+                                // Its helper clears the transient queue; restore recovery
+                                // ownership until both durable writes have succeeded.
+                                self.file_pull_notify.notify_one();
+                            }
+                            self.note_file_change();
+                        }
+                        Ok(())
                     }
-                }
-                if self.file_progress(fc).is_some_and(|p| p.done >= p.total) {
-                    self.persist_media_if_complete(fc);
-                    let managed = self
-                        .files
-                        .lock()
-                        .expect("files lock not poisoned")
-                        .manifest(&fc)
-                        .is_some_and(super::media_store::manifest_is_media);
-                    if !managed || self.local_media_recovery_complete(fc) {
-                        self.pending_files
-                            .lock()
-                            .expect("pending files mutex not poisoned")
-                            .remove(&fc);
-                    } else {
-                        // The byte store may succeed before completion metadata.
-                        // Its helper clears the transient queue; restore recovery
-                        // ownership until both durable writes have succeeded.
-                        self.pending_files
-                            .lock()
-                            .expect("pending files mutex not poisoned")
-                            .insert(fc);
+                    .await;
+                    if let Err(error) = result {
+                        log::warn!("file receive deferred after storage failure: {error}");
                     }
-                    self.note_file_change();
-                }
-            })
-            .await;
+                })
+                .await;
+
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            log::warn!("pull_pending_files deferred after storage failure: {error}");
+        }
     }
 
-    fn file_recovery_sources(&self, file: ConversationId, cursor: usize) -> Vec<PeerRecord> {
-        let (authors, manifests) = {
-            let files = self.files.lock().expect("files lock not poisoned");
-            (files.authors(file), files.manifest_events(file))
-        };
-        let parents: Vec<_> = {
-            let log = self.log.lock().expect("log lock not poisoned");
-            manifests
-                .iter()
-                .filter_map(|id| log.get(id).map(|event| event.conversation_id))
-                .collect()
-        };
-        let mut identities = authors
-            .into_iter()
-            .filter_map(|author| {
-                self.historical_author(author.ed25519_pub())
-                    .map(|proof| proof.public())
-            })
-            .collect::<Vec<_>>();
-        {
-            let book = self.channels.lock().expect("channels lock not poisoned");
-            let mut members = Vec::new();
+    fn file_recovery_sources(
+        &self,
+        file: ConversationId,
+        cursor: usize,
+    ) -> Result<Vec<PeerRecord>, NodeError> {
+        let files = self.files.lock().expect("files lock").clone();
+        let mut peers = Vec::new();
+        for peer in self.routing_peers() {
+            if peer.post_office || peer.public == self.identity.public() {
+                continue;
+            }
             let mut channel_bound = false;
-            for parent in parents {
+            let mut channel_allowed = false;
+            for scope in self.manifest_scopes(file) {
+                let parent = scope?.parent;
+                let book = self.channels.lock().expect("channels lock");
                 if let Some(state) = book.state(&parent) {
                     channel_bound = true;
-                    members.extend(
-                        state
-                            .members()
-                            .iter()
-                            .filter(|member| {
-                                state.is_accepted_member(&member.user_id())
-                                    && book.replica_enabled(parent, &member.user_id())
-                            })
-                            .cloned(),
-                    );
+                    channel_allowed |= state.is_accepted_member(&peer.public.user_id())
+                        && book.replica_enabled(parent, &peer.public.user_id());
                 }
             }
-            if channel_bound {
-                identities = members;
+            if channel_allowed
+                || (!channel_bound
+                    && files.has_author(file, Author::from_ed25519(peer.public.ed25519_pub))?)
+            {
+                peers.push(peer);
             }
         }
-        let mut peers = identities
-            .into_iter()
-            .filter(|identity| *identity != self.identity.public())
-            .filter_map(|identity| {
-                self.routing_peer(&identity.user_id())
-                    .filter(|peer| !peer.post_office && peer.public == identity)
-            })
-            .collect::<Vec<_>>();
         peers.sort_unstable_by_key(|peer| peer.public.user_id());
         peers.dedup_by_key(|peer| peer.public.user_id());
         if !peers.is_empty() {
@@ -1214,7 +1189,7 @@ impl Node {
             peers.rotate_left(offset);
         }
         peers.truncate(3);
-        peers
+        Ok(peers)
     }
 
     /// Run the channel book over `conv`'s events and stream any newly-decryptable
@@ -1225,248 +1200,543 @@ impl Node {
 
     /// Install validated control metadata independently of plaintext retries,
     /// preserving local crypto state and the pending plaintext batch.
-    pub(in crate::node) fn refresh_channel_control_metadata(&self, conv: ConversationId) {
-        let changed = {
-            // Match the book -> log order used by outgoing allocation.
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            let before = book.info_projection(conv);
-            let log = self.log.lock().expect("log mutex not poisoned");
-            if let Some(projected) =
-                super::channel::ChannelBook::projected_metadata(conv, &log.events(&conv))
-                && let Some(state) = book.state_mut(&conv)
-            {
-                state.install_membership_projection(projected);
-            }
-            before != book.info_projection(conv)
+    #[cfg(test)]
+    pub(in crate::node) fn refresh_channel_control_metadata(
+        &self,
+        conv: ConversationId,
+    ) -> Result<(), crate::eventlog::LogError> {
+        self.prepare_channel_metadata_turn(conv).map(|_| ())
+    }
+
+    /// A single canonical or presentation turn. Only a fresh, completed
+    /// canonical state may replace membership; last presentation stays visible
+    /// until its independently budgeted selectors finish.
+    fn prepare_channel_metadata_turn(&self, conv: ConversationId) -> Result<bool, LogError> {
+        use crate::eventlog::sync::network::PreparationBudget;
+        self.channel_checkpoints.queue_runtime(conv)?;
+        let step = {
+            let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.project_step_with_budget(
+                log.repository()?,
+                &self.identity,
+                conv,
+                PreparationBudget::default(),
+            )?
         };
-        if changed {
+        if !step.ready {
+            self.channel_recovery_notify.notify_one();
+            return Ok(false);
+        }
+        #[cfg(test)]
+        {
+            let hook = self
+                .channel_metadata_install_test_hook
+                .lock()
+                .expect("channel metadata hook lock")
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        if !self.install_current_channel_metadata(conv)? {
+            if self.channel_checkpoints.finish_runtime(conv, None)? {
+                self.channel_recovery_notify.notify_one();
+            }
+            return Ok(true);
+        }
+        // The canonical step already consumed this turn's allowance. Do not
+        // reset the budget when it published the final control.
+        if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+            self.channel_recovery_notify.notify_one();
+            self.account_sync_notify.notify_one();
+            return Ok(false);
+        }
+        let step = {
+            let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.prepare_presentation_step(
+                log.repository()?,
+                &self.identity,
+                conv,
+                PreparationBudget::default(),
+            )?
+        };
+        if step.ready {
+            // Deferred presentation can finish after account publication observed
+            // no current group or an unprepared policy. Resume that existing lane
+            // now; unchanged ready reads must not create a publication wake loop.
+            if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+                self.account_sync_notify.notify_one();
+            }
+            let mut book = self.channels.lock().expect("channel book lock");
+            let before = book.info_projection(conv);
+            self.channel_checkpoints.install_prepared_presentation(
+                &mut book,
+                &self.user_id(),
+                conv,
+            )?;
+            if before != book.info_projection(conv) {
+                let _ = self.channel_changes.send(conv);
+            }
+        } else {
+            self.channel_recovery_notify.notify_one();
+        }
+        let ready = step.ready && step.rows == 0 && step.edges == 0 && step.bytes == 0;
+        if !ready {
+            self.channel_recovery_notify.notify_one();
+        }
+        Ok(ready)
+    }
+
+    /// Install one already-published snapshot, using the same source fence and
+    /// lock order for runtime turns and local admission.
+    fn install_current_channel_metadata(&self, conv: ConversationId) -> Result<bool, LogError> {
+        let mut book = self.channels.lock().expect("channel book lock");
+        let before = book.info_projection(conv);
+        // Recheck while holding the book guard, following outgoing's
+        // book -> log order; a concurrently appended control cannot install
+        // an old display as fresh membership for subsequent authoring.
+        let log = self.log.lock().expect("log lock");
+        let state = self.channel_checkpoints.current_state(conv)?;
+        let Some(state) = state else {
+            return Ok(false);
+        };
+        book.install_indexed_state(state);
+        if let Some(state) = book.state_mut(&conv)
+            && !state.has_my_sender(state.epoch())
+            && let Some(bytes) = self
+                .channel_senders
+                .lock()
+                .expect("sender store lock")
+                .current(&conv, state.epoch())?
+        {
+            let key = crate::channel::sender_key::SenderKey::deserialize(&bytes)
+                .ok_or_else(|| LogError::CorruptFile("invalid channel sender checkpoint".into()))?;
+            state.import_my_sender(state.epoch(), key);
+        }
+        drop(log);
+        if before != book.info_projection(conv) {
             let _ = self.channel_changes.send(conv);
+        }
+        Ok(true)
+    }
+
+    /// Local acceptance can finish a short appended tail without inheriting a
+    /// stale authority snapshot. All phases consume one allowance; a backlog
+    /// remains pending for the existing worker instead of draining here.
+    pub(in crate::node) fn prepare_channel_admission(
+        &self,
+        channel: ConversationId,
+        budget: &mut crate::eventlog::sync::network::PreparationBudget,
+    ) -> Result<(), LogError> {
+        self.channel_checkpoints.queue_runtime(channel)?;
+        let mut advanced = false;
+        while budget.rows >= 2 && budget.edges > 0 && budget.bytes >= 512 {
+            let step = {
+                let log = self.log.lock().expect("log lock");
+                match self.channel_checkpoints.project_step_with_budget(
+                    log.repository()?,
+                    &self.identity,
+                    channel,
+                    *budget,
+                ) {
+                    Err(LogError::PageBudgetTooSmall { required })
+                        if required
+                            <= crate::eventlog::sync::network::PreparationBudget::default()
+                                .bytes =>
+                    {
+                        break;
+                    }
+                    result => result?,
+                }
+            };
+            advanced |= step.rows != 0 || step.edges != 0 || step.bytes != 0;
+            // A phase-only transition also consumes a scheduling row, so even
+            // zero-I/O continuation changes cannot create an unbounded loop.
+            budget.rows = budget
+                .rows
+                .checked_sub(step.rows.max(usize::from(!step.ready)))
+                .ok_or(LogError::InvalidPageBudget)?;
+            budget.edges = budget
+                .edges
+                .checked_sub(step.edges)
+                .ok_or(LogError::InvalidPageBudget)?;
+            budget.bytes = budget
+                .bytes
+                .checked_sub(step.bytes)
+                .ok_or(LogError::InvalidPageBudget)?;
+            if step.ready {
+                self.install_current_channel_metadata(channel)?;
+                if advanced {
+                    self.account_sync_notify.notify_one();
+                }
+                return Ok(());
+            }
+        }
+        self.channel_recovery_notify.notify_one();
+        Err(LogError::StaleCursor)
+    }
+
+    /// Local control APIs may await their accepted intent, yielding between
+    /// bounded turns. They never hold the log/book or delivery guard over await.
+    pub(in crate::node) async fn await_channel_metadata(
+        &self,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
+        loop {
+            match self.prepare_channel_metadata_turn(channel) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(LogError::StaleCursor) => {
+                    // The source may change between bounded preparation and
+                    // installation. Retry only while this exact participant
+                    // owner is still valid; adoption also returns StaleCursor.
+                    self.channel_checkpoints.check_account()?;
+                    // Physical retirement may have finished before derived
+                    // checkpoint cleanup. That empty source cannot advance.
+                    let retained = self
+                        .log
+                        .lock()
+                        .expect("log lock")
+                        .repository()?
+                        .metadata(&channel)?
+                        .is_some_and(|metadata| metadata.count > 0);
+                    if !retained {
+                        return Err(LogError::StaleCursor.into());
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+            tokio::task::yield_now().await;
         }
     }
 
     /// Recovery provenance is supplied by the operation, never inferred from a
-    /// sender's wall clock. A multi-message decryption pass is a catch-up batch.
+    /// sender's wall clock. Receiver consumption, body and receipt commit together.
     pub(in crate::node) fn process_channel_reception(
         &self,
         conv: ConversationId,
         context: &'static str,
     ) {
+        if let Err(error) = self.process_channel_reception_inner(conv, context) {
+            let mut pending = self
+                .pending_channel_plaintext
+                .lock()
+                .expect("channel retry lock");
+            let lane = pending.lanes.entry(conv).or_default();
+            let delayed = lane.record_failure(&error, std::time::Instant::now());
+            self.channel_recovery_notify.notify_one();
+            if delayed {
+                log::warn!("channel reception deferred after storage failure: {error}");
+            }
+        }
+    }
+
+    pub(in crate::node) fn process_channel_reception_inner(
+        &self,
+        conv: ConversationId,
+        context: &'static str,
+    ) -> Result<(), NodeError> {
+        use super::reception_effects::{ArrivalKind, ReceptionMetadata};
         let mut pending = self
             .pending_channel_plaintext
             .lock()
-            .expect("pending plaintext lock not poisoned");
+            .expect("channel retry lock");
         if pending
             .retry_at
             .is_some_and(|deadline| std::time::Instant::now() < deadline)
             || pending
-                .messages
-                .first()
-                .is_some_and(|message| message.channel_id != conv)
+                .lanes
+                .get(&conv)
+                .and_then(|lane| lane.retry_at)
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
         {
-            return;
+            return Ok(());
         }
-        let mut saved: std::collections::HashSet<_> = self
-            .received
-            .lock()
-            .expect("received mutex not poisoned")
-            .entries_ref(&conv)
-            .iter()
-            .map(|entry| entry.event_id)
-            .collect();
-        let events: Vec<Event> = self
-            .log
-            .lock()
-            .expect("log mutex not poisoned")
-            .events(&conv)
+        let lane = pending.lanes.entry(conv).or_default();
+        let mut arrival = *lane.continuation.get_or_insert_with(|| {
+            if context == "live" {
+                ArrivalKind::Live
+            } else {
+                ArrivalKind::CatchUp
+            }
+        });
+        if !self.prepare_channel_metadata_turn(conv)? {
+            return Ok(());
+        }
+        let Some(state) = self.channel_checkpoints.current_state(conv)? else {
+            pending.lanes.remove(&conv);
+            return Ok(());
+        };
+        let name = state.name().to_owned();
+        let source = self
+            .channel_checkpoints
+            .source_binding(conv)?
+            .ok_or(LogError::StaleCursor)?;
+        // A deferred startup may expose current display metadata, but no
+        // plaintext handoff precedes the admitted recall attempt boundary.
+        let (recalls_ready, recall_work) = self.process_channel_recalls(conv)?;
+        if !recalls_ready || recall_work {
+            self.channel_recovery_notify.notify_one();
+            return Ok(());
+        }
+        let own_devices: std::collections::HashSet<_> = self
+            .linked_devices()
             .into_iter()
-            .cloned()
+            .map(|device| device.public.user_id())
             .collect();
-        let refs: Vec<_> = events.iter().collect();
-        let mut replay = super::channel::ChannelReplay::new(&refs);
-        let mut context = context;
+        let mut budget = super::channel::checkpoint::ChannelReceiveBudget::default();
         loop {
-            let retrying = !pending.messages.is_empty();
-            let (mut messages, limited) = if retrying {
-                context = "catch_up";
-                (std::mem::take(&mut pending.messages), false)
-            } else {
-                let mut book = self.channels.lock().expect("channels mutex not poisoned");
-                let before = book.info_projection(conv);
-                let result = book.process_replay(
-                    &self.identity,
+            self.received
+                .lock()
+                .expect("received lock")
+                .check_publication()?;
+            let turn = {
+                let log = self.log.lock().expect("log lock");
+                self.channel_checkpoints.prepare_message_turn_with_budget(
+                    log.repository()?,
                     conv,
-                    &mut replay,
-                    CHANNEL_PLAINTEXT_BATCH,
-                    super::channel::CHANNEL_PENDING_BYTES.saturating_sub(
-                        pending
-                            .terminal
-                            .as_ref()
-                            .map_or(0, super::channel::ReceivedChannelMessage::retained_bytes),
-                    ),
-                );
-                if before != book.info_projection(conv) {
-                    let _ = self.channel_changes.send(conv);
-                }
-                result
+                    &mut budget,
+                )?
             };
-            let own_devices: std::collections::HashSet<_> = self
-                .linked_devices()
-                .iter()
-                .map(|device| device.public.user_id())
-                .collect();
-            let observed_at = super::node::now_millis();
-            for msg in &mut messages {
-                if msg.received_at == 0 {
-                    msg.received_at = observed_at;
-                }
-                if !own_devices.contains(&msg.from) {
-                    let _ = self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock);
-                }
+            if turn.candidates.len() > 1 {
+                arrival = ArrivalKind::CatchUp;
             }
-            let opened = messages.len();
-            let mut received = Vec::new();
-            let mut messages = messages.into_iter();
-            while let Some(mut msg) = messages.next() {
-                if saved.contains(&msg.event_id)
-                    || self
-                        .account_suppression
-                        .lock()
-                        .expect("account suppression lock not poisoned")
-                        .contains(conv, msg.event_id)
-                {
-                    continue;
-                }
-                msg.own_device = own_devices.contains(&msg.from);
-                if self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock) {
-                    continue;
-                }
-                if msg.received_at == 0 {
-                    msg.received_at = super::node::now_millis();
-                }
-                if let Err(error) = self
-                    .received
+            for candidate in turn.candidates {
+                let own = own_devices.contains(candidate.author());
+                let suppressed = self
+                    .account_suppression
                     .lock()
-                    .expect("received mutex not poisoned")
-                    .record(
-                        conv,
-                        msg.from.clone(),
-                        msg.wall_clock,
-                        &msg.wrapped,
-                        msg.event_id,
+                    .expect("account suppression lock")
+                    .contains(conv, candidate.event_id())?;
+                let pre_open = candidate.retained_before_open();
+                let expired = if pre_open && !own {
+                    crate::expiry::deadline(candidate.plaintext()).is_some()
+                } else {
+                    self.recipient_expired(
+                        candidate.plaintext(),
+                        candidate.event_id(),
+                        candidate.wall_clock(),
                     )
-                {
-                    log::warn!(
-                        "channel plaintext persistence failed; retaining bounded retry: {error}"
-                    );
-                    pending.messages.push(msg);
-                    pending.messages.extend(messages);
-                    break;
+                };
+                let entry = super::received_log::ReceivedEntry {
+                    event_id: candidate.event_id(),
+                    conversation: conv,
+                    from: candidate.author().to_owned(),
+                    wall_clock: candidate.wall_clock(),
+                    plaintext: candidate.plaintext().to_vec(),
+                };
+                let metadata = ReceptionMetadata {
+                    from_device: entry.from.clone(),
+                    received_at: super::node::now_millis(),
+                    arrival_kind: arrival,
+                    own_device: own,
+                    batch_id: None,
+                    batch_complete: true,
+                    batch_size: 1,
+                    reception_only: false,
+                };
+                let committed = self.channel_checkpoints.commit_reception(
+                    &candidate,
+                    &mut self.received.lock().expect("received lock"),
+                    &entry,
+                    metadata,
+                    !suppressed && !expired,
+                )?;
+                if let Some(metadata) = committed {
+                    self.note_reception_change();
+                    if !own && entry.from != self.user_id() {
+                        self.note_account_local_change();
+                    }
+                    if !pre_open && self.channel_incoming.is_legacy() {
+                        if metadata.batch_id.is_some() {
+                            pending.lanes.entry(conv).or_default().legacy_batch_visible = true;
+                        }
+                        let body = super::message::MessageBody::decode(&entry.plaintext);
+                        let _ =
+                            self.channel_incoming
+                                .send(super::channel::ReceivedChannelMessage {
+                                    channel_id: conv,
+                                    channel_name: name.clone(),
+                                    from: entry.from,
+                                    text: body.text,
+                                    protection: body.protection,
+                                    reply_to: body.reply_to,
+                                    event_id: entry.event_id,
+                                    wall_clock: entry.wall_clock,
+                                    wrapped: entry.plaintext,
+                                    received_at: metadata.received_at,
+                                    arrival_kind: match metadata.arrival_kind {
+                                        ArrivalKind::Live => "live",
+                                        ArrivalKind::CatchUp => "catch_up",
+                                        ArrivalKind::HistorySync => "history_sync",
+                                    },
+                                    own_device: metadata.own_device,
+                                    batch_id: metadata.batch_id,
+                                    batch_complete: metadata.batch_complete,
+                                    batch_size: metadata.batch_size,
+                                    reception_only: false,
+                                });
+                    }
+                    self.schedule_channel_recovery(conv);
                 }
-                saved.insert(msg.event_id);
-                if !msg.own_device && msg.from != self.user_id() {
-                    self.note_account_local_change();
-                }
-                received.push(msg);
             }
-            let (history, received): (Vec<_>, Vec<_>) = received
-                .into_iter()
-                .partition(|message| message.arrival_kind == "history_sync");
-            for message in history {
-                let _ = self.channel_incoming.send(message);
-            }
-            let total = received.len();
-            let kind = if context == "live" && (opened > 1 || retrying) {
-                "catch_up"
-            } else {
-                context
-            };
-            if kind == "catch_up" {
-                if pending.batch_id.is_none() {
-                    pending.batch_id = received
-                        .first()
-                        .or_else(|| pending.messages.first())
-                        .map(|msg| format!("message:{}", msg.event_id.to_hex()));
-                }
-                pending.batch_size += total;
-                if pending.terminal.is_none() {
-                    pending.terminal = received
-                        .first()
-                        .or_else(|| pending.messages.first())
-                        .map(|msg| msg.terminal(pending.batch_id.clone(), pending.batch_size));
-                }
-                for mut msg in received {
-                    msg.arrival_kind = kind;
-                    msg.batch_id = pending.batch_id.clone();
-                    msg.batch_complete = false;
-                    msg.batch_size = pending.batch_size;
-                    pending.terminal =
-                        Some(msg.terminal(pending.batch_id.clone(), pending.batch_size));
-                    let _ = self.channel_incoming.send(msg);
-                }
-            } else {
-                for mut msg in received {
-                    msg.arrival_kind = kind;
-                    msg.batch_complete = true;
-                    msg.batch_size = total;
-                    let _ = self.channel_incoming.send(msg);
-                }
-            }
-            if total > 0 {
-                self.schedule_channel_recovery(conv);
-            }
-            if !pending.messages.is_empty() {
-                let delay = pending.delay_ms.max(1000);
-                pending.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
-                pending.delay_ms = (delay * 2).min(30_000);
-                self.channel_recovery_notify.notify_one();
-                return;
-            }
-            pending.retry_at = None;
-            pending.delay_ms = 0;
-            if !limited && !retrying {
+            if !turn.more_work {
                 break;
             }
-            context = "catch_up";
+            if budget.exhausted() {
+                let lane = pending.lanes.entry(conv).or_default();
+                lane.continuation = Some(arrival);
+                lane.retry_at = None;
+                self.channel_recovery_notify.notify_one();
+                return Ok(());
+            }
         }
-        if let Some(mut terminal) = pending.terminal.take() {
-            terminal.batch_size = pending.batch_size;
-            let _ = self.channel_incoming.send(terminal);
+        if budget.spent() {
+            pending.lanes.entry(conv).or_default().continuation = Some(arrival);
+            self.channel_recovery_notify.notify_one();
+            return Ok(());
         }
-        pending.batch_id = None;
-        pending.batch_size = 0;
-        // ChannelBook returns only newly validated, decryptable messages. A
-        // coalesced domain-specific wake advances bounded background gossip;
-        // repeated processing and empty sync rounds do not create feedback.
+        if !self.process_join_history_reception(conv)? {
+            pending.lanes.entry(conv).or_default().continuation = Some(arrival);
+            return Ok(());
+        }
+        if let Some((event, metadata)) = self.channel_checkpoints.finish_batch(conv)? {
+            self.note_reception_change();
+            let visible =
+                std::mem::take(&mut pending.lanes.entry(conv).or_default().legacy_batch_visible);
+            if visible && self.channel_incoming.is_legacy() {
+                let _ = self
+                    .channel_incoming
+                    .send(super::channel::ReceivedChannelMessage {
+                        channel_id: conv,
+                        channel_name: name,
+                        from: metadata.from_device,
+                        text: Vec::new(),
+                        protection: None,
+                        reply_to: None,
+                        event_id: event,
+                        wall_clock: 0,
+                        wrapped: Vec::new(),
+                        received_at: metadata.received_at,
+                        arrival_kind: "catch_up",
+                        own_device: metadata.own_device,
+                        batch_id: metadata.batch_id,
+                        batch_complete: true,
+                        batch_size: metadata.batch_size,
+                        reception_only: true,
+                    });
+            }
+        }
         if self
-            .log
-            .lock()
-            .expect("log mutex not poisoned")
-            .events(&conv)
-            .iter()
-            .any(|event| event.kind == EventKind::Delete)
+            .channel_checkpoints
+            .finish_runtime(conv, Some(&source))?
         {
-            self.recalled_targets_channel(conv);
+            self.channel_recovery_notify.notify_one();
         }
+        pending.lanes.remove(&conv);
+        Ok(())
     }
 
-    /// Retry exact failed plaintext even with no reachable member or new event.
+    #[cfg(test)]
+    pub(in crate::node) fn channel_plaintext_pending_for_test(
+        &self,
+        channel: ConversationId,
+    ) -> bool {
+        self.pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock")
+            .lanes
+            .contains_key(&channel)
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn channel_plaintext_retry_pending_for_test(
+        &self,
+        channel: ConversationId,
+    ) -> bool {
+        self.pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock")
+            .lanes
+            .get(&channel)
+            .is_some_and(|lane| {
+                lane.retry_at.is_some()
+                    && matches!(
+                        lane.continuation,
+                        Some(super::reception_effects::ArrivalKind::CatchUp)
+                    )
+            })
+    }
+
+    /// Retry the exact durable ciphertext work with no reachable peer or new event.
     pub(in crate::node) fn retry_channel_plaintext(&self) {
-        let channel = {
-            let pending = self
-                .pending_channel_plaintext
-                .lock()
-                .expect("pending plaintext lock not poisoned");
-            if pending
-                .retry_at
-                .is_some_and(|deadline| std::time::Instant::now() < deadline)
-            {
-                return;
+        let turn = || -> Result<(), NodeError> {
+            if self.channel_checkpoints.retire_orphan_step(128)? != 0 {
+                self.channel_recovery_notify.notify_one();
+                return Ok(());
             }
-            pending.messages.first().map(|message| message.channel_id)
+            let more = {
+                let log = self.log.lock().expect("log lock");
+                self.channel_checkpoints.discover_step(log.repository()?)?
+            };
+            let bootstrap = self.channel_checkpoints.resume_current_channels_step()?;
+            let channel = {
+                let mut pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                if pending
+                    .retry_at
+                    .is_some_and(|deadline| std::time::Instant::now() < deadline)
+                {
+                    return Ok(());
+                }
+                let channel = self.channel_checkpoints.next_runtime(pending.cursor)?;
+                pending.cursor = channel.map(|(channel, _)| channel);
+                channel
+            };
+            if more || bootstrap {
+                self.channel_recovery_notify.notify_one();
+            }
+            if let Some((channel, _)) = channel {
+                if let Err(error) = self.process_channel_reception_inner(channel, "catch_up") {
+                    let mut pending = self
+                        .pending_channel_plaintext
+                        .lock()
+                        .expect("channel retry lock");
+                    let lane = pending.lanes.entry(channel).or_default();
+                    if lane.record_failure(&error, std::time::Instant::now()) {
+                        log::warn!("channel recovery deferred after storage failure: {error}");
+                    } else {
+                        self.channel_recovery_notify.notify_one();
+                    }
+                }
+                self.process_file_events_reception(channel, "catch_up");
+            }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                let pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                let now = std::time::Instant::now();
+                let next = self.channel_checkpoints.next_runtime(pending.cursor);
+                let next_id = next.as_ref().ok().and_then(|row| row.as_ref().map(|row| row.0));
+                let global_delayed = pending.retry_at.is_some_and(|at| now < at);
+                let next_delayed = next_id.is_some_and(|id| {
+                    pending.lanes.get(&id).and_then(|lane| lane.retry_at)
+                        .is_some_and(|at| now < at)
+                });
+                format!(
+                    "channel_recovery_runtime_queue selected={:?} cursor={:?} next={:?} global_delayed={} next_delayed={} read_error={} lanes={} discovery_more={} bootstrap_more={}",
+                    channel.map(|row| row.0), pending.cursor, next_id,
+                    global_delayed, next_delayed, next.is_err(), pending.lanes.len(), more, bootstrap
+                )
+            });
+            Ok(())
         };
-        if let Some(channel) = channel {
-            self.process_channel_reception(channel, "catch_up");
-            self.process_file_events_reception(channel, "catch_up");
+        if let Err(error) = turn() {
+            log::warn!("channel work discovery deferred: {error}");
         }
     }
 
@@ -1667,10 +1937,16 @@ impl Node {
                 cursors.insert(relay_id.clone(), index.wrapping_add(1));
             }
             let peer = &peers[index];
-            if !self.verified_dm_pull_peer(&peer.public().user_id())
-                && !self.group_member(&peer.public())
-            {
-                continue;
+            if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+                match self.group_member(&peer.public()) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        log::warn!("relay group membership lookup deferred: {error}");
+                        success = false;
+                        continue;
+                    }
+                }
             }
             let attempt = async {
                 if channel.is_none() {
@@ -1710,71 +1986,545 @@ impl Node {
     /// (author not yet in the roster, or its ratchet key not yet derivable) is
     /// retried on a later sync rather than lost.
     pub(in crate::node) fn emit_new_messages(&self, conv: ConversationId) {
-        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        if self.recover_delivery(&mut delivery).is_err() {
-            log::warn!("DM processing awaits local delivery recovery");
-            return;
-        }
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        let candidates: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            let emitted = self.emitted.lock().expect("emitted mutex not poisoned");
-            log.events(&conv)
-                .into_iter()
-                .filter(|e| {
-                    e.kind == EventKind::Message
-                        && e.author != self_author
-                        && !emitted.contains(&e.id)
-                })
-                .cloned()
-                .collect()
-        };
-        for event in candidates {
-            if let Some(proof) = self.historical_author(event.author.ed25519_pub()) {
-                let _ = self.accept_dm_event(&event, &proof, &mut delivery);
-            } else if let Some(device) = self
-                .linked_devices()
-                .into_iter()
-                .find(|device| device.public.ed25519_pub == *event.author.ed25519_pub())
-            {
-                let _ =
-                    self.accept_dm_event_with_author(&event, &device.public, None, &mut delivery);
+        let result = (|| -> Result<(), NodeError> {
+            let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+            if let Err(error) = self.recover_delivery(&mut delivery) {
+                log::warn!("DM processing awaits local delivery recovery: {error}");
+                return Ok(());
             }
-        }
-        drop(delivery);
-        if let Err(error) = self.project_private_dm_controls(conv) {
-            log::warn!("private DM controls await durable projection: {error}");
-        }
-        // A recall may arrive before its target is viewed. Persist verified
-        // tombstones while the old device and peer proofs are still available,
-        // so an offline backup cannot resurrect the recalled plaintext.
-        if self
-            .log
-            .lock()
-            .expect("log mutex not poisoned")
-            .events(&conv)
-            .iter()
-            .any(|event| event.kind == EventKind::Delete)
-        {
-            let my_account = self.account_id();
-            let peers = self.historical_dm_peers();
-            let matched: Vec<_> = peers
-                .iter()
-                .filter(|peer| {
-                    super::conversation::dm_conversation_id(&self.identity.public(), &peer.public())
-                        == conv
-                })
-                .filter_map(|peer| peer.account_id())
-                .collect();
-            for account in matched {
-                if account == my_account {
-                    for other in self.known_account_ids() {
-                        self.recalled_targets_account(&other);
-                    }
-                } else {
-                    self.recalled_targets_account(&account);
+            let candidates = {
+                let log = self.log.lock().expect("log mutex not poisoned");
+                log.repository()?
+                    .pending_receive_ids(conv, 128, 8 * 1024 * 1024)?
+            };
+            for id in candidates {
+                let Some(event) = self.log.lock().expect("log mutex not poisoned").get(&id)? else {
+                    continue;
+                };
+                if let Some(proof) = self.historical_author(event.author.ed25519_pub()) {
+                    let _ = self.accept_dm_event(&event, &proof, &mut delivery)?;
+                } else if let Some(device) = self
+                    .linked_devices()
+                    .into_iter()
+                    .find(|device| device.public.ed25519_pub == *event.author.ed25519_pub())
+                {
+                    let _ = self.accept_dm_event_with_author(
+                        &event,
+                        &device.public,
+                        None,
+                        &mut delivery,
+                    )?;
                 }
             }
+            drop(delivery);
+            if let Err(error) = self.project_private_dm_controls(conv) {
+                log::warn!("private DM controls await durable projection: {error}");
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("emit_new_messages deferred after storage failure: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod channel_metadata_wait_tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    fn node(path: &std::path::Path) -> Arc<Node> {
+        let peer = crate::discovery::Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        super::super::test_support::node_with_files(
+            path,
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        )
+        .0
+    }
+
+    #[tokio::test]
+    async fn local_channel_directory_progresses_while_maintenance_is_held() {
+        use crate::{
+            channel::ChannelMeta,
+            discovery::{Announce, DiscoveryVisibility},
+            eventlog::{Event, EventKind},
+            node::{AccountDocumentKey, SyncCategory, account_devices::AccountDevice},
+        };
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Held(Arc<AtomicBool>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source_identity = DeviceIdentity::generate();
+        let target_identity = DeviceIdentity::generate();
+        let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_proof = Announce::new_with_account(
+            &source_identity,
+            &account,
+            "Source",
+            source_listener.local_addr().unwrap().port(),
+        );
+        let target_proof = Announce::new_with_account(
+            &target_identity,
+            &account,
+            "Target",
+            target_listener.local_addr().unwrap().port(),
+        );
+        let source_path = directory.path().join("source");
+        let target_path = directory.path().join("target");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::create_dir_all(&target_path).unwrap();
+        let source = super::super::test_support::node_with_files(
+            &source_path,
+            source_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &target_proof,
+        )
+        .0;
+        let target = super::super::test_support::node_with_files(
+            &target_path,
+            target_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &source_proof,
+        )
+        .0;
+        for (node, peer, path, proof) in [
+            (&source, &target, &source_path, &source_proof),
+            (&target, &source, &target_path, &target_proof),
+        ] {
+            node.account_devices
+                .lock()
+                .unwrap()
+                .insert(AccountDevice {
+                    public: peer.identity.public(),
+                    certificate: account.certify(&peer.identity.public().ed25519_pub),
+                })
+                .unwrap();
+            node.configure_privacy(path, "pw", proof, Arc::new(DiscoveryVisibility::default()))
+                .unwrap();
+            for category in [
+                SyncCategory::History,
+                SyncCategory::Attachments,
+                SyncCategory::Appearance,
+                SyncCategory::Contacts,
+                SyncCategory::Profile,
+            ] {
+                node.set_device_sync_category(category, false).unwrap();
+            }
+        }
+        let channel = crate::channel::new_channel_id();
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(channel.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let active = Arc::new(AtomicBool::new(false));
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let held = active.clone();
+        // This is an owned maintenance-future gate, not a simulated Capability
+        // RPC. Its lifetime cannot expire and accidentally rescue local work.
+        let maintenance = async move {
+            held.store(true, Ordering::Release);
+            let _held = Held(held);
+            let _ = entered.send(());
+            std::future::pending::<()>().await;
+        };
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(source.clone().run_channel_recovery_with_maintenance(
+            Arc::new(tokio::sync::Notify::new()),
+            false,
+            maintenance,
+        ));
+        let serving = source.clone();
+        tasks.spawn(async move { serving.accept_connections(source_listener).await });
+        tasks.spawn(source.clone().run_account_history_loop());
+        tasks.spawn(source.clone().run_account_wake_loop());
+        tasks.spawn(target.clone().run_accept_loop(target_listener));
+        let turns = Arc::new(AtomicUsize::new(0));
+        let first_pending = Arc::new(AtomicBool::new(false));
+        let observed = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(30), entry)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(active.load(Ordering::Acquire));
+            let event = Event::new(
+                &source.identity,
+                channel,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "new local inventory".into(),
+                    members: vec![source.identity.public()],
+                    epoch: 0,
+                    owner: source.user_id(),
+                }
+                .encode(),
+            );
+            assert!(event.verify_signature() && event.verify_integrity());
+            source.log.lock().unwrap().append_durable(event).unwrap();
+            assert!(
+                source
+                    .channel_checkpoints
+                    .source_binding(channel)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(target.account_document_meta(&key).is_none());
+            let weak = Arc::downgrade(&source);
+            let counted = turns.clone();
+            let pending = first_pending.clone();
+            *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+                if phase == "channel_recovery_plaintext_done"
+                    && counted.fetch_add(1, Ordering::Relaxed) == 0
+                {
+                    let node = weak.upgrade().unwrap();
+                    let unfinished = match node.channel_checkpoints.source_binding(channel) {
+                        Ok(None) | Err(LogError::StaleCursor) => true,
+                        Ok(Some(_)) => false,
+                        Err(_) => panic!("first local turn failed outside bounded preparation"),
+                    };
+                    pending.store(unfinished, Ordering::Relaxed);
+                }
+            }));
+            // One retained-input demand; subsequent turns must come from the
+            // actual bounded owners. No manual projection/history driver runs.
+            source.channel_recovery_notify.notify_one();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let mut required = None;
+                loop {
+                    if required.is_none() {
+                        required = source.account_document_meta(&key);
+                    }
+                    let imported = required.as_ref().is_some_and(|head| {
+                        target
+                            .account_document(&key)
+                            .unwrap()
+                            .is_some_and(|document| {
+                                !document.meta.tombstone
+                                    && document.meta.account_public == account.public().ed25519_pub
+                                    && &document.meta == head
+                            })
+                    });
+                    let presented = match target.list_channels() {
+                        Ok(rows) => rows.iter().any(|row| {
+                            row.id == channel && row.name == "new local inventory" && row.archived
+                        }),
+                        Err(NodeError::Log(LogError::StaleCursor)) => false,
+                        Err(_) => {
+                            panic!("Directory presentation failed outside bounded preparation")
+                        }
+                    };
+                    if imported && presented {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect(
+                "new signed Directory state must progress while account maintenance remains held",
+            );
+            assert!(
+                active.load(Ordering::Acquire),
+                "maintenance must still be held at publication"
+            );
+            assert!(
+                first_pending.load(Ordering::Relaxed),
+                "one local turn must not have completed the cold source"
+            );
+            assert!(
+                turns.load(Ordering::Relaxed) > 1,
+                "local preparation must resume across bounded turns"
+            );
+        })
+        .catch_unwind()
+        .await;
+        eprintln!(
+            "maintenance isolation local_turns={} first_pending={} held={} source_head={} target_head={}",
+            turns.load(Ordering::Relaxed),
+            first_pending.load(Ordering::Relaxed),
+            active.load(Ordering::Acquire),
+            source.account_document_meta(&key).is_some(),
+            target.account_document_meta(&key).is_some(),
+        );
+        *source.account_client_test_hook.lock().unwrap() = None;
+        for node in [&source, &target] {
+            node.runtime_work.close();
+            node.sessions.clear();
+        }
+        tasks.abort_all();
+        let worker_failures = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut failed = 0;
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result
+                    && !error.is_cancelled()
+                {
+                    failed += 1;
+                }
+            }
+            for node in [&source, &target] {
+                node.runtime_work.drain().await;
+            }
+            failed
+        })
+        .await
+        .expect("all composition fixture owners must join");
+        assert_eq!(
+            worker_failures, 0,
+            "a worker failure must not masquerade as blocked Directory progress"
+        );
+        assert!(
+            !active.load(Ordering::Acquire),
+            "parent cancellation must drop held maintenance"
+        );
+        if let Err(error) = observed {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    #[tokio::test]
+    async fn public_send_resumes_a_source_change_before_metadata_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node.create_channel("before", vec![]).await.unwrap();
+        let source = node
+            .channel_checkpoints
+            .source_binding(channel)
+            .unwrap()
+            .unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            assert!(node.log.try_lock().is_ok());
+            assert!(node.channels.try_lock().is_ok());
+            assert!(node.delivery.try_lock().is_ok());
+            node.append_event(
+                channel,
+                crate::eventlog::EventKind::ChannelRename,
+                b"after".to_vec(),
+            )
+            .unwrap();
+            assert!(matches!(
+                node.channel_checkpoints.check_source(&source),
+                Err(LogError::StaleCursor)
+            ));
+        }));
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            node.send_channel_message(channel, b"one accepted message"),
+        )
+        .await
+        .expect("selected metadata preparation must finish after a finite source change");
+        assert!(result.is_ok());
+        assert!(
+            node.channel_metadata_install_test_hook
+                .lock()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            node.sentlog.lock().unwrap().count(Some(&channel)).unwrap(),
+            1
+        );
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        let state = node
+            .channel_checkpoints
+            .current_state(channel)
+            .unwrap()
+            .unwrap();
+        assert!(state.name() == "after");
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_rejects_retired_participant_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node.create_channel("owner fence", vec![]).await.unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            node.storage.database().transaction(|connection| {
+                connection.execute(
+                    "UPDATE participant_event_ownership SET generation=generation+1 WHERE singleton=1",
+                    [],
+                )?;
+                Ok(())
+            }).unwrap();
+        }));
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), node.await_channel_metadata(channel))
+                .await
+                .expect("an invalid participant owner must fail without retrying");
+        assert!(matches!(result, Err(NodeError::Log(LogError::StaleCursor))));
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_rejects_retired_source_before_checkpoint_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node.create_channel("retired source", vec![]).await.unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            assert!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .drop_conversation(&channel)
+                    .unwrap()
+                    > 0
+            );
+            assert!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .metadata(&channel)
+                    .unwrap()
+                    .is_some_and(|metadata| metadata.count == 0)
+            );
+            let checkpoint_retained: bool = node
+                .storage
+                .database()
+                .read(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1)",
+                        [channel.as_bytes().as_slice()],
+                        |row| row.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert!(
+                checkpoint_retained,
+                "source removal precedes independent checkpoint cleanup"
+            );
+        }));
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), node.await_channel_metadata(channel))
+                .await
+                .expect("a retired source must fail without waiting for background cleanup");
+        assert!(matches!(result, Err(NodeError::Log(LogError::StaleCursor))));
+        // Empty channels that have no obsolete checkpoint keep their existing
+        // successful preparation result; this guard only classifies a failure.
+        assert!(
+            node.await_channel_metadata(ConversationId::new([91; 32]))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_propagates_corrupt_current_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node
+            .create_channel("storage failure", vec![])
+            .await
+            .unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            node.storage
+                .database()
+                .transaction(|connection| {
+                    connection.execute(
+                        "UPDATE channel_current SET state=X'00' WHERE channel=?1",
+                        [channel.as_bytes().as_slice()],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }));
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), node.await_channel_metadata(channel))
+                .await
+                .expect("storage corruption must not become a preparation retry");
+        assert!(matches!(
+            result,
+            Err(NodeError::Log(LogError::CorruptFile(_)))
+        ));
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod channel_plaintext_retry_tests {
+    use super::*;
+    use crate::node::reception_effects::ArrivalKind;
+
+    #[test]
+    fn source_revision_continuation_preserves_arrival_and_storage_backoff() {
+        let now = std::time::Instant::now();
+        let stale = NodeError::Log(LogError::StaleCursor);
+        let mut lane = ChannelPlaintextRetry {
+            continuation: Some(ArrivalKind::Live),
+            legacy_batch_visible: true,
+            ..Default::default()
+        };
+        for _ in 0..16 {
+            assert!(!lane.record_failure(&stale, now));
+            assert!(lane.legacy_batch_visible);
+        }
+        assert!(lane.retry_at.is_none());
+        assert_eq!(lane.delay_ms, 0);
+        assert!(matches!(lane.continuation, Some(ArrivalKind::Live)));
+
+        let failures = [
+            NodeError::Log(LogError::Io(std::io::Error::other("retry test"))),
+            NodeError::Log(LogError::Database(Box::new(std::io::Error::other(
+                "retry test",
+            )))),
+            NodeError::Log(LogError::Storage(
+                crate::storage::errors::StorageError::KeyDerivationFailed,
+            )),
+        ];
+        for (error, seconds) in failures.iter().zip([1, 2, 4]) {
+            assert!(lane.record_failure(error, now));
+            assert!(lane.legacy_batch_visible);
+            let deadline = now + Duration::from_secs(seconds);
+            assert_eq!(lane.retry_at, Some(deadline));
+            assert_eq!(lane.delay_ms, seconds * 2000);
+            assert!(matches!(lane.continuation, Some(ArrivalKind::CatchUp)));
+            assert!(!lane.record_failure(&stale, now));
+            assert!(lane.legacy_batch_visible);
+            assert_eq!(lane.retry_at, Some(deadline));
+            assert_eq!(lane.delay_ms, seconds * 2000);
         }
     }
 }
@@ -1918,7 +2668,7 @@ mod file_recovery_tests {
             .clone();
         b.log.lock().unwrap().append_durable(event.clone()).unwrap();
         b.process_file_events(event.conversation_id);
-        let sources = b.file_recovery_sources(file, 0);
+        let sources = b.file_recovery_sources(file, 0).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].public, ap.public());
     }

@@ -72,13 +72,28 @@ async fn runtime_automatically_queries_a_host_supplied_routed_candidate() {
     b.stop().await;
 }
 
+fn reserve_dual_discovery_port() -> (tokio::net::UdpSocket, tokio::net::UdpSocket) {
+    for _ in 0..32 {
+        let ipv4 = crate::transport::net::discovery_socket(0).unwrap();
+        match routed_ipv6_socket(ipv4.local_addr().unwrap().port()) {
+            Ok(ipv6) => return (ipv4, ipv6),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("reserve the routed discovery fixture: {error}"),
+        }
+    }
+    panic!("reserve a discovery port available in both address families");
+}
+
 #[tokio::test]
 async fn runtime_automatically_queries_ipv6_candidate_when_ipv6_is_available() {
-    let Ok(reserve) = routed_ipv6_socket(0) else {
+    let Ok(available) = routed_ipv6_socket(0) else {
         return;
     };
-    let b_port = reserve.local_addr().unwrap().port();
-    drop(reserve);
+    drop(available);
+    // IPv6-only allocation does not reserve the IPv4 port the runtime binds
+    // first. Retain both compatible reuse sockets until startup owns them.
+    let b_reservation = reserve_dual_discovery_port();
+    let b_port = b_reservation.0.local_addr().unwrap().port();
     let root = tempfile::tempdir().unwrap();
     let b = NodeRuntime::start(
         root.path(),
@@ -94,9 +109,9 @@ async fn runtime_automatically_queries_ipv6_candidate_when_ipv6_is_available() {
     )
     .await
     .unwrap();
-    let reserve = routed_ipv6_socket(0).unwrap();
-    let a_port = reserve.local_addr().unwrap().port();
-    drop(reserve);
+    drop(b_reservation);
+    let a_reservation = reserve_dual_discovery_port();
+    let a_port = a_reservation.0.local_addr().unwrap().port();
     let source = Arc::new(FixedCandidates(std::net::SocketAddr::from((
         std::net::Ipv6Addr::LOCALHOST,
         b_port,
@@ -121,6 +136,7 @@ async fn runtime_automatically_queries_ipv6_candidate_when_ipv6_is_available() {
     )
     .await
     .unwrap();
+    drop(a_reservation);
     tokio::time::timeout(Duration::from_secs(4), async {
         while !a
             .peers()
@@ -193,16 +209,32 @@ async fn runtime_manual_endpoint_probe_uses_the_same_query_protocol() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_node_or_privacy_initialization_joins_already_started_names_writer() {
+    struct ReleaseNames(Option<std::sync::mpsc::Sender<()>>);
+    impl Drop for ReleaseNames {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
     for failure_path in ["messages.log", "privacy.policy"] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("accounts").join("owner");
-        std::fs::create_dir_all(directory.join(failure_path)).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        // Regular paths pass source validation. The corrupt content fails in
+        // the actual Node/privacy initializer after names work has started.
+        std::fs::write(
+            directory.join(failure_path),
+            b"invalid legacy source header",
+        )
+        .unwrap();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut release = ReleaseNames(Some(release_tx));
         NAMES_OPEN_HOOKS.lock().unwrap().insert(
             directory.join("names.log"),
             Box::new(move || {
-                entered_tx.send(()).unwrap();
+                let _ = entered_tx.send(());
                 release_rx.recv().unwrap();
             }),
         );
@@ -225,12 +257,23 @@ async fn failed_node_or_privacy_initialization_joins_already_started_names_write
             finished_tx.send(()).unwrap();
             result
         });
-        entered_rx.await.unwrap();
+        let entered = tokio::time::timeout(Duration::from_secs(5), entered_rx).await;
+        if entered.is_err() {
+            // Release before removing the hook: it may have just started and
+            // still hold the hook-map lock while waiting on this channel.
+            drop(release);
+            NAMES_OPEN_HOOKS
+                .lock()
+                .unwrap()
+                .remove(&directory.join("names.log"));
+            panic!("the valid source paths must reach the names initializer");
+        }
+        entered.unwrap().unwrap();
         let returned_while_writer_blocked =
             tokio::time::timeout(Duration::from_millis(150), &mut finished_rx)
                 .await
                 .is_ok();
-        release_tx.send(()).unwrap();
+        release.0.take().unwrap().send(()).unwrap();
         assert!(startup.await.unwrap().is_err());
         assert!(
             !returned_while_writer_blocked,
@@ -261,12 +304,17 @@ async fn names_initialization_error_waits_for_node_initializer_completion() {
     )
     .await;
     assert!(result.is_err());
-    assert!(directory.join("messages.log").is_file());
-    // Reopening immediately after error must not race a detached Node writer.
+    // Profile source validation rejects the invalid names path before database
+    // publication. Completion includes the failed initializer, not a detached
+    // writer that could create the database after this error returns.
+    assert!(!directory.join("profile.db").exists());
+    // Remove only the deliberately invalid names path, then reopen this same
+    // profile immediately: the failed startup must have joined its Node writer.
+    std::fs::remove_dir(directory.join("names.log")).unwrap();
     let node = NodeRuntime::start(
         root.path(),
-        "other",
-        "Other",
+        "owner",
+        "Owner",
         "pw",
         0,
         |_| {},
@@ -411,6 +459,7 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     let card = runtime
         .handle()
         .account_profile(runtime.account_id())
+        .unwrap()
         .unwrap();
     assert_eq!(card.display_name, "Alice");
     assert!(card.created_at_ms.is_some());
@@ -427,7 +476,12 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     assert!(node_dir.join("messages.log").exists());
     assert!(node_dir.join("sent.log").exists());
 
-    // Reopening the same dir reloads the SAME identity (persistent).
+    let user_id = runtime.user_id().to_owned();
+    let account_id = runtime.account_id().to_owned();
+    let host_account_id = runtime.host_account_id().map(str::to_owned);
+    runtime.stop().await;
+
+    // Reopening after joined shutdown reloads the SAME identity (persistent).
     let runtime2 = NodeRuntime::start(
         dir.path(),
         "alice-user-id",
@@ -442,13 +496,14 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     )
     .await
     .expect("runtime reopens");
-    assert_eq!(runtime.user_id(), runtime2.user_id());
+    assert_eq!(user_id, runtime2.user_id());
 
     // The cryptographic account is created on disk and stable across reopen.
-    assert_eq!(runtime.account_id().len(), 32); // account_id is 32 hex chars
-    assert_eq!(runtime.host_account_id(), Some("alice-user-id"));
+    assert_eq!(account_id.len(), 32); // account_id is 32 hex chars
+    assert_eq!(host_account_id.as_deref(), Some("alice-user-id"));
     assert!(node_dir.join("account.keystore").exists());
-    assert_eq!(runtime.account_id(), runtime2.account_id());
+    assert_eq!(account_id, runtime2.account_id());
+    runtime2.stop().await;
 }
 
 #[tokio::test]
@@ -494,6 +549,7 @@ async fn existing_account_without_creation_evidence_stays_unknown() {
             .handle()
             .account_profile(&account.account_id())
             .unwrap()
+            .unwrap()
             .created_at_ms
             .is_none()
     );
@@ -527,6 +583,7 @@ async fn set_display_name_updates_advertised_name_and_own_record() {
         runtime
             .handle()
             .account_profile(runtime.account_id())
+            .unwrap()
             .unwrap()
             .display_name,
         "Alice Renamed 🐻"
@@ -573,7 +630,7 @@ async fn startup_network_options_precede_discovery_and_delivery_launch() {
         crate::node::NetworkCost::Unknown,
         |_| Ok(()),
         |launch| {
-            let runtime = launch("Scoped");
+            let runtime = launch("Scoped")?;
             let node = runtime.handle();
             let relay = crate::identity::device::DeviceIdentity::generate().public();
             assert!(node.physical_lan_only());
@@ -633,27 +690,27 @@ async fn contact_nickname_survives_a_stale_signed_card_name_and_restart() {
     );
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Duncan"
     );
     // Reading a profile must neither rename the contact nor mutate its claims.
     assert_eq!(
-        runtime.handle().trust_card(&account.account_id()),
+        runtime.handle().trust_card(&account.account_id()).unwrap(),
         Some(stale_card.clone())
     );
     runtime.roster.lock().unwrap().evict_stale(Duration::ZERO);
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Duncan"
     );
     runtime.stop().await;
     let reopened = start().await.unwrap();
     assert_eq!(
-        reopened.known_account_names()[&account.account_id()][0],
+        reopened.known_account_names().unwrap()[&account.account_id()][0],
         "Duncan"
     );
     assert_eq!(
-        reopened.handle().trust_card(&account.account_id()),
+        reopened.handle().trust_card(&account.account_id()).unwrap(),
         Some(stale_card)
     );
     reopened.stop().await;
@@ -687,7 +744,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
     );
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Old name"
     );
     let proof = crate::discovery::Announce::new_with_account(&device, &account, "Messi10", 1);
@@ -698,7 +755,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
         .update(&proof, "127.0.0.1".parse().unwrap(), runtime.user_id());
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
     runtime.roster.lock().unwrap().update(
@@ -708,16 +765,16 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
     );
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
     runtime.roster.lock().unwrap().evict_stale(Duration::ZERO);
     assert!(runtime.peers().is_empty());
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
-    drop(runtime);
+    runtime.stop().await;
     let reopened = NodeRuntime::start(
         dir.path(),
         "owner",
@@ -733,7 +790,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
     .await
     .unwrap();
     assert_eq!(
-        reopened.known_account_names()[&account.account_id()][0],
+        reopened.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
     assert!(
@@ -742,6 +799,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
             .iter()
             .all(|peer| peer.presence_evidence(std::time::Instant::now()).is_empty())
     );
+    reopened.stop().await;
 }
 
 #[tokio::test]
@@ -776,6 +834,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     let old = runtime
         .handle()
         .account_profile(runtime.account_id())
+        .unwrap()
         .unwrap();
     let joining_dir = root.path().join("accounts/joining");
     crate::identity::account_keystore::save(
@@ -809,7 +868,10 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     .await
     .unwrap();
     assert_eq!(
-        joining.handle().account_profile(joining.account_id()),
+        joining
+            .handle()
+            .account_profile(joining.account_id())
+            .unwrap(),
         Some(old.clone()),
         "the sibling starts with the existing signed account profile"
     );
@@ -842,6 +904,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     let card = runtime
         .handle()
         .account_profile(runtime.account_id())
+        .unwrap()
         .unwrap();
     assert_eq!(card.bio, old.bio);
     assert_eq!(card.avatar, old.avatar);
@@ -851,6 +914,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
         while joining
             .handle()
             .account_profile(joining.account_id())
+            .unwrap()
             .as_ref()
             != Some(&card)
         {
@@ -866,11 +930,13 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     let shared = joining
         .handle()
         .account_profile(joining.account_id())
+        .unwrap()
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while runtime
             .handle()
             .account_profile(runtime.account_id())
+            .unwrap()
             .as_ref()
             != Some(&shared)
         {
@@ -902,6 +968,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
         reopened
             .handle()
             .account_profile(reopened.account_id())
+            .unwrap()
             .unwrap()
             .bio,
         "Personal signature"
@@ -976,6 +1043,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     tokio::time::timeout(Duration::from_secs(12), async {
         while !receiver
             .account_history(receiver.account_id(), 20)
+            .unwrap()
             .iter()
             .any(|row| row.text == b"saved before sibling started")
         {
@@ -998,6 +1066,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     tokio::time::timeout(Duration::from_secs(12), async {
         while !receiver
             .account_history(receiver.account_id(), 20)
+            .unwrap()
             .iter()
             .any(|row| row.text == b"saved on first device")
         {
@@ -1018,7 +1087,12 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
         .unwrap();
     let reverse_accepted = clock.elapsed();
     tokio::time::timeout(Duration::from_secs(12), async {
-        while source.account_history(source.account_id(), 20).len() != 3 {
+        while source
+            .account_history(source.account_id(), 20)
+            .unwrap()
+            .len()
+            != 3
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -1030,6 +1104,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     );
     let expected: std::collections::HashSet<_> = source
         .account_history(source.account_id(), 20)
+        .unwrap()
         .into_iter()
         .map(|row| {
             assert!(row.from_me);
@@ -1040,6 +1115,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     let restarted = start("saved-receiver").await.unwrap();
     let actual: std::collections::HashSet<_> = restarted
         .account_history(restarted.account_id(), 20)
+        .unwrap()
         .into_iter()
         .map(|row| {
             assert!(row.from_me);
@@ -1093,13 +1169,13 @@ async fn historical_account_name_does_not_follow_a_retained_devices_new_account(
         .unwrap()
         .update(&new, "127.0.0.2".parse().unwrap(), runtime.user_id());
     assert_eq!(
-        runtime.known_account_names()[&old_account.account_id()][0],
+        runtime.known_account_names().unwrap()[&old_account.account_id()][0],
         "Old principal"
     );
     runtime.stop().await;
     let reopened = start().await.unwrap();
     assert_eq!(
-        reopened.known_account_names()[&old_account.account_id()][0],
+        reopened.known_account_names().unwrap()[&old_account.account_id()][0],
         "Old principal",
         "an unscoped durable device nickname cannot rename its old account after restart"
     );

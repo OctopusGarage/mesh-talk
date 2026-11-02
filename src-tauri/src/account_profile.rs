@@ -28,7 +28,7 @@ pub async fn get_account_profile(
     admission
         .blocking(move |runtime, _| {
             let node = runtime.handle();
-            if let Some(profile) = node.account_profile(&account_id) {
+            if let Some(profile) = node.account_profile(&account_id)? {
                 return Ok(Some(AccountProfileView {
                     account_id: profile.account_id(),
                     display_name: profile.display_name,
@@ -37,7 +37,7 @@ pub async fn get_account_profile(
                 }));
             }
             // Legacy statements remain readable; their hand-entered dates are not account metadata.
-            Ok(node.trust_card(&account_id).map(legacy_profile_view))
+            Ok(node.trust_card(&account_id)?.map(legacy_profile_view))
         })
         .await
 }

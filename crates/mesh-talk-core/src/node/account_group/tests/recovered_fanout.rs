@@ -105,8 +105,9 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
     }
     let old_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     configure(&owner, &path, old_listener.local_addr().unwrap().port());
-    owner.publish_account_group_access_for(group);
-    owner.publish_group_inventory_for(group);
+    // Establish the pre-crash source head through the same bounded preparation
+    // used by a real fanout; later reopen/fanout assertions remain untouched.
+    owner.prepare_account_group_fanout(group).await.unwrap();
     assert_eq!(inventory(&owner, group).name, "Before recovery");
     let id = owner
         .new_account_group_operation_id(&account.account_id())
@@ -136,6 +137,7 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::ChannelRename)
         .unwrap()
@@ -267,7 +269,14 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
     gate.add_permits(4);
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            if external.log.lock().unwrap().get(&effect.id).is_some() {
+            if external
+                .log
+                .lock()
+                .unwrap()
+                .get(&effect.id)
+                .unwrap()
+                .is_some()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -280,6 +289,7 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
         .lock()
         .unwrap()
         .get(&effect.id)
+        .unwrap()
         .unwrap()
         .clone();
     assert_eq!(received.id, effect.id);
@@ -295,6 +305,7 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::ChannelRename)
             .count(),
@@ -359,7 +370,7 @@ async fn assert_stalled_fanout_retires_with_account_loop(adopt: bool) {
     if adopt {
         let kept = Account::generate();
         owner
-            .persist_account_adoption(&kept.account_id(), || Ok(()))
+            .persist_account_adoption(&kept.public(), || Ok(()), || Ok(kept.public()))
             .unwrap();
         tokio::time::timeout(Duration::from_secs(2), loops.join_next())
             .await
@@ -399,4 +410,216 @@ async fn adoption_cancels_stalled_fanout_and_drains_its_runtime_admission() {
 #[tokio::test]
 async fn closing_account_loop_cancels_stalled_fanout_and_drains_runtime_admission() {
     assert_stalled_fanout_retires_with_account_loop(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
+    assert_source_invalidation_keeps_fanout_pending(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_source_invalidation_keeps_the_original_account_fanout_pending() {
+    assert_source_invalidation_keeps_fanout_pending(true).await;
+}
+
+async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let genesis = legacy_group(&source, &external);
+    let group = genesis.conversation_id;
+    for node in [&source, &external] {
+        install(node, &genesis);
+    }
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let external_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = external_listener.local_addr().unwrap();
+    configure(
+        &source,
+        &dir.path().join("source"),
+        source_listener.local_addr().unwrap().port(),
+    );
+    configure(&external, &dir.path().join("external"), address.port());
+    source.roster.lock().unwrap().update(
+        &external.signed_announce("External member", address.port()),
+        address.ip(),
+        &source.user_id(),
+    );
+    source
+        .set_device_sync_category(SyncCategory::Profile, true)
+        .unwrap();
+    external
+        .set_device_sync_category(SyncCategory::Profile, true)
+        .unwrap();
+    source.prepare_account_group_fanout(group).await.unwrap();
+
+    let injected = Arc::new(AtomicBool::new(false));
+    let captured_views = Arc::new(AtomicUsize::new(0));
+    let stale_rounds = Arc::new(AtomicUsize::new(0));
+    let failed_rounds = Arc::new(AtomicUsize::new(0));
+    let recoverable_rounds = Arc::new(AtomicUsize::new(0));
+    let successful_rounds = Arc::new(AtomicUsize::new(0));
+    let weak_source = Arc::downgrade(&source);
+    let expected_peer = external.identity.public();
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let injected = injected.clone();
+        let captured_views = captured_views.clone();
+        let stale_rounds = stale_rounds.clone();
+        let failed_rounds = failed_rounds.clone();
+        let recoverable_rounds = recoverable_rounds.clone();
+        let successful_rounds = successful_rounds.clone();
+        move |peer, phase| {
+            if peer != expected_peer {
+                return;
+            }
+            match phase.as_str() {
+                "network_view_captured" => {
+                    captured_views.fetch_add(1, Ordering::SeqCst);
+                    if !remote && !injected.swap(true, Ordering::SeqCst) {
+                        // Change a real public policy after its source stamp was
+                        // captured, before the selected round validates it.
+                        // No synthetic transport error or event import is used.
+                        weak_source
+                            .upgrade()
+                            .unwrap()
+                            .set_device_sync_category(SyncCategory::Profile, false)
+                            .unwrap();
+                    }
+                }
+                "control_fanout_round_stale" => {
+                    stale_rounds.fetch_add(1, Ordering::SeqCst);
+                }
+                phase if phase.starts_with("control_fanout_round_failed") => {
+                    failed_rounds.fetch_add(1, Ordering::SeqCst);
+                    if phase == "control_fanout_round_failed kind=transport_closed" {
+                        recoverable_rounds.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                "control_fanout_round_ok" => {
+                    successful_rounds.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    }));
+
+    if remote {
+        let weak_external = Arc::downgrade(&external);
+        let injected = injected.clone();
+        let expected_peer = source.identity.public();
+        *external.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if peer == expected_peer
+                && phase == "network_view_captured"
+                && !injected.swap(true, Ordering::SeqCst)
+            {
+                // Invalidate the responder's actual view. Its StaleCursor closes
+                // the real Noise exchange, so the requester observes transport
+                // failure rather than a local Store(StaleCursor).
+                weak_external
+                    .upgrade()
+                    .unwrap()
+                    .set_device_sync_category(SyncCategory::Profile, false)
+                    .unwrap();
+            }
+        }));
+    }
+
+    // Only the real account producer can originate a public exchange. Keep
+    // the advertised source listener owned but unserved: external background
+    // recovery cannot fetch the effect and hide a lost account fanout ticket.
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(source.clone().run_account_history_loop());
+    tasks.spawn(external.clone().run_accept_loop(external_listener));
+    let id = source
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    source
+        .submit_account_group_operation(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupOperation::Rename {
+                name: "Original effect after source invalidation".into(),
+            },
+        )
+        .unwrap();
+    let observed = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut original = None;
+        loop {
+            if let Some(status) = source
+                .retained_account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                && status.phase == AccountGroupOperationPhase::Committed
+            {
+                assert_eq!(status.committed_events.len(), 1);
+                let current = (
+                    status.committed_events[0],
+                    source.account_group_fanout_sequence(group).unwrap(),
+                );
+                if let Some(expected) = original {
+                    assert_eq!(
+                        current, expected,
+                        "retry must retain the exact source effect"
+                    );
+                } else {
+                    original = Some(current);
+                }
+                if let Some(event) = external.log.lock().unwrap().get(&current.0).unwrap()
+                    && successful_rounds.load(Ordering::SeqCst) != 0
+                {
+                    assert_eq!(event.kind, EventKind::ChannelRename);
+                    assert_eq!(
+                        event.author.ed25519_pub(),
+                        &source.identity.public().ed25519_pub
+                    );
+                    assert!(event.verify_integrity() && event.verify_signature());
+                    return current;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    source.account_client_test_hook.lock().unwrap().take();
+    external.account_client_test_hook.lock().unwrap().take();
+    for node in [&source, &external] {
+        node.runtime_work.close();
+    }
+    tasks.abort_all();
+    let mut panics = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            panics.push(error.to_string());
+        }
+    }
+    for node in [&source, &external] {
+        node.sessions.clear();
+        tokio::time::timeout(Duration::from_secs(15), node.runtime_work.drain())
+            .await
+            .expect("all owned account and accept tasks must retire");
+    }
+    drop(source_listener);
+    assert!(panics.is_empty(), "background task failed: {panics:?}");
+    assert!(injected.load(Ordering::SeqCst));
+    assert_eq!(stale_rounds.load(Ordering::SeqCst), usize::from(!remote));
+    assert_eq!(failed_rounds.load(Ordering::SeqCst), usize::from(remote));
+    assert_eq!(
+        recoverable_rounds.load(Ordering::SeqCst),
+        usize::from(remote)
+    );
+    eprintln!(
+        "fanout invalidation remote={remote} injected={} stale_rounds={} failed_rounds={} recoverable_rounds={} successful_rounds={}",
+        injected.load(Ordering::SeqCst),
+        stale_rounds.load(Ordering::SeqCst),
+        failed_rounds.load(Ordering::SeqCst),
+        recoverable_rounds.load(Ordering::SeqCst),
+        successful_rounds.load(Ordering::SeqCst),
+    );
+    observed.expect("source invalidation must retain the original account fanout ticket");
+    assert!(captured_views.load(Ordering::SeqCst) >= 2);
 }

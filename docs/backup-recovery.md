@@ -74,7 +74,7 @@ and previous identity cannot be recovered by a password reset.
 
 ## Snapshot compatibility
 
-New backups use snapshot schema 5 and retain the released schemas 1–3 record tags.
+New backups use snapshot schema 6 and retain all earlier record tags.
 Schema 5 combines logical Favorites and independently retained attachments with
 signed account profiles and a required immutable account-creation metadata record.
 The restored key and creation metadata are installed together before the account
@@ -85,13 +85,28 @@ and account-profile/creation metadata. Their colliding extension tags are decode
 strictly with bounded exact encodings; a snapshot cannot mix the two families.
 Missing authoritative creation metadata remains unknown. Schema 5 keeps Favorites
 at tags 12–14 and appends creation metadata and profiles at tags 15–16; new exports
-always use schema 5. The outer authenticated archive format is unchanged.
+always use schema 6. The outer authenticated archive format is unchanged.
+
+Schema 6 appends exact local deletion facts at tag 17. Each fact names both the
+original conversation and message ID; it does not suppress an intentionally
+retained copy in another conversation or an independent Favorite. Restore installs
+these facts before any history records, regardless of their order in the archive.
+Known deleted messages therefore remain suppressed when a sibling later offers
+its older history. Duplicate deletion facts are idempotent. These facts have no
+expiry: forgetting one while another device can still supply that message would
+allow it to return. A backup created before a deletion cannot contain that later
+decision, and schemas 1–5 do not carry ordinary local deletion evidence.
 
 Favorites preserve removal tombstones and expiry restrictions. Only already
 retained, live referenced files are exported, with the existing 64 MiB per-file
 limit. Canonical-known protected Favorites are excluded as a single eligibility
 projection for records, counts and attachments; ordinary Favorites remain portable
-after their original history is cleared. Ordinary and Favorite media share the
+after their original history is cleared. Explicit offline export prepares only
+the selected Favorite source channels through existing bounded canonical and
+recall turns, outside the Favorite journal lock. A source change or protection
+read/storage failure aborts the export instead of silently omitting a Favorite.
+This preparation belongs to the requested export, not application startup.
+Ordinary and Favorite media share the
 8 GiB aggregate media limit. Size, chunk order and SHA-256 are checked before
 publication. Staged attachment files open only while writing or installing, so
 large collections do not require one handle per retained file.

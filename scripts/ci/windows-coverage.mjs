@@ -2,13 +2,14 @@
 // Official nextest archives, fixed source paths, serial hash shards and receipts.
 // Pinned LLVM coverage uses v1 target/debug/{deps,examples}; see upstream #520.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const versions = Object.freeze({ nextest: "0.9.148", llvmCov: "0.8.7" });
+export const windowsPartitions = Object.freeze([1, 2, 3, 4]);
 const buildArgs = ["--workspace", "--locked"];
 const nextestArgs = ["--profile", "default", "--user-config-file", "none"];
 const canonical = value => JSON.stringify(value);
@@ -20,16 +21,95 @@ async function fileHash(file) {
   for await (const chunk of createReadStream(file)) hash.update(chunk);
   return hash.digest("hex");
 }
-function command(args, { env = process.env, receipt } = {}) {
-  const result = spawnSync("cargo", args, { encoding: "utf8", env, maxBuffer: 128 * 1024 * 1024 });
-  if (receipt) {
-    writeFileSync(`${receipt}.jsonl`, result.stdout ?? "");
-    writeFileSync(`${receipt}.log`, result.stderr ?? "");
+export async function command(args, { env = process.env, receipt, progress, phase = "command", liveStdout = false, binary = "cargo", signal, maxOutputBytes = 128 * 1024 * 1024 } = {}) {
+  assert.ok(Number.isSafeInteger(maxOutputBytes) && maxOutputBytes > 0 && maxOutputBytes <= 128 * 1024 * 1024, "Invalid CI command output limit");
+  const record = event => {
+    if (progress) appendFileSync(progress, `${JSON.stringify({ at: new Date().toISOString(), phase, ...event })}\n`);
+  };
+  const files = [];
+  try {
+    if (receipt) {
+      files.push(openSync(`${receipt}.jsonl`, "w"));
+      files.push(openSync(`${receipt}.log`, "w"));
+    }
+    // Publish the phase before starting the child; cancellation must not erase
+    // whether a shard was listing tests, running them, or reporting coverage.
+    record({ event: "started", binary, args });
+    signal?.throwIfAborted();
+    return await new Promise((resolve, reject) => {
+      const child = spawn(binary, args, { env, windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+      const output = [];
+      const bytes = [0, 0];
+      let failure, stopping = false, outputRejected = false;
+      let cleanup = Promise.resolve();
+      const stop = error => {
+        failure ??= error;
+        if (stopping || !child.pid) return;
+        stopping = true;
+        if (process.platform === "win32") {
+          cleanup = new Promise(done => {
+            const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+            killer.on("error", error => { failure = error; child.kill(); });
+            killer.on("close", code => {
+              if (code !== 0) { failure = new Error("Windows child-tree termination could not be verified"); child.kill(); }
+              done();
+            });
+          });
+        } else {
+          try { process.kill(-child.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") failure = error; }
+          // As in the validation stage owner, finish group cleanup even when
+          // the leader exits before a descendant with independent stdio.
+          cleanup = new Promise(done => setTimeout(() => {
+            try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") failure = error; }
+            done();
+          }, 2000));
+        }
+      };
+      const interrupted = () => stop(new Error("CI command interrupted"));
+      process.on("SIGINT", interrupted);
+      process.on("SIGTERM", interrupted);
+      signal?.addEventListener("abort", interrupted, { once: true });
+      if (signal?.aborted) interrupted();
+      child.on("spawn", () => {
+        try { record({ event: "spawned", pid: child.pid }); } catch (error) { stop(error); }
+      });
+      const capture = (index, chunk) => {
+        if (outputRejected) return;
+        try {
+          assert.ok(chunk.length <= maxOutputBytes - bytes[index], "CI command output exceeded its byte limit");
+          if (files[index] !== undefined) {
+            let written = 0;
+            while (written < chunk.length) {
+              const count = writeSync(files[index], chunk, written, chunk.length - written);
+              assert.ok(count > 0, "CI command receipt write made no progress");
+              written += count;
+            }
+          }
+          if (index === 1) process.stderr.write(chunk);
+          else if (liveStdout) process.stdout.write(chunk);
+          bytes[index] += chunk.length;
+          if (index === 0) output.push(chunk);
+        } catch (error) { outputRejected = true; stop(error); }
+      };
+      child.stdout.on("data", chunk => capture(0, chunk));
+      child.stderr.on("data", chunk => capture(1, chunk));
+      child.on("error", stop);
+      child.on("close", async (code, childSignal) => {
+        await cleanup;
+        process.off("SIGINT", interrupted);
+        process.off("SIGTERM", interrupted);
+        signal?.removeEventListener("abort", interrupted);
+        try {
+          record({ event: "closed", code, signal: childSignal, stdoutBytes: bytes[0], stderrBytes: bytes[1], failed: !!failure || code !== 0 });
+          if (failure) throw failure;
+          assert.equal(code, 0, `${binary} ${args.join(" ")} failed: ${code}/${childSignal}`);
+          resolve(Buffer.concat(output).toString("utf8"));
+        } catch (error) { reject(error); }
+      });
+    });
+  } finally {
+    for (const file of files) closeSync(file);
   }
-  if (result.stderr) process.stderr.write(result.stderr);
-  assert.ok(!result.error, String(result.error));
-  assert.equal(result.status, 0, `cargo ${args.join(" ")} failed: ${result.status}/${result.signal}`);
-  return result.stdout;
 }
 function tool(binary, args) {
   const result = spawnSync(binary, args, { encoding: "utf8" });
@@ -57,7 +137,7 @@ export function inventory(listing) {
 }
 
 export function verifyPartition(all, shards) {
-  assert.equal(shards.length, 2, "Expected two partitions");
+  assert.equal(shards.length, windowsPartitions.length, "Expected four partitions");
   assert.ok(all.length && all.some(row => !row.ignored), "Empty full partition inventory");
   assert.ok(all.every(row => row.selected === !row.ignored), "Full partition has hidden filters or changed ignored behavior");
   const stable = rows => rows.map(({ selected: _selected, ...rest }) => rest);
@@ -143,7 +223,7 @@ export function validateProfilePath(profile, root) {
   assert.ok(relative && !relative.startsWith("..") && !path.isAbsolute(relative), "LLVM_PROFILE_FILE must remain under workspace/target");
 }
 
-async function identity() {
+async function identity(evidence = () => undefined) {
   const root = process.cwd();
   validateProfilePath(process.env.LLVM_PROFILE_FILE, root);
   const sha = tool("git", ["rev-parse", "HEAD"]);
@@ -152,8 +232,8 @@ async function identity() {
   assert.equal(tool("git", ["status", "--porcelain", "--untracked-files=normal"]), "", "Source must be clean");
   assert.match(process.env.GITHUB_RUN_ID ?? "", /^[1-9]\d*$/u);
   assert.match(process.env.GITHUB_RUN_ATTEMPT ?? "", /^[1-9]\d*$/u);
-  const nextest = command(["nextest", "--version"]);
-  const llvmCov = command(["llvm-cov", "--version"]);
+  const nextest = await command(["nextest", "--version"], evidence("identity-nextest"));
+  const llvmCov = await command(["llvm-cov", "--version"], evidence("identity-llvm-cov"));
   assert.match(nextest, /^cargo-nextest 0\.9\.148(?:\s|$)/u);
   assert.equal(llvmCov.trim(), "cargo-llvm-cov 0.8.7");
   assert.equal(process.env.CARGO_LLVM_COV_SHOW_ENV, "1", "Source cargo llvm-cov show-env --sh before running this command");
@@ -168,7 +248,7 @@ async function identity() {
     runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
   };
 }
-function list(args) { return JSON.parse(command(["nextest", "list", ...nextestArgs, ...args, "--message-format", "json"])); }
+async function list(args, options) { return JSON.parse(await command(["nextest", "list", ...nextestArgs, ...args, "--message-format", "json"], options)); }
 export function verifyLayout(binaries) {
   const metadata = binaries["rust-build-meta"];
   assert.ok(typeof metadata?.["target-directory"] === "string" && path.isAbsolute(metadata["target-directory"]), "Missing absolute archive target directory");
@@ -186,17 +266,18 @@ export async function produce(directory) {
   const archive = path.join(directory, "workspace.tar.zst");
   assert.ok(!existsSync(archive), "Archive already exists");
   mkdirSync(directory, { recursive: true });
-  command(["nextest", "archive", ...nextestArgs, ...buildArgs, "--archive-file", archive]);
+  await command(["nextest", "archive", ...nextestArgs, ...buildArgs, "--archive-file", archive]);
   const probe = path.join(directory, "inventory-extract");
   mkdirSync(probe, { recursive: true });
-  const binaries = list(["--archive-file", archive, "--extract-to", probe, "--list-type", "binaries-only"]);
+  const binaries = await list(["--archive-file", archive, "--extract-to", probe, "--list-type", "binaries-only"]);
   verifyLayout(binaries);
   const binaryFile = path.join(directory, "producer-binaries.json");
   writeJson(binaryFile, binaries);
   const metadataFile = path.join(probe, "target", "nextest", "cargo-metadata.json");
   const metadata = readJson(metadataFile);
   const reuse = ["--binaries-metadata", binaryFile, "--cargo-metadata", metadataFile, "--target-dir-remap", path.join(probe, "target")];
-  const listings = [list(reuse), ...[1, 2].map(shard => list([...reuse, "--partition", `hash:${shard}/2`]))];
+  const listings = [await list(reuse)];
+  for (const shard of windowsPartitions) listings.push(await list([...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`]));
   verifyTargets(listings[0], metadata);
   const inventories = listings.map(inventory);
   verifyPartition(inventories[0], inventories.slice(1));
@@ -208,22 +289,26 @@ export async function produce(directory) {
   }
   const featureResolutionSha256 = digest(canonical(metadata.resolve));
   verifyIdentity(before, await identity());
-  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256: await fileHash(archive), inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: 2, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
+  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256: await fileHash(archive), inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
   rmSync(probe, { recursive: true });
   rmSync(binaryFile);
-  console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across two verified serial shards.`);
+  console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);
 }
 
 export async function consume(shard, directory, output) {
-  assert.ok([1, 2].includes(shard), "shard must be 1 or 2");
+  assert.ok(windowsPartitions.includes(shard), "shard must be an integer from 1 through 4");
+  mkdirSync(output, { recursive: true });
+  const progress = path.join(output, "progress.jsonl");
+  assert.ok(!existsSync(progress) && !existsSync(path.join(output, "receipt.json")), "Consumer output already contains a prior attempt");
+  const evidence = phase => ({ progress, phase, receipt: path.join(output, phase) });
   const manifest = readJson(path.join(directory, "manifest.json"));
   assert.equal(manifest.schema, 1, "Unsupported archive manifest");
-  verifyIdentity(manifest.identity, await identity());
-  assert.deepEqual(manifest.scheduling, { partitions: 2, partition: "hash", testThreads: 1, retries: 0, ignored: "default" });
+  verifyIdentity(manifest.identity, await identity(evidence));
+  assert.deepEqual(manifest.scheduling, { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" });
   const archive = path.join(directory, "workspace.tar.zst");
   assert.equal(await fileHash(archive), manifest.archiveSha256, "Archive digest mismatch");
   const expected = [];
-  for (let index = 0; index < 3; index++) {
+  for (let index = 0; index <= windowsPartitions.length; index++) {
     const name = `inventory-${index}.json`;
     assert.equal(await fileHash(path.join(directory, name)), manifest.inventoryFiles[name], "Inventory digest mismatch");
     expected.push(readJson(path.join(directory, name)));
@@ -231,8 +316,9 @@ export async function consume(shard, directory, output) {
   verifyPartition(expected[0], expected.slice(1));
   // Never reuse producer build outputs accidentally: this proves archive-only execution.
   assert.ok(!existsSync(path.join(process.cwd(), "target", "debug")), "Consumer target contains prior compilation outputs");
-  mkdirSync(output, { recursive: true });
-  const binaries = list(["--archive-file", archive, "--extract-to", process.cwd(), "--list-type", "binaries-only"]);
+  writeJson(path.join(output, "expected-inventory.json"), expected[shard]);
+  writeJson(path.join(output, "input-identity.json"), { sourceSha: manifest.identity.sourceSha, runId: manifest.identity.runId, runAttempt: manifest.identity.runAttempt, shard, archiveSha256: manifest.archiveSha256 });
+  const binaries = await list(["--archive-file", archive, "--extract-to", process.cwd(), "--list-type", "binaries-only"], evidence("extract"));
   verifyLayout(binaries);
   const binaryFile = path.join(output, "consumer-binaries.json");
   writeJson(binaryFile, binaries);
@@ -240,24 +326,25 @@ export async function consume(shard, directory, output) {
   const metadata = readJson(metadataFile);
   assert.equal(digest(canonical(metadata.resolve)), manifest.featureResolutionSha256, "Archived feature resolution changed");
   const reuse = ["--binaries-metadata", binaryFile, "--cargo-metadata", metadataFile, "--target-dir-remap", path.resolve("target")];
-  const listings = [list(reuse), ...[1, 2].map(index => list([...reuse, "--partition", `hash:${index}/2`]))];
+  const listings = [await list(reuse, evidence("inventory-all"))];
+  for (const index of windowsPartitions) listings.push(await list([...reuse, "--partition", `hash:${index}/${windowsPartitions.length}`], evidence(`inventory-${index}`)));
   verifyTargets(listings[0], metadata);
   const observed = listings.map(inventory);
   verifyPartition(observed[0], observed.slice(1));
   assert.deepEqual(observed, expected, "Consumer partition differs from producer inventory");
+  writeJson(path.join(output, "selected-inventory.json"), observed[shard]);
   const started = performance.now();
-  const events = command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/2`, "--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
+  const events = await command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`, "--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
     env: { ...process.env, CARGO_NET_OFFLINE: "true", RUST_TEST_THREADS: "1", NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1" },
-    receipt: path.join(output, "execution"),
+    ...evidence("execution"), liveStdout: true,
   });
   verifyExecution(events, observed[shard]);
   const coverageFile = path.join(output, "coverage.lcov");
-  command(["llvm-cov", "report", "--lcov", "--output-path", coverageFile], { env: { ...process.env, CARGO_NET_OFFLINE: "true" } });
+  await command(["llvm-cov", "report", "--lcov", "--output-path", coverageFile], { env: { ...process.env, CARGO_NET_OFFLINE: "true" }, ...evidence("coverage") });
   const coverage = validateLcov(readFileSync(coverageFile, "utf8"));
-  verifyIdentity(manifest.identity, await identity());
+  verifyIdentity(manifest.identity, await identity(phase => evidence(`final-${phase}`)));
   writeJson(path.join(output, "receipt.json"), { schema: 1, sourceSha: manifest.identity.sourceSha, runId: manifest.identity.runId, runAttempt: manifest.identity.runAttempt, shard, archiveSha256: manifest.archiveSha256, manifestSha256: await fileHash(path.join(directory, "manifest.json")), coverageSha256: await fileHash(coverageFile), executionSha256: await fileHash(path.join(output, "execution.jsonl")), seconds: (performance.now() - started) / 1000, executedTests: observed[shard].filter(row => row.selected).length, totalTests: observed[0].length, coverage });
-  writeJson(path.join(output, "selected-inventory.json"), observed[shard]);
-  console.log(`Shard ${shard}/2 passed exact inventory and coverage validation.`);
+  console.log(`Shard ${shard}/${windowsPartitions.length} passed exact inventory and coverage validation.`);
 }
 
 async function main([mode, first, second, third, ...extra]) {
