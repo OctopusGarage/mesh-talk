@@ -528,6 +528,110 @@ async fn noise_fault_requires_a_fresh_control_socket_and_retires_unclassified_wa
     );
 }
 
+#[test]
+fn fixture_gate_hands_off_its_worker_to_the_queued_owner() {
+    use super::recovered_fanout::{PublicationGate, ReleasePublications};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    struct StopWatchdog(std::sync::mpsc::Sender<()>);
+    impl Drop for StopWatchdog {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    for handoff in [false, true] {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let gate = Arc::new(PublicationGate::default());
+        let returned = Arc::new(AtomicBool::new(false));
+        let watchdog_fired = Arc::new(AtomicBool::new(false));
+        let (outcome, retired) = std::thread::scope(|scope| {
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let stop = StopWatchdog(stop);
+            let watchdog = scope.spawn({
+                let gate = gate.clone();
+                let fired = watchdog_fired.clone();
+                move || {
+                    // Deadlock backstop only: its use always fails the proof.
+                    if stopped.recv_timeout(Duration::from_secs(5)).is_err() {
+                        fired.store(true, Ordering::Release);
+                        gate.release();
+                    }
+                }
+            });
+            let release_on_unwind = ReleasePublications([gate.clone()]);
+            let (owner_finished, mut owner_completion) = tokio::sync::oneshot::channel();
+            let held = runtime.spawn({
+                let gate = gate.clone();
+                let returned = returned.clone();
+                async move {
+                    // Spawn on the sole worker, then block without yielding.
+                    // The actual owner's runnable task is in its local queue.
+                    let owner = tokio::spawn({
+                        let returned = returned.clone();
+                        async move {
+                            let _ = owner_finished.send(!returned.load(Ordering::Acquire));
+                        }
+                    });
+                    if handoff {
+                        gate.hold_on_runtime_worker();
+                    } else {
+                        gate.hold();
+                    }
+                    returned.store(true, Ordering::Release);
+                    owner.await
+                }
+            });
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(async {
+                    gate.entered.notified().await;
+                    if handoff {
+                        assert!(
+                            owner_completion.await.unwrap(),
+                            "the owner must complete while the handed-off gate remains held"
+                        );
+                        assert!(!returned.load(Ordering::Acquire));
+                    } else {
+                        assert!(
+                            matches!(
+                                owner_completion.try_recv(),
+                                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                            ),
+                            "the old raw Condvar strands its known queued owner on the sole worker"
+                        );
+                        gate.release();
+                        assert!(
+                            !owner_completion.await.unwrap(),
+                            "the raw-gate owner can run only after its worker is released"
+                        );
+                    }
+                });
+            }));
+            gate.release();
+            let retired = runtime.block_on(held);
+            drop(release_on_unwind);
+            drop(stop);
+            watchdog.join().unwrap();
+            (outcome, retired)
+        });
+        runtime.shutdown_timeout(Duration::from_secs(5));
+        if let Err(error) = outcome {
+            std::panic::resume_unwind(error);
+        }
+        assert!(
+            !watchdog_fired.load(Ordering::Acquire),
+            "the deadlock backstop cannot establish readiness"
+        );
+        assert!(
+            matches!(retired, Ok(Ok(()))),
+            "both the gate task and actual queued owner must retire"
+        );
+    }
+}
+
 async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
     use super::recovered_fanout::{PublicationGate, ReleasePublications};
     use futures_util::FutureExt;
@@ -666,13 +770,13 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
                 && (event == "negotiation_begin domain=Some(GroupInventory)"
                     || event == "negotiation_begin domain=Some(DeviceHostname)")
             {
-                directory.hold();
+                directory.hold_on_runtime_worker();
             }
             if wake_during_attempt
                 && event.starts_with("control_dispatch")
                 && first_dispatch.swap(false, Ordering::AcqRel)
             {
-                dispatch.hold();
+                dispatch.hold_on_runtime_worker();
             }
         }
     }));

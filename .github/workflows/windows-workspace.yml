@@ -59,7 +59,7 @@ jobs:
           node scripts/check-repository-hygiene.mjs
       - uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       - name: Validate archive and coverage contracts
         run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
       - name: Build frontend
@@ -111,7 +111,7 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       # No Cargo cache, dependency fetch, frontend rebuild or test compilation.
       - uses: actions/download-artifact@v8
         with:

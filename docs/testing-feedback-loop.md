@@ -679,6 +679,16 @@ cannot certify that original failed socket. Socket classification waits on its
 owned notification or cleanup, rather than manufacturing a transport failure
 after a fixed delay.
 
+Synchronous fixture hooks running on Tokio workers must hand off that worker
+before waiting on a condition variable. Use the explicit
+`PublicationGate::hold_on_runtime_worker` boundary for async negotiation,
+dispatch and parent-completion hooks; publication callbacks already running in
+the blocking pool retain the ordinary hold. A single-worker control must prove
+that its actual queued owner completes while the managed gate is still held,
+and that the raw blocking gate strands the same owner until release. A deadlock
+backstop cannot certify progress. Release gates and join all controlled work
+before shutting down the test runtime or propagating the original failure.
+
 The during-attempt case observes the exact authenticated Wake before the original
 Noise failure. The after-failure case waits for that same Control page's terminal
 Noise-timeout result before sending its Wake, preserving the backoff-recovery
@@ -1237,12 +1247,15 @@ See [Cargo debug profiles](https://doc.rust-lang.org/cargo/reference/profiles.ht
 
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
-workspace test binaries once with pinned cargo-nextest 0.9.148 and
+workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Two fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
 another test on that machine. Nextest uses a fresh process per test, so tests
 must not depend on another test's process-local state.
+CI installer pins and the repository minimum follow the archive tool owner.
+That minimum includes the
+[portable-recording parser security fix](https://github.com/nextest-rs/nextest/security/advisories/GHSA-vc25-qg58-w57c).
 The producer retains the former Windows workspace cache namespace through an
 explicit shared key. Only the cache step normalizes the inherited color/thread
 environment to its previous key inputs; actual tests keep serial execution and

@@ -8,7 +8,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFil
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const versions = Object.freeze({ nextest: "0.9.148", llvmCov: "0.8.7" });
+export const versions = Object.freeze({ nextest: "0.9.150", llvmCov: "0.8.7" });
 const buildArgs = ["--workspace", "--locked"];
 const nextestArgs = ["--profile", "default", "--user-config-file", "none"];
 const canonical = value => JSON.stringify(value);
@@ -154,8 +154,10 @@ async function identity() {
   assert.match(process.env.GITHUB_RUN_ATTEMPT ?? "", /^[1-9]\d*$/u);
   const nextest = command(["nextest", "--version"]);
   const llvmCov = command(["llvm-cov", "--version"]);
-  assert.match(nextest, /^cargo-nextest 0\.9\.148(?:\s|$)/u);
-  assert.equal(llvmCov.trim(), "cargo-llvm-cov 0.8.7");
+  const [nextestName, nextestVersion] = nextest.trim().split(/\s+/u);
+  assert.equal(nextestName, "cargo-nextest");
+  assert.equal(nextestVersion, versions.nextest);
+  assert.equal(llvmCov.trim(), `cargo-llvm-cov ${versions.llvmCov}`);
   assert.equal(process.env.CARGO_LLVM_COV_SHOW_ENV, "1", "Source cargo llvm-cov show-env --sh before running this command");
   assert.equal(path.resolve(process.env.CARGO_LLVM_COV_TARGET_DIR ?? ""), path.join(root, "target"), "Coverage target must be workspace/target");
   return {

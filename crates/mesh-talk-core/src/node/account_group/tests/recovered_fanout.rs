@@ -298,7 +298,7 @@ async fn assert_recovered_group_fanout(fail_refresh: bool) {
             if phase == "operation_owner phase=local_turn_completed" {
                 // Actual blocking work has retired; the parent has not installed
                 // the fanout snapshot yet. No journal/store guard is retained.
-                handoff.hold();
+                handoff.hold_on_runtime_worker();
             }
         }
     }));
@@ -563,6 +563,11 @@ pub(super) struct PublicationGate {
     released: (Mutex<bool>, std::sync::Condvar),
 }
 impl PublicationGate {
+    // Synchronous hooks on async workers must hand the runtime core off before
+    // the Condvar wait. Blocking-pool publishers continue to use raw hold().
+    pub(super) fn hold_on_runtime_worker(&self) {
+        tokio::task::block_in_place(|| self.hold());
+    }
     pub(super) fn hold(&self) {
         let mut released = self.released.0.lock().unwrap();
         self.entered.notify_one();

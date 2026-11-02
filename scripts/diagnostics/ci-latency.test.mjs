@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { versions } from "../ci/windows-coverage.mjs";
 
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
@@ -180,7 +181,7 @@ test("Windows builds once then requires two complete serial archive partitions",
   assert.match(windows, /ref: \$\{\{ github.sha \}\}/);
   assert.match(windows, /toolchain: \$\{\{ needs.build.outputs.rust \}\}/);
   assert.match(windows, /RUST_TEST_THREADS: '1'/);
-  assert.match(windows, /cargo-nextest@0\.9\.148,cargo-llvm-cov@0\.8\.7/);
+  assert.ok(windows.includes(`cargo-nextest@${versions.nextest},cargo-llvm-cov@${versions.llvmCov}`));
   assert.match(windows, /if-no-files-found: error/);
   assert.doesNotMatch(windows.split("  tests:\n")[1], /Swatinem\/rust-cache|cargo build|npm ci/);
 });

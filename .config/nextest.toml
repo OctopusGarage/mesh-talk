@@ -1,3 +1,5 @@
+nextest-version = "0.9.150"
+
 # Each mutated test runs in its own process so a busy loop cannot starve an
 # async timeout or block the remaining tests until the whole-suite deadline.
 [profile.mutants]

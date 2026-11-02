@@ -1,7 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { inventory, verifyPartition, verifyExecution, validateLcov, verifyIdentity, verifyTargets, validateProfilePath, verifyLayout } from "../ci/windows-coverage.mjs";
+import { versions, inventory, verifyPartition, verifyExecution, validateLcov, verifyIdentity, verifyTargets, validateProfilePath, verifyLayout } from "../ci/windows-coverage.mjs";
+
+test("nextest security minimum and every CI installer follow the version owner", () => {
+  // GHSA-vc25-qg58-w57c: portable recording parsing is patched in 0.9.150.
+  const minimum = [0, 9, 150];
+  const current = versions.nextest.split(".").map(Number);
+  assert.equal(current.length, minimum.length);
+  assert(current.every(Number.isSafeInteger));
+  const changed = current.findIndex((part, index) => part !== minimum[index]);
+  assert(changed < 0 || current[changed] > minimum[changed], "nextest must include the recording parser security fix");
+  const config = readFileSync(new URL("../../.config/nextest.toml", import.meta.url), "utf8");
+  assert.equal(config.match(/^nextest-version = "([^"]+)"$/mu)?.[1], versions.nextest);
+  for (const file of ["windows-workspace.yml", "mutants.yml"]) {
+    const source = readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
+    const pins = [...source.matchAll(/cargo-nextest@([0-9.]+)/gu)].map(match => match[1]);
+    assert(pins.length > 0, `${file} must install the owned nextest version`);
+    assert(pins.every(pin => pin === versions.nextest), `${file} nextest installer drift`);
+  }
+});
 
 const listing = selected => ({ "test-count": 3, "rust-suites": {
   lib: { "package-name": "pkg", "package-id": "pkg-id", "binary-id": "lib", "binary-name": "pkg", kind: "lib", status: "listed", testcases: Object.fromEntries(["a", "b", "ignored"].map(name => [name, { kind: "test", ignored: name === "ignored", "filter-match": { status: selected.includes(name) ? "matches" : "mismatch", reason: name === "ignored" ? "ignored" : "partition" } }])) },

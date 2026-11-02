@@ -107,6 +107,7 @@
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
             "selected_source_cold_capability_setup_precedes_role_page_budget",
             "canonical_prefix_preparation_uses_verified_inputs_after_an_early_empty_comparison",
+            "fixture_gate_hands_off_its_worker_to_the_queued_owner",
             "cold_inbound_control_proves_capabilities_before_the_warm_role_clock",
             "account_fixture_health_snapshot_precedes_real_peer_shutdown",
             "recovered_group_beyond_publication_slice_refreshes_before_exact_network_fanout",
@@ -167,7 +168,7 @@
             "reference": "docs/testing-feedback-loop.md#windows-workspace-archives-and-slow-fixtures"
           },
           {
-            "name": "Modern Leave Noise-fault fixtures prepare genuine mandatory Directory state before admission, pause unrelated requester Directory work before its clocks, and bind failure to the original GroupControl task, current TCP port and actual Noise start. During-attempt Wake reception and after-terminal-page recovery remain distinct; original admission-to-receipt eight-second bounds and actual tracked-provider retirement remain required.",
+            "name": "Modern Leave Noise-fault fixtures prepare genuine mandatory Directory state before admission, pause unrelated requester Directory work before its clocks, and bind failure to the original GroupControl task, current TCP port and actual Noise start. Synchronous async-worker gates explicitly hand off the Tokio worker; a real single-worker queued-owner control distinguishes managed progress from raw Condvar starvation. During-attempt Wake reception and after-terminal-page recovery remain distinct; original admission-to-receipt eight-second bounds and actual tracked-provider retirement remain required.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
