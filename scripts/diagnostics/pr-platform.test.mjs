@@ -128,7 +128,7 @@ test("committed archive includes export-ignored harness without changing reposit
 });
 
 test("bounded child execution reports timeout rather than a successful empty run", async () => {
-  const result = await runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 30 });
+  const result = await runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 30, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   assert.equal(result.timedOut, true);
   assert.notEqual(result.code, 0);
 });
@@ -337,4 +337,89 @@ test("the shared classifier exposes the same selection requirement to the local 
   const unneeded = await runCommand(process.execPath, ["scripts/pr-platform/rust-packages.mjs", "--selection-needed", "docs/README.md"]);
   assert.equal(needed.code, 0);
   assert.equal(unneeded.code, 1);
+});
+
+for (const signal of ["SIGTERM", "SIGINT"]) test(`guest cancellation ${signal} retires an ignored-stdio descendant`, { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { spawn, spawnSync } = await import("node:child_process");
+  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-guest-cancel-"));
+  const marker = join(directory, "ready");
+  const leaf = `process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000)`;
+  const leader = `process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:'ignore'});setInterval(()=>{},1000)`;
+  const module = new URL("../pr-platform/guest.mjs", import.meta.url).href;
+  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", `import {runCommand} from ${JSON.stringify(module)};const result=await runCommand(process.execPath,['-e',${JSON.stringify(leader)}]);process.exitCode=result.code;`], { stdio: "ignore", env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  let pid;
+  t.after(async () => { supervisor.kill("SIGKILL"); if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } await rm(directory, { recursive: true, force: true }); });
+  for (let i = 0; i < 300; i++) { try { pid = Number(await readFile(marker, "utf8")); break; } catch {} await pause(10); }
+  assert.ok(pid, "descendant must acknowledge installed signal handlers");
+  const closed = new Promise(resolve => supervisor.once("close", resolve));
+  supervisor.kill(signal);
+  await closed;
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `owned descendant remains runnable: ${state}`);
+});
+
+test("a nested guest timeout notifies its existing stage owner and retires the group", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { spawn, spawnSync } = await import("node:child_process");
+  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-nested-guest-"));
+  const marker = join(directory, "ready");
+  const leaf = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000)`;
+  const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
+  const stage = new URL("../validation/stage.mjs", import.meta.url).href;
+  const inner = `import {runCommand} from ${JSON.stringify(guest)};console.log('GROUP='+process.pid);await runCommand(process.execPath,['-e',${JSON.stringify(leaf)}],{timeoutMs:1500});`;
+  const outer = `import {execute} from ${JSON.stringify(stage)};const controller=new AbortController();process.on('SIGTERM',()=>controller.abort());const r=await execute([process.execPath,'--input-type=module','-e',${JSON.stringify(inner)}],{env:process.env,signal:controller.signal});process.exitCode=r.code;`;
+  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", outer], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  let group, pid;
+  supervisor.stdout.on("data", chunk => { const match = chunk.toString().match(/GROUP=(\d+)/); if (match) group = Number(match[1]); });
+  t.after(async () => { supervisor.kill("SIGKILL"); if (group) try { process.kill(-group, "SIGKILL"); } catch {} if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
+  const closed = new Promise(resolve => supervisor.once("close", resolve));
+  for (let i = 0; i < 300; i++) { try { pid = Number(await readFile(marker, "utf8")); break; } catch {} await pause(10); }
+  assert.ok(pid && group, "real nested child must acknowledge startup");
+  const code = await Promise.race([closed, pause(6000).then(() => "still running")]);
+  assert.equal(code, 130, "nested timeout must reach the process-group owner");
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `nested worker remains runnable: ${state}`);
+});
+
+test("guest cancellation stops admission of subsequent plan steps", async () => {
+  const plan = { ...buildPlan(parseFlags(["--core-filter", "node::account_sync"]), ["crates/mesh-talk-core/src/node.rs"]), sourceSha: sha };
+  for (const stopped of [{ code: 130, cancelled: true }, { code: 0, cleanupUnverified: true }]) {
+    let calls = 0;
+    const report = await executePlan(plan, { run: async () => { calls++; return { output: "", ...stopped }; } });
+    assert.equal(calls, 1);
+    assert.equal(report.ok, false);
+  }
+});
+
+test("interrupted execution reports retain an exact failed selection prefix", async () => {
+  const plan = { ...buildPlan(parseFlags(["--core-filter", "fixture::"]), ["crates/mesh-talk-core/src/node.rs"]), sourceSha: sha, archiveSha: "b".repeat(64) };
+  for (const flag of ["cancelled", "cleanupUnverified"]) {
+    for (const stopAt of [1, expectedSteps(plan).length]) {
+      let calls = 0;
+      const report = await executePlan(plan, { run: async () => ++calls === stopAt ? { code: 0, output: "", [flag]: true } : { code: 0, output: "test result: ok. 2 passed; 0 failed;" } });
+      assert.equal(validateGuestReport(report, plan, process.platform), report);
+      assert.equal(report[flag], true);
+      assert.equal(report.results.at(-1)[flag], true);
+      for (const mutate of [
+        r => { r.ok = true; },
+        r => { r[flag] = false; },
+        r => { r.results.at(-1)[flag] = false; },
+        r => { r.results[0].args.push("--ignored"); },
+        r => { r.sourceSha = "c".repeat(40); },
+        r => { r.archiveSha = "c".repeat(64); },
+      ]) { const bad = structuredClone(report); mutate(bad); assert.throws(() => validateGuestReport(bad, plan, process.platform)); }
+    }
+  }
+  const complete = await executePlan(plan, { run: async () => ({ code: 0, output: "test result: ok. 2 passed; 0 failed;" }) });
+  const truncated = { ...complete, ok: false, results: complete.results.slice(0, 1) };
+  assert.throws(() => validateGuestReport(truncated, plan, process.platform), /mismatched|interrupt/i);
+  const forged = structuredClone(complete); forged.cancelled = true; forged.ok = false; forged.results[0].cancelled = true; forged.results[0].ok = false;
+  assert.throws(() => validateGuestReport(forged, plan, process.platform), /interrupt|terminal/i);
 });

@@ -260,6 +260,58 @@ it.each(["onAttach", "onAttachDirectory", "onImage"] as const)(
     expect(useChat.getState().sendFile).not.toHaveBeenCalled();
   },
 );
+it("awaits the real ConversationView picker consumer after its transport resolves and navigation retires it", async () => {
+  vi.useFakeTimers();
+  const transport = deferred<string>();
+  const delivery = deferred<void>();
+  let delivered = false;
+  let settled = false;
+  let pending!: Promise<void>;
+  const enqueues: Array<{ path: string; destination: unknown }> = [];
+  useChat.setState({
+    sendFile: vi.fn(async (path) => {
+      enqueues.push({ path, destination: useChat.getState().active });
+    }),
+  });
+  native.open.mockImplementation(async () => {
+    const path = await transport.promise;
+    delivered = true;
+    await delivery.promise;
+    return path;
+  });
+  try {
+    await act(async () => {
+      pending = (composer.onAttach!() as unknown as Promise<void>).finally(
+        () => {
+          settled = true;
+        },
+      );
+    });
+    await switchConversation();
+    await act(async () => transport.resolve("/native/stale.txt"));
+    expect(delivered).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(enqueues).toEqual([]);
+    expect(settled).toBe(false); // An elapsed-time zero count does not prove task completion.
+    await act(async () => {
+      delivery.resolve();
+      await pending;
+    });
+    expect(settled).toBe(true);
+    expect(enqueues).toEqual([]);
+    expect(useChat.getState().active?.id).toBe("bob");
+    expect(
+      native.invoke.mock.calls.filter(([cmd]) => cmd === "owner_enqueue_file"),
+    ).toEqual([]);
+  } finally {
+    await act(async () => {
+      transport.resolve("/native/stale.txt");
+      delivery.resolve();
+      await pending;
+    });
+    vi.useRealTimers();
+  }
+});
 it("keeps native paths and directory/media intent without byte staging", async () => {
   native.open.mockResolvedValue("/native/photo.png");
   await act(async () => {

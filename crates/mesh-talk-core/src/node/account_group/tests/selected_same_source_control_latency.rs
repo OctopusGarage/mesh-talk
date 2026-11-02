@@ -83,6 +83,8 @@ impl CriticalControlTrace {
         if event.starts_with("control_")
             || event.starts_with("wake_")
             || event.starts_with("operation_local_published")
+            || event.starts_with("operation_owner ")
+            || event.starts_with("operation_publication_owner ")
             || control_task
                 && (event.starts_with("page_")
                     || event.starts_with("negotiation_")
@@ -2497,6 +2499,8 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             record_b_trace(&abort_trace, b_clock, "fixture", "B_admitted".into());
             Some(
                 tokio::time::timeout(Duration::from_secs(8), async {
+                    let mut executor_committed_observed = false;
+                    let mut requester_committed_observed = false;
                     if let Some(boundary) = &executor_boundary {
                         // Wait inside the ORIGINAL operation budget for its
                         // actual signed request publication, then deliver a real
@@ -2541,6 +2545,30 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                         let remote = other
                             .retained_account_group_operation_status(&account.account_id(), second)
                             .unwrap();
+                        if !executor_committed_observed
+                            && remote.as_ref().is_some_and(|status| {
+                                status.phase == AccountGroupOperationPhase::Committed
+                            })
+                        {
+                            executor_committed_observed = true;
+                            b_critical.lock().unwrap().record(
+                                b_clock,
+                                "fixture",
+                                "B_executor_committed_first_observed".into(),
+                            );
+                        }
+                        if !requester_committed_observed
+                            && local.as_ref().is_some_and(|status| {
+                                status.phase == AccountGroupOperationPhase::Committed
+                            })
+                        {
+                            requester_committed_observed = true;
+                            b_critical.lock().unwrap().record(
+                                b_clock,
+                                "fixture",
+                                "B_requester_committed_first_observed".into(),
+                            );
+                        }
                         if let (Some(local), Some(remote)) = (local, remote)
                             && local.phase == AccountGroupOperationPhase::Committed
                             && remote.phase == AccountGroupOperationPhase::Committed

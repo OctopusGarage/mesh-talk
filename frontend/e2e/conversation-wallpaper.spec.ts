@@ -559,12 +559,11 @@ for (const replacement of ["selection", "scope"] as const) {
           )
           .toBe(1);
       }
-      await page.evaluate(async () => {
+      // App.test.ts awaits the exact old presentation; this remains a browser state sample.
+      await page.evaluate(() => {
         (
           window as unknown as { __releasePresentationAssets: () => void }
         ).__releasePresentationAssets();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(
         await page.evaluate(

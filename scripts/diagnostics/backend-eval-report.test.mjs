@@ -50,3 +50,55 @@ test("instrumented backend execution preserves the exact ignored scenario select
   assert.deepEqual(covered.slice(-4), ["--", "--ignored", "--test-threads=1", "--nocapture"]);
   assert.throws(() => backendCargoArgs("unknown", true), /Unknown backend/);
 });
+
+for (const mode of ["output cap", "timeout"]) test(`backend ${mode} retires ignored-stdio workers before the next suite`, { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { runCargo } = await import("../evals/backend-runner.mjs");
+  assert.equal(typeof runCargo, "function");
+  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-backend-tree-"));
+  const marker = join(directory, "ready"); let pid;
+  t.after(async () => { if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
+  const leaf = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));process.send('ready');setInterval(()=>{},1000)`;
+  const leader = `process.on('SIGTERM',()=>process.exit(0));const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.stdout.write('x'.repeat(2048)));setInterval(()=>{},1000)`;
+  const result = await runCargo("two_node_cli", { command: [process.execPath, "-e", leader], maxOutputBytes: mode === "output cap" ? 1024 : 4096, timeoutMs: 1500, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  pid = Number(await readFile(marker, "utf8"));
+  assert.match(result.failure, mode === "output cap" ? /output.*limit/i : /timeout/i);
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `next suite would overlap a runnable worker: ${state}`);
+});
+
+test("backend cancellation and unverified cleanup stop admission of later suites", async () => {
+  const { evaluateBackendSuites } = await import("../evals/backend-runner.mjs");
+  for (const reason of [{ cancelled: true }, { cleanupUnverified: true }]) {
+    let calls = 0;
+    const failures = await evaluateBackendSuites(async () => { calls++; return { code: 130, failure: "cancelled or unretired work", ...reason }; }, async () => {});
+    assert.equal(calls, 1);
+    assert.equal(failures.length, 1);
+  }
+});
+
+test("intentional lifecycle fault fixtures cannot cancel their real validation owner", { skip: process.platform === "win32", timeout: 30000 }, async t => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-managed-faults-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const git = args => { const r = spawnSync("git", args, { cwd: directory, encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); };
+  git(["init", "-q"]);
+  await writeFile(join(directory, ".gitignore"), "target/\n");
+  git(["add", ".gitignore"]);
+  git(["-c", "commit.gpgsign=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
+  const files = ["backend-eval-report.test.mjs", "pr-platform.test.mjs", "pr-preflight-output.test.mjs"].map(name => fileURLToPath(new URL(name, import.meta.url)));
+  // A fresh test driver must not inherit node:test's child-context marker,
+  // which otherwise silently suppresses execution of these nested test files.
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)), "fault-fixtures", "--", process.execPath, "--test", "--test-reporter=tap", "--test-name-pattern", "backend (output cap|timeout)|bounded child execution|browser wrapper exposes", ...files], { cwd: directory, env: { ...process.env, CI: "1", MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined }, encoding: "utf8", timeout: 25000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /browser wrapper exposes/);
+  assert.match(result.stdout, /backend timeout/);
+  assert.match(result.stdout, /^# pass 4$/mu, "all four selected fault controls must actually pass");
+});

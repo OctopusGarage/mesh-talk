@@ -41,7 +41,9 @@ export async function inputIdentity(root, inputs) {
   if (result.status !== 0) throw Error(result.stderr || "Stage input discovery failed");
   // Always include implementation bytes even when called from an external test
   // fixture or an older checkout lacking these files in its Git index.
-  const implementation = await Promise.all(["stage.mjs", "stage-inputs.mjs"].map(
+  const owners = ["stage.mjs", "stage-inputs.mjs", ...(process.platform === "win32"
+    ? ["windows-process-owner.mjs", "windows-process-owner.ps1", "windows-process-owner.cs"] : [])];
+  const implementation = await Promise.all(owners.map(
     name => readFile(new URL(name, import.meta.url))));
   const hash = createHash("sha256").update(JSON.stringify(paths)).update(result.stdout);
   for (const bytes of implementation) hash.update(bytes);

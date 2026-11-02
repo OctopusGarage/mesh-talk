@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, writeFile, readFile, rm, mkdir, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm, mkdir, readdir, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 async function fixture(t) {
@@ -506,4 +506,177 @@ test("an ignored frontend environment file created during finalization invalidat
   assert.equal(result.code, 1);
   assert.equal(result.failureKind, "invalidated");
   await assert.rejects(readFile(result.receipt));
+});
+
+test("unowned non-detached execution is rejected before starting a command", { skip: process.platform === "win32" }, async () => {
+  const { execute } = await import("../validation/stage.mjs");
+  await assert.rejects(execute([process.execPath, "-e", "process.exit(0)"], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, detached: false }), /requires an existing managed process-group owner/);
+});
+
+test("a stale group-owner marker cannot signal an unrelated process", { skip: process.platform === "win32", timeout: 10000 }, async t => {
+  const { spawn } = await import("node:child_process");
+  const { execute } = await import("../validation/stage.mjs");
+  const unrelated = spawn(process.execPath, ["-e", "process.send('ready');setInterval(()=>{},1000)"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  t.after(() => unrelated.kill("SIGKILL"));
+  await new Promise(resolve => unrelated.once("message", resolve));
+  const controller = new AbortController();
+  const result = await execute([process.execPath, "-e", "console.log('ready');setInterval(()=>{},1000)"], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: String(unrelated.pid) }, signal: controller.signal, notifyOwnerOnAbort: true, onOutput() { controller.abort(); } });
+  assert.equal(result.cleanupUnverified, true);
+  assert.equal(unrelated.exitCode, null, "unrelated live process must not receive the owner notification");
+  process.kill(unrelated.pid, 0);
+});
+
+for (const code of [0, 23]) test(`ordinary leader exit ${code} retires ignored-stdio work before preserving status`, { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { execute } = await import("../validation/stage.mjs");
+  let pid;
+  t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
+  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(${code})});`;
+  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  assert.ok(pid, "descendant must acknowledge installed handler before leader exits");
+  assert.equal(result.code, code, result.error);
+  assert.equal(result.cleanupUnverified, false);
+  assert.equal(result.forcedRetirement, true);
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `successful leader left runnable work: ${state}`);
+});
+
+test("clean standalone and managed nested success preserve exit zero", async () => {
+  const { execute } = await import("../validation/stage.mjs");
+  const env = { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" };
+  const direct = await execute([process.execPath, "-e", "process.exit(0)"], { env });
+  assert.equal(direct.code, 0);
+  const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
+  const inner = `import {runCommand} from ${JSON.stringify(guest)};const result=await runCommand(process.execPath,['-e','process.exit(0)']);process.exitCode=result.code;`;
+  const nested = await execute([process.execPath, "--input-type=module", "-e", inner], { env });
+  assert.equal(nested.code, 0);
+});
+
+test("a hard-killed outer supervisor cannot expose a live owned group to another heavy stage", { skip: process.platform === "win32", timeout: 20000 }, async t => {
+  const { spawn } = await import("node:child_process");
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const f = await fixture(t);
+  const ready = path.join(f.root, "target/ready");
+  const admitted = path.join(f.root, "target/second-admitted");
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const env = { ...process.env, CI: "1", MESH_VALIDATION_PROCESS_GROUP_OWNER: "" };
+  let leaf, group, first, second;
+  t.after(() => { first?.kill("SIGKILL"); second?.kill("SIGKILL"); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} });
+  first = spawn(process.execPath, [cli, "first-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000)`], { cwd: f.root, env, stdio: "ignore" });
+  const stopped = new Promise(resolve => first.once("close", resolve));
+  for (let i = 0; i < 500; i++) { try { leaf = Number(await readFile(ready, "utf8")); break; } catch {} await pause(10); }
+  assert.ok(leaf, "the real child must acknowledge readiness");
+  group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(leaf)], { encoding: "utf8" }).stdout.trim());
+  assert.equal(group, leaf);
+  const resourceRoot = path.join(f.root, ".git/validation-resources");
+  const ownerFile = path.join(resourceRoot, (await readdir(resourceRoot))[0], "owner.json");
+  // Publication may follow target startup; its prior unknown state must remain
+  // non-reapable until this actual group identity has been durably written.
+  for (let i = 0; i < 500; i++) { const owner = JSON.parse(await readFile(ownerFile, "utf8")); if (owner.group === group) break; if (!owner.retirementRequired) break; await pause(10); }
+  const published = JSON.parse(await readFile(ownerFile, "utf8"));
+  first.kill("SIGKILL"); await stopped;
+  let queued;
+  const waiting = new Promise(resolve => { queued = resolve; });
+  second = spawn(process.execPath, [cli, "second-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(admitted)},'entered')`], { cwd: f.root, env, stdio: ["ignore", "pipe", "pipe"] });
+  const completed = new Promise(resolve => second.once("close", resolve));
+  second.stdout.on("data", chunk => { if (chunk.toString().includes("waiting for another validation stage")) queued(); });
+  await waiting;
+  assert.equal(published.retirementRequired, true, "unknown admission must not be PID-only reapable");
+  assert.equal(published.group, group);
+  assert.equal(JSON.parse(await readFile(ownerFile, "utf8")).group, group);
+  await assert.rejects(readFile(admitted), { code: "ENOENT" });
+  assert.doesNotThrow(() => process.kill(leaf, 0));
+  process.kill(-group, "SIGKILL");
+  assert.equal(await completed, 0, "a provably retired known group must permit recovery");
+  assert.equal(await readFile(admitted, "utf8"), "entered");
+});
+
+
+test("a dead owner with unknown admitted group cannot be automatically reaped", { skip: process.platform === "win32", timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const first = await f.run();
+  const directory = path.join(f.root, "target/validation/locks", first.key);
+  await mkdir(directory);
+  const owner = { pid: 2147483647, retirementRequired: true };
+  await writeFile(path.join(directory, "owner.json"), JSON.stringify(owner));
+  const controller = new AbortController();
+  let queued = false;
+  await assert.rejects(f.run({ signal: controller.signal, log: message => {
+    if (message.startsWith("waiting for another validation stage")) {
+      queued = true;
+      controller.abort();
+    }
+  } }), { name: "AbortError" });
+  assert.equal(queued, true, "real waiter must observe the retained lease");
+  assert.deepEqual(JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8")), owner);
+  assert.equal(await f.count(), 1, "unknown ownership must not admit another command");
+});
+
+test("leader exit retires descendants retaining inherited output pipes", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { execute } = await import("../validation/stage.mjs");
+  let pid;
+  t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
+  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});`;
+  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  assert.ok(pid);
+  assert.equal(result.code, 0, result.error);
+  assert.equal(result.forcedRetirement, true);
+  assert.equal(result.cleanupUnverified, false);
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"));
+});
+
+
+test("stage attempts record verified forced retirement", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const leaf = "process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)";
+  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.exit(0));`;
+  const result = await f.run({ command: [process.execPath, "-e", leader] });
+  assert.equal(result.code, 0);
+  assert.equal(result.forcedRetirement, true);
+  assert.equal(JSON.parse(await readFile(result.receipt, "utf8")).forcedRetirement, true);
+  const attempts = path.join(f.root, "target/validation/attempts");
+  const records = await Promise.all((await readdir(attempts)).map(async name => JSON.parse(await readFile(path.join(attempts, name), "utf8"))));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].forcedRetirement, true);
+});
+
+
+test("ordinary retirement does not trust an empty process-table snapshot", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const copied = path.join(f.root, "target/private-validation");
+  await cp(new URL("../validation/", import.meta.url), copied, { recursive: true });
+  const filename = path.join(copied, "stage.mjs");
+  const original = await readFile(filename, "utf8");
+  const declaration = original.match(/function processGroupRunning\([^)]*\) \{/u)?.[0];
+  assert.ok(declaration);
+  // A private owner copy deterministically supplies stale empty ps snapshots.
+  // The real group/descendant remain unmodified; final acceptance checks its PID.
+  await writeFile(filename, original.replace(declaration, declaration + "\n  return false;"));
+  const { execute } = await import(pathToFileURL(filename).href);
+  let pid;
+  t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
+  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});`;
+  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  assert.ok(pid);
+  assert.equal(result.code, 0, result.error);
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `stale snapshot left live owned work: ${state}`);
+  assert.equal(result.forcedRetirement, true);
+});
+
+test("process-group retirement bounds probes and pauses by one monotonic deadline", async () => {
+  const { waitForProcessGroup } = await import("../validation/stage.mjs");
+  let clock = 0;
+  assert.equal(await waitForProcessGroup(123, { now: () => clock, probe: () => { clock += 5001; return false; }, pause: async ms => { clock += ms; } }), false, "a late empty observation cannot certify bounded retirement");
+  clock = 0;
+  const budgets = [], pauses = [];
+  assert.equal(await waitForProcessGroup(123, { now: () => clock,
+    probe: (_group, remaining) => { budgets.push(remaining); clock += Math.min(2300, remaining); throw Error("probe timed out"); },
+    pause: async ms => { pauses.push(ms); clock += ms; } }), false);
+  assert.deepEqual(budgets, [5000, 2600, 200]);
+  assert.deepEqual(pauses, [100, 100]);
+  assert.equal(clock, 5000);
 });

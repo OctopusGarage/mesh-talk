@@ -174,7 +174,6 @@ export async function createPlan(root, options) {
 async function checked(run, program, args, options) {
   const result = await run(program, args, {
     ...options,
-    detached: false,
     timeoutMs: 2_147_483_647,
   });
   if (result.code !== 0 || result.timedOut || result.error)
