@@ -558,24 +558,24 @@ async fn closing_account_loop_cancels_stalled_fanout_and_drains_runtime_admissio
 }
 
 #[derive(Default)]
-struct PublicationGate {
-    entered: tokio::sync::Notify,
+pub(super) struct PublicationGate {
+    pub(super) entered: tokio::sync::Notify,
     released: (Mutex<bool>, std::sync::Condvar),
 }
 impl PublicationGate {
-    fn hold(&self) {
+    pub(super) fn hold(&self) {
         let mut released = self.released.0.lock().unwrap();
         self.entered.notify_one();
         while !*released {
             released = self.released.1.wait(released).unwrap();
         }
     }
-    fn release(&self) {
+    pub(super) fn release(&self) {
         *self.released.0.lock().unwrap() = true;
         self.released.1.notify_all();
     }
 }
-struct ReleasePublications<const N: usize>([Arc<PublicationGate>; N]);
+pub(super) struct ReleasePublications<const N: usize>(pub(super) [Arc<PublicationGate>; N]);
 impl<const N: usize> Drop for ReleasePublications<N> {
     fn drop(&mut self) {
         for gate in &self.0 {

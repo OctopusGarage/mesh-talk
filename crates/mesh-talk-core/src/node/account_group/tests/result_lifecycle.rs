@@ -288,7 +288,62 @@ async fn modern_leave_wake_during_real_noise_timeout_recovers_within_operation_b
     modern_leave_timeout_recovery(true).await;
 }
 
+#[derive(Default)]
+struct DuringAttemptWake {
+    revision: Option<u64>,
+    received_before_failure: bool,
+    failed: bool,
+}
+impl DuringAttemptWake {
+    fn observe(&mut self, event: &str) {
+        if event.contains("outcome=NoiseTimeout") {
+            self.failed = true;
+        }
+        if self
+            .revision
+            .is_some_and(|revision| event == format!("wake_received revision={revision}"))
+            && !self.failed
+        {
+            self.received_before_failure = true;
+        }
+    }
+}
+
+#[test]
+fn during_attempt_wake_uses_exact_reception_order_not_ack_return() {
+    let mut observed = DuringAttemptWake {
+        revision: Some(7),
+        ..Default::default()
+    };
+    observed.observe("wake_received revision=7");
+    observed.observe("dial_noise_end ok=false outcome=NoiseTimeout");
+    assert!(observed.failed);
+    assert!(
+        observed.received_before_failure,
+        "a later ack return cannot erase authenticated reception during the attempt"
+    );
+    for revision in [None, Some(6), Some(7)] {
+        let mut rejected = DuringAttemptWake {
+            revision: Some(7),
+            ..Default::default()
+        };
+        if let Some(revision) = revision.filter(|revision| *revision != 7) {
+            rejected.observe(&format!("wake_received revision={revision}"));
+        }
+        rejected.observe("dial_noise_end ok=false outcome=NoiseTimeout");
+        if revision == Some(7) {
+            rejected.observe("wake_received revision=7");
+        }
+        assert!(
+            !rejected.received_before_failure,
+            "missing, stale and late wake evidence must fail"
+        );
+    }
+}
+
 async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
+    use super::recovered_fanout::{PublicationGate, ReleasePublications};
+    use futures_util::FutureExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     let f = crate::node::channels::account_self_control::tests::fixture(false);
@@ -421,6 +476,12 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
     assert!(reference.channel_members(group).is_empty());
     let trace = Arc::new(Mutex::new(Vec::new()));
     let timeout_seen = Arc::new(AtomicBool::new(false));
+    let dispatch = Arc::new(PublicationGate::default());
+    let _release_dispatch = ReleasePublications([dispatch.clone()]);
+    let first_dispatch = Arc::new(AtomicBool::new(true));
+    let during = Arc::new(Mutex::new(DuringAttemptWake::default()));
+    let client_during = during.clone();
+    let client_dispatch = dispatch.clone();
     let expected = source.identity.public();
     let client_trace = trace.clone();
     let client_timeout = timeout_seen.clone();
@@ -441,7 +502,21 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
                 let control = roles.0.get(&tokio::task::id()).copied().unwrap_or(false);
                 roles.1.insert(port, control);
             }
+            let control = roles.0.get(&tokio::task::id()).copied().unwrap_or(false);
             drop(roles);
+            if event.starts_with("wake_received")
+                || (control && event.starts_with("dial_noise_end"))
+            {
+                client_during.lock().unwrap().observe(&event);
+            }
+            if wake_during_attempt
+                && event.starts_with("control_dispatch")
+                && first_dispatch.swap(false, Ordering::AcqRel)
+            {
+                // Before child spawn and both negotiation/Noise clocks. No
+                // authority, roster, trace or document guard spans this wait.
+                client_dispatch.hold();
+            }
             if event.starts_with("page_end")
                 && event.contains("outcome=noise_timeout")
                 && event.contains("domain=GroupControl")
@@ -477,24 +552,45 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
         )
         .unwrap();
     let reference_worker = tokio::spawn(reference.clone().run_account_history_loop());
-    let source_worker = tokio::spawn(source.clone().run_account_history_loop());
-    let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+    let mut source_worker =
+        (!wake_during_attempt).then(|| tokio::spawn(source.clone().run_account_history_loop()));
+    let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(8), async {
         if wake_during_attempt {
             let key = crate::node::AccountDocumentKey::GroupOperation {
                 channel: hex::encode(group.as_bytes()), source_device: source.user_id(),
             };
+            dispatch.entered.notified().await;
+            let intent_key = crate::node::AccountDocumentKey::GroupOperation {
+                channel: hex::encode(group.as_bytes()), source_device: reference.user_id(),
+            };
+            // The independently admitted local publisher can finish while its
+            // parent dispatch waits. Start the source's first fresh pull only
+            // after the real signed intent exists, without needing a blocked
+            // parent to send a later notification about an initially empty page.
+            loop {
+                let published_intent = reference.account_document(&intent_key).unwrap()
+                    .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
+                    .is_some_and(|frame| frame.projection.requests.iter().any(|request| request.reference.id == id));
+                if published_intent { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            source_worker = Some(tokio::spawn(source.clone().run_account_history_loop()));
             loop {
                 let published_terminal = source.account_document(&key).unwrap()
                     .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
                     .is_some_and(|frame| frame.projection.results.iter().any(|result|
                         result.reference.id == id && result.status.phase == AccountGroupOperationPhase::Committed));
-                if held_control.load(Ordering::Acquire) && published_terminal { break; }
+                if published_terminal { break; }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             // Retain the real endpoint and signed terminal head, but prevent a
             // later automatic publication from masking this one during-attempt wake.
-            source_worker.abort();
-            while !source_worker.is_finished() {
+            source_worker.as_ref().unwrap().abort();
+            while !source_worker.as_ref().unwrap().is_finished() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            dispatch.release();
+            while !held_control.load(Ordering::Acquire) {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         } else {
@@ -509,6 +605,7 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
             "Published during failed control attempt"
         } else { "Published after failed control attempt" })).unwrap();
         let (epoch, revision) = source.account_wake_token_for_test();
+        during.lock().unwrap().revision = Some(revision);
         let peer = source.routing_peer(&reference.user_id()).unwrap();
         use crate::node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
         let mut wake = source.begin_account_exchange(&peer, AccountSyncVersion::V2,
@@ -520,7 +617,9 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
                 if observed_epoch == epoch && observed_revision == revision));
         wake.recycle(&source);
         if wake_during_attempt {
-            assert!(!timeout_seen.load(Ordering::Acquire), "the authenticated publication must precede the original attempt's failure");
+            let received_during = during.lock().unwrap().received_before_failure;
+            let phases = trace.lock().unwrap().clone();
+            assert!(received_during, "the exact authenticated wake reception must precede the original attempt's failure; phases={phases:?}");
             while !timeout_seen.load(Ordering::Acquire) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -536,7 +635,8 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await;
+    })).catch_unwind().await;
+    dispatch.release();
     let source_phase = source
         .list_account_group_operations(
             &account.account_id(),
@@ -553,17 +653,24 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
         .map(|status| status.phase);
     let elapsed = started.elapsed();
     for task in [
-        source_server,
-        reference_server,
-        reference_worker,
+        Some(source_server),
+        Some(reference_server),
+        Some(reference_worker),
         source_worker,
-    ] {
+    ]
+    .into_iter()
+    .flatten()
+    {
         task.abort();
         let _ = task.await;
     }
     release.notify_waiters();
+    source.runtime_work.close();
+    reference.runtime_work.close();
     source.runtime_work.drain().await;
     reference.runtime_work.drain().await;
+    *reference.account_client_test_hook.lock().unwrap() = None;
+    let outcome = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     assert!(
         timeout_seen.load(Ordering::Acquire),
         "a real Control Noise timeout must precede recovery: {:?}",

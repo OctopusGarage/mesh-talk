@@ -562,6 +562,125 @@ async fn conflicting_file_retry_cannot_replace_a_result_adopted_during_lookup_ad
     file_result_roundtrip(5).await;
 }
 
+#[derive(Default)]
+struct PreparationProgressState {
+    entered: bool,
+    completed: bool,
+    released: bool,
+}
+
+struct DeliveryDuringPreparation {
+    gate: Arc<(Mutex<PreparationProgressState>, std::sync::Condvar)>,
+    witness: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DeliveryDuringPreparation {
+    fn install(node: &Arc<Node>, observed: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        let gate = Arc::new((
+            Mutex::new(PreparationProgressState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let witness = std::thread::spawn({
+            let gate = gate.clone();
+            let observed = observed.clone();
+            let weak = Arc::downgrade(node);
+            move || {
+                let mut state = gate.0.lock().unwrap();
+                while !state.entered && !state.released {
+                    state = gate.1.wait(state).unwrap();
+                }
+                if state.released {
+                    return;
+                }
+                drop(state);
+                let node = weak.upgrade().expect("the preparing fixture owns its Node");
+                {
+                    let delivery = node.delivery.lock().unwrap();
+                    let _pending = delivery.pending_transactions().len();
+                }
+                let mut state = gate.0.lock().unwrap();
+                // A late acquisition must never erase a failed bounded witness.
+                let _ = observed.compare_exchange(
+                    0,
+                    1,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                state.completed = true;
+                gate.1.notify_all();
+            }
+        });
+        node.media.before_prepare_for_test(Box::new({
+            let gate = gate.clone();
+            move || {
+                let mut state = gate.0.lock().unwrap();
+                state.entered = true;
+                gate.1.notify_all();
+                // Reuse the fixture's existing progress bound. The preparing
+                // thread remains paused until a different owner finishes a real
+                // delivery-journal read, rather than sampling global contention.
+                let (state, _) = gate
+                    .1
+                    .wait_timeout_while(state, std::time::Duration::from_secs(8), |state| {
+                        !state.completed && !state.released
+                    })
+                    .unwrap();
+                if !state.completed && !state.released {
+                    let _ = observed.compare_exchange(
+                        0,
+                        2,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+            }
+        }));
+        Self {
+            gate,
+            witness: Some(witness),
+        }
+    }
+}
+
+impl Drop for DeliveryDuringPreparation {
+    fn drop(&mut self) {
+        {
+            let mut state = self.gate.0.lock().unwrap();
+            state.released = true;
+            self.gate.1.notify_all();
+        }
+        if let Err(error) = self.witness.take().unwrap().join()
+            && !std::thread::panicking()
+        {
+            std::panic::resume_unwind(error);
+        }
+    }
+}
+
+#[test]
+fn delivery_progress_probe_rejects_a_guard_owned_by_the_preparing_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = node(dir.path(), &Account::generate());
+    let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe = DeliveryDuringPreparation::install(&node, observed.clone());
+    let file = new_channel_id();
+    let delivery = node.delivery.lock().unwrap();
+    node.media
+        .store_bytes(file, "probe.bin", b"actual encrypted preparation")
+        .unwrap();
+    drop(delivery);
+    drop(probe);
+    assert_eq!(
+        observed.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a preparing owner retaining delivery must not qualify as independent progress"
+    );
+    assert_eq!(
+        node.media.read(file).unwrap(),
+        b"actual encrypted preparation"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn foreign_signed_file_prefix_prepares_cache_without_holding_delivery() {
     file_result_roundtrip(1).await;
@@ -1090,26 +1209,34 @@ async fn file_result_roundtrip(mode: u8) {
     );
     assert_eq!(fresh.log.lock().unwrap().conversation_len(&file), 0);
     let prepare_observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut preparation_progress = None;
     if mode == 1 || mode == 2 {
         let original = source.log.lock().unwrap().events(&file)[0].clone();
         assert!(original.verify_integrity() && original.verify_signature());
         fresh.log.lock().unwrap().append_durable(original).unwrap();
-        let weak = Arc::downgrade(&fresh);
-        let observed = prepare_observed.clone();
-        fresh.media.before_prepare_for_test(Box::new(move || {
-            let node = weak.upgrade().unwrap();
-            observed.store(
-                if node.delivery.try_lock().is_ok() {
-                    1
-                } else {
-                    2
-                },
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            if mode == 2 {
-                node.runtime_work.close();
-            }
-        }));
+        if mode == 1 {
+            preparation_progress = Some(DeliveryDuringPreparation::install(
+                &fresh,
+                prepare_observed.clone(),
+            ));
+        } else {
+            let weak = Arc::downgrade(&fresh);
+            let observed = prepare_observed.clone();
+            fresh.media.before_prepare_for_test(Box::new(move || {
+                let node = weak.upgrade().unwrap();
+                observed.store(
+                    if node.delivery.try_lock().is_ok() {
+                        1
+                    } else {
+                        2
+                    },
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                if mode == 2 {
+                    node.runtime_work.close();
+                }
+            }));
+        }
     }
     if mode == 3 {
         let original = source.log.lock().unwrap().events(&file)[0].clone();
@@ -1330,6 +1457,7 @@ async fn file_result_roundtrip(mode: u8) {
         );
     }
     if mode == 1 {
+        drop(preparation_progress.take());
         assert_eq!(
             prepare_observed.load(std::sync::atomic::Ordering::SeqCst),
             1,
