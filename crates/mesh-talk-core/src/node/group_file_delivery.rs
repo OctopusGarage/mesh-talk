@@ -8,10 +8,7 @@ use crate::{
 };
 use std::{
     collections::BTreeMap,
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Mutex, atomic::Ordering},
 };
 
 type UploadKey = (EventId, [u8; 32]);
@@ -28,7 +25,7 @@ struct GroupFileUpload {
 #[derive(Default)]
 pub(super) struct GroupFileDelivery {
     gate: tokio::sync::Mutex<()>,
-    scan_cursor: AtomicUsize,
+    scan_cursor: Mutex<Option<i64>>,
     cursor: Mutex<Option<UploadKey>>,
     jobs: Mutex<BTreeMap<UploadKey, GroupFileUpload>>,
 }
@@ -40,23 +37,29 @@ impl Node {
         file: ConversationId,
         manifest: EventId,
         peer: &PublicIdentity,
-    ) -> Option<(Event, super::received_log::ReceivedEntry)> {
+    ) -> Result<Option<(Event, super::received_log::ReceivedEntry)>, LogError> {
         if self.delivery_suspended.load(Ordering::Acquire) {
-            return None;
+            return Ok(None);
         }
-        let row = self
+        let Some(row) = self
             .received_files
             .lock()
             .expect("file rows lock")
             .entry(manifest)?
-            .clone();
-        let decoded = super::files::validated_manifest(&row.plaintext)?;
+        else {
+            return Ok(None);
+        };
+        let Some(decoded) = super::files::validated_manifest(&row.plaintext) else {
+            return Ok(None);
+        };
         if decoded.file_conv() != file
             || self.recipient_expired(&row.plaintext, manifest, row.wall_clock)
         {
-            return None;
+            return Ok(None);
         }
-        let event = self.log.lock().expect("log lock").get(&manifest)?.clone();
+        let Some(event) = self.log.lock().expect("log lock").get(&manifest)? else {
+            return Ok(None);
+        };
         if event.kind != EventKind::FileManifest
             || event.conversation_id != row.conversation
             || event.author.user_id() != row.from
@@ -65,75 +68,98 @@ impl Node {
             || !event.verify_integrity()
             || !event.verify_signature()
         {
-            return None;
+            return Ok(None);
         }
         {
             let store = self.delivery.lock().expect("delivery lock");
             if store.file_erased(row.conversation, manifest)
                 || store.manifest_event_erased(manifest)
             {
-                return None;
+                return Ok(None);
             }
         }
         if self
             .account_suppression
             .lock()
             .expect("suppression lock")
-            .contains(row.conversation, manifest)
+            .contains(row.conversation, manifest)?
             || self
-                .recalled_targets_channel(row.conversation)
-                .contains(&manifest)
-            || self
-                .channel_content_gate(row.conversation)
-                .is_some_and(|ids| !ids.contains(&manifest))
+                .recalls
+                .lock()
+                .expect("recalls lock")
+                .contains(row.conversation, manifest)?
+            || !self.channel_content_visible(row.conversation, manifest)?
         {
-            return None;
+            return Ok(None);
         }
-        let proof = self.historical_author(&peer.ed25519_pub)?;
+        let Some(proof) = self.historical_author(&peer.ed25519_pub) else {
+            return Ok(None);
+        };
         if proof.public() != *peer {
-            return None;
+            return Ok(None);
         }
         {
             let book = self.channels.lock().expect("channels lock");
-            let state = book.state(&row.conversation)?;
-            if !self.channel_identity_is_current(state)
+            let Some(state) = book.state(&row.conversation) else {
+                return Ok(None);
+            };
+            if !self.channel_identity_is_current(state)?
                 || !state.is_accepted_member(&peer.user_id())
                 || !state.members().contains(peer)
                 || (state.owner_account_id().is_some()
                     && state.member_account_id(&peer.user_id()) != proof.account_id().as_deref())
             {
-                return None;
+                return Ok(None);
             }
         }
         // Check signed controls too: a removal can precede the live-book refresh.
         let log = self.log.lock().expect("log lock");
-        let members = super::channel::ChannelBook::projected_members(
+        let Some(members) = super::channel::ChannelBook::projected_members(
             row.conversation,
-            &log.events(&row.conversation),
-        )?;
-        (members.contains(peer) && members.contains(&self.identity.public()))
-            .then_some((event, row))
+            &log.events(&row.conversation)?,
+        ) else {
+            return Ok(None);
+        };
+        Ok(
+            (members.contains(peer) && members.contains(&self.identity.public()))
+                .then_some((event, row)),
+        )
     }
 
     pub(super) fn group_mailbox_peers(&self) -> Vec<Announce> {
-        let members = {
-            let book = self.channels.lock().expect("channels lock");
-            book.channel_ids()
-                .into_iter()
-                .filter_map(|id| book.state(&id))
-                .filter(|state| self.channel_identity_is_current(state))
-                .flat_map(|state| state.recipient_members())
-                .collect::<Vec<_>>()
-        };
-        members
-            .into_iter()
-            .filter(|peer| *peer != self.identity.public())
-            .filter(|peer| self.group_member(peer))
-            .filter_map(|peer| {
-                self.historical_author(&peer.ed25519_pub)
-                    .filter(|proof| proof.public() == peer)
-            })
-            .collect()
+        let selected = (|| -> Result<Vec<Announce>, LogError> {
+            let members = {
+                let book = self.channels.lock().expect("channels lock");
+                let mut members = Vec::new();
+                for id in book.channel_ids() {
+                    if let Some(state) = book.state(&id)
+                        && self.channel_identity_is_current(state)?
+                    {
+                        members.extend(state.recipient_members());
+                    }
+                }
+                members
+            };
+            let mut peers = Vec::new();
+            for peer in members {
+                if peer != self.identity.public()
+                    && self.group_member(&peer)?
+                    && let Some(proof) = self
+                        .historical_author(&peer.ed25519_pub)
+                        .filter(|proof| proof.public() == peer)
+                {
+                    peers.push(proof);
+                }
+            }
+            Ok(peers)
+        })();
+        match selected {
+            Ok(peers) => peers,
+            Err(error) => {
+                log::warn!("Group mailbox discovery deferred after storage failure: {error}");
+                Vec::new()
+            }
+        }
     }
 
     /// Reserve the same verified-save evidence as private files, without a DM receipt.
@@ -166,51 +192,55 @@ impl Node {
     }
 
     /// Rebuild bounded work from the durable group rows, including older sends.
-    fn refill_group_file_delivery(&self) {
-        let offset = self
+    fn refill_group_file_delivery(&self) -> Result<(), LogError> {
+        let after = *self
             .group_file_delivery
             .scan_cursor
-            .fetch_add(128, Ordering::Relaxed);
-        let rows = {
-            let rows = self.received_files.lock().expect("file rows lock");
-            let mut hosts = rows.conversations();
-            hosts.sort_unstable_by_key(|host| *host.as_bytes());
-            let total: usize = hosts.iter().map(|host| rows.entries_ref(host).len()).sum();
-            if total == 0 {
-                return;
-            }
-            let start = offset % total;
-            let entries = || hosts.iter().flat_map(|host| rows.entries_ref(host));
-            entries()
-                .skip(start)
-                .chain(entries().take(start))
-                .take(128)
-                .filter(|row| row.from == self.user_id())
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        for row in rows {
-            if let Some(manifest) = super::files::validated_manifest(&row.plaintext) {
-                self.queue_group_file_delivery(manifest.file_conv(), row.event_id);
+            .lock()
+            .expect("group file scan lock");
+        let page = self
+            .received_files
+            .lock()
+            .expect("file rows lock")
+            .scan_page(
+                None,
+                after,
+                super::transcript_repository::TranscriptPageLimit::default(),
+            )?;
+        for row in page.rows {
+            if row.from == self.user_id()
+                && let Some(manifest) = super::files::validated_manifest(&row.plaintext)
+            {
+                self.queue_group_file_delivery(manifest.file_conv(), row.event_id)?;
             }
         }
+        *self
+            .group_file_delivery
+            .scan_cursor
+            .lock()
+            .expect("group file scan lock") = page.next;
+        Ok(())
     }
 
-    pub(super) fn queue_group_file_delivery(&self, file: ConversationId, manifest: EventId) {
-        let original = self.log.lock().expect("log lock").get(&manifest).cloned();
+    pub(super) fn queue_group_file_delivery(
+        &self,
+        file: ConversationId,
+        manifest: EventId,
+    ) -> Result<(), LogError> {
+        let original = self.log.lock().expect("log lock").get(&manifest)?;
         let Some(original) = original.filter(|event| {
             event.kind == EventKind::FileManifest
                 && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
         }) else {
-            return;
+            return Ok(());
         };
         let members = {
             let book = self.channels.lock().expect("channels lock");
             let Some(state) = book.state(&original.conversation_id) else {
-                return;
+                return Ok(());
             };
-            if !self.channel_identity_is_current(state) {
-                return;
+            if !self.channel_identity_is_current(state)? {
+                return Ok(());
             }
             state.recipient_members()
         };
@@ -225,7 +255,7 @@ impl Node {
                 recipient,
                 retry_after: None,
             };
-            if !self.group_file_custody_allowed(&job) {
+            if !self.group_file_custody_allowed(&job)? {
                 continue;
             }
             let mut jobs = self
@@ -242,6 +272,7 @@ impl Node {
         if added {
             self.file_pull_notify.notify_one();
         }
+        Ok(())
     }
 
     pub(super) fn group_file_work_pending(&self) -> bool {
@@ -253,17 +284,21 @@ impl Node {
             .is_empty()
     }
 
-    fn group_file_custody_allowed(&self, job: &GroupFileUpload) -> bool {
-        let Some((original, _)) = self.group_file_offer(job.file, job.manifest, &job.recipient)
+    fn group_file_custody_allowed(&self, job: &GroupFileUpload) -> Result<bool, LogError> {
+        let Some((original, _)) = self.group_file_offer(job.file, job.manifest, &job.recipient)?
         else {
-            return false;
+            return Ok(false);
         };
         if original.author.ed25519_pub() != &self.identity.public().ed25519_pub
             || self
                 .file_progress(job.file)
+                .map_err(|error| match error {
+                    super::NodeError::Log(error) => error,
+                    other => LogError::Serialization(other.to_string()),
+                })?
                 .is_none_or(|p| p.done != p.total)
         {
-            return false;
+            return Ok(false);
         }
         // A new member's grant cannot release a pre-invitation file. Reuse the
         // existing recipient projection for its exact signed manifest.
@@ -271,17 +306,19 @@ impl Node {
             .sync_store(&job.recipient)
             .lock()
             .expect("projection lock")
-            .authorized_event_ids(&original.conversation_id)
+            .authorized_event_ids(&original.conversation_id)?
             .contains(&job.manifest)
         {
-            return false;
+            return Ok(false);
         }
         // Custody of ciphertext may precede approval. An explicit refusal or
         // verified recipient completion stops further deposits for this device.
-        self.file_consent
+        Ok(self
+            .file_consent
             .lock()
             .expect("file consent lock")
-            .received_control_for(job.manifest, &job.recipient)
+            .received_control_for(job.manifest, &job.recipient)?
+            .as_ref()
             .and_then(Decision::open)
             .is_none_or(|decision| {
                 decision.file == job.file
@@ -289,7 +326,17 @@ impl Node {
                     && decision.recipient == job.recipient
                     && decision.decision != ReceiveDecision::Declined
                     && decision.completion.is_none()
-            })
+            }))
+    }
+
+    fn group_file_custody_current(&self, job: &GroupFileUpload) -> bool {
+        match self.group_file_custody_allowed(job) {
+            Ok(current) => current,
+            Err(error) => {
+                log::warn!("Group file custody deferred after storage failure: {error}");
+                false
+            }
+        }
     }
 
     /// One bounded pass; mailbox reconciliation resumes only missing signed chunks.
@@ -299,7 +346,10 @@ impl Node {
         let Ok(_work) = self.group_file_delivery.gate.try_lock() else {
             return;
         };
-        self.refill_group_file_delivery();
+        if let Err(error) = self.refill_group_file_delivery() {
+            log::warn!("Group file scan deferred after storage failure: {error}");
+            return;
+        }
         let after = *self
             .group_file_delivery
             .cursor
@@ -333,7 +383,8 @@ impl Node {
                     .cursor
                     .lock()
                     .expect("group file cursor lock") = Some(key);
-                if !self.group_file_custody_allowed(&job) {
+                let allowed = match self.group_file_custody_allowed(&job) { Ok(allowed) => allowed, Err(error) => { log::warn!("Group file retry deferred after storage failure: {error}"); continue; } };
+                if !allowed {
                     self.group_file_delivery
                         .jobs
                         .lock()
@@ -356,7 +407,7 @@ impl Node {
                                 super::delivery_runtime::RELAY_EXCHANGE_TIMEOUT,
                                 async {
                                     if !self.relay_send_allowed(&relay.public)
-                                        || !self.group_file_custody_allowed(job)
+                                        || !self.group_file_custody_current(job)
                                     {
                                         return;
                                     }
@@ -386,7 +437,7 @@ impl Node {
                                                 mailbox,
                                             );
                                         let current = || {
-                                            self.group_file_custody_allowed(job)
+                                            self.group_file_custody_current(job)
                                                 && self.relay_send_allowed(&relay.public)
                                                 && self
                                                     .roster
@@ -415,13 +466,12 @@ impl Node {
                                                 return;
                                             }
                                         }
-                                        let final_chunk = self
+                                        let chunks = match self
                                             .log
                                             .lock()
                                             .expect("log lock")
-                                            .events(&job.file)
-                                            .last()
-                                            .map(|event| event.id);
+                                            .events(&job.file) { Ok(chunks) => chunks, Err(error) => { log::warn!("Group file completion deferred after storage failure: {error}"); return; } };
+                                        let final_chunk = chunks.last().map(|event| event.id);
                                         if let Some((_, outer)) = progress
                                             .uploaded()
                                             .iter()

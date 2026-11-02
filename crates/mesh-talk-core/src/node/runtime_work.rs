@@ -146,7 +146,7 @@ mod tests {
         let task = tokio::spawn(permit.track(inner));
         work.close();
         task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
         assert!(
             result.await.unwrap(),
             "inner capture outlived admission permit"
@@ -164,7 +164,7 @@ mod tests {
         let task = tokio::spawn(future);
         work.close();
         task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
         tokio::time::timeout(Duration::from_secs(1), work.drain())
             .await
             .unwrap();
@@ -222,6 +222,143 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!finished_early);
+        });
+    }
+}
+
+/// Blocking captures and undelivered results have the same lifetime contract as
+/// TrackedFuture: their resources are destroyed before admission is released.
+struct BlockingWork<F> {
+    work: Option<F>,
+    permit: Option<WorkPermit>,
+}
+
+pub(super) struct TrackedValue<T> {
+    value: Option<T>,
+    permit: Option<WorkPermit>,
+}
+
+impl<T> TrackedValue<T> {
+    pub(super) fn into_inner(mut self) -> T {
+        self.value.take().expect("blocking value present")
+    }
+}
+
+impl<T> Drop for TrackedValue<T> {
+    fn drop(&mut self) {
+        drop(self.value.take());
+        drop(self.permit.take());
+    }
+}
+
+impl<F> Drop for BlockingWork<F> {
+    fn drop(&mut self) {
+        drop(self.work.take());
+        drop(self.permit.take());
+    }
+}
+
+impl WorkPermit {
+    pub(super) fn spawn_blocking<T: Send + 'static>(
+        self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> tokio::task::JoinHandle<TrackedValue<T>> {
+        let mut owner = BlockingWork {
+            work: Some(work),
+            permit: Some(self),
+        };
+        tokio::task::spawn_blocking(move || {
+            let value = owner.work.take().expect("blocking work present")();
+            TrackedValue {
+                value: Some(value),
+                permit: owner.permit.take(),
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod blocking_result_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Resource(Arc<AtomicBool>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceled_successful_blocking_output_drops_resource_before_completion() {
+        let work = Arc::new(RuntimeWork::default());
+        let permit = work.admit().unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let resource = Resource(dropped.clone());
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let task = permit.spawn_blocking(move || {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            resource
+        });
+        let caller = tokio::spawn(async move { task.await.unwrap().into_inner() });
+        started.await.unwrap();
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        work.close();
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), work.drain())
+            .await
+            .unwrap();
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "undelivered output outlived admission"
+        );
+    }
+}
+
+#[cfg(test)]
+mod queued_blocking_owner_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Capture(Arc<AtomicBool>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    #[test]
+    fn canceled_queued_blocking_owner_drops_captures_before_admission() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+            });
+            started.await.unwrap();
+            let work = Arc::new(RuntimeWork::default());
+            let permit = work.admit().unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let capture = Capture(dropped.clone());
+            let task = permit.spawn_blocking(move || {
+                let _capture = capture;
+                panic!("canceled queued work must never run");
+            });
+            task.abort();
+            work.close();
+            release.send(()).unwrap();
+            occupied.await.unwrap();
+            assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+            tokio::time::timeout(std::time::Duration::from_secs(3), work.drain())
+                .await
+                .unwrap();
+            assert!(dropped.load(Ordering::SeqCst));
         });
     }
 }

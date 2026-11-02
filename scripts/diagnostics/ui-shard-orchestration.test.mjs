@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -72,6 +72,26 @@ test("desktop browser burst waits for Health while Linux starts independently", 
   assert.doesNotMatch(job("linux"), /needs:/);
 });
 
+test("HTML reports require all four current-attempt shards for every admitted OS", () => {
+  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  const complete = { desktop: "success", platforms };
+  assert.equal(renderReports(complete).status, 0);
+  for (const os of platforms) {
+    const partial = renderReports({ ...complete, missing: [`${os}-2`, `${os}-3`, `${os}-4`] });
+    assert.notEqual(partial.status, 0, `${os} accepted only one shard`);
+  }
+  assert.notEqual(renderReports({ ...complete, attempt: "2" }).status, 0, "another attempt cannot satisfy current artifacts");
+});
+
+test("HTML presentation never substitutes for successful producer acceptance", () => {
+  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  for (const producer of ["LINUX", "DESKTOP"]) {
+    for (const result of ["failure", "cancelled", "skipped", ""]) {
+      assert.notEqual(gate("Require all full Chromium shards", { LINUX: "success", DESKTOP: "success", [producer]: result }), 0, `accepted ${producer} ${result}`);
+    }
+  }
+  assert.notEqual(renderReports({ desktop: "success", platforms, renderExit: "1" }).status, 0);
+});
 
 // GitHub documents that reusable workflows inherit the caller's github context:
 // https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
@@ -140,12 +160,12 @@ test("Firefox core runs on ordinary candidates and the final gate requires its r
   }
 });
 
-function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", attempt = "3", renderExit = "0" } = {}) {
+function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0" } = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-inventory-"));
   try {
     mkdirSync(path.join(directory, "frontend"));
     for (const os of platforms) for (const shard of [1, 2, 3, 4]) {
-      if (`${os}-${shard}` === omit) continue;
+      if (`${os}-${shard}` === omit || missing.includes(`${os}-${shard}`)) continue;
       const blob = path.join(directory, "target", "ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
       mkdirSync(blob, { recursive: true });
       writeFileSync(path.join(blob, `report-${shard}.zip`), "actual shard blob placeholder");

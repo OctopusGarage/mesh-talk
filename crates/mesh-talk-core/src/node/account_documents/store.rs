@@ -28,7 +28,7 @@ const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
 // These are local encrypted-index limits, independent of document wire quotas.
 const MAX_LOCAL_ROW: usize = 12 * 1024 * 1024;
-const MAX_LOCAL_FRONTIER: usize = 131_072;
+pub(in crate::node) const MAX_LOCAL_FRONTIER: usize = 131_072;
 const MAX_LOCAL_RECEIPTS: usize = 32 * 1024 * 1024;
 const MAX_COMPACT_INDEX: usize = 112 * 1024 * 1024;
 const INDEX_HEADER: usize = 6 + crate::storage::encryption::SALT_SIZE;
@@ -195,7 +195,38 @@ fn scope_contains(
 }
 
 impl AccountDocumentStore {
+    #[cfg(test)]
     pub(in crate::node) fn open(
+        dir: &Path,
+        password: &str,
+        account: &[u8; 32],
+    ) -> Result<Self, LogError> {
+        Self::open_inner(None, dir, password, account)
+    }
+    /// Authenticate the legacy owner before the first shared SQL publication.
+    /// Warm opens already retain that publication and avoid this migration-only
+    /// validation pass, including its standalone blob inventory.
+    pub(in crate::node) fn authenticate_legacy(
+        profile: &crate::storage::profile::context::ProfileStorage,
+        dir: &Path,
+        password: &str,
+        account: &[u8; 32],
+    ) -> Result<(), LogError> {
+        if profile.participant_database().is_none() {
+            drop(Self::open_inner(None, dir, password, account)?);
+        }
+        Ok(())
+    }
+    pub(in crate::node) fn open_profile(
+        profile: std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
+        dir: &Path,
+        password: &str,
+        account: &[u8; 32],
+    ) -> Result<Self, LogError> {
+        Self::open_inner(Some(profile), dir, password, account)
+    }
+    fn open_inner(
+        profile: Option<std::sync::Arc<crate::storage::profile::context::ProfileStorage>>,
         dir: &Path,
         password: &str,
         account: &[u8; 32],
@@ -225,31 +256,35 @@ impl AccountDocumentStore {
         }
         // This namespace belongs exclusively to account documents. Other media
         // stores keep their own recovery policy and are never scanned here.
-        match std::fs::read_dir(blob_root.join("media")) {
-            Ok(entries) => {
-                for (i, entry) in entries.enumerate() {
-                    if i >= MAX_MEDIA_ENTRIES {
-                        return Err(corrupt());
-                    }
-                    let entry = entry.map_err(LogError::Io)?;
-                    if entry.file_type().map_err(LogError::Io)?.is_file()
-                        && entry.file_name().to_str().is_some_and(|name| {
-                            name.strip_suffix(".bin.part")
-                                .is_some_and(|stem| hex(stem, 64))
-                        })
-                    {
-                        std::fs::remove_file(entry.path()).map_err(LogError::Io)?;
+        if profile.is_none() {
+            match std::fs::read_dir(blob_root.join("media")) {
+                Ok(entries) => {
+                    for (i, entry) in entries.enumerate() {
+                        if i >= MAX_MEDIA_ENTRIES {
+                            return Err(corrupt());
+                        }
+                        let entry = entry.map_err(LogError::Io)?;
+                        if entry.file_type().map_err(LogError::Io)?.is_file()
+                            && entry.file_name().to_str().is_some_and(|name| {
+                                name.strip_suffix(".bin.part")
+                                    .is_some_and(|stem| hex(stem, 64))
+                            })
+                        {
+                            std::fs::remove_file(entry.path()).map_err(LogError::Io)?;
+                        }
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(LogError::Io(e)),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(LogError::Io(e)),
         }
-        let media = MediaStore::open(
-            &dir.join(format!("account-document-blobs-{id}")),
-            &scoped,
-            &id,
-        )
+        let indexed = profile.is_some();
+        let media = match profile {
+            Some(profile) => {
+                MediaStore::open_profile(profile, &blob_root, &scoped, &id, Some(MAX_MEDIA_ENTRIES))
+            }
+            None => MediaStore::open(&blob_root, &scoped, &id),
+        }
         .map_err(LogError::Io)?;
         let journal_bytes =
             INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
@@ -350,11 +385,30 @@ impl AccountDocumentStore {
                 store.index_personal_control(doc.meta.clone(), control);
             }
         }
-        store
-            .media
-            .prune_unreferenced(&store.live())
-            .map_err(LogError::Io)?;
+        if indexed {
+            store.media.schedule_gc().map_err(LogError::Io)?;
+        } else {
+            store
+                .media
+                .prune_unreferenced(&store.live())
+                .map_err(LogError::Io)?;
+        }
+
         Ok(store)
+    }
+    pub(in crate::node) fn media_maintenance_pending(&self) -> Result<bool, LogError> {
+        self.media.gc_pending().map_err(LogError::Io)
+    }
+    /// Caller holds this document owner while a bounded physical cleanup turn
+    /// checks its current references and removes orphaned bytes.
+    pub(in crate::node) fn maintain_media(&self) -> Result<(), LogError> {
+        self.media
+            .gc_step(|file| {
+                Ok(self.current.values().any(|meta| {
+                    !meta.tombstone && meta.content_len > 0 && meta.content_hash == *file.as_bytes()
+                }))
+            })
+            .map_err(LogError::Io)
     }
     #[cfg(test)]
     pub(super) fn remove_blob_for_test(&self, hash: [u8; 32]) {
@@ -374,6 +428,45 @@ impl AccountDocumentStore {
     }
     pub(super) fn meta(&self, key: &AccountDocumentKey) -> Option<AccountDocumentMeta> {
         self.current.get(key).cloned()
+    }
+    pub(super) fn reaction_metadata_page(
+        &self,
+        peer: &str,
+        target: &str,
+        after: Option<&AccountDocumentKey>,
+    ) -> Result<Vec<AccountDocumentMeta>, LogError> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let first = AccountDocumentKey::DmReaction {
+            peer_account: peer.into(),
+            target: target.into(),
+            actor_account: String::new(),
+            emoji: String::new(),
+        };
+        if after.is_some_and(|key| !matches!(key, AccountDocumentKey::DmReaction {peer_account, target: selected, ..} if peer_account==peer && selected==target)) {
+            return Err(LogError::InvalidPageBudget);
+        }
+        let lower = after.map_or(Included(&first), Excluded);
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        for (key, meta) in self.current.range((lower, Unbounded)) {
+            if !matches!(key, AccountDocumentKey::DmReaction {peer_account, target: selected, ..} if peer_account==peer && selected==target)
+            {
+                break;
+            }
+            let required = (meta.content_len as usize)
+                .checked_mul(3)
+                .and_then(|n| n.checked_add(1024))
+                .ok_or(LogError::RepositoryCounterExhausted)?;
+            if out.len() == 64 || bytes + required > 8 * 1024 * 1024 {
+                if out.is_empty() {
+                    return Err(LogError::PageBudgetTooSmall { required });
+                }
+                break;
+            }
+            bytes += required;
+            out.push(meta.clone());
+        }
+        Ok(out)
     }
     pub(super) fn list(
         &self,
@@ -1315,6 +1408,7 @@ mod tests {
         );
         node.log.lock().unwrap().append(genesis).unwrap();
         node.process_channel(group);
+        super::super::tests::settle_group_metadata(&node, group);
         node.publish_account_group_access(&mut None);
         let document = node.account_document(&control).unwrap().unwrap();
         store
@@ -1559,6 +1653,7 @@ mod tests {
         );
         node.log.lock().unwrap().append_durable(genesis).unwrap();
         node.process_channel(group);
+        super::super::tests::settle_group_metadata(&node, group);
         node.publish_account_group_access_for(group);
         let mut head = node
             .group_control_heads(group)

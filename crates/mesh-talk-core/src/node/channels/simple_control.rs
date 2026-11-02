@@ -72,7 +72,10 @@ impl Node {
                 (EventKind::ChannelRename, name.into_bytes())
             }
             SimpleControl::HistoryPolicy(policy) => {
-                if super::super::join_history::policy(&log.events(&group)) == policy {
+                if super::super::join_history::policy(
+                    &log.events(&group)?.iter().collect::<Vec<_>>(),
+                ) == policy
+                {
                     return Ok(None);
                 }
                 (

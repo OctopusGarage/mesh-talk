@@ -233,6 +233,55 @@ keys. These relay-runtime budgets are independent of the client Node TCP budget;
 large graphs of slow or unreachable peers can still lengthen a reconciliation
 round.
 
+## Indexed relay runtime and resource bounds
+
+The dedicated CLI serves plain mailboxes, named bridges/gateways, pinned
+federation and approved-network federation through one encrypted indexed store
+and shared endpoint. Normal reopen does not load retained ciphertext bodies or
+all historical IDs. Legacy import is a separate authenticated migration; the
+participant runtime and collecting SDK APIs keep their separate storage behavior.
+
+One endpoint shares four nonwaiting Have reservations, each with 32 MiB logical
+accounting, including vector-to-set overlap and retained use. Saturation returns
+local retryable overload rather than waiting with partial reservations. The
+128 MiB aggregate is a Have accounting budget, not a measured process RSS cap.
+Federation staging admits at most 512 outstanding sessions, 262,144 entries and
+64 MiB accounted storage across both remote inventory and selected local digests;
+current direction limits remain 256 inbound and eight outbound. Stale sessions
+remain charged until bounded cleanup. Each federation exchange retains its
+absolute 30-second deadline across pages and version attempts. Existing frame,
+Have aggregate, round and file-burst limits remain unchanged.
+
+Missing fingerprints request scoped bounded preparation. Queue saturation leaves
+an optional cache miss for a later probe; it does not initiate global inventory
+preparation. Explicit federation preparation advances in bounded background
+passes: up to 512 raw producer rows and, separately, 512 retained IDs hashed.
+These limits do not combine the other bounded maintenance classes into one
+512-row budget. Empty filtered inventory continuations are not end-of-inventory. Local
+readiness, capacity and storage failures retain typed causes in the runtime and
+do not trigger older-version negotiation. Only the existing genuine unsupported
+protocol outcome permits compatibility fallback; failed network membership never
+downgrades to pin-only trust. An earlier valid origin can invalidate a previously
+sent view, requiring a subsequent bounded exchange.
+
+The single paced supervisor owns session and staging cleanup, retention, hashes,
+discovery and gateway cancellation. It stops admission on faulted storage and
+uses the existing service manager's throttled restart policy. Archive-only
+cleanup failures retain their cause and an independently paced retry intent;
+they cannot block publication staging or normal role, digest and session work.
+Identical persistent error diagnostics are not repeatedly rewritten. Initial
+publication can leave retryable archive cleanup pending, while provenance and
+authoritative database failures remain explicit. A separate physical class
+reclaims already-free pages in capped background slices and completes eligible
+main-file truncation through PASSIVE checkpoints. It does not delete live mail
+or change retention. Reader-pinned or incomplete checkpoints retain independently
+paced work; ordinary traffic and cleanup continue. Actual checkpoint work can
+exceed the page-step budget, and retained WAL space may remain allocated. The
+[storage contract](ARCHITECTURE.md#storage-replay-and-query-budgets) defines
+transaction, expiry and shutdown semantics. Functional fast-KDF tests and Unix
+joined-stop tests do not establish production unlock performance, native Windows
+hard-stop recovery or physical-network discovery acceptance.
+
 ## Failure behavior and verification
 
 Clients retain direct delivery and order relay alternatives. A failed relay can

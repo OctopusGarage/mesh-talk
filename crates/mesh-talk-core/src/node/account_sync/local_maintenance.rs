@@ -7,6 +7,7 @@ pub(super) struct LocalMaintenance {
     custody: Option<(EventId, String)>,
     inventory: Option<ConversationId>,
     profile: Option<String>,
+    profile_projection: Option<AccountDocumentKey>,
     personal: Option<DocumentConversation>,
     personal_retry_at: Option<std::time::Instant>,
     access: Option<ConversationId>,
@@ -53,6 +54,14 @@ impl LocalMaintenance {
         node.publish_group_inventory(&mut self.inventory);
         if let Err(error) = node.publish_public_profile_documents_page(&mut self.profile) {
             log::debug!("contact profile publication deferred: {error}");
+        }
+        {
+            let _commit = node.account_sync_commit.lock().expect("sync commit mutex");
+            if let Err(error) =
+                node.project_public_profile_documents_page(&mut self.profile_projection)
+            {
+                log::debug!("contact profile projection deferred: {error}");
+            }
         }
         let data = select_data.then(|| {
             let turn = node.account_group_data_work(self.operation_data);

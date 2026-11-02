@@ -52,12 +52,22 @@ test("Codecov receives the frontend and Rust coverage produced by CI", () => {
 test("native workspace test passes collect and upload their own platform coverage", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const steps = workflow.split(/^      - /m);
-  const install = steps.find(value => value.startsWith("name: Install cargo-llvm-cov\n"));
+  const install = steps.find(value => value.startsWith("name: Install cargo-llvm-cov and cargo-nextest\n"));
   const native = steps.find(value => value.startsWith("name: Test + coverage (macOS)\n"));
   const upload = steps.find(value => value.startsWith("name: Upload coverage to Codecov\n"));
   assert.ok(install && native && upload);
   assert.doesNotMatch(install, /if:/, "every native test platform needs the coverage tool");
-  assert.match(native, /cargo llvm-cov --workspace --lcov --output-path lcov\.info/, "the existing native test pass must produce coverage");
+  assert.match(install, /cargo-llvm-cov@0\.8\.7,cargo-nextest@0\.9\.148/);
+  for (const platform of ["macOS", "Linux"]) {
+    const pass = steps.find(value => value.startsWith(`name: Test + coverage (${platform})\n`));
+    assert.ok(pass);
+    assert.match(pass, /cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default/);
+    assert.match(pass, /cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk/);
+    assert.match(pass, /cargo llvm-cov report --lcov --output-path lcov\.info/);
+    assert.match(pass, /set -e -o pipefail/);
+    assert.match(pass, /run_coverage 2>&1 \| tee/);
+  }
+  assert.match(native, /NEXTEST_TEST_THREADS: 4/);
   assert.deepEqual([...native.matchAll(/cargo test --workspace([^\n]*)/g)].map(match => match[1].trim()), ["--doc"], "preserve doctests without repeating unit/integration suites");
   const windows = readFileSync(new URL("../../.github/workflows/windows-workspace.yml", import.meta.url), "utf8");
   assert.match(windows, /cargo test --workspace --doc --locked/);

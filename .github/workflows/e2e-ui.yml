@@ -185,7 +185,10 @@ jobs:
             available=true
             for shard in 1 2 3 4; do
               artifact="../target/ui-reports/playwright-ui-$os-$shard-${{ github.run_attempt }}"
-              cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/" || available=false
+              if ! cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/"; then
+                echo "::error::Missing $os shard $shard blobs for this run attempt."
+                available=false
+              fi
             done
             if [ "$available" != true ]; then
               status=1

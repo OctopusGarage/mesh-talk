@@ -70,14 +70,14 @@ pub(super) fn validate_parent_view(
     use std::collections::{HashMap, HashSet};
     validate_common(operation, witness, event)?;
     let group = event.conversation_id;
-    let mut ancestors: HashMap<EventId, &Event> = HashMap::new();
+    let mut ancestors: HashMap<EventId, Event> = HashMap::new();
     let mut pending = witness.parents.clone();
     while let Some(id) = pending.pop() {
         if ancestors.contains_key(&id) {
             continue;
         }
         let parent = log
-            .get(&id)
+            .get(&id)?
             .ok_or_else(|| invalid("self-control causal parent missing"))?;
         if parent.conversation_id != group || parent.id == event.id {
             return Err(invalid("invalid self-control causal parent"));
@@ -85,7 +85,7 @@ pub(super) fn validate_parent_view(
         pending.extend(parent.parents.iter().copied());
         ancestors.insert(id, parent);
     }
-    let events: Vec<_> = ancestors.values().copied().collect();
+    let events: Vec<_> = ancestors.values().collect();
     let projection = ChannelBook::project_membership(group, &events);
     if let Some(operation) = operation {
         let mut source = Node::public_account_group_source(
@@ -290,7 +290,7 @@ mod tests {
         }
         let projection = ChannelBook::project_membership(
             event.conversation_id,
-            &log.events(&event.conversation_id),
+            &log.events(&event.conversation_id).unwrap(),
         );
         assert!(
             projection
@@ -342,7 +342,7 @@ mod tests {
             vec![],
         );
         log.append_durable(other_leave.clone()).unwrap();
-        let projection = ChannelBook::project_membership(group, &log.events(&group));
+        let projection = ChannelBook::project_membership(group, &log.events(&group).unwrap());
         let current =
             Node::public_account_group_source(group, &projection, &member.public(), &witness.own)
                 .unwrap();
@@ -379,7 +379,7 @@ mod tests {
             .encode(),
         );
         log.append_durable(reinvite.clone()).unwrap();
-        let rejoined = ChannelBook::project_membership(group, &log.events(&group));
+        let rejoined = ChannelBook::project_membership(group, &log.events(&group).unwrap());
         let new_source =
             Node::public_account_group_source(group, &rejoined, &member.public(), &witness.own)
                 .expect("owner snapshot causally re-invites the physical member");
@@ -483,7 +483,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(log.get(&event.id), Some(&event));
+        assert_eq!(log.get(&event.id).unwrap(), Some(event.clone()));
         assert_eq!(store.pending_transactions()[0].id(), event.id);
         drop((store, log, ratchet, sent, received, terminal));
         let mut store = open();
@@ -513,6 +513,7 @@ mod tests {
         assert!(store.pending_transactions().is_empty());
         assert_eq!(
             log.events(&reference.group)
+                .unwrap()
                 .into_iter()
                 .filter(|candidate| candidate.kind == EventKind::ChannelLeave)
                 .map(|candidate| candidate.id)

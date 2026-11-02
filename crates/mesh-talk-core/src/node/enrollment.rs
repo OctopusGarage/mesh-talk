@@ -318,6 +318,8 @@ impl EnrolledDevice {
         {
             return Err(invalid());
         }
+        let lease = crate::storage::profile::ProfileStorageLease::acquire(directory)
+            .map_err(|e| NodeError::Log(e.into()))?;
         let secrets = zeroize::Zeroizing::new(self.identity.secret_bytes());
         let identity = DeviceIdentity::from_secret_bytes(secrets.0, secrets.1);
         let account = Account::from_secret_bytes_with_created_at(
@@ -328,16 +330,19 @@ impl EnrolledDevice {
         let (dm, _) = mpsc::unbounded_channel();
         let (channel, _) = mpsc::unbounded_channel();
         let (file, _) = mpsc::unbounded_channel();
-        let node = Node::open_with_account(
-            identity,
-            account,
-            Arc::new(Mutex::new(Roster::default())),
-            dm,
-            channel,
-            file,
-            &directory.join("events.log"),
-            &directory.join("sent.log"),
-            password,
+        let node = Node::open_with_profile_lease(
+            lease,
+            super::NodeOpenRequest {
+                identity,
+                account,
+                roster: Arc::new(Mutex::new(Roster::default())),
+                incoming: dm,
+                channel_incoming: channel,
+                file_incoming: file,
+                log_path: &directory.join("messages.log"),
+                sent_path: &directory.join("sent.log"),
+                password,
+            },
         )
         .map_err(NodeError::Log)?;
         node.account_access
@@ -379,6 +384,7 @@ impl EnrolledDevice {
         .map_err(|e| NodeError::Channel(e.to_string()))?;
         account_keystore::save(&directory.join("account.keystore"), password, &self.account)
             .map_err(|e| NodeError::Channel(e.to_string()))?;
+        node.close_profile().map_err(NodeError::Log)?;
         Ok(())
     }
 }
@@ -396,101 +402,127 @@ mod tests {
 
     #[tokio::test]
     async fn device_only_enrollment_persists_validated_source_without_target_account() {
-        let source_dir = tempfile::tempdir().unwrap();
-        let stage = tempfile::tempdir().unwrap();
-        let (d, _) = mpsc::unbounded_channel();
-        let (c, _) = mpsc::unbounded_channel();
-        let (f, _) = mpsc::unbounded_channel();
-        let source = Node::open_with_account(
-            DeviceIdentity::generate(),
-            Account::generate(),
-            Arc::new(Mutex::new(Roster::default())),
-            d,
-            c,
-            f,
-            &source_dir.path().join("events.log"),
-            &source_dir.path().join("sent.log"),
-            "pw",
-        )
-        .unwrap();
-        source.set_profile_display_name("Source nickname").unwrap();
-        source
-            .set_avatar(Some(vec![7; super::super::profile::MAX_AVATAR_BYTES]))
-            .await
-            .unwrap();
-        let expected = source
-            .publish_account_access_if(b"opaque credential bytes".to_vec(), |commit| commit())
-            .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let announce = source.signed_announce("Source nickname", addr.port());
-        source
-            .configure_privacy(
-                source_dir.path(),
+        for include_history in [false, true] {
+            let source_dir = tempfile::tempdir().unwrap();
+            let stage = tempfile::tempdir().unwrap();
+            let (d, _) = mpsc::unbounded_channel();
+            let (c, _) = mpsc::unbounded_channel();
+            let (f, _) = mpsc::unbounded_channel();
+            let source = Node::open_with_account(
+                DeviceIdentity::generate(),
+                Account::generate(),
+                Arc::new(Mutex::new(Roster::default())),
+                d,
+                c,
+                f,
+                &source_dir.path().join("events.log"),
+                &source_dir.path().join("sent.log"),
                 "pw",
-                &announce,
-                Arc::new(DiscoveryVisibility::new(true)),
             )
             .unwrap();
-        let selected = EnrollmentSource::from_announce(announce, addr.ip()).unwrap();
-        let code = source.start_linking();
-        let serving = source.clone();
-        let task = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (socket, _) = listener.accept().await.unwrap();
-                let channel = serving.privacy_accept(socket).await.unwrap();
-                assert!(channel.pairing_only());
-                serving.serve_connection(channel).await;
-            }
-        });
-        let device = DeviceIdentity::generate();
-        let expected_device = device.public();
-        let enrollment = DeviceEnrollment::new(device);
-        let wrong = if let Some(rest) = code.strip_prefix('0') {
-            format!("1{rest}")
-        } else {
-            format!("0{}", &code[1..])
-        };
-        assert!(enrollment.enroll(&selected, &wrong, false).await.is_err());
-        assert!(std::fs::read_dir(stage.path()).unwrap().next().is_none());
-        assert_eq!(
-            source.linked_devices().len(),
-            1,
-            "wrong code cannot enroll an accountless device"
-        );
-        let enrolled = enrollment.enroll(&selected, &code, false).await.unwrap();
-        assert_eq!(enrolled.account_id(), source.account_id());
-        assert_eq!(enrolled.access_snapshot(), &expected);
-        assert_eq!(enrolled.profile().unwrap().display_name, "Source nickname");
-        assert_eq!(
-            enrolled.profile().unwrap().avatar.as_ref().unwrap().len(),
-            super::super::profile::MAX_AVATAR_BYTES
-        );
-        assert!(std::fs::read_dir(stage.path()).unwrap().next().is_none());
-        enrolled.persist_profile(stage.path(), "pw").unwrap();
-        assert_eq!(
-            crate::identity::keystore::load(&stage.path().join("identity.keystore"), "pw")
-                .unwrap()
-                .public(),
-            expected_device
-        );
-        let account =
-            crate::identity::account_keystore::load(&stage.path().join("account.keystore"), "pw")
+            source.set_profile_display_name("Source nickname").unwrap();
+            source
+                .set_avatar(Some(vec![7; super::super::profile::MAX_AVATAR_BYTES]))
+                .await
                 .unwrap();
-        assert_eq!(account.account_id(), source.account_id());
-        assert_eq!(account.created_at_ms(), source.account.created_at_ms());
-        let devices = super::super::account_devices::AccountDevices::open(
-            &super::super::account_devices::file_path(stage.path(), &account.account_id()),
-            "pw",
-            &account.account_id(),
-        )
-        .unwrap();
-        assert_eq!(devices.devices().len(), 2);
-        assert!(
-            enrolled.persist_profile(stage.path(), "pw").is_err(),
-            "must refuse overwriting existing staged material"
-        );
-        task.await.unwrap();
+            let expected = source
+                .publish_account_access_if(b"opaque credential bytes".to_vec(), |commit| commit())
+                .unwrap();
+            source
+                .enqueue_to_account(
+                    &source.account_id(),
+                    b"history transferred into the standard participant source",
+                    None,
+                )
+                .await
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let announce = source.signed_announce("Source nickname", addr.port());
+            source
+                .configure_privacy(
+                    source_dir.path(),
+                    "pw",
+                    &announce,
+                    Arc::new(DiscoveryVisibility::new(true)),
+                )
+                .unwrap();
+            let selected = EnrollmentSource::from_announce(announce, addr.ip()).unwrap();
+            let code = source.start_linking();
+            let serving = source.clone();
+            let task = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let channel = serving.privacy_accept(socket).await.unwrap();
+                    assert!(channel.pairing_only());
+                    serving.serve_connection(channel).await;
+                }
+            });
+            let device = DeviceIdentity::generate();
+            let expected_device = device.public();
+            let enrollment = DeviceEnrollment::new(device);
+            let wrong = if let Some(rest) = code.strip_prefix('0') {
+                format!("1{rest}")
+            } else {
+                format!("0{}", &code[1..])
+            };
+            assert!(enrollment.enroll(&selected, &wrong, false).await.is_err());
+            assert!(std::fs::read_dir(stage.path()).unwrap().next().is_none());
+            assert_eq!(
+                source.linked_devices().len(),
+                1,
+                "wrong code cannot enroll an accountless device"
+            );
+            let enrolled = enrollment
+                .enroll(&selected, &code, include_history)
+                .await
+                .unwrap();
+            assert_eq!(enrolled.account_id(), source.account_id());
+            assert_eq!(enrolled.access_snapshot(), &expected);
+            assert_eq!(enrolled.profile().unwrap().display_name, "Source nickname");
+            assert_eq!(
+                enrolled.profile().unwrap().avatar.as_ref().unwrap().len(),
+                super::super::profile::MAX_AVATAR_BYTES
+            );
+            assert!(std::fs::read_dir(stage.path()).unwrap().next().is_none());
+            enrolled.persist_profile(stage.path(), "pw").unwrap();
+            assert_eq!(
+                crate::identity::keystore::load(&stage.path().join("identity.keystore"), "pw")
+                    .unwrap()
+                    .public(),
+                expected_device
+            );
+            let account = crate::identity::account_keystore::load(
+                &stage.path().join("account.keystore"),
+                "pw",
+            )
+            .unwrap();
+            assert_eq!(account.account_id(), source.account_id());
+            assert_eq!(account.created_at_ms(), source.account.created_at_ms());
+            let devices = super::super::account_devices::AccountDevices::open(
+                &super::super::account_devices::file_path(stage.path(), &account.account_id()),
+                "pw",
+                &account.account_id(),
+            )
+            .unwrap();
+            assert_eq!(devices.devices().len(), 2);
+            assert!(
+                enrolled.persist_profile(stage.path(), "pw").is_err(),
+                "must refuse overwriting existing staged material"
+            );
+            let reopened = Node::open_recovery_profile(stage.path(), "pw").unwrap();
+            let history = reopened.account_history(&source.account_id(), 10).unwrap();
+            assert_eq!(
+                history
+                    .iter()
+                    .any(|row| row.text
+                        == b"history transferred into the standard participant source"),
+                include_history,
+                "enrollment verification must read the same history path as installation"
+            );
+            reopened.close_profile().unwrap();
+            task.await.unwrap();
+        }
     }
     #[tokio::test]
     async fn anonymous_discovery_rejects_unbound_responses_and_creates_no_account() {
@@ -591,7 +623,10 @@ mod tests {
                 } else {
                     &serving.account
                 };
-                let mut profile = serving.account_profile(&serving.account_id()).unwrap();
+                let mut profile = serving
+                    .account_profile(&serving.account_id())
+                    .unwrap()
+                    .unwrap();
                 if !wrong_account {
                     profile.display_name = "Unsigned edit".into();
                 }

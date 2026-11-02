@@ -9,7 +9,7 @@ const step = (source, name) => source.split(/^      - /m).find(value => value.st
 
 test("real compiler contracts do not compete for the native job's Cargo cache", () => {
   for (const [workflow, name, expected] of [
-    ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "rust-profile"]],
+    ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "native-host-coverage", "rust-profile"]],
     ["windows-workspace.yml", "Validate archive and coverage contracts", ["backend-coverage", "rust-profile", "windows-coverage-cli"]],
   ]) {
     const caller = step(read(workflow), name);
@@ -185,12 +185,12 @@ test("CI runs release workflow diagnostics only through the shared glob", () => 
   assert.doesNotMatch(ci, /node --test scripts\/diagnostics\/release-workflow.test.mjs/);
 });
 
-test("Windows builds once then requires two complete serial archive partitions", () => {
+test("Windows builds once then requires four complete serial archive partitions", () => {
   assert.match(read("ci.yml"), /os: \[ubuntu-latest, macos-latest\]/);
   assert.match(read("ci.yml"), /windows:\n    uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
   const windows = read("windows-workspace.yml");
   assert.match(windows, /needs: build/);
-  assert.match(windows, /shard: \[1, 2\]/);
+  assert.match(windows, /shard: \[1, 2, 3, 4\]/);
   assert.match(windows, /ref: \$\{\{ github.sha \}\}/);
   assert.match(windows, /toolchain: \$\{\{ needs.build.outputs.rust \}\}/);
   assert.match(windows, /RUST_TEST_THREADS: '1'/);

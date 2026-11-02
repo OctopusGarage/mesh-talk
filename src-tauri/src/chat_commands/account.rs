@@ -58,24 +58,32 @@ pub async fn publish_avatar(
         .await
 }
 
-/// Durable signed profiles, including `null` for a cleared avatar. The frontend uses
-/// tombstones so an old local copy cannot reappear after a linked device clears it.
+/// One current signed avatar, including a clear tombstone, under the same
+/// owner admission as profile edits. No whole-profile map crosses IPC.
 #[tauri::command]
-pub async fn peer_avatars(
+pub async fn peer_profile_avatar(
+    app: tauri::State<'_, crate::state::AppState>,
     state: tauri::State<'_, NodeState>,
-) -> Result<std::collections::HashMap<String, Option<String>>, CommandError> {
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt
-        .peer_profile_states()
-        .into_iter()
-        .map(|(id, bytes)| {
-            (
-                id,
-                bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
-            )
+    owner: String,
+    account_id: String,
+) -> Result<Option<crate::events::ProfileReceivedEvent>, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
+    if account_id.len() != 32 || hex::decode(&account_id).is_err() {
+        return Err(CommandError::Validation("invalid mesh account ID".into()));
+    }
+    admission
+        .blocking(move |runtime, _| {
+            Ok(runtime
+                .handle()
+                .current_profile(&account_id)?
+                .map(|profile| crate::events::ProfileReceivedEvent {
+                    account_id: profile.account_id,
+                    avatar: profile
+                        .avatar
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                }))
         })
-        .collect())
+        .await
 }
 
 async fn prepare_linking_sync(
@@ -121,7 +129,7 @@ pub async fn start_linking<R: tauri::Runtime>(
         .detached(move |rt, admission| {
             Box::pin(async move {
                 crate::shared_account_login::initialize_source(&source_app, admission, rt)?;
-                if rt.handle().account_profile(rt.account_id()).is_none() {
+                if rt.handle().account_profile(rt.account_id())?.is_none() {
                     rt.handle()
                         .set_profile_display_name(&rt.display_name())
                         .map_err(CommandError::from)?;
@@ -248,8 +256,13 @@ pub async fn list_accounts(
                 .into_iter()
                 .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
                 .collect();
-            let mut rows = merge_account_rows(live, rt.known_account_ids());
-            fill_account_names(&mut rows, rt.known_account_names());
+            let mut rows =
+                merge_account_rows(live, rt.known_account_ids().map_err(|e| e.to_string())?);
+            fill_account_names(
+                &mut rows,
+                rt.known_account_names()
+                    .map_err(|error| error.to_string())?,
+            );
             let personal = policy.personal_snapshot(&owner, &rt.handle())?;
             rows.retain(|row| !personal.deleted.contains(&row.account_id));
             Ok(rows)

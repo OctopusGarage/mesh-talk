@@ -1570,7 +1570,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             handle.account_preferences(SyncCategory::Appearance).len(),
-            16
+            15,
+            "the existing notifications tombstone is one of the 15 portable fields"
         );
         assert!(
             handle
@@ -1675,6 +1676,7 @@ mod tests {
             .await
             .is_err()
         );
+        drop(handle);
         nodes.0.write().await.take().unwrap().stop().await;
         let restarted = NodeRuntime::start(
             root.path(),

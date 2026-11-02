@@ -206,6 +206,16 @@ impl FavoriteStore {
             .filter_map(|file| conversation(&file.file_conv))
             .collect()
     }
+    pub(super) fn has_live_file(&self, file: ConversationId, now: u64) -> bool {
+        self.current
+            .values()
+            .filter(|record| !record.removed)
+            .flat_map(|record| &record.favorite.messages)
+            .filter(|message| message.expires_at_ms.is_none_or(|end| end > now))
+            .filter_map(|message| message.file.as_ref())
+            .filter_map(|file| conversation(&file.file_conv))
+            .any(|id| id == file)
+    }
     pub(super) fn digest(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"mesh-talk-favorites-v1");

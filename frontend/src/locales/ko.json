@@ -382,7 +382,13 @@
     "reEdit": "다시 편집",
     "mentionedYou": "나를 언급함",
     "reactionAdd": "{{emoji}} 반응 추가",
-    "reactionRemove": "내 {{emoji}} 반응 삭제"
+    "reactionRemove": "내 {{emoji}} 반응 삭제",
+    "reactionsTitle": "반응",
+    "reactionsDescription": "이 메시지의 반응 수입니다. 반응을 선택하여 내 반응을 추가하거나 삭제하세요.",
+    "reactionsEmpty": "반응 없음",
+    "reactionsStart": "처음부터 보기",
+    "reactionsNext": "다음 페이지",
+    "reactionsMore": "반응 더 보기"
   },
   "transfer": {
     "preparing": "파일 준비 중…",
@@ -521,6 +527,12 @@
     "changeFolder": "변경",
     "sectionChat": "대화 기록",
     "retention": "기록 보관 기간",
+    "storageRefresh": "새로고침",
+    "storageUsage": "이 기기에 저장된 데이터",
+    "storageUsageDesc": "이 기기의 계정 폴더에 있는 기록, 색인, 설정 등의 파일입니다. 하위 폴더는 제외됩니다.",
+    "storageReview": "저장된 데이터가 1 GiB를 초과했습니다. 기록 보관 기간을 확인하거나 백업을 만드세요. 보관 기간을 변경해도 디스크 사용량이 즉시 줄어들지 않을 수 있습니다.",
+    "storageAtLeast": "최소 {{size}}",
+    "storageUnavailable": "저장 공간 사용량을 확인할 수 없습니다",
     "retentionDesc": "이 기간이 지난 메시지를 이 기기에서 자동으로 삭제합니다.",
     "retentionForever": "무기한",
     "retentionDays": "{{count}}일",

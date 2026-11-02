@@ -233,9 +233,8 @@ impl Node {
         {
             return Err(NodeError::Channel("not a channel member".into()));
         }
-        if target
-            .as_ref()
-            .is_some_and(|target| log.get(&target.original.id) != Some(&target.original))
+        if let Some(target) = &target
+            && log.get(&target.original.id)?.as_ref() != Some(&target.original)
         {
             return Err(NodeError::Channel(
                 "recall original event is reconciling".into(),

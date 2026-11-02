@@ -18,6 +18,7 @@ fn privacy_contention_keeps_public_log_available(local_observation: bool) {
             task_owner
                 .account_group_local_observation(group, None)
                 .unwrap()
+                .unwrap()
                 .observation
                 .role
         } else {

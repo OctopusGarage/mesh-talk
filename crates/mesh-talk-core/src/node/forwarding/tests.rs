@@ -156,7 +156,7 @@ async fn file_forward_has_fresh_crypto_and_merged_bytes_export() {
         })
         .unwrap_err();
     assert!(archive.to_string().contains("Nested"));
-    let history = node.account_history(&node.account_id(), 100);
+    let history = node.account_history(&node.account_id(), 100).unwrap();
     let entry = history
         .iter()
         .find(|m| Some(m.id.to_hex()) == merged.items[0].message_id)
@@ -353,42 +353,45 @@ fn completed_batch_eviction_keeps_request_fingerprint_across_compaction() {
     assert!(store.fingerprints.contains_key(&format!("{now}-0000")));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file() {
     use crate::discovery::Announce;
+    use futures_util::FutureExt;
     use std::time::Duration;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        let directory = tempfile::tempdir().unwrap();
-        let sender_account = Account::generate();
-        let sender = open(&directory.path().join("sender"), &sender_account);
-        let selected = source(&sender);
-        let sender_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let recipient_identity = DeviceIdentity::generate();
-        let recipient_account = Account::generate();
-        let recipient_proof = Announce::new_with_account(
-            &recipient_identity,
-            &recipient_account,
-            "Reader",
-            listener.local_addr().unwrap().port(),
-        );
-        let sender_proof = Announce::new_with_account(
-            &sender.identity,
-            &sender_account,
-            "Forwarder",
-            sender_listener.local_addr().unwrap().port(),
-        );
-        let (recipient, _, mut offers) = super::super::test_support::node_with_files(
-            &directory.path().join("recipient"),
-            recipient_identity,
-            recipient_account,
-            &sender_proof,
-        );
-        sender.roster.lock().unwrap().update(
-            &recipient_proof,
-            "127.0.0.1".parse().unwrap(),
-            &sender.user_id(),
-        );
+    // Independent hosts perform synchronous durable storage. Complete profile
+    // and signed-membership setup before measuring the forwarding operation.
+    let directory = tempfile::tempdir().unwrap();
+    let sender_account = Account::generate();
+    let sender = open(&directory.path().join("sender"), &sender_account);
+    let selected = source(&sender);
+    let sender_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_identity = DeviceIdentity::generate();
+    let recipient_account = Account::generate();
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "Reader",
+        listener.local_addr().unwrap().port(),
+    );
+    let sender_proof = Announce::new_with_account(
+        &sender.identity,
+        &sender_account,
+        "Forwarder",
+        sender_listener.local_addr().unwrap().port(),
+    );
+    let (recipient, _, mut offers) = super::super::test_support::node_with_files(
+        &directory.path().join("recipient"),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    sender.roster.lock().unwrap().update(
+        &recipient_proof,
+        "127.0.0.1".parse().unwrap(),
+        &sender.user_id(),
+    );
+    let group = tokio::time::timeout(Duration::from_secs(30), async {
         let group = sender
             .create_channel("Forwarded discussion", vec![recipient_proof.public()])
             .await
@@ -399,99 +402,162 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
-            .cloned()
             .collect::<Vec<_>>();
         for event in controls {
             recipient.log.lock().unwrap().append_durable(event).unwrap();
         }
         recipient.process_channel(group);
-        let sender_task = tokio::spawn(sender.clone().run_accept_loop(sender_listener));
-        let recipient_task = tokio::spawn(recipient.clone().run_accept_loop(listener));
-        let mut request = ForwardRequest {
-            operation_id: format!("{}-group-text", super::super::node::now_millis()),
-            source: selected,
-            destinations: vec![ForwardTarget {
-                kind: "channel".into(),
-                target: hex::encode(group.as_bytes()),
-            }],
-            mode: "individual".into(),
-        };
-        let accepted = sender
-            .forward_messages_if(request.clone(), |commit| commit())
-            .await
-            .unwrap();
-        assert!(
-            accepted
-                .items
-                .iter()
-                .all(|item| item.status == "pending" || item.status == "accepted")
-        );
-        let accepted = wait_forward_receipts(&sender, &request).await;
-        for item in &accepted.items {
-            let id = crate::eventlog::EventId::new(
-                hex::decode(item.message_id.as_ref().unwrap())
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-            );
-            sender
-                .flush_accepted_message(&MessageDestination::Channel(group), id)
-                .await;
-        }
-        while recipient.channel_history(group, 10).len() < 2 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let history = recipient.channel_history(group, 10);
-        assert_eq!(
-            history
-                .iter()
-                .map(|row| row.text.clone())
-                .collect::<Vec<_>>(),
-            vec![b"first".to_vec(), b"second".to_vec()]
-        );
-        request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
-        request.mode = "merged".into();
-        let merged = sender
-            .forward_messages_if(request.clone(), |commit| commit())
-            .await
-            .unwrap();
-        assert!(merged.items[0].status == "pending" || merged.items[0].status == "accepted");
-        let merged = wait_forward_receipts(&sender, &request).await;
-        let archive_id = merged.items[0].message_id.as_ref().unwrap();
-        let archive = sender
-            .channel_history(group, 10)
-            .into_iter()
-            .find(|row| row.id.to_hex() == *archive_id)
-            .unwrap()
-            .file
-            .unwrap()
-            .file_conv;
-        sender.flush_channel_file(group, archive).await;
-        let offer = offers.recv().await.unwrap();
-        assert_eq!(offer.name, "Chat records.mtchat");
-        recipient.decide_attachment(archive, true).unwrap();
-        while !recipient.file_ready_to_save(archive) {
-            recipient.pull_pending_files().await;
-            sender.pull_pending_files().await;
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let received = recipient.read_file(archive).unwrap();
-        let record: serde_json::Value = serde_json::from_slice(&received).unwrap();
-        assert_eq!(record["format"], "MTCHAT1");
-        assert_eq!(record["messages"][0]["text"], "first");
-        assert_eq!(record["messages"][1]["text"], "second");
-        assert!(
-            recipient
-                .account_history(&sender.account_id(), 10)
-                .is_empty(),
-            "receiver never joined original direct conversation"
-        );
-        sender_task.abort();
-        recipient_task.abort();
+        recipient.await_channel_metadata(group).await.unwrap();
+        group
     })
     .await
-    .expect("group forwarding completes on encrypted loopback");
+    .expect("forwarding profiles must finish signed membership setup");
+    let sender_task = tokio::spawn(sender.clone().run_accept_loop(sender_listener));
+    let recipient_task = tokio::spawn(recipient.clone().run_accept_loop(listener));
+    let mut phase = "forwarding-start";
+    let started = std::time::Instant::now();
+    let observed = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut request = ForwardRequest {
+                operation_id: format!("{}-group-text", super::super::node::now_millis()),
+                source: selected,
+                destinations: vec![ForwardTarget {
+                    kind: "channel".into(),
+                    target: hex::encode(group.as_bytes()),
+                }],
+                mode: "individual".into(),
+            };
+            phase = "individual-admission";
+            let accepted = sender
+                .forward_messages_if(request.clone(), |commit| commit())
+                .await
+                .unwrap();
+            assert!(
+                accepted
+                    .items
+                    .iter()
+                    .all(|item| item.status == "pending" || item.status == "accepted")
+            );
+            phase = "individual-acceptance";
+            let accepted = wait_forward_receipts(&sender, &request).await;
+            for item in &accepted.items {
+                let id = crate::eventlog::EventId::new(
+                    hex::decode(item.message_id.as_ref().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                );
+                sender
+                    .flush_accepted_message(&MessageDestination::Channel(group), id)
+                    .await;
+            }
+            phase = "individual-history";
+            loop {
+                match recipient.channel_history(group, 10) {
+                    Ok(history) if history.len() >= 2 => break,
+                    Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                    Err(error) => panic!("recipient history failed: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let history = recipient.channel_history(group, 10).unwrap();
+            assert_eq!(
+                history
+                    .iter()
+                    .map(|row| row.text.clone())
+                    .collect::<Vec<_>>(),
+                vec![b"first".to_vec(), b"second".to_vec()]
+            );
+            request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
+            request.mode = "merged".into();
+            phase = "merged-admission";
+            let merged = sender
+                .forward_messages_if(request.clone(), |commit| commit())
+                .await
+                .unwrap();
+            assert!(merged.items[0].status == "pending" || merged.items[0].status == "accepted");
+            phase = "merged-acceptance";
+            let merged = wait_forward_receipts(&sender, &request).await;
+            let archive_id = merged.items[0].message_id.as_ref().unwrap();
+            phase = "merged-history";
+            let archive = loop {
+                match sender.channel_history(group, 10) {
+                    Ok(history) => {
+                        if let Some(row) = history
+                            .into_iter()
+                            .find(|row| row.id.to_hex() == *archive_id)
+                        {
+                            break row.file.unwrap().file_conv;
+                        }
+                    }
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                    Err(error) => panic!("forwarded archive history failed: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            phase = "merged-transfer";
+            sender.flush_channel_file(group, archive).await;
+            phase = "merged-offer";
+            let offer = offers.recv().await.unwrap();
+            assert_eq!(offer.name, "Chat records.mtchat");
+            recipient.decide_attachment(archive, true).unwrap();
+            phase = "merged-bytes";
+            while !recipient.file_ready_to_save(archive).unwrap() {
+                recipient.pull_pending_files().await;
+                sender.pull_pending_files().await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let received = recipient.read_file(archive).unwrap();
+            let record: serde_json::Value = serde_json::from_slice(&received).unwrap();
+            assert_eq!(record["format"], "MTCHAT1");
+            assert_eq!(record["messages"][0]["text"], "first");
+            assert_eq!(record["messages"][1]["text"], "second");
+            assert!(
+                recipient
+                    .account_history(&sender.account_id(), 10)
+                    .unwrap()
+                    .is_empty(),
+                "receiver never joined original direct conversation"
+            );
+        })
+        .await
+    })
+    .catch_unwind()
+    .await;
+    for node in [&sender, &recipient] {
+        node.runtime_work.close();
+        node.clear_delivery_observations();
+        node.sessions.clear();
+    }
+    let operation_outcome = match &observed {
+        Ok(Ok(())) => "completed",
+        Ok(Err(_)) => "timed out",
+        Err(_) => "panicked",
+    };
+    let retired = tokio::time::timeout(Duration::from_secs(15), async {
+        sender_task.abort();
+        recipient_task.abort();
+        let _ = sender_task.await;
+        let _ = recipient_task.await;
+        for node in [&sender, &recipient] {
+            node.runtime_work.drain().await;
+        }
+    })
+    .await;
+    assert!(
+        retired.is_ok(),
+        "forwarding fixture producers did not retire; operation={operation_outcome} phase={phase}"
+    );
+    match observed {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!(
+            "group forwarding completes on encrypted loopback: phase={phase} elapsed={:?}: {error}",
+            started.elapsed()
+        ),
+        Err(error) => std::panic::resume_unwind(error),
+    }
 }
 
 #[tokio::test]
@@ -532,7 +598,11 @@ async fn recall_at_final_guard_prevents_forward_acceptance() {
         .unwrap();
     assert!(calls >= 6);
     assert!(result.items.iter().all(|item| item.status == "failed"));
-    assert!(node.account_history(&node.account_id(), 100).is_empty());
+    assert!(
+        node.account_history(&node.account_id(), 100)
+            .unwrap()
+            .is_empty()
+    );
 }
 #[test]
 fn protected_and_expired_canonical_sources_are_not_inspectable() {
@@ -772,6 +842,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
     assert_eq!(
         reference
             .operation_projection(group)
+            .unwrap()
             .requests
             .iter()
             .map(|request| request.reference.id)
@@ -823,6 +894,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
     assert_eq!(
         source
             .channel_history(group, 10)
+            .unwrap()
             .iter()
             .map(|row| row.text.clone())
             .collect::<Vec<_>>(),
@@ -882,6 +954,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
         .unwrap()
         .entry(event)
         .unwrap()
+        .unwrap()
         .clone();
     let manifest = crate::node::files::validated_manifest(&row.plaintext).unwrap();
     assert_ne!(
@@ -917,6 +990,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .iter()
         .filter(|event| matches!(event.kind, EventKind::Message | EventKind::FileManifest))
         .count();
@@ -976,6 +1050,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .filter(|event| matches!(event.kind, EventKind::Message | EventKind::FileManifest))
             .count(),
@@ -1021,7 +1096,7 @@ async fn unknown_group_leg_fails_without_network_admission_or_file_staging() {
             }],
             mode: "merged".into(),
         };
-        let before = node.log.lock().unwrap().all_event_ids();
+        let before = node.log.lock().unwrap().all_event_ids().unwrap();
         let identity = item_identity(&request.operation_id, &request.destinations[0], &None);
         let result = node
             .forward_messages_if(request, |commit| commit())
@@ -1039,7 +1114,7 @@ async fn unknown_group_leg_fails_without_network_admission_or_file_staging() {
             "{label} must not admit a network operation"
         );
         assert_eq!(
-            node.log.lock().unwrap().all_event_ids(),
+            node.log.lock().unwrap().all_event_ids().unwrap(),
             before,
             "no ciphertext staging or outgoing effect for the {label} leg"
         );
@@ -1113,7 +1188,10 @@ async fn unauthorized_group_leg_preserves_an_accepted_account_leg() {
             .count(),
         2
     );
-    assert_eq!(node.account_history(&node.account_id(), 100).len(), 2);
+    assert_eq!(
+        node.account_history(&node.account_id(), 100).unwrap().len(),
+        2
+    );
     let replay = node
         .forward_messages_if(request, |commit| commit())
         .await
@@ -1130,7 +1208,10 @@ async fn unauthorized_group_leg_preserves_an_accepted_account_leg() {
         items
     };
     assert_eq!(by_identity(replay), by_identity(result));
-    assert_eq!(node.account_history(&node.account_id(), 100).len(), 2);
+    assert_eq!(
+        node.account_history(&node.account_id(), 100).unwrap().len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -1201,6 +1282,7 @@ async fn pending_forwarding_order_survives_restart_and_cancelled_predecessor() {
     let exported = || {
         reopened
             .operation_projection(group)
+            .unwrap()
             .requests
             .into_iter()
             .map(|request| request.reference.id)
@@ -1227,9 +1309,13 @@ async fn pending_forwarding_order_survives_restart_and_cancelled_predecessor() {
         "terminal cancellation releases the following leg"
     );
     reopened.maintain_account_group_operation_effects();
+    // This bare-node fixture committed the second send without a participant
+    // worker. Finish only its bounded metadata continuation before reading it.
+    crate::node::test_support::settle_group_metadata(&reopened, group);
     assert_eq!(
         reopened
             .channel_history(group, 10)
+            .unwrap()
             .iter()
             .map(|row| row.text.clone())
             .collect::<Vec<_>>(),
@@ -1268,6 +1354,7 @@ async fn committed_group_progress_frees_batch_budget_and_survives_restart() {
     );
     node.log.lock().unwrap().append_durable(genesis).unwrap();
     node.process_channel(group);
+    crate::node::test_support::settle_group_metadata(&node, group);
     let mut selected = source(&node);
     selected.message_ids.truncate(1);
     let mut requests = Vec::new();
@@ -1318,6 +1405,7 @@ async fn committed_group_progress_frees_batch_budget_and_survives_restart() {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .filter(|event| event.kind == EventKind::FileManifest)
             .count(),
@@ -1341,6 +1429,7 @@ async fn committed_group_progress_frees_batch_budget_and_survives_restart() {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .filter(|event| event.kind == EventKind::FileManifest)
             .count(),

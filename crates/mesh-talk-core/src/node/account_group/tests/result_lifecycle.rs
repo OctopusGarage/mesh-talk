@@ -49,6 +49,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
     let event_id = original.primary_event.unwrap();
     let live = source
         .operation_projection(group)
+        .unwrap()
         .results
         .into_iter()
         .find(|result| result.reference.id == id)
@@ -68,6 +69,10 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
     let next_id = source
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
+    // This fixture drives accepted effects without the participant worker.
+    // Finish metadata before constructing the internal executor snapshot whose
+    // preflight is then tested while the delivery lock is held.
+    source.await_channel_metadata(group).await.unwrap();
     let executor = source
         .account_group_access(group)
         .unwrap()
@@ -161,11 +166,12 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
                     .lock()
                     .unwrap()
                     .entry(event_id)
+                    .unwrap()
                     .is_none()
             );
         }
     }
-    let projection = source.operation_projection(group);
+    let projection = source.operation_projection(group).unwrap();
     let retired = projection
         .results
         .iter()
@@ -206,6 +212,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .entry(event_id)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -214,12 +221,21 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .get(&event_id)
+            .unwrap()
             .is_none()
     );
     assert!(reference.account_group_data_work(None).work.is_empty());
     assert!(reference.channel_members(group).is_empty());
-    assert!(reference.history(group, 20).is_empty());
-    assert!(reference.log.lock().unwrap().events(&file).is_empty());
+    assert!(reference.history(group, 20).unwrap().is_empty());
+    assert!(
+        reference
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty()
+    );
     let identity = reference.identity.secret_bytes();
     drop(reference);
     let (dm, _) = mpsc::unbounded_channel();
@@ -251,6 +267,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .entry(event_id)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -259,6 +276,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .get(&event_id)
+            .unwrap()
             .is_none()
     );
 }
@@ -839,11 +857,15 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
                 record_b_trace(&trace, clock, "fixture", "original_signed_intent_published".into());
                 source_worker = Some(tokio::spawn(source.clone().run_account_history_loop()));
                 let key = crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device: source.user_id() };
+                let control_key = crate::node::AccountDocumentKey::GroupControl { channel: hex::encode(group.as_bytes()), source_device: source.user_id() };
                 loop {
                     let published = source.account_document(&key).unwrap()
                         .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
                         .is_some_and(|frame| frame.projection.results.iter().any(|row| row.reference.id == id && row.status.phase == AccountGroupOperationPhase::Committed));
-                    if published { break; }
+                    let published_left = source.account_document(&control_key).unwrap()
+                        .and_then(|document| crate::node::account_group::wire::GroupControlHead::decode(document.payload(), &account.public().ed25519_pub))
+                        .is_some_and(|head| head.access.source.role == AccountGroupRole::Left && head.access.observation.role == AccountGroupRole::Left);
+                    if published && published_left { break; }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 record_b_trace(&trace, clock, "fixture", "source_signed_terminal_published".into());
@@ -874,7 +896,10 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
             loop {
                 let status = reference.list_account_group_operations(&account.account_id(), AccountGroupOperationQuery { group: Some(group), pending_only: false, after: None, limit: 64 }).unwrap()
                     .into_iter().find(|row| row.id == id).unwrap();
-                if status.phase == AccountGroupOperationPhase::Committed { assert_eq!(status.committed_events.len(), 1); break; }
+                if status.phase == AccountGroupOperationPhase::Committed {
+                    assert_eq!(status.committed_events.len(), 1);
+                    if reference.account_group_access(group).unwrap().role == AccountGroupRole::Left { break; }
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await;
@@ -935,7 +960,7 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
     assert_eq!(source_phase, Some(AccountGroupOperationPhase::Committed));
     assert!(
         receipt.is_ok(),
-        "original Leave receipt must recover within unchanged 8s from admission; elapsed={elapsed:?}; phases={phases:?}"
+        "original Leave receipt and Left access must recover within unchanged 8s from admission; elapsed={elapsed:?}; phases={phases:?}"
     );
     assert_eq!(
         reference.account_group_access(group).unwrap().role,

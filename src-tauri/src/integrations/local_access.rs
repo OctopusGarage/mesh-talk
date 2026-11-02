@@ -151,10 +151,15 @@ fn read_preferences(path: &Path) -> Result<Preferences, CommandError> {
         Ok(_) => read_private_json(path).map_err(integration_error),
     }
 }
-fn conversations(runtime: &mesh_talk_core::node::NodeRuntime) -> Vec<AgentConversation> {
+fn conversations(
+    runtime: &mesh_talk_core::node::NodeRuntime,
+) -> Result<Vec<AgentConversation>, CommandError> {
     let mut accounts = BTreeMap::new();
-    let names = runtime.known_account_names();
-    for id in runtime.known_account_ids() {
+    let names = runtime.known_account_names()?;
+    for id in runtime
+        .known_account_ids()
+        .map_err(|e| CommandError::Internal(e.to_string()))?
+    {
         accounts.insert(
             id.clone(),
             names
@@ -179,7 +184,7 @@ fn conversations(runtime: &mesh_talk_core::node::NodeRuntime) -> Vec<AgentConver
         .collect();
     result.extend(
         runtime
-            .list_channels()
+            .list_channels()?
             .into_iter()
             .filter(|channel| {
                 !channel.pending_invite && !channel.archived && !channel.dissolved && !channel.left
@@ -192,7 +197,7 @@ fn conversations(runtime: &mesh_talk_core::node::NodeRuntime) -> Vec<AgentConver
             }),
     );
     result.sort_by(|a, b| a.label.cmp(&b.label));
-    result
+    Ok(result)
 }
 fn validate_scope(
     preferences: &Preferences,
@@ -294,7 +299,7 @@ async fn view(
                         lease == admission.lease() && host.is_running()
                     }),
                 destinations: preferences.destinations,
-                available_destinations: conversations(runtime),
+                available_destinations: conversations(runtime)?,
                 instructions_path: paths.agents.to_string_lossy().into_owned(),
                 instructions: controller
                     .running
@@ -345,7 +350,7 @@ async fn apply(
                 Some(preferences) => Preferences::resolve(&previous, preferences),
                 None => previous,
             };
-            validate_scope(&preferences, &conversations(runtime))?;
+            validate_scope(&preferences, &conversations(runtime)?)?;
             let legacy = requested.is_none()
                 && !paths.preferences(admission.lease().owner())?.exists()
                 && std::env::var_os("MESH_TALK_INTEGRATIONS").as_deref()
@@ -1173,8 +1178,8 @@ mod tests {
             let guard = node.0.read().await;
             let runtime = guard.as_ref().unwrap();
             (
-                runtime.handle().channel_history(channel, 100),
-                runtime.handle().channel_history(private, 100),
+                runtime.handle().channel_history(channel, 100).unwrap(),
+                runtime.handle().channel_history(private, 100).unwrap(),
             )
         };
         node.0.write().await.take().unwrap().stop().await;

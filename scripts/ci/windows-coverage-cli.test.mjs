@@ -29,6 +29,8 @@ pub fn branch(first: bool) -> u8 { if first { 7 } else { 9 } }
   #[test] #[ignore] fn ignored() { panic!("must stay ignored"); }
 }
 `);
+  const shardCases = Array.from({ length: 32 }, (_, index) => `#[test] fn partition_case_${index}() { assert_eq!(crate::branch(${index % 2 === 0}), ${index % 2 === 0 ? 7 : 9}); }`).join("\n");
+  write("src/lib.rs", readFileSync(path.join(root, "src/lib.rs"), "utf8") + `\n#[cfg(test)] mod partition_cases { ${shardCases} }\n`);
   write("examples/default-example.rs", 'fn main() {}\n#[test] fn example_body() { assert_eq!(archive_fixture::branch(true), 7); }\n');
   write("src/main.rs", 'fn main() { println!("helper"); }\n');
   write("tests/runtime.rs", `
@@ -77,15 +79,15 @@ pub fn branch(first: bool) -> u8 { if first { 7 } else { 9 } }
   const freshCargoHome = path.join(temporary, "fresh-cargo-home");
   mkdirSync(freshCargoHome);
   const receipts = [], logs = [];
-  for (const shard of [1, 2]) {
+  for (const shard of [1, 2, 3, 4]) {
     const output = path.join(temporary, `results-${shard}`);
     phase(["consume", String(shard), artifact, output], { ...env, CARGO_HOME: freshCargoHome });
     receipts.push(JSON.parse(readFileSync(path.join(output, "receipt.json"), "utf8")));
     logs.push(readFileSync(path.join(output, "execution.log"), "utf8"));
     renameSync(path.join(root, "target"), path.join(temporary, `consumer-${shard}-target`));
   }
-  assert.equal(receipts.reduce((total, receipt) => total + receipt.executedTests, 0), 4);
-  assert.ok(receipts.every(receipt => receipt.totalTests === 5 && receipt.coverage.coveredLines > 0));
-  assert.equal(receipts[0].archiveSha256, receipts[1].archiveSha256);
+  assert.equal(receipts.reduce((total, receipt) => total + receipt.executedTests, 0), 36);
+  assert.ok(receipts.every(receipt => receipt.totalTests === 37 && receipt.coverage.coveredLines > 0));
+  assert.ok(receipts.every(receipt => receipt.archiveSha256 === receipts[0].archiveSha256));
   assert.ok(logs.some(log => log.includes('PHASE {"successful":true}')), "successful timing payload was lost");
 });

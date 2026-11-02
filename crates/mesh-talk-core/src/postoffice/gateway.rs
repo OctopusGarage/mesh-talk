@@ -187,6 +187,89 @@ async fn drive_proxy<T>(proxy: &mut Option<ActiveProxy>, operation: impl Future<
     }
 }
 
+/// Dedicated runtime entrypoint. Query, listener and proxy sessions all belong
+/// to this future; cancellation joins admitted proxy tasks before returning.
+pub async fn run_bridge_gateway_on_port_until(
+    gateway_proof: Arc<Mutex<Option<GatewayProof>>>,
+    local_tcp_port: u16,
+    remote_discovery: SocketAddr,
+    expected_id: String,
+    proxy_bind_port: Option<u16>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    use futures_util::{StreamExt, stream::FuturesUnordered};
+    let mut proxy: Option<(u16, u16, TcpListener)> = None;
+    let mut sessions = tokio::task::JoinSet::new();
+    let mut queries = FuturesUnordered::new();
+    let mut refresh = tokio::time::interval(REFRESH_INTERVAL);
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut misses = 0u8;
+    loop {
+        if *stop.borrow_and_update() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            changed=stop.changed()=>{if changed.is_err() || *stop.borrow(){break;}}
+            result=sessions.join_next(),if !sessions.is_empty()=>{
+                if let Some(Err(error))=result {log::warn!("gateway proxy task: {error}");}
+            }
+            proof=queries.next(),if !queries.is_empty()=>{
+                let Some(proof): Option<Option<Announce>>=proof else {continue};
+                if let Some(announce)=proof {
+                    misses=0;
+                    let port=announce.tcp_port;
+                    let bind_port=proxy_bind_port.unwrap_or(port);
+                    if bind_port==local_tcp_port && bind_port!=0 {
+                        proxy=None;
+                        *gateway_proof.lock().expect("gateway proof lock not poisoned")=None;
+                        log::warn!("bridge proxy would use this relay's tcp/{local_tcp_port}; configure a different proxy port");
+                    } else {
+                        if proxy.as_ref().is_some_and(|(active,_,_)|*active!=port) {proxy=None;}
+                        if proxy.is_none() {
+                            match bind_dual_stack_listener(bind_port).await {
+                                Ok(listener)=>{
+                                    let proxy_port=listener.local_addr().expect("bound listener").port();
+                                    proxy=Some((port,proxy_port,listener));
+                                }
+                                Err(error)=>log::warn!("bridge gateway could not bind tcp/{bind_port}: {error}"),
+                            }
+                        }
+                        if let Some((_,proxy_port,_))=&proxy {
+                            *gateway_proof.lock().expect("gateway proof lock not poisoned")=Some(GatewayProof{announce,proxy_port:*proxy_port});
+                        }
+                    }
+                } else {
+                    misses=misses.saturating_add(1);
+                    if misses>=3 {*gateway_proof.lock().expect("gateway proof lock not poisoned")=None;}
+                }
+            }
+            accepted=async {proxy.as_ref().expect("guarded proxy").2.accept().await},if proxy.is_some() && sessions.len()<MAX_PROXY_CONNECTIONS=>{
+                match accepted {
+                    Ok((mut client,_))=>{
+                        let remote=SocketAddr::new(remote_discovery.ip(),proxy.as_ref().expect("guarded proxy").0);
+                        sessions.spawn(async move {
+                            let Ok(Ok(mut upstream))=tokio::time::timeout(CONNECT_TIMEOUT,TcpStream::connect(remote)).await else{return;};
+                            let _=tokio::time::timeout(SESSION_LIMIT,copy_bidirectional(&mut client,&mut upstream)).await;
+                        });
+                    }
+                    Err(error)=>{log::warn!("gateway proxy accept: {error}");proxy=None;*gateway_proof.lock().expect("gateway proof lock not poisoned")=None;}
+                }
+            }
+            _=refresh.tick(),if queries.is_empty()=>{
+                queries.push(query_pinned_relay(remote_discovery,&expected_id));
+            }
+        }
+    }
+    drop(proxy);
+    drop(queries);
+    *gateway_proof
+        .lock()
+        .expect("gateway proof lock not poisoned") = None;
+    sessions.abort_all();
+    while sessions.join_next().await.is_some() {}
+}
+
 async fn proxy_connections(listener: TcpListener, remote: SocketAddr) {
     let mut connections = FuturesUnordered::new();
     loop {
@@ -701,5 +784,85 @@ mod tests {
         .expect("a signed refresh should replace the old proxy");
         responder.abort();
         gateway.abort();
+    }
+    #[tokio::test]
+    async fn cancelled_gateway_drops_owned_listener_and_proxy_sessions() {
+        gateway_shutdown_case(false).await;
+    }
+    #[tokio::test]
+    async fn supervised_gateway_joins_live_proxy_sessions_before_returning() {
+        gateway_shutdown_case(true).await;
+    }
+    async fn gateway_shutdown_case(cooperative: bool) {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let proof = Announce::new_post_office_with_account(&identity, &account, "remote", port);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = socket.local_addr().unwrap();
+        let expected = identity.user_id();
+        let responder = tokio::spawn(respond_with_current_proof(
+            socket,
+            identity,
+            Arc::new(Mutex::new(Some(proof))),
+            Arc::new(AtomicUsize::new(0)),
+        ));
+        let shared = Arc::new(Mutex::new(None));
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let gateway = if cooperative {
+            tokio::spawn(run_bridge_gateway_on_port_until(
+                shared.clone(),
+                0,
+                remote,
+                expected,
+                Some(0),
+                rx,
+            ))
+        } else {
+            tokio::spawn(run_bridge_gateway_on_port(
+                shared.clone(),
+                0,
+                remote,
+                expected,
+                Some(0),
+            ))
+        };
+        let proxy_port = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(p) = shared.lock().unwrap().as_ref() {
+                    break p.proxy_port;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let client = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+        let (mut server, _) = upstream.accept().await.unwrap();
+        if cooperative {
+            stop.send_replace(true);
+            tokio::time::timeout(Duration::from_secs(1), gateway)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(shared.lock().unwrap().is_none());
+        } else {
+            gateway.abort();
+            let _ = gateway.await;
+        }
+        let mut byte = [0];
+        let closed = tokio::time::timeout(Duration::from_millis(100), server.read(&mut byte)).await;
+        drop(client);
+        responder.abort();
+        let _ = responder.await;
+        assert!(
+            matches!(closed, Ok(Ok(0))),
+            "owned proxy connection must close when gateway is cancelled"
+        );
+        assert!(
+            TcpListener::bind(("127.0.0.1", proxy_port)).await.is_ok(),
+            "cancelled gateway must release proxy listener"
+        );
     }
 }

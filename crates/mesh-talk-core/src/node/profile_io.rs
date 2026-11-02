@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::discovery::roster::PeerRecord;
+use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
 use crate::node::conversation::dm_conversation_id;
 use crate::node::profile::ProfilePayload;
@@ -37,12 +38,10 @@ impl Node {
         let mut delivery = Vec::new();
         authorize(&mut || {
             let mut store = self.profiles.lock().expect("profiles mutex not poisoned");
-            if let Some(mut profile) = store.get(&self.account_id()) {
+            if let Some(mut profile) = store.get(&self.account_id())? {
                 if profile.avatar == avatar {
                     // Repair a previous committed intent before acknowledging a retry.
-                    self.account_profiles
-                        .receive_account_profile(&profile)
-                        .map_err(NodeError::Log)?;
+                    self.project_account_profile(&store, &profile)?;
                     return Ok(());
                 }
                 let last = profile.revision.max(
@@ -63,9 +62,7 @@ impl Node {
                         "invalid or over-budget account profile".into(),
                     ));
                 }
-                self.account_profiles
-                    .receive_account_profile(&profile)
-                    .map_err(NodeError::Log)?;
+                self.project_account_profile(&store, &profile)?;
                 // Keep the durable edit atomic, then release before channel/log work.
                 drop(store);
                 for peer in self.profile_fanout_targets() {
@@ -91,18 +88,17 @@ impl Node {
     }
 
     /// Revision of the current public profile, including an avatar clear.
-    pub(in crate::node) fn public_profile_revision(&self) -> Option<u64> {
+    pub(in crate::node) fn public_profile_revision(&self) -> Result<Option<u64>, LogError> {
         let card = self
             .profiles
             .lock()
             .expect("profiles mutex not poisoned")
-            .get(&self.account_id())
-            .map(|card| card.revision);
+            .version(&self.account_id())?;
         let avatar = self
             .account_profiles
             .current()
             .map(|profile| profile.updated_at);
-        card.into_iter().chain(avatar).max()
+        Ok(card.into_iter().chain(avatar).max())
     }
 
     /// Report whether direct reconciliation or relay publication completed, so
@@ -189,141 +185,131 @@ impl Node {
         Some((conv, id))
     }
 
-    /// Decode + verify + store any new `Profile` events in `conv` authored by others, then
-    /// surface each applied avatar update to the app. A profile is marked emitted only
-    /// after it's processed (verified-and-applied, or definitively rejected), so a
-    /// transiently-unopenable one (author not yet in the roster) is retried on a later
-    /// sync rather than lost — mirroring `emit_new_messages`.
+    /// Receive a bounded metadata discovery/retry page. Unknown devices and
+    /// temporarily disabled sibling synchronization keep durable pending work.
     pub(in crate::node) fn process_profile_events(&self, conv: ConversationId) {
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        let candidates: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            let emitted = self
-                .profiles_emitted
+        if let Err(error) = self.drain_profile_receptions().and_then(|_| {
+            self.log
                 .lock()
-                .expect("profiles_emitted mutex not poisoned");
-            log.events(&conv)
-                .into_iter()
-                .filter(|e| {
-                    e.kind == EventKind::Profile
-                        && e.author != self_author
-                        && !emitted.contains(&e.id)
-                })
-                .cloned()
-                .collect()
-        };
-        for event in candidates {
-            let author_uid = event.author.user_id();
-            // The author's X25519 (to open the sealed box) + their CERTIFIED account (to
-            // bind the profile's claimed account — a device can't forge another account's
-            // avatar). Unknown author → retry later (NOT marked emitted).
-            let (sender_x25519, peer_account) = {
-                match self.routing_peer(&author_uid) {
-                    Some(p) => (p.public.x25519_pub, p.account_id.clone()),
-                    None => continue,
-                }
-            };
-            let plaintext = match crate::dm::open(&self.identity, &sender_x25519, &event.ciphertext)
-            {
-                Ok(p) => p,
-                Err(_) => continue, // not yet openable / not a profile we can read — retry later
-            };
-            // From here the event is readable; mark it emitted regardless of outcome so a
-            // malformed/forged/stale profile isn't reprocessed every sync.
-            self.profiles_emitted
-                .lock()
-                .expect("profiles_emitted mutex not poisoned")
-                .insert(event.id);
-            if plaintext.starts_with(b"MTP3") {
-                let Some(profile) = AccountProfile::decode(&plaintext) else {
-                    continue;
-                };
-                if peer_account.as_deref() != Some(profile.account_id().as_str()) {
-                    continue;
-                }
-                if profile.account_id() == self.account_id() && !self.device_sync_policy().profile {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                    continue;
-                }
-                if self.receive_account_profile(&profile).is_err() {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                }
-                continue;
-            }
-            if plaintext.starts_with(b"MTC1") {
-                let Some(card) = TrustCard::decode(&plaintext) else {
-                    continue;
-                };
-                if peer_account.as_deref() != Some(card.account_id().as_str()) {
-                    continue;
-                }
-                if card.account_id() == self.account_id() && !self.device_sync_policy().profile {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                    continue;
-                }
-                if self.receive_trust_card(&card).is_err() {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                }
-                continue;
-            }
-            let Some(payload) = ProfilePayload::decode(&plaintext) else {
-                continue;
-            };
-            // Authenticated: the account signature must verify (also enforces the size
-            // bound) AND the claimed account must match the AUTHENTICATED device's
-            // certified account (re-homing/spoof defense).
-            if !payload.verify() || peer_account.as_deref() != Some(payload.account_id().as_str()) {
-                continue;
-            }
-            if payload.account_id() == self.account_id() && !self.device_sync_policy().profile {
-                self.profiles_emitted
-                    .lock()
-                    .expect("profiles_emitted mutex not poisoned")
-                    .remove(&event.id);
-                continue;
-            }
-            let applied = match self.receive_legacy_profile(&payload) {
-                Ok(applied) => applied,
-                Err(_) => {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                    continue;
-                }
-            };
-            if applied {
-                let _ = self.profile_incoming.send(ReceivedProfile {
-                    account_id: payload.account_id(),
-                    avatar: payload.avatar,
-                });
-            }
+                .expect("log mutex not poisoned")
+                .request_profile_compaction(conv)?;
+            Ok(())
+        }) {
+            log::warn!("profile reception deferred after storage failure: {error}");
         }
-        // Bound on-disk growth: schedule dropping superseded, unreferenced profile events
-        // for this conversation, preserving parents of retained legacy/card pairs. The accept
-        // loop performs the expensive rewrite outside this sync callback.
-        self.log
+    }
+
+    fn drain_profile_receptions(&self) -> Result<bool, NodeError> {
+        let work = match self.profile_receive_work.try_lock() {
+            Ok(work) => work,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(NodeError::Log(crate::eventlog::LogError::CorruptFile(
+                    "profile receive owner unavailable".into(),
+                )));
+            }
+        };
+        let after = work.after()?;
+        let headers = self
+            .log
             .lock()
             .expect("log mutex not poisoned")
-            .request_profile_compaction(conv);
+            .repository()?
+            .committed_headers_page(after, 128)?;
+        let discovering = headers.len() == 128;
+        work.discover(
+            after,
+            &headers,
+            Author::from_ed25519(self.identity.public().ed25519_pub),
+        )?;
+        for candidate in work.candidates()? {
+            let event = self
+                .log
+                .lock()
+                .expect("log mutex not poisoned")
+                .get(&candidate.id)?;
+            let complete = match event {
+                None => true, // a retired source no longer owns presentation work
+                Some(event) if event.conversation_id == candidate.conversation => {
+                    self.process_profile_candidate(&event)?
+                }
+                Some(_) => {
+                    return Err(NodeError::Log(crate::eventlog::LogError::CorruptFile(
+                        "profile retry source changed".into(),
+                    )));
+                }
+            };
+            if complete {
+                work.complete(candidate.id)?;
+                self.note_reception_change();
+            }
+        }
+        Ok(discovering)
+    }
+
+    fn process_profile_candidate(&self, event: &Event) -> Result<bool, NodeError> {
+        let Some(peer) = self.routing_peer(&event.author.user_id()) else {
+            return Ok(false);
+        };
+        let Ok(plaintext) =
+            crate::dm::open(&self.identity, &peer.public.x25519_pub, &event.ciphertext)
+        else {
+            return Ok(false);
+        };
+        if plaintext.starts_with(b"MTP3") {
+            let Some(profile) = AccountProfile::decode(&plaintext) else {
+                return Ok(true);
+            };
+            if peer.account_id.as_deref() != Some(profile.account_id().as_str()) {
+                return Ok(true);
+            }
+            if profile.account_id() == self.account_id() && !self.device_sync_policy().profile {
+                return Ok(false);
+            }
+            self.receive_account_profile(&profile)?;
+            return Ok(true);
+        }
+        if plaintext.starts_with(b"MTC1") {
+            let Some(card) = TrustCard::decode(&plaintext) else {
+                return Ok(true);
+            };
+            if peer.account_id.as_deref() != Some(card.account_id().as_str()) {
+                return Ok(true);
+            }
+            if card.account_id() == self.account_id() && !self.device_sync_policy().profile {
+                return Ok(false);
+            }
+            self.receive_trust_card(&card)?;
+            return Ok(true);
+        }
+        let Some(payload) = ProfilePayload::decode(&plaintext) else {
+            return Ok(true);
+        };
+        if !payload.verify() || peer.account_id.as_deref() != Some(payload.account_id().as_str()) {
+            return Ok(true);
+        }
+        if payload.account_id() == self.account_id() && !self.device_sync_policy().profile {
+            return Ok(false);
+        }
+        if self.receive_legacy_profile(&payload)? {
+            let _ = self.profile_incoming.send(ReceivedProfile {
+                account_id: payload.account_id(),
+                avatar: payload.avatar,
+            });
+        }
+        Ok(true)
     }
 
     /// Drain one deferred profile compaction without holding any async/network state.
     pub(in crate::node) fn drain_profile_compaction(
         &self,
     ) -> Result<Option<usize>, crate::eventlog::LogError> {
+        self.storage.maintain_participant_events()?;
+        self.log
+            .lock()
+            .expect("log mutex not poisoned")
+            .repository()?
+            .cleanup_selections()?;
         self.log
             .lock()
             .expect("log mutex not poisoned")
@@ -332,22 +318,32 @@ impl Node {
 
     /// Owned by the accept-loop future, rather than a detached background task.
     pub(in crate::node) async fn run_profile_compaction_loop(self: Arc<Self>) {
+        let mut delay = PROFILE_COMPACTION_INTERVAL;
         loop {
-            tokio::time::sleep(PROFILE_COMPACTION_INTERVAL).await;
+            tokio::time::sleep(delay).await;
             let node = Arc::clone(&self);
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
-            match tokio::task::spawn_blocking(move || {
-                let _work = work;
-                if node.cache_discovered_peers().is_err() {
-                    log::warn!("verified discovery cache update failed; will retry");
-                }
-                node.drain_profile_compaction()
-            })
-            .await
+            match work
+                .spawn_blocking(move || {
+                    if node.cache_discovered_peers().is_err() {
+                        log::warn!("verified discovery cache update failed; will retry");
+                    }
+                    let discovering = node.drain_profile_receptions()?;
+                    node.drain_profile_compaction()?;
+                    Ok::<_, NodeError>(discovering)
+                })
+                .await
+                .map(|value| value.into_inner())
             {
-                Ok(Ok(_)) => {}
+                Ok(Ok(discovering)) => {
+                    delay = if discovering {
+                        Duration::from_millis(25)
+                    } else {
+                        PROFILE_COMPACTION_INTERVAL
+                    };
+                }
                 Ok(Err(error)) => {
                     log::warn!("profile log compaction failed; will retry: {error}");
                 }

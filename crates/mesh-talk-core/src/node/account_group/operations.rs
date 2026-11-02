@@ -651,6 +651,22 @@ impl Node {
                 result = Some(status);
                 return Ok(());
             }
+            // A newly accepted local public tail can leave canonical metadata
+            // pending. Finish only one bounded admission allowance before the
+            // strict executor read; reference-only groups retain their private
+            // source rule and idempotent IDs above never reallocate work.
+            let local_channel = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .has_kind(&group, crate::eventlog::EventKind::MembershipChange)?;
+            if local_channel {
+                self.prepare_channel_admission(
+                    group,
+                    &mut crate::eventlog::sync::network::PreparationBudget::default(),
+                )?;
+            }
             let access = self.account_group_access(group)?;
             if !operation.kind().admits_role(access.role) {
                 return Err(NodeError::Authorization(
@@ -676,7 +692,7 @@ impl Node {
             }
             if let AccountGroupOperation::Recall { target } = &operation {
                 let author = self
-                    .account_group_original_message_author(group, *target)
+                    .account_group_original_message_author(group, *target)?
                     .ok_or_else(|| {
                         NodeError::Channel("original message author is reconciling".into())
                     })?;
@@ -977,7 +993,7 @@ impl Node {
     pub(in crate::node) fn operation_projection(
         &self,
         group: crate::eventlog::ConversationId,
-    ) -> OperationProjection {
+    ) -> Result<OperationProjection, NodeError> {
         // Never retain the journal while querying capability or public-log owners.
         let (pending, results, lookups) = {
             let journal = self
@@ -1058,7 +1074,7 @@ impl Node {
             .into_iter()
             .map(|(reference, status, file_descriptor)| {
                 let mut message_event =
-                    self.account_group_committed_message_event(&reference, &status);
+                    self.account_group_committed_message_event(&reference, &status)?;
                 let file_descriptor = if reference.kind == AccountGroupOperationKind::File {
                     match (message_event.as_ref(), file_descriptor) {
                         (Some(_), Some(descriptor)) => Some(descriptor),
@@ -1072,16 +1088,18 @@ impl Node {
                 };
                 let recall_mark = message_event
                     .as_ref()
-                    .and_then(|event| self.account_group_committed_recall_mark(&reference, event));
-                ResultProjection {
+                    .map(|event| self.account_group_committed_recall_mark(&reference, event))
+                    .transpose()?
+                    .flatten();
+                Ok(ResultProjection {
                     file_descriptor,
                     recall_mark,
                     reference,
                     status,
                     message_event,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, NodeError>>()?;
         let lookups = lookups
             .iter()
             .take(8)
@@ -1111,7 +1129,7 @@ impl Node {
         {
             projection.results.pop();
         }
-        projection
+        Ok(projection)
     }
     pub(in crate::node) fn operation_publication_groups(
         &self,

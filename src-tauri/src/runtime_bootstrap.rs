@@ -40,20 +40,10 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
     let Ok(authority) = RuntimeAuthority::request(session, lease, node_handle.clone()) else {
         return;
     };
-    let dm_authority = authority.clone();
-    let channel_authority = authority.clone();
-    let file_authority = authority.clone();
-    let profile_authority = authority.clone();
-    let call_authority = authority.clone();
-    let app_handle_for_dm = app_handle.clone();
-    let app_handle_for_channel = app_handle.clone();
-    let app_handle_for_file = app_handle.clone();
-    let app_handle_for_profile = app_handle.clone();
-    let app_handle_for_call = app_handle.clone();
     let observation = authority.observation_lifetime();
     tauri::async_runtime::spawn(async move {
         let _observation = observation;
-        let Ok(permit) = authority.begin().await else {
+        let Ok(mut permit) = authority.begin().await else {
             return;
         };
         let display_name = permit.display_name.clone();
@@ -75,8 +65,11 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_enabled: false,
                 ..Default::default()
             });
-        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_cost_observed(
-            mesh_talk_core::node::RuntimeConfig {
+        // A replacement releases the retired context before reacquiring. A
+        // retained external SDK handle keeps the profile busy by design.
+        drop(permit.take_retired());
+        let startup =
+            mesh_talk_core::node::RuntimeStartup::bounded(mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
                 account_id: &account_id,
                 display_name: &display_name,
@@ -87,62 +80,16 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 candidate_source: Some(crate::routed_discovery::desktop_candidates(discovery_port)),
                 #[cfg(test)]
                 candidate_source: None,
-            },
-            mesh_talk_core::node::RuntimeEvents {
-                on_dm: Box::new(move |dm| {
-                    crate::events::dispatch_runtime_presentation(
-                        &app_handle_for_dm,
-                        &dm_authority,
-                        move |app| crate::events::emit_dm_received(app, dm),
-                    );
-                }),
-                on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                    let owner = format!(
-                        "{}:{}:{}",
-                        channel_authority.lease.owner(),
-                        channel_authority.lease.generation(),
-                        channel_authority.ticket
-                    );
-                    crate::events::dispatch_runtime_presentation(
-                        &app_handle_for_channel,
-                        &channel_authority,
-                        move |app| crate::events::emit_channel_message(app, &owner, msg),
-                    );
-                }),
-                on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
-                    let owner = format!(
-                        "{}:{}:{}",
-                        file_authority.lease.owner(),
-                        file_authority.lease.generation(),
-                        file_authority.ticket
-                    );
-                    crate::events::dispatch_runtime_presentation(
-                        &app_handle_for_file,
-                        &file_authority,
-                        move |app| crate::events::emit_file_received(app, &owner, f),
-                    );
-                }),
-                on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
-                    crate::events::dispatch_runtime_presentation(
-                        &app_handle_for_profile,
-                        &profile_authority,
-                        move |app| crate::events::emit_profile_received(app, p.account_id, p.avatar),
-                    );
-                }),
-                on_call_signal: Box::new(move |s: mesh_talk_core::node::ReceivedCallSignal| {
-                    crate::events::dispatch_runtime_presentation(
-                        &app_handle_for_call,
-                        &call_authority,
-                        move |app| crate::events::emit_call_signal(app, s.from, s.payload),
-                    );
-                }),
-            },
-            mesh_talk_core::node::RuntimeNetworkOptions {
+            })
+            .with_network(mesh_talk_core::node::RuntimeNetworkOptions {
                 post_office_send_enabled: relay_settings.post_office_send_enabled,
                 post_office_receive_enabled: relay_settings.post_office_receive_enabled,
                 physical_lan_only: relay_settings.physical_lan_only,
-            },
-            mesh_talk_core::node::NetworkCost::Unknown,
+            })
+            .with_network_cost(mesh_talk_core::node::NetworkCost::Unknown);
+        permit.track_startup(startup.completion());
+        match mesh_talk_core::node::NodeRuntime::start_owned(
+            startup,
             |identity| {
                 authority.observe_identity(identity).map_err(|_| {
                     mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(
@@ -160,6 +107,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                             "session replaced",
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await
@@ -187,9 +135,33 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         log::warn!("Account profile binding failed: {error}");
                     }
                 });
+                let Ok(runtime_id) = authority.runtime_id() else {
+                    return;
+                };
+                let reception_scope = crate::reception_host::Scope {
+                    owner: account_id.clone(),
+                    account_id: runtime.account_id().to_owned(),
+                    device_id: runtime.user_id().to_owned(),
+                    runtime_id,
+                };
+                let receipt_head = runtime.handle().reception_head();
+                app_handle
+                    .state::<crate::reception_host::ReceptionHostState>()
+                    .install(reception_scope.clone());
                 // Subscribe before installing/launching the host producer so no
                 // invalidation can fall between capturing the receiver and spawn.
                 let (installed, installation) = tokio::sync::watch::channel(false);
+                if let Ok(cursor) = receipt_head {
+                    runtime.register_host_task(tokio::spawn(after_install(
+                        installation.clone(),
+                        crate::reception_host::native_alerts(
+                            app_handle.clone(),
+                            authority.clone(),
+                            runtime.handle(),
+                            cursor,
+                        ),
+                    )));
+                }
                 let cost_node = runtime.handle();
                 runtime.register_host_task(tokio::spawn(after_install(
                     installation.clone(),
@@ -285,6 +257,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     return;
                 }
                 installed.send_replace(true);
+                crate::reception_host::invalidate(&app_handle, &reception_scope);
                 // Keep startup's exact session and installation authority through
                 // trust publication and every relay-policy commit after a wait.
                 let Ok(admission) = crate::runtime_admission::RuntimeAdmission::capture_lease(
@@ -371,7 +344,7 @@ fn bind_account_profile(
     let recover_bound_legacy = bound.as_str() == Some(runtime.account_id())
         && runtime
             .handle()
-            .account_profile(runtime.account_id())
+            .account_profile(runtime.account_id())?
             .is_none();
     if recover_bound_legacy
         || (bound.as_str() != Some(runtime.account_id())
@@ -406,8 +379,15 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
         let Some(runtime) = guard.as_ref() else {
             return;
         };
-        let Some(card) = runtime.handle().account_profile(runtime.account_id()) else {
-            continue;
+        let card = match runtime.handle().account_profile(runtime.account_id()) {
+            Ok(Some(card)) => card,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!(
+                    "Account profile reconciliation deferred after storage failure: {error}"
+                );
+                continue;
+            }
         };
         let name = card.display_name;
         if mesh_talk_core::identity::user::User::validate_display_name(&name).as_ref()
@@ -443,6 +423,7 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
         .await;
         if let Ok(Ok(user)) = updated {
             let _ = authority.current(|_| {
+                if crate::reception_host::invalidate_identity(&app,authority.lease.owner(),&identity.0,&identity.1) {return;}
                 let _ = app.emit(
                     "account-profile-changed",
                     serde_json::json!({"user": crate::commands::UserInfo::from(user), "account_id": identity.0, "device_id": identity.1}),
@@ -799,7 +780,7 @@ mod tests {
                     release_rx.recv().unwrap();
                     Ok(())
                 },
-                |launch| Ok(launch("Owner")),
+                |launch| launch("Owner"),
             )
             .await
         });
@@ -996,6 +977,7 @@ mod tests {
         let card = runtime
             .handle()
             .account_profile(runtime.account_id())
+            .unwrap()
             .unwrap();
         assert_eq!(card.display_name, "Current desktop nickname");
         assert_eq!(card.bio, "Personal signature");
@@ -1008,6 +990,7 @@ mod tests {
             runtime
                 .handle()
                 .account_profile(runtime.account_id())
+                .unwrap()
                 .unwrap()
                 .display_name,
             "New signed name"
@@ -1028,6 +1011,7 @@ mod tests {
             runtime
                 .handle()
                 .account_profile(runtime.account_id())
+                .unwrap()
                 .map(|card| card.display_name),
             Some("Kept Mac nickname".into())
         );
@@ -1044,6 +1028,7 @@ mod tests {
                 runtime
                     .handle()
                     .account_profile(runtime.account_id())
+                    .unwrap()
                     .is_none()
             );
         }
@@ -1057,6 +1042,7 @@ mod tests {
                 .handle()
                 .account_profile(runtime.account_id())
                 .unwrap()
+                .unwrap()
                 .display_name,
             "Imported kept account"
         );
@@ -1069,7 +1055,7 @@ mod tests {
         let runtime = legacy_linked_runtime_without_card(root.path()).await;
         let account_id = runtime.account_id().to_string();
         let handle = runtime.handle();
-        assert!(handle.account_profile(&account_id).is_none());
+        assert!(handle.account_profile(&account_id).unwrap().is_none());
         let auth = crate::services::auth_service::AuthService::new(std::sync::Arc::new(
             mesh_talk_core::identity::manager::IdentityManager::new(
                 mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
@@ -1109,7 +1095,7 @@ mod tests {
             .await
             .is_err()
         );
-        assert!(handle.account_profile(&account_id).is_none());
+        assert!(handle.account_profile(&account_id).unwrap().is_none());
         crate::account_profile::save_account_bio(
             app.state(),
             app.state(),
@@ -1118,7 +1104,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let profile = handle.account_profile(&account_id).unwrap();
+        let profile = handle.account_profile(&account_id).unwrap().unwrap();
         assert_eq!(profile.display_name, "Existing local name");
         assert_eq!(profile.bio, "New signature");
         state.session().clear();
@@ -1132,7 +1118,7 @@ mod tests {
             .await
             .is_err()
         );
-        assert_eq!(handle.account_profile(&account_id), Some(profile));
+        assert_eq!(handle.account_profile(&account_id).unwrap(), Some(profile));
         node.0.write().await.take().unwrap().stop().await;
     }
 
@@ -1153,21 +1139,21 @@ mod tests {
                 |_| {},
             )
         };
-        let runtime = start().await.unwrap();
-        let account_id = runtime.account_id().to_owned();
-        runtime.stop().await;
         let directory = root.join("accounts/owner");
-        for file in ["trust-cards.log", "account-profiles.log"] {
-            let path = directory.join(file);
-            if path.exists() {
-                std::fs::remove_file(path).unwrap();
-            }
-        }
-        let account = mesh_talk_core::identity::account_keystore::load(
+        std::fs::create_dir_all(&directory).unwrap();
+        mesh_talk_core::identity::keystore::load_or_create(
+            &directory.join("identity.keystore"),
+            "pw",
+        )
+        .unwrap();
+        // Build the actual legacy linked layout before its first indexed open.
+        // Published profile barriers must never be deleted to simulate no card.
+        let account = mesh_talk_core::identity::account_keystore::load_or_create(
             &directory.join("account.keystore"),
             "pw",
         )
         .unwrap();
+        let account_id = account.account_id();
         let other = mesh_talk_core::identity::device::DeviceIdentity::generate().public();
         let (mut roster, _) = mesh_talk_core::storage::record_log::EncryptedRecordLog::<
             mesh_talk_core::node::AccountDevice,
@@ -1190,6 +1176,7 @@ mod tests {
             runtime
                 .handle()
                 .account_profile(runtime.account_id())
+                .unwrap()
                 .is_none()
         );
         runtime
@@ -1258,6 +1245,7 @@ mod tests {
             joined
                 .handle()
                 .account_profile(&account_id)
+                .unwrap()
                 .unwrap()
                 .display_name,
             "Kept account"

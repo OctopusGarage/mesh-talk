@@ -14,22 +14,20 @@ use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
 use mesh_talk_core::node::{
     DEFAULT_DISCOVERY_PORT, Node, ParticipantConfig, ParticipantRuntime, PreparedParticipant,
-    ReceivedDm, discovery_socket,
+    discovery_socket,
 };
-use mesh_talk_core::node::{
-    run_federated_relay_accept_loop_with_directory, run_network_relay_accept_loop_with_directory,
-    run_relay_accept_loop,
+use mesh_talk_core::postoffice::IndexedPostOffice;
+use mesh_talk_core::postoffice::federation::{
+    FederationDirectory, IndexedRelayEndpoint, IndexedRelayTrust,
 };
-use mesh_talk_core::postoffice::PostOffice;
-use mesh_talk_core::postoffice::federation::FederationDirectory;
+use mesh_talk_core::storage::profile::ProfileStorageLease;
 use mesh_talk_core::transport::net::POST_OFFICE_DISCOVERY_PORT;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
-
 #[path = "mesh-talk-node/federation_config.rs"]
 mod federation_config;
 #[path = "mesh-talk-node/federation_runtime.rs"]
@@ -38,6 +36,10 @@ mod federation_runtime;
 mod file_saves;
 #[path = "mesh-talk-node/network_config.rs"]
 mod network_config;
+#[path = "mesh-talk-node/reception.rs"]
+mod reception;
+#[path = "mesh-talk-node/relay_runtime.rs"]
+mod relay_runtime;
 use federation_config::{FederationSeed, parse_fingerprint};
 use federation_runtime::run_federation_loop;
 
@@ -212,151 +214,6 @@ fn emit(line: &str) {
     let _ = out.flush();
 }
 
-/// Exclusive CLI ownership of a node's data directory. The open file retains
-/// the OS lock for the guard's lifetime; its stable path must never be unlinked
-/// on release, since another process may already have that same file open.
-struct DataDirLock {
-    file: std::fs::File,
-}
-
-impl DataDirLock {
-    fn acquire(data_dir: &std::path::Path) -> std::io::Result<DataDirLock> {
-        use std::io::{Read, Seek, Write};
-        std::fs::create_dir_all(data_dir)?;
-        let path = data_dir.join("node.lock");
-        let busy = || {
-            std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "data dir {} is locked by another mesh-talk-node; stop the owning node before retrying",
-                    data_dir.display()
-                ),
-            )
-        };
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // Nonblocking open also prevents a substituted FIFO from hanging startup.
-            options
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            // FILE_FLAG_OPEN_REPARSE_POINT: inspect the entry itself, not its target.
-            options.custom_flags(0x0020_0000);
-        }
-        let mut file = options.open(&path)?;
-        let metadata = file.metadata()?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            // FILE_ATTRIBUTE_REPARSE_POINT includes symlinks and other redirections.
-            if metadata.file_attributes() & 0x400 != 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "node.lock must not be a reparse point",
-                ));
-            }
-        }
-        if !metadata.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "node.lock must be a regular file",
-            ));
-        }
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Err(busy()),
-            Err(std::fs::TryLockError::Error(error)) => return Err(error),
-        }
-        // Old binaries use a bare PID without an OS lock. Retain a live legacy
-        // holder conservatively; this cannot make mixed-version startup race-free.
-        // Limit the diagnostic read even if an unrelated large file is present.
-        let mut diagnostic = Vec::new();
-        Read::by_ref(&mut file)
-            .take(32)
-            .read_to_end(&mut diagnostic)?;
-        let holder = (metadata.len() <= 32)
-            .then(|| {
-                std::str::from_utf8(&diagnostic)
-                    .ok()?
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            })
-            .flatten();
-        if holder.is_some_and(pid_is_alive) {
-            return Err(busy());
-        }
-        #[cfg(test)]
-        tests::profile_lock_before_publish();
-        file.set_len(0)?;
-        file.rewind()?;
-        write!(file, "{}", std::process::id())?;
-        Ok(DataDirLock { file })
-    }
-}
-
-/// Whether a process with `pid` is currently alive (signal 0 probe). Used only to decide
-/// if a leftover lockfile is stale. On the rare PID-reuse race this can over-report
-/// "alive" and refuse the lock — a safe (conservative) failure, never silent corruption.
-#[cfg(unix)]
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > libc::pid_t::MAX as u32 {
-        return false;
-    }
-    // SAFETY: `kill` with signal 0 performs no signal delivery — it only checks whether the
-    // process exists / is permitted to be signalled. No memory is touched.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true; // exists and signallable
-    }
-    // Only ESRCH (no such process) proves it's gone; EPERM means it exists but isn't ours.
-    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-/// Windows service managers terminate a process without running `Drop`, so a PID
-/// in the lockfile must be checked before refusing a restart. Failure to open or
-/// query a process is treated as alive: only a confirmed exit makes it safe to
-/// reclaim the lock.
-#[cfg(windows)]
-fn pid_is_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    // SAFETY: this opens a query-only handle for a numeric PID, checks its exit
-    // code, and closes the handle. No process memory is accessed or modified.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return std::io::Error::last_os_error().raw_os_error()
-            != Some(ERROR_INVALID_PARAMETER as i32);
-    }
-    let mut exit_code = 0;
-    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-    unsafe { CloseHandle(handle) };
-    queried == 0 || exit_code == STILL_ACTIVE as u32
-}
-
-/// Other platforms conservatively retain a lock whose holder cannot be probed.
-#[cfg(not(any(unix, windows)))]
-fn pid_is_alive(_pid: u32) -> bool {
-    true
-}
-
-impl Drop for DataDirLock {
-    fn drop(&mut self) {
-        // Clear the live PID before releasing ownership, permitting this process
-        // to acquire again. A failed clear leaves conservative legacy detection.
-        let _ = self.file.set_len(0);
-    }
-}
-
 impl Args {
     fn apply_discovery_defaults(&mut self) {
         // Managed-role defaults retain LAN visibility. An explicitly isolated
@@ -406,10 +263,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
-    let _data_dir_lock = DataDirLock::acquire(&data_dir)?;
+    let data_dir_lock = ProfileStorageLease::acquire(&data_dir)?;
 
     if args.post_office {
-        return run_post_office(args, network_configuration).await;
+        return run_post_office(args, network_configuration, data_dir_lock).await;
     }
     let password = args
         .password
@@ -417,6 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Clap requires a password source");
 
     // Persistent identity (created on first run).
+    data_dir_lock.validate_identity_sources(std::path::Path::new(&args.keystore))?;
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
         password,
@@ -441,25 +299,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Shared roster (discovery writes it; the node + REPL read it) and the node.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
-    let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
-    let (channel_tx, mut channel_rx) =
-        mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedChannelMessage>();
-    let (file_tx, file_rx) = mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedFile>();
     // Derive log paths from the keystore path (sibling files, same directory).
     let keystore_path = std::path::Path::new(&args.keystore);
     let data_dir = keystore_path.parent().unwrap_or(std::path::Path::new("."));
     let log_path = data_dir.join("messages.log");
     let sent_path = data_dir.join("sent.log");
-    let node = Node::open_with_account(
-        identity,
-        account,
-        Arc::clone(&roster),
-        incoming_tx,
-        channel_tx,
-        file_tx,
-        &log_path,
-        &sent_path,
-        password,
+    let node = Node::open_bounded_with_profile_lease(
+        data_dir_lock,
+        mesh_talk_core::node::BoundedNodeOpenRequest {
+            identity,
+            account,
+            roster: Arc::clone(&roster),
+            log_path: &log_path,
+            sent_path: &sent_path,
+            password,
+        },
     )?;
     node.set_profile_display_name(&args.name)?;
     let verified_path = verified_peer_path(data_dir);
@@ -484,41 +338,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .launch(&args.name);
 
-    // Print received DMs as they arrive.
-    participant.register_host_task(tokio::spawn(async move {
-        while let Some(dm) = incoming_rx.recv().await {
-            // DMs are text-only in this CLI; lossy decode is safe here.
-            let text = String::from_utf8_lossy(&dm.text);
-            emit(&format!("from {} ({}): {}", dm.from, dm.from_name, text));
-        }
-    }));
-
-    // Print inbound channel messages as they arrive.
-    participant.register_host_task(tokio::spawn(async move {
-        while let Some(m) = channel_rx.recv().await {
-            if m.reception_only {
-                continue;
-            }
-            // Channel messages are text-only in this CLI; lossy decode is safe here.
-            let text = String::from_utf8_lossy(&m.text);
-            emit(&format!(
-                "channel {} from {}: {}",
-                hex::encode(m.channel_id.as_bytes()),
-                m.from,
-                text
-            ));
-        }
-    }));
-
-    // Print inbound files as they arrive, saving them into the node's data dir.
-    {
-        let node = Arc::clone(&node);
-        let data_dir = data_dir.to_path_buf();
-        let work = participant.blocking_work();
-        participant.register_host_task(tokio::spawn(file_saves::run(
-            node, data_dir, file_rx, emit, work,
-        )));
-    }
+    // Enroll both fixed consumers before either can retire a shared prefix.
+    let output_cursor =
+        node.reception_resume(mesh_talk_core::node::ReceptionConsumer::CliOutput)?;
+    let save_cursor =
+        node.reception_resume(mesh_talk_core::node::ReceptionConsumer::CliAutosave)?;
+    participant.register_host_task(tokio::spawn(reception::output(
+        node.clone(),
+        output_cursor,
+        emit,
+        participant.blocking_work(),
+    )));
+    participant.register_host_task(tokio::spawn(file_saves::run_bounded(
+        node.clone(),
+        data_dir.to_path_buf(),
+        save_cursor,
+        emit,
+        participant.blocking_work(),
+    )));
 
     emit(&format!(
         "node {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
@@ -680,41 +517,39 @@ fn spawn_relay_lan_discovery(
     roster: Arc<Mutex<Roster>>,
     announce: mesh_talk_core::discovery::service::SharedAnnounce,
     user_id: String,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<tokio::task::JoinHandle<()>>> {
     if lan_port == routed_port {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let shared_socket = Arc::new(discovery_socket(lan_port)?);
-    mesh_talk_core::discovery::service::spawn_discovery_with_trigger(
-        shared_socket,
-        roster,
-        announce,
-        user_id,
-        lan_port,
-        None,
-    );
-    Ok(())
+    Ok(
+        mesh_talk_core::discovery::service::spawn_discovery_with_trigger(
+            shared_socket,
+            roster,
+            announce,
+            user_id,
+            lan_port,
+            None,
+        ),
+    )
 }
 
 /// Run as a post office: load the identity, advertise the post-office role,
-/// serve a durable `PostOffice` relay. No DM send/drain — a pure relay. Runs the
-/// accept loop forever (stop with Ctrl-C / kill).
-///
-/// Note: cold start does TWO password-KDF unlocks back to back — the keystore
-/// (`load_or_create`) and the relay log (`PostOffice::open`) — so the startup
-/// line can take ~15s to appear on first run. Tooling that waits for a relay to
-/// come up should poll for the startup line, not fixed-sleep.
+/// serve the indexed encrypted relay under one owned shutdown supervisor.
+/// Tooling should poll the startup line rather than assume a fixed unlock time.
 async fn run_post_office(
     args: Args,
     network_configuration: Option<(
         mesh_talk_core::postoffice::network::NetworkPolicy,
         mesh_talk_core::postoffice::network::NetworkMembership,
     )>,
+    lease: ProfileStorageLease,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let password = args
         .password
         .as_deref()
         .expect("Clap requires a password source");
+    lease.validate_identity_sources(std::path::Path::new(&args.keystore))?;
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
         password,
@@ -754,153 +589,130 @@ async fn run_post_office(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("relay.log");
-    let store = Arc::new(Mutex::new(PostOffice::open(
-        &relay_path,
-        password,
-        identity,
-    )?));
-    let retention_store = Arc::clone(&store);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            if let Err(error) = retention_store
-                .lock()
-                .expect("post office lock not poisoned")
-                .prune_expired()
-            {
-                eprintln!("post office retention cleanup failed: {error}");
-            }
-        }
-    });
+    let store = IndexedPostOffice::open_with_lease(lease, &relay_path, password, identity)?;
+    // Install real service signals before announcing readiness or spawning work.
+    let signals = relay_runtime::ShutdownSignals::install()?;
+    let mut background = relay_runtime::BackgroundTasks::default();
 
     // Discovery: advertise ourselves (and harmlessly track peers) on the shared socket.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
     let shared_announce = mesh_talk_core::discovery::service::shared_announce(&announce);
     let discovery_identity = DeviceIdentity::from_secret_bytes(ed, x);
-    mesh_talk_core::discovery::service::spawn_discovery_with_routed(
-        Arc::clone(&socket),
-        Arc::clone(&roster),
-        Arc::clone(&shared_announce),
-        user_id.clone(),
-        args.discovery_port,
-        None,
-        Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::default()),
-        Some(Arc::new(
-            mesh_talk_core::discovery::service::RoutedDiscovery::new(Arc::new(
-                move |nonce, announce| {
-                    mesh_talk_core::discovery::query::encode_response(
-                        nonce,
-                        announce,
-                        &discovery_identity,
-                    )
-                },
+    background.handles.extend(
+        mesh_talk_core::discovery::service::spawn_discovery_with_routed(
+            Arc::clone(&socket),
+            Arc::clone(&roster),
+            Arc::clone(&shared_announce),
+            user_id.clone(),
+            args.discovery_port,
+            None,
+            Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::default()),
+            Some(Arc::new(
+                mesh_talk_core::discovery::service::RoutedDiscovery::new(Arc::new(
+                    move |nonce, announce| {
+                        mesh_talk_core::discovery::query::encode_response(
+                            nonce,
+                            announce,
+                            &discovery_identity,
+                        )
+                    },
+                )),
             )),
-        )),
+        ),
     );
     if let Some(port) = args.lan_announce_port {
-        spawn_relay_lan_discovery(
+        background.handles.extend(spawn_relay_lan_discovery(
             port,
             args.discovery_port,
             Arc::clone(&roster),
             shared_announce,
             user_id.clone(),
-        )?;
+        )?);
     }
 
     let gateway = if let (Some(remote), Some(peer_id)) = (args.bridge_peer, args.bridge_peer_id) {
         let proof = Arc::new(Mutex::new(None));
-        tokio::spawn(
-            mesh_talk_core::postoffice::gateway::run_bridge_gateway_on_port(
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(
+            mesh_talk_core::postoffice::gateway::run_bridge_gateway_on_port_until(
                 Arc::clone(&proof),
                 tcp_port,
                 remote,
                 peer_id,
                 args.bridge_proxy_port,
+                rx,
             ),
         );
+        background.gateway = Some((stop, task));
         Some(proof)
     } else {
         None
     };
 
-    emit(&format!(
-        "post-office {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
-        args.discovery_port
-    ));
-
-    if let Some(network) = network {
-        let directory = FederationDirectory::new();
-        directory.set_office_name(&args.name);
-        emit(
-            "post-office network ready: automatic approved-member discovery; software integrity not attested",
-        );
-        tokio::spawn(run_federation_loop(
-            Arc::clone(&roster),
-            args.relay_seeds,
-            DeviceIdentity::from_secret_bytes(ed, x),
-            Arc::clone(&store),
-            directory.clone(),
-            Some(network.clone()),
-        ));
-        run_network_relay_accept_loop_with_directory(
-            transport_identity,
-            listener,
-            store,
-            network,
-            directory,
-        )
-        .await;
-        return Ok(());
-    }
-
-    if args.federation_config.is_some() || !args.federation_peers.is_empty() {
+    let federation_enabled =
+        network.is_some() || args.federation_config.is_some() || !args.federation_peers.is_empty();
+    let directory = if federation_enabled || gateway.is_some() || args.bridge {
         let directory = gateway
             .map(FederationDirectory::with_gateway)
             .unwrap_or_default();
         directory.set_office_name(&args.name);
-        let trusted = Arc::new(
-            args.federation_peers
-                .iter()
-                .map(|seed| seed.id.clone())
-                .collect::<HashSet<_>>(),
-        );
-        let federation_identity = DeviceIdentity::from_secret_bytes(ed, x);
-        tokio::spawn(run_federation_loop(
-            Arc::clone(&roster),
-            args.federation_peers.clone(),
-            federation_identity,
-            Arc::clone(&store),
-            directory.clone(),
-            None,
-        ));
-        run_federated_relay_accept_loop_with_directory(
-            transport_identity,
-            listener,
-            store,
-            trusted,
-            directory,
-        )
-        .await;
-        return Ok(());
-    }
-
-    // Serve relay connections until killed. This loop never returns; the trailing
-    // Ok(()) is unreachable in practice (the process is stopped by a signal).
-    if gateway.is_some() || args.bridge {
-        mesh_talk_core::node::run_named_bridge_relay_accept_loop(
-            transport_identity,
-            listener,
-            store,
-            gateway,
-            &args.name,
-        )
-        .await;
+        directory.set_office_public(transport_identity.public());
+        Some(directory)
     } else {
-        run_relay_accept_loop(transport_identity, listener, store).await;
+        None
+    };
+    let trust = network.clone().map(IndexedRelayTrust::Network).or_else(|| {
+        federation_enabled.then(|| {
+            IndexedRelayTrust::Pinned(Arc::new(
+                args.federation_peers
+                    .iter()
+                    .map(|seed| seed.id.clone())
+                    .collect(),
+            ))
+        })
+    });
+    let endpoint = IndexedRelayEndpoint::new(store.clone(), directory.clone(), trust);
+    let outgoing_endpoint = endpoint.clone();
+    let outgoing_store = store.clone();
+    let seeds = if network.is_some() {
+        args.relay_seeds
+    } else {
+        args.federation_peers
+    };
+    let outgoing = async move {
+        if let Some(directory) = directory.filter(|_| federation_enabled) {
+            run_federation_loop(
+                roster,
+                seeds,
+                DeviceIdentity::from_secret_bytes(ed, x),
+                outgoing_store,
+                directory,
+                network,
+                outgoing_endpoint,
+            )
+            .await
+        } else {
+            std::future::pending().await
+        }
+    };
+    emit(&format!(
+        "post-office {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
+        args.discovery_port
+    ));
+    if federation_enabled {
+        emit("post-office federation ready; software integrity not attested");
     }
-    Ok(())
+    relay_runtime::run(
+        store,
+        endpoint,
+        transport_identity,
+        listener,
+        outgoing,
+        background,
+        signals,
+    )
+    .await
 }
 
 /// Parse and dispatch a `/msg <prefix> <text>` command: resolve the recipient
@@ -967,7 +779,13 @@ fn handle_history(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
         emit("peer vanished from roster");
         return;
     };
-    let entries = node.dm_history(&peer.public, limit);
+    let entries = match node.dm_history(&peer.public, limit) {
+        Ok(entries) => entries,
+        Err(error) => {
+            emit(&format!("history unavailable: {error}"));
+            return;
+        }
+    };
     if entries.is_empty() {
         emit("(no history)");
         return;
@@ -1042,8 +860,14 @@ fn handle_channel_msg(participant: &mut ParticipantRuntime, node: &Arc<Node>, re
         emit("usage: /channel-msg <chan-id-prefix> <text>");
         return;
     }
-    let matches: Vec<_> = node
-        .list_channels()
+    let channels = match node.list_channels() {
+        Ok(channels) => channels,
+        Err(error) => {
+            emit(&format!("channel list unavailable: {error}"));
+            return;
+        }
+    };
+    let matches: Vec<_> = channels
         .into_iter()
         .filter(|c| hex::encode(c.id.as_bytes()).starts_with(&prefix))
         .map(|c| c.id)
@@ -1085,8 +909,14 @@ fn handle_channel_replica(participant: &mut ParticipantRuntime, node: &Arc<Node>
         emit("usage: /channel-replica <chan-id-prefix> on|off");
         return;
     };
-    let matches: Vec<_> = node
-        .list_channels()
+    let channels = match node.list_channels() {
+        Ok(channels) => channels,
+        Err(error) => {
+            emit(&format!("channel list unavailable: {error}"));
+            return;
+        }
+    };
+    let matches: Vec<_> = channels
         .into_iter()
         .filter(|channel| hex::encode(channel.id.as_bytes()).starts_with(prefix))
         .map(|channel| channel.id)
@@ -1245,175 +1075,6 @@ mod tests {
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;
     use std::time::Instant;
-
-    // Only the subprocess helper sets these variables; ordinary test threads do
-    // not mutate the environment or pause acquisitions.
-    pub(super) fn profile_lock_before_publish() {
-        if let Some(ready) = std::env::var_os("MESH_TEST_LOCK_READY") {
-            std::fs::write(ready, b"ready").unwrap();
-            let mut line = String::new();
-            assert!(std::io::stdin().read_line(&mut line).unwrap() > 0);
-        }
-    }
-
-    struct ProfileLockChild(std::process::Child);
-
-    impl ProfileLockChild {
-        fn spawn(root: &std::path::Path) -> Self {
-            Self(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "tests::profile_lock_child", "--nocapture"])
-                    .env("MESH_TEST_LOCK_DIR", root)
-                    .env("MESH_TEST_LOCK_READY", root.join("ready"))
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .unwrap(),
-            )
-        }
-
-        fn wait_for(&mut self, path: &std::path::Path) {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !path.exists() {
-                assert!(self.0.try_wait().unwrap().is_none(), "lock child exited");
-                assert!(Instant::now() < deadline, "lock child timed out");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-
-        fn publish(&mut self) {
-            use std::io::Write;
-            self.0
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(b"publish\n")
-                .unwrap();
-        }
-    }
-
-    impl Drop for ProfileLockChild {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    #[test]
-    fn profile_lock_child() {
-        let Some(root) = std::env::var_os("MESH_TEST_LOCK_DIR") else {
-            return;
-        };
-        let root = std::path::PathBuf::from(root);
-        let _lock = DataDirLock::acquire(&root).unwrap();
-        std::fs::write(root.join("owned"), b"owned").unwrap();
-        let mut line = String::new();
-        assert!(std::io::stdin().read_line(&mut line).unwrap() > 0);
-    }
-
-    #[test]
-    fn profile_lock_excludes_contender_before_pid_publication() {
-        let root = tempfile::tempdir().unwrap();
-        let mut child = ProfileLockChild::spawn(root.path());
-        child.wait_for(&root.path().join("ready"));
-        assert_eq!(
-            std::fs::metadata(root.path().join("node.lock"))
-                .unwrap()
-                .len(),
-            0
-        );
-        let contender = DataDirLock::acquire(root.path());
-        assert_eq!(
-            contender
-                .err()
-                .expect("second process acquired the same profile")
-                .kind(),
-            std::io::ErrorKind::AlreadyExists
-        );
-        child.publish();
-        child.wait_for(&root.path().join("owned"));
-        assert!(DataDirLock::acquire(root.path()).is_err());
-    }
-
-    #[test]
-    fn profile_lock_releases_after_process_kill() {
-        let root = tempfile::tempdir().unwrap();
-        let mut child = ProfileLockChild::spawn(root.path());
-        child.wait_for(&root.path().join("ready"));
-        child.publish();
-        child.wait_for(&root.path().join("owned"));
-        assert!(DataDirLock::acquire(root.path()).is_err());
-        drop(child);
-        let _lock = DataDirLock::acquire(root.path()).unwrap();
-    }
-
-    #[test]
-    fn profile_lock_reuses_persistent_file_and_releases_on_drop() {
-        for content in ["", "malformed", "4294967295"] {
-            let root = tempfile::tempdir().unwrap();
-            let path = root.path().join("node.lock");
-            std::fs::write(&path, content).unwrap();
-            let original = std::fs::File::open(&path).unwrap();
-            let lock = DataDirLock::acquire(root.path()).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                assert_eq!(
-                    original.metadata().unwrap().ino(),
-                    std::fs::metadata(&path).unwrap().ino()
-                );
-            }
-            drop(original);
-            assert!(DataDirLock::acquire(root.path()).is_err());
-            drop(lock);
-            assert!(path.exists());
-            let _next = DataDirLock::acquire(root.path()).unwrap();
-        }
-    }
-
-    #[test]
-    fn profile_lock_rejects_live_legacy_pid() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("node.lock"),
-            std::process::id().to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            DataDirLock::acquire(root.path()).err().unwrap().kind(),
-            std::io::ErrorKind::AlreadyExists
-        );
-    }
-
-    #[test]
-    fn profile_lock_allows_different_directories() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let _first = DataDirLock::acquire(first.path()).unwrap();
-        let _second = DataDirLock::acquire(second.path()).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn profile_lock_rejects_aliases_and_unsafe_lock_paths() {
-        use std::os::unix::fs::symlink;
-        let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("data");
-        std::fs::create_dir(&data).unwrap();
-        let alias = root.path().join("alias");
-        symlink(&data, &alias).unwrap();
-        let lock = DataDirLock::acquire(&data).unwrap();
-        assert!(DataDirLock::acquire(&alias).is_err());
-        drop(lock);
-        std::fs::remove_file(data.join("node.lock")).unwrap();
-        let target = root.path().join("target");
-        std::fs::write(&target, b"untouched").unwrap();
-        symlink(&target, data.join("node.lock")).unwrap();
-        assert!(DataDirLock::acquire(&data).is_err());
-        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
-        std::fs::remove_file(data.join("node.lock")).unwrap();
-        std::fs::create_dir(data.join("node.lock")).unwrap();
-        assert!(DataDirLock::acquire(&data).is_err());
-    }
 
     #[test]
     fn cli_accepts_exactly_one_password_source() {
@@ -1750,6 +1411,7 @@ mod tests {
         assert!(
             recipient
                 .account_history(sender.account_id(), 20)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"native account delivery")
         );

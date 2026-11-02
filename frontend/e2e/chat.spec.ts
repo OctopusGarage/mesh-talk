@@ -561,8 +561,10 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("search-input").fill("welcome");
     const result = page.getByTestId("search-result").first();
     await expect(result).toBeVisible();
-    // The first seeded Bob message in tauri-mock.ts owns this exact hit.
-    await expectMessageHighlight(page, "m101", () => result.click());
+    // The first seeded Bob message uses canonical hex event ID 101 (0x65).
+    await expectMessageHighlight(page, "65".padStart(64, "0"), () =>
+      result.click(),
+    );
     // Navigated into the conversation containing the hit.
     await expect(page.getByTestId("conversation-header")).toBeVisible();
     await expect(

@@ -587,6 +587,40 @@ impl SessionPool {
         None
     }
 
+    pub(in crate::node) fn file_identity_scan_after(&self, peer: &PublicIdentity) -> Option<i64> {
+        self.file_identity_scans
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(public, kind, _)| public == peer && *kind == 0)
+            .and_then(|(_, _, value)| i64::try_from(*value).ok())
+            .filter(|value| *value != 0)
+    }
+
+    pub(in crate::node) fn advance_file_identity_scan(
+        &self,
+        peer: &PublicIdentity,
+        after: Option<i64>,
+    ) {
+        let mut scans = self.file_identity_scans.lock().unwrap();
+        if let Some(index) = scans
+            .iter()
+            .position(|(public, kind, _)| public == peer && *kind == 0)
+        {
+            scans.remove(index);
+        }
+        if scans.len() >= MAX_ACCOUNT_CAPABILITIES {
+            scans.pop_front();
+        }
+        scans.push_back((
+            peer.clone(),
+            0,
+            after
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0),
+        ));
+    }
+
     /// Independent bounded cursors keep one peer's scan from skipping another's rows.
     pub(in crate::node) fn file_identity_scan_offset(
         &self,
@@ -863,7 +897,9 @@ impl Node {
                     && self.pooled_presence_current(protocol, &channel)
                 {
                     if !self.account_allowed(expected, channel.peer_announcement())
-                        && !self.group_member(expected)
+                        && !self
+                            .group_member(expected)
+                            .map_err(|error| TransportError::Io(std::io::Error::other(error)))?
                         && !self.group_departure_peer(expected)
                     {
                         return Err(TransportError::AdmissionDenied);

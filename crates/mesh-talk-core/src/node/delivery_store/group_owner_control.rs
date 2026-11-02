@@ -218,7 +218,7 @@ fn validate_parent_common(
             continue;
         }
         let parent = log
-            .get(&id)
+            .get(&id)?
             .ok_or_else(|| invalid("owner control causal parent missing"))?;
         if parent.conversation_id != group || parent.id == event.id {
             return Err(invalid("invalid owner control causal parent"));
@@ -226,7 +226,7 @@ fn validate_parent_common(
         pending.extend(parent.parents.iter().copied());
         ancestors.insert(id, parent);
     }
-    let events: Vec<_> = ancestors.values().copied().collect();
+    let events: Vec<_> = ancestors.values().collect();
     let projection = ChannelBook::project_membership(group, &events);
     let mut source =
         Node::public_account_group_source(group, &projection, &witness.own.public(), &witness.own)
@@ -383,7 +383,8 @@ mod tests {
         fn prepare(&self, input: &OwnerControlInput) -> (OperationReference, PreparedOwnerControl) {
             let proofs = self.node.owner_control_proof_snapshot();
             let log = self.node.log.lock().unwrap();
-            let projection = ChannelBook::project_membership(self.group, &log.events(&self.group));
+            let projection =
+                ChannelBook::project_membership(self.group, &log.events(&self.group).unwrap());
             let prepared = self
                 .node
                 .prepare_owner_control(self.group, &log, &projection, input, &proofs)
@@ -723,7 +724,7 @@ mod tests {
         let f = Fixture::new();
         let proofs = f.node.owner_control_proof_snapshot();
         let log = f.node.log.lock().unwrap();
-        let projection = ChannelBook::project_membership(f.group, &log.events(&f.group));
+        let projection = ChannelBook::project_membership(f.group, &log.events(&f.group).unwrap());
         let input = OwnerControlInput::Transfer(f.node.account_id());
         assert!(
             f.node

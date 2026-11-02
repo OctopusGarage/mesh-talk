@@ -74,6 +74,26 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     /// stored record (tolerating a torn trailing record). Returns the writer plus
     /// the records already stored, in file order.
     pub fn open(path: &Path, password: &str, magic: &[u8; 6]) -> Result<(Self, Vec<R>), LogError> {
+        let mut records = Vec::new();
+        let log = Self::open_with_visitor(path, password, magic, |record| {
+            records.push(record);
+            Ok(())
+        })?;
+        Ok((log, records))
+    }
+
+    /// Open or create a log, visiting each authenticated, decoded record in file
+    /// order before decoding the next. The parser retains no decoded records
+    /// between visits; the visitor controls any retention.
+    /// A visitor error returns no writer and leaves the source bytes unchanged,
+    /// including a torn tail. Callers own any partial effects of earlier visits
+    /// and must publish a complete import only after this method succeeds.
+    pub(crate) fn open_with_visitor(
+        path: &Path,
+        password: &str,
+        magic: &[u8; 6],
+        visit: impl FnMut(R) -> Result<(), LogError>,
+    ) -> Result<Self, LogError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -94,36 +114,38 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 file.write_all(&salt)?;
                 file.sync_all()?;
                 sync_parent(path)?;
-                Ok((
-                    Self {
-                        file,
-                        #[cfg(windows)]
-                        repair,
-                        #[cfg(test)]
-                        append_fault: None,
-                        #[cfg(test)]
-                        append_rollback_fault: None,
-                        key,
-                        salt,
-                        magic: *magic,
-                        path: path.to_path_buf(),
-                        poisoned: false,
-                        rollback_boundary: 0,
-                        #[cfg(test)]
-                        before_rewrite_rename: None,
-                        _marker: PhantomData,
-                    },
-                    Vec::new(),
-                ))
+                Ok(Self {
+                    file,
+                    #[cfg(windows)]
+                    repair,
+                    #[cfg(test)]
+                    append_fault: None,
+                    #[cfg(test)]
+                    append_rollback_fault: None,
+                    key,
+                    salt,
+                    magic: *magic,
+                    path: path.to_path_buf(),
+                    poisoned: false,
+                    rollback_boundary: 0,
+                    #[cfg(test)]
+                    before_rewrite_rename: None,
+                    _marker: PhantomData,
+                })
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                Self::load(path, password, magic)
+                Self::load(path, password, magic, visit)
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    fn load(path: &Path, password: &str, magic: &[u8; 6]) -> Result<(Self, Vec<R>), LogError> {
+    fn load(
+        path: &Path,
+        password: &str,
+        magic: &[u8; 6],
+        visit: impl FnMut(R) -> Result<(), LogError>,
+    ) -> Result<Self, LogError> {
         let mut file = OpenOptions::new().read(true).append(true).open(path)?;
         #[cfg(windows)]
         let repair = OpenOptions::new().write(true).open(path)?;
@@ -139,7 +161,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         let key = EncryptionKey::from_password(password, &salt)?;
 
         let body_len = file.metadata()?.len() - (6 + SALT_SIZE) as u64;
-        let (records, valid) = Self::parse_records(&mut BufReader::new(&mut file), body_len, &key)?;
+        let valid = Self::parse_records(&mut BufReader::new(&mut file), body_len, &key, visit)?;
         if valid != body_len {
             #[cfg(windows)]
             let repair_file = &repair;
@@ -148,27 +170,24 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             repair_file.set_len((6 + SALT_SIZE) as u64 + valid)?;
             repair_file.sync_all()?;
         }
-        Ok((
-            Self {
-                file,
-                #[cfg(windows)]
-                repair,
-                #[cfg(test)]
-                append_fault: None,
-                #[cfg(test)]
-                append_rollback_fault: None,
-                key,
-                salt,
-                magic: *magic,
-                path: path.to_path_buf(),
-                poisoned: false,
-                rollback_boundary: 0,
-                #[cfg(test)]
-                before_rewrite_rename: None,
-                _marker: PhantomData,
-            },
-            records,
-        ))
+        Ok(Self {
+            file,
+            #[cfg(windows)]
+            repair,
+            #[cfg(test)]
+            append_fault: None,
+            #[cfg(test)]
+            append_rollback_fault: None,
+            key,
+            salt,
+            magic: *magic,
+            path: path.to_path_buf(),
+            poisoned: false,
+            rollback_boundary: 0,
+            #[cfg(test)]
+            before_rewrite_rename: None,
+            _marker: PhantomData,
+        })
     }
 
     /// Parse the record region. A torn trailing record (crash mid-write) is
@@ -177,8 +196,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         reader: &mut impl Read,
         body_len: u64,
         key: &EncryptionKey,
-    ) -> Result<(Vec<R>, u64), LogError> {
-        let mut records = Vec::new();
+        mut visit: impl FnMut(R) -> Result<(), LogError>,
+    ) -> Result<u64, LogError> {
         let mut valid = 0;
         // Reuse one ciphertext buffer; replay never retains a second whole-file copy.
         let mut record = Vec::new();
@@ -195,6 +214,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 return Err(LogError::CorruptFile("record shorter than nonce".into()));
             }
             record.resize(len, 0);
+            #[cfg(test)]
+            frame_observations::record_capacity(record.capacity());
             reader.read_exact(&mut record)?;
             let nonce: [u8; NONCE_SIZE] = record[..NONCE_SIZE]
                 .try_into()
@@ -203,10 +224,10 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 .map_err(|_| LogError::CorruptFile("record failed to decrypt".into()))?;
             let value: R = bincode::deserialize(&plaintext)
                 .map_err(|e| LogError::CorruptFile(format!("record decode: {e}")))?;
-            records.push(value);
+            visit(value)?;
             valid += 4 + len as u64;
         }
-        Ok((records, valid))
+        Ok(valid)
     }
 
     /// Encrypt one record into its `[u32 len][nonce][ciphertext]` wire form.
@@ -444,6 +465,8 @@ mod tests {
     use super::*;
     use serde::Deserialize;
 
+    include!("record_log_visitor_tests.rs");
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct Rec {
         n: u64,
@@ -486,8 +509,13 @@ mod tests {
             data: std::io::Cursor::new(bytes),
             largest_read: 0,
         };
-        let (records, valid) =
-            EncryptedRecordLog::<Rec>::parse_records(&mut reader, body_len, &log.key).unwrap();
+        let mut records = Vec::new();
+        let valid =
+            EncryptedRecordLog::<Rec>::parse_records(&mut reader, body_len, &log.key, |record| {
+                records.push(record);
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(records, vec![rec(1, b"streamed"); 128]);
         assert_eq!(valid, (128 * frame_len) as u64);
         assert!(reader.largest_read <= frame_len);
@@ -802,5 +830,47 @@ mod tests {
         let (_log, records): (EncryptedRecordLog<Rec>, _) =
             EncryptedRecordLog::open(&path, "pw", TEST_MAGIC).unwrap();
         assert_eq!(records, vec![big, rec(2, b"small after big")]);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod frame_observations {
+    use std::cell::Cell;
+    thread_local! {static MAXIMUM:Cell<usize>=const{Cell::new(0)};}
+    pub(crate) fn record_capacity(capacity: usize) {
+        MAXIMUM.with(|v| v.set(v.get().max(capacity)));
+    }
+    pub(crate) fn reset() {
+        MAXIMUM.with(|v| v.set(0));
+    }
+    pub(crate) fn maximum_capacity() -> usize {
+        MAXIMUM.with(Cell::get)
+    }
+}
+#[cfg(test)]
+mod frame_budget_tests {
+    use super::*;
+    #[test]
+    fn visitor_frame_buffer_tracks_largest_record_without_history_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames");
+        let (mut writer, _) = EncryptedRecordLog::<Vec<u8>>::open(&path, "pw", b"FRAMES").unwrap();
+        for bytes in [32, 32768, 64] {
+            writer.append_durable(&vec![7; bytes]).unwrap();
+        }
+        drop(writer);
+        frame_observations::reset();
+        let mut count = 0;
+        drop(
+            EncryptedRecordLog::<Vec<u8>>::open_with_visitor(&path, "pw", b"FRAMES", |_| {
+                count += 1;
+                Ok(())
+            })
+            .unwrap(),
+        );
+        assert_eq!(count, 3);
+        let maximum = frame_observations::maximum_capacity();
+        assert!(maximum >= 32768, "missing frame allocation observation");
+        assert!(maximum <= 2 * 32768 + 64);
     }
 }

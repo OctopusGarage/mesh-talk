@@ -16,6 +16,7 @@ import type {
   ChannelMetadata,
   PeerInfo,
   PresenceInfo,
+  ReceptionScope,
 } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -418,7 +419,7 @@ export const test = base.extend({
       };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
-        id: `m${++mid}`,
+        id: (++mid).toString(16).padStart(64, "0"),
         from_me: false,
         who: BOB.device_id,
         text: "",
@@ -491,6 +492,18 @@ export const test = base.extend({
         string,
         Array<{ target: string; emoji: string; who: string[] }>
       > = {};
+
+      if (dataMode === "reactions-paged") {
+        reacts[`acc:${BOB.account_id}`] = Array.from(
+          { length: 200 },
+          (_, index) => ({
+            target: msgs[`acc:${BOB.account_id}`][0].id!,
+            emoji: `reaction-${index.toString().padStart(3, "0")}`,
+            who:
+              index === 199 ? [BOB.account_id, SELF.account] : [BOB.account_id],
+          }),
+        );
+      }
 
       const protectedBodies: Record<string, string> = {};
       const protectedModes: Record<string, string> = {};
@@ -662,7 +675,7 @@ export const test = base.extend({
 
       // --- Custom avatars (id -> data-URL) ----------------------------------
       const avatars: Record<string, string> = {};
-      // Avatars peers PROPAGATED to us, keyed by ACCOUNT id (what `peer_avatars` returns).
+      // Avatars peers propagated to us, selected by account ID through the profile IPC.
       // Bob set a photo → it must show wherever Bob appears, including the channel roster.
       const TINY_PNG =
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -1106,13 +1119,65 @@ export const test = base.extend({
           ? SELF.account
           : peers.find((peer) => peer.user_id === device)?.account_id;
       }
+      // Native delivery replays current profiles in bounded pages on renderer start.
+      // Live message scenarios still use __mockEmit; these pages contain profiles only.
+      let profileOffset = 0;
+      let profilePage = 0;
+      let pendingProfiles: { token: string; end: number } | null = null;
+      const receptionScope = (args: Record<string, unknown>) => {
+        const scope = args.scope as ReceptionScope;
+        if (
+          scope.owner !== "u_self" ||
+          scope.account_id !== SELF.account ||
+          scope.device_id !== SELF.device ||
+          scope.runtime_id !== `mock-runtime:${SELF.account}`
+        )
+          throw new Error("Runtime changed");
+        return scope;
+      };
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
             owner: a.owner,
             device_id: SELF.device,
             account_id: SELF.account,
+            supports_bounded_delivery: true,
+            runtime_id: `mock-runtime:${SELF.account}`,
           }),
+          owner_reception_page: (args) => {
+            const scope = receptionScope(args);
+            if (args.reset) {
+              profileOffset = 0;
+              pendingProfiles = null;
+            }
+            if (pendingProfiles) throw new Error("Reception page awaiting ACK");
+            const profiles = Object.entries(receivedAvatars);
+            const selected = profiles.slice(profileOffset, profileOffset + 16);
+            const end = profileOffset + selected.length;
+            const token = `mock-profile-page:${++profilePage}`;
+            pendingProfiles = { token, end };
+            const cursor = { epoch: "0".repeat(32), sequence: "0" };
+            return {
+              scope,
+              token,
+              after: cursor,
+              next: cursor,
+              through: cursor,
+              complete: end === profiles.length,
+              receipts: selected.map(([account_id, avatar]) => ({
+                kind: "profile",
+                event: { account_id, avatar },
+              })),
+            };
+          },
+          owner_reception_ack: (args) => {
+            receptionScope(args);
+            if (!pendingProfiles || args.token !== pendingProfiles.token)
+              throw new Error("Reception page changed");
+            profileOffset = pendingProfiles.end;
+            pendingProfiles = null;
+            return false;
+          },
           owner_reveal_image: (a) => {
             const reference = a.reference as { message_id: string };
             if (!protectedModes[reference.message_id])
@@ -1533,6 +1598,32 @@ export const test = base.extend({
           },
 
           // reactions
+          owner_reaction_summaries: (a) => {
+            const selected = new Set(a.targets as string[]);
+            if (selected.size > 64) throw new Error("reaction target limit");
+            const rows = (
+              reacts[`${a.kind === "account" ? "acc" : "ch"}:${a.target}`] ?? []
+            )
+              .filter((row) => selected.has(row.target))
+              .sort(
+                (left, right) =>
+                  left.target.localeCompare(right.target) ||
+                  left.emoji.localeCompare(right.emoji),
+              );
+            const offset = a.cursor ? Number(String(a.cursor).slice(5)) : 0;
+            return {
+              items: rows.slice(offset, offset + 128).map((row) => ({
+                target: row.target,
+                emoji: row.emoji,
+                count: row.who.length,
+                from_me:
+                  row.who.includes(SELF.account) ||
+                  row.who.includes(SELF.device),
+              })),
+              next: offset + 128 < rows.length ? `mock:${offset + 128}` : null,
+              pending: false,
+            };
+          },
           reactions: (a) => reacts[`dm:${a.peer}`] ?? [],
           account_reactions: (a) => reacts[`acc:${a.account}`] ?? [],
           channel_reactions: (a) => reacts[`ch:${a.channelId}`] ?? [],
@@ -2241,8 +2332,16 @@ export const test = base.extend({
             else avatars[id] = String(a.data_url);
             return null;
           },
-          // avatars peers propagated to us (none in the mock); publishing is a no-op
-          peer_avatars: () => receivedAvatars,
+          peer_profile_avatar: (args) => {
+            if (args.owner !== "u_self") throw new Error("Account changed");
+            const accountId = String(args.accountId);
+            return Object.prototype.hasOwnProperty.call(
+              receivedAvatars,
+              accountId,
+            )
+              ? { account_id: accountId, avatar: receivedAvatars[accountId] }
+              : null;
+          },
           publish_avatar: (args) => {
             documentScope(args);
             return null;
@@ -2358,6 +2457,7 @@ export const test = base.extend({
           suspend_screenshot_shortcuts: () => null,
           pause_screenshot_shortcuts: () => null,
           wake_screenshot_window: () => null,
+          history_storage_usage: () => ({ bytes: 0, complete: true }),
           reconcile_account_settings: () => appSettings,
           load_conversation_drafts: snapshotDrafts,
           save_conversation_drafts: (a) => {

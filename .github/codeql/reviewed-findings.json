@@ -3,19 +3,19 @@
     "rule": "rust/cleartext-logging",
     "path": "crates/mesh-talk-core/src/node/ratchet_sessions.rs",
     "fingerprint": "d5384bcc1cfa5e9e:1",
-    "flow": "1f37b0a2bafc5c6169e0fd65db0ea693ac2e5110c7fbeebad6665f5ef73c64af",
+    "flow": "35d709093f72fef2b7b6f0c6b5aa5d12f20d625e23ab42ef71ac91b2f7cd3da4",
     "alert": 464,
     "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/464",
-    "reason": "main 2a5ab70: test assertions format only usize record counts and HashMap::len(), never passwords, key bytes or ratchet state. from_password taint reaches the aggregate store but these cardinalities are not key material. Keep compaction diagnostics."
+    "reason": "main 2a5ab70: test assertions format only usize record counts and HashMap::len(), never passwords, key bytes or ratchet state. from_password taint reaches the aggregate store but these cardinalities are not key material. Keep compaction diagnostics. Re-reviewed at d9109021 against all four flows from CodeQL analysis 2075206817: visitor-based record loading carries aggregate key taint, but the unchanged cfg(test) sink formats only usize record counts; key bytes remain in the encrypted writer."
   },
   {
     "rule": "rust/cleartext-logging",
     "path": "crates/mesh-talk-core/src/node/ratchet_sessions.rs",
     "fingerprint": "8767d653a383944c:1",
-    "flow": "c35211a4a6c29bb2c91c3beae9973c767f64496fae8291b9bb84bd7aee48d66f",
+    "flow": "886e73c5e6f4978fc16059fdd882a41ea2f08ac4a84205ec0e2fadc9d9a5a6c1",
     "alert": 465,
     "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/465",
-    "reason": "main 2a5ab70: test assertions format only usize record counts and HashMap::len(), never passwords, key bytes or ratchet state. from_password taint reaches the aggregate store but these cardinalities are not key material. Keep compaction diagnostics."
+    "reason": "main 2a5ab70: test assertions format only usize record counts and HashMap::len(), never passwords, key bytes or ratchet state. from_password taint reaches the aggregate store but these cardinalities are not key material. Keep compaction diagnostics. Re-reviewed at d9109021 against all four flows from CodeQL analysis 2075206817: visitor-based record loading carries aggregate key taint, but the unchanged cfg(test) sink formats only usize record counts; key bytes remain in the encrypted writer."
   },
   {
     "rule": "rust/cleartext-logging",
@@ -66,10 +66,10 @@
     "rule": "rust/cleartext-logging",
     "path": "crates/mesh-talk-core/src/node/delivery_store.rs",
     "fingerprint": "aa6478bdb3ca79d7:1",
-    "flow": "cfec3e601f42bba174d416081f998173dd8211787cf8bd22b343d5b4a445c0a7",
+    "flow": "93e14a4eaf53ac30e8268d5d42356e9e3ed43626cd8e7f231c25b672349e8552",
     "alert": 475,
     "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/475",
-    "reason": "SARIF sink is Vec::remove(0), not logging. Nonempty queue is proven; removal follows successful AES-GCM journal rewrite. Key remains in its encrypted writer. Pinned CodeQL model:8766-8767 over-models receiver. Independently reviewed; evidence in PR #152."
+    "reason": "SARIF sink is Vec::remove(0), not logging. Nonempty queue is proven; removal follows successful AES-GCM journal rewrite. Key remains in its encrypted writer. Pinned CodeQL model:8766-8767 over-models receiver. Independently reviewed; evidence in PR #152. Re-reviewed at d9109021 against all four flows from CodeQL analysis 2075206817: public account-certificate validation reaches the aggregate store, but the unchanged sink only removes an in-memory Vec entry; no value is formatted or emitted."
   },
   {
     "rule": "js/bad-code-sanitization",

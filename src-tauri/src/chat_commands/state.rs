@@ -137,6 +137,22 @@ impl NodeState {
         Ok(())
     }
 
+    pub(crate) fn installed_runtime_id(
+        &self,
+        lease: &SessionLease,
+    ) -> Result<Option<String>, CommandError> {
+        self.check_installation(lease)?;
+        let state = self
+            .3
+            .lock()
+            .map_err(|_| CommandError::Internal("runtime state unavailable".into()))?;
+        Ok(state
+            .startup
+            .as_ref()
+            .filter(|startup| startup.lease == *lease && self.ticket_current(startup.ticket))
+            .map(|startup| startup.projection.startup_id.clone()))
+    }
+
     pub fn empty() -> Self {
         NodeState(
             Arc::new(RwLock::new(None)),
@@ -239,6 +255,24 @@ pub(crate) struct RuntimeAuthority {
 }
 
 impl RuntimeAuthority {
+    pub(crate) fn runtime_id(&self) -> Result<String, String> {
+        let state = self
+            .node
+            .3
+            .lock()
+            .map_err(|_| "runtime state unavailable")?;
+        state
+            .startup
+            .as_ref()
+            .filter(|startup| {
+                startup.lease == self.lease
+                    && startup.ticket == self.ticket
+                    && self.node.ticket_current(self.ticket)
+            })
+            .map(|startup| startup.projection.startup_id.clone())
+            .ok_or_else(|| "startup superseded".into())
+    }
+
     pub(crate) fn request(
         session: SessionState,
         lease: SessionLease,
@@ -298,13 +332,15 @@ impl RuntimeAuthority {
         let serialization = self.node.1.clone().lock_owned().await;
         self.current(|_| ())?;
         let old = self.node.0.write().await.take();
-        if let Some(old) = old {
-            old.stop().await;
-        }
+        let retired = match old {
+            Some(old) => Some(old.stop_for_storage().await),
+            None => None,
+        };
         let display_name = self.current(|info| info.user.display_name.clone())?;
         Ok(StartupPermit {
             authority: self.clone(),
-            _serialization: serialization,
+            _serialization: std::sync::Arc::new(serialization),
+            retired,
             display_name,
         })
     }
@@ -358,11 +394,24 @@ impl Drop for StartupObservationLifetime {
 
 pub(crate) struct StartupPermit {
     authority: RuntimeAuthority,
-    _serialization: tokio::sync::OwnedMutexGuard<()>,
+    retired: Option<mesh_talk_core::node::RetiredNode>,
     pub(crate) display_name: String,
+    // Retained profile handles must drop before replacement admission opens.
+    _serialization: std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl StartupPermit {
+    pub(crate) fn take_retired(&mut self) -> Option<mesh_talk_core::node::RetiredNode> {
+        self.retired.take()
+    }
+
+    pub(crate) fn track_startup(&self, completion: mesh_talk_core::node::StartupCompletion) {
+        let serialization = self._serialization.clone();
+        tokio::spawn(async move {
+            completion.wait().await;
+            drop(serialization);
+        });
+    }
     pub(crate) async fn install(self, runtime: NodeRuntime) -> bool {
         let mut guard = self.authority.node.0.write().await;
         let mut runtime = Some(runtime);

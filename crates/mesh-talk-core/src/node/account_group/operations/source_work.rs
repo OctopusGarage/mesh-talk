@@ -117,9 +117,15 @@ impl Node {
             }
         }
         work.extend(
-            self.account_group_file_work(files)
-                .into_iter()
-                .map(|work| AccountGroupDataWork::File(Box::new(work))),
+            match self.account_group_file_work(files) {
+                Ok(work) => work,
+                Err(error) => {
+                    log::warn!("Group file work selection deferred after storage failure: {error}");
+                    Vec::new()
+                }
+            }
+            .into_iter()
+            .map(|work| AccountGroupDataWork::File(Box::new(work))),
         );
         work.sort_by_key(AccountGroupDataWork::id);
         AccountGroupDataWorkTurn { work, after, more }

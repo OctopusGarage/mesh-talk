@@ -154,7 +154,7 @@ async fn exercise_local_send() {
     let first = first.structured_content.unwrap();
     assert_eq!(first["acceptance"], "accepted");
     assert_eq!(first["duplicate"], false);
-    let history = node.channel_history(group, 10);
+    let history = node.channel_history(group, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].text, b"Build completed through local MCP");
     assert_eq!(first["message"]["id"], history[0].id.to_hex());
@@ -170,7 +170,7 @@ async fn exercise_local_send() {
     let retry = retry.structured_content.unwrap();
     assert_eq!(retry["message"]["id"], first["message"]["id"]);
     assert_eq!(retry["duplicate"], true);
-    assert_eq!(node.channel_history(group, 10).len(), 1);
+    assert_eq!(node.channel_history(group, 10).unwrap().len(), 1);
 
     let mut denied = send;
     denied["destination"] = json!({"kind":"channel", "id":fingerprint(private_group.as_bytes())});
@@ -186,7 +186,7 @@ async fn exercise_local_send() {
         denied.structured_content.unwrap()["error"]["code"],
         "SCOPE_DENIED"
     );
-    assert!(node.channel_history(private_group, 10).is_empty());
+    assert!(node.channel_history(private_group, 10).unwrap().is_empty());
     assert!(
         client
             .call_tool(CallToolRequestParams::new("mesh_talk_read_messages"))

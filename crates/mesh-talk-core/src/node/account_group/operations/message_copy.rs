@@ -7,9 +7,9 @@ impl Node {
         &self,
         reference: &journal::OperationReference,
         status: &AccountGroupOperationStatus,
-    ) -> Option<Event> {
+    ) -> Result<Option<Event>, NodeError> {
         if status.phase != AccountGroupOperationPhase::Committed {
-            return None;
+            return Ok(None);
         }
         let kind = match reference.kind {
             AccountGroupOperationKind::Text | AccountGroupOperationKind::Sticker => {
@@ -18,19 +18,24 @@ impl Node {
             AccountGroupOperationKind::File => EventKind::FileManifest,
             AccountGroupOperationKind::Reaction => EventKind::React,
             AccountGroupOperationKind::Recall => EventKind::Delete,
-            _ => return None,
+            _ => return Ok(None),
+        };
+        let Some(primary_event) = status.primary_event else {
+            return Ok(None);
         };
         let event = self
             .log
             .lock()
             .expect("log mutex")
-            .get(&status.primary_event?)
+            .get(&primary_event)?
             .filter(|event| {
                 event.conversation_id == reference.group
                     && event.kind == kind
                     && event.author.ed25519_pub() == &reference.executor.device.ed25519_pub
-            })
-            .cloned()?;
+            });
+        let Some(event) = event else {
+            return Ok(None);
+        };
         if reference.kind == AccountGroupOperationKind::File {
             // Projection also runs under the host's existing delivery guard
             // during admission preflight. Use durable lifecycle owners directly;
@@ -39,63 +44,72 @@ impl Node {
                 .account_suppression
                 .lock()
                 .expect("suppression mutex")
-                .contains(reference.group, event.id);
+                .contains(reference.group, event.id)?;
             let recalled = self
                 .recalls
                 .lock()
                 .expect("recalls mutex")
-                .targets(&reference.group)
-                .contains(&event.id);
+                .contains(reference.group, event.id)?;
             if suppressed || recalled {
-                return None;
+                return Ok(None);
             }
             let row = self
                 .received_files
                 .lock()
                 .expect("received files mutex")
-                .entry(event.id)
-                .cloned()?;
+                .entry_in(&reference.group, event.id)?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
             if row.conversation != reference.group
                 || row.from != reference.executor.device.user_id()
                 || row.wall_clock != event.wall_clock
                 || self.recipient_expired(&row.plaintext, event.id, event.wall_clock)
                 || crate::node::files::eligible_manifest_row(&row, Some(&event), None).is_none()
             {
-                return None;
+                return Ok(None);
             }
         }
-        Some(event)
+        Ok(Some(event))
     }
 
     pub(super) fn account_group_committed_recall_mark(
         &self,
         reference: &journal::OperationReference,
         event: &Event,
-    ) -> Option<crate::node::recall::RecallMark> {
+    ) -> Result<Option<crate::node::recall::RecallMark>, NodeError> {
         if reference.kind != AccountGroupOperationKind::Recall || event.kind != EventKind::Delete {
-            return None;
+            return Ok(None);
         }
-        let sealed = crate::node::channel::SealedPayload::decode(&event.ciphertext)?;
-        let plaintext = sealed.open(&self.identity, &self.identity.public().x25519_pub)?;
-        let target = crate::node::recall::DeletePayload::decode(&plaintext)?.target;
+        let Some(sealed) = crate::node::channel::SealedPayload::decode(&event.ciphertext) else {
+            return Ok(None);
+        };
+        let Some(plaintext) = sealed.open(&self.identity, &self.identity.public().x25519_pub)
+        else {
+            return Ok(None);
+        };
+        let Some(payload) = crate::node::recall::DeletePayload::decode(&plaintext) else {
+            return Ok(None);
+        };
+        let target = payload.target;
         if journal::operation_digest(reference.group, &AccountGroupOperation::Recall { target })
             != reference.digest
         {
-            return None;
+            return Ok(None);
         }
         if let Some(mark) = self
             .recalls
             .lock()
             .expect("recalls mutex")
-            .mark(&reference.group, target)
-            .cloned()
+            .mark(reference.group, target)?
         {
-            return Some(mark);
+            return Ok(Some(mark));
         }
-        self.log
+        Ok(self
+            .log
             .lock()
             .expect("log mutex")
-            .get(&target)
+            .get(&target)?
             .filter(|original| {
                 original.conversation_id == reference.group && original.author == event.author
             })
@@ -103,7 +117,7 @@ impl Node {
                 conversation: reference.group,
                 target,
                 wall_clock: original.wall_clock,
-            })
+            }))
     }
 
     pub(super) fn import_account_group_action_copy(

@@ -1,3 +1,4 @@
+import { ReactionSummaryDialog } from "./ReactionSummaryDialog";
 import { DeleteChatDialog } from "./DeleteChatDialog";
 import {
   canParticipateChannel,
@@ -127,6 +128,11 @@ export function ConversationView() {
       ? null
       : Date.now() + expiryDurationMs;
   const toggleReaction = useChat((s) => s.toggleReaction);
+  const reactionRemainder = useChat((s) => s.reactionRemainder);
+  const [reactionTarget, setReactionTarget] = useState<{
+    key: string;
+    id: string;
+  } | null>(null);
   const openConversation = useChat((s) => s.open);
   const deleteMessage = useChat((s) => s.deleteMessage);
   const [memberProfile, setMemberProfile] =
@@ -915,6 +921,11 @@ export function ConversationView() {
                     }
                     fresh={motionOK && isFresh(m, i)}
                     reactions={m.id ? (reactionsByTarget.get(m.id) ?? []) : []}
+                    onMoreReactions={
+                      m.id && reactionRemainder[key]?.includes(m.id)
+                        ? () => setReactionTarget({ key, id: m.id! })
+                        : undefined
+                    }
                     selfReactionId={selfReactionId}
                     myName={myName}
                     mentioned={mentioned}
@@ -1186,6 +1197,15 @@ export function ConversationView() {
           bytes={attachments.screenshotBytes}
           onCancel={attachments.cancelScreenshot}
           onSend={attachments.sendScreenshot}
+        />
+      )}
+      {reactionTarget?.key === key && (
+        <ReactionSummaryDialog
+          key={`${owner}:${authGeneration}:${receptionScope}:${key}:${reactionTarget.id}`}
+          conversation={active}
+          target={reactionTarget.id}
+          readOnly={readOnly}
+          close={() => setReactionTarget(null)}
         />
       )}
       <MemberProfileDialog

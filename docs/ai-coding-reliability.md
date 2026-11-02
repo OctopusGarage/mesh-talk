@@ -199,6 +199,13 @@ Keep count, byte, task and concurrency budgets intact. Fair scheduling does not
 guarantee a successful write into a full store, justify eviction of durable intent
 or permit increasing capacity without reviewing consumers.
 
+Finite preparation must survive unrelated ordinary appends without relaxing its
+authority fences. Compare the owner's complete control and destructive revisions;
+an unfinished derived index cannot certify a concurrent append. Capture completed
+index readiness so later turns can progress. The ordinary-append and pending
+observation regressions in [participant network selection](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+exercise progress alongside capability, proof, roster and file-policy invalidation.
+
 **Evidence:** create more eligible items than one batch, put pending work behind
 terminal history, and include a failed item, cancellation and newly arriving work.
 Assert progress and budget preservation across turns. See publication rotation
