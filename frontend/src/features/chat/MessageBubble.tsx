@@ -11,7 +11,7 @@ import { createAttachmentDecision } from "./attachments/attachmentDecision";
 import { useLayoutEffect, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
-  Bookmark,
+  Star,
   ListChecks,
   Copy,
   CornerUpLeft,
@@ -719,7 +719,7 @@ export function MessageBubble({
                   data-testid="msg-collect"
                   onSelect={() => onCollect(m)}
                 >
-                  <Bookmark className="h-3.5 w-3.5 opacity-70" />
+                  <Star className="h-3.5 w-3.5 opacity-70" />
                   {t(
                     collected
                       ? "messageFavorites.saved"
