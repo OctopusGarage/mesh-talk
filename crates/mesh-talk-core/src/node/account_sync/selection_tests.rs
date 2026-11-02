@@ -2969,6 +2969,60 @@ async fn account_network_children_retain_retirement_admission_until_cancelled() 
     }
 }
 
+fn group_inventory_version_for(
+    node: &Node,
+    key: &crate::node::AccountDocumentKey,
+    expected_name: &str,
+) -> Option<crate::node::DocumentVersion> {
+    let document = node
+        .account_document(key)
+        .unwrap_or_else(|_| panic!("canonical inventory document read must succeed"))?;
+    let crate::node::AccountDocumentKey::GroupInventory {
+        channel,
+        source_device,
+    } = key
+    else {
+        panic!("inventory observation requires an exact source key");
+    };
+    assert!(
+        document.meta.key == *key
+            && document.meta.writer_device == *source_device
+            && !document.meta.tombstone,
+        "canonical inventory must retain its exact positive source identity"
+    );
+    let reference: crate::node::GroupInventoryReference =
+        serde_json::from_slice(document.payload())
+            .unwrap_or_else(|_| panic!("canonical inventory payload must decode"));
+    assert!(
+        reference.channel_id == *channel
+            && reference.source_device == *source_device
+            && reference.name == expected_name,
+        "canonical inventory must describe the expected group and source"
+    );
+    Some(document.meta.version())
+}
+
+#[tokio::test]
+async fn local_group_hides_ui_reference_without_hiding_canonical_inventory() {
+    let (_dir, source, _receiver) = sibling_nodes();
+    let name = "Canonical local group";
+    let channel = source.create_channel(name, vec![]).await.unwrap();
+    source.prepare_account_group_fanout(channel).await.unwrap();
+    let channel_id = hex::encode(channel.as_bytes());
+    let key = crate::node::AccountDocumentKey::GroupInventory {
+        channel: channel_id.clone(),
+        source_device: source.user_id(),
+    };
+    assert!(source.channels.lock().unwrap().state(&channel).is_some());
+    assert!(source.channel_shared_reference(channel).is_none());
+    assert!(group_inventory_version_for(&source, &key, name).is_some());
+    assert!(
+        source
+            .group_inventory_references()
+            .contains_key(&channel_id)
+    );
+}
+
 #[tokio::test]
 async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off() {
     let (_dir, source, receiver) = sibling_nodes();
@@ -3036,92 +3090,118 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
     );
     let mut phase = "initial_reciprocal_documents";
     let mut mandatory = (false, false);
-    let outcome = async {
-        // Cold reciprocal authentication/document setup is a prerequisite,
-        // not part of either subsequent publication's wake observation.
-        tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                if [&source, &receiver].iter().all(|node| {
-                    node.device_sync_status()
-                        .iter()
-                        .any(|status| status.document_phase == SyncPhase::UpToDate)
-                }) {
-                    break;
+    let mut observed_channel = None;
+    let mut source_inventory_key = None;
+    let mut source_floor = None;
+    let outcome =
+        async {
+            // Cold reciprocal authentication/document setup is a prerequisite,
+            // not part of either subsequent publication's wake observation.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if [&source, &receiver].iter().all(|node| {
+                        node.device_sync_status()
+                            .iter()
+                            .any(|status| status.document_phase == SyncPhase::UpToDate)
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await?;
-        // Start before the durable trigger; retain one common five-second
-        // window through mandatory delivery and both optional-off assertions.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            phase = "create_channel";
-            let channel = source
-                .create_channel("Mandatory group", vec![])
-                .await
-                .unwrap();
-            source
-                .set_account_preference(
-                    SyncCategory::Appearance,
-                    "theme".into(),
-                    Some("dark".into()),
-                )
-                .unwrap();
-            phase = "write_disabled_history";
-            source
-                .enqueue_to_account(&source.account_id(), b"optional history", None)
-                .await
-                .unwrap();
-            phase = "mandatory_group_observation";
-            loop {
-                mandatory.0 = receiver.account_group_access(channel).is_ok();
-                mandatory.1 = mandatory.0 && receiver.channel_shared_reference(channel).is_some();
-                if mandatory.0 && mandatory.1 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            assert!(
-                receiver
-                    .account_preferences(SyncCategory::Appearance)
-                    .is_empty()
-            );
-            assert!(
-                receiver
-                    .account_history(&receiver.account_id(), 10)
-                    .unwrap()
-                    .is_empty()
-            );
-        })
-        .await?;
-        // Policy enable is a distinct trigger. Its observation starts before
-        // either local policy change and still proves History remains disabled.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            phase = "appearance_enable_and_observation";
-            for node in [&source, &receiver] {
-                node.set_device_sync_category(SyncCategory::Appearance, true)
+            })
+            .await?;
+            // Start before the durable trigger; retain one common five-second
+            // window through mandatory delivery and both optional-off assertions.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                phase = "create_channel";
+                let channel = source
+                    .create_channel("Mandatory group", vec![])
+                    .await
                     .unwrap();
-            }
-            loop {
-                if receiver
-                    .account_preferences(SyncCategory::Appearance)
-                    .iter()
-                    .any(|record| record.value.as_deref() == Some("dark"))
-                {
-                    break;
+                observed_channel = Some(channel);
+                source_inventory_key = Some(crate::node::AccountDocumentKey::GroupInventory {
+                    channel: hex::encode(channel.as_bytes()),
+                    source_device: source.user_id(),
+                });
+                source
+                    .set_account_preference(
+                        SyncCategory::Appearance,
+                        "theme".into(),
+                        Some("dark".into()),
+                    )
+                    .unwrap();
+                phase = "write_disabled_history";
+                source
+                    .enqueue_to_account(&source.account_id(), b"optional history", None)
+                    .await
+                    .unwrap();
+                phase = "mandatory_group_observation";
+                loop {
+                    let key = source_inventory_key.as_ref().unwrap();
+                    // Capture the first actual signed source head inside this same
+                    // trigger window; later publication cannot move this floor.
+                    if source_floor.is_none() {
+                        source_floor = group_inventory_version_for(&source, key, "Mandatory group");
+                    }
+                    let received = group_inventory_version_for(&receiver, key, "Mandatory group");
+                    mandatory.0 = receiver
+                        .account_group_access(channel)
+                        .is_ok_and(|access| access.role == super::super::AccountGroupRole::Owner);
+                    mandatory.1 = source_floor.as_ref().zip(received.as_ref()).is_some_and(
+                        |(floor, version)| {
+                            (
+                                version.revision,
+                                &version.writer_device,
+                                &version.content_hash,
+                            ) >= (floor.revision, &floor.writer_device, &floor.content_hash)
+                        },
+                    );
+                    if mandatory.0 && mandatory.1 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            assert!(
-                receiver
-                    .account_history(&receiver.account_id(), 10)
-                    .unwrap()
-                    .is_empty()
-            );
-        })
-        .await
-    }
-    .await;
+                assert!(
+                    receiver
+                        .account_preferences(SyncCategory::Appearance)
+                        .is_empty()
+                );
+                assert!(
+                    receiver
+                        .account_history(&receiver.account_id(), 10)
+                        .unwrap()
+                        .is_empty()
+                );
+            })
+            .await?;
+            // Policy enable is a distinct trigger. Its observation starts before
+            // either local policy change and still proves History remains disabled.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                phase = "appearance_enable_and_observation";
+                for node in [&source, &receiver] {
+                    node.set_device_sync_category(SyncCategory::Appearance, true)
+                        .unwrap();
+                }
+                loop {
+                    if receiver
+                        .account_preferences(SyncCategory::Appearance)
+                        .iter()
+                        .any(|record| record.value.as_deref() == Some("dark"))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                assert!(
+                    receiver
+                        .account_history(&receiver.account_id(), 10)
+                        .unwrap()
+                        .is_empty()
+                );
+            })
+            .await
+        }
+        .await;
     if outcome.is_err() {
         let statuses = [(&source, &receiver), (&receiver, &source)].map(|(node, peer)| {
             node.device_sync_status()
@@ -3136,9 +3216,27 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
                     )
                 })
         });
+        let book_present = observed_channel
+            .is_some_and(|channel| receiver.channels.lock().unwrap().state(&channel).is_some());
+        let source_meta_present = source_inventory_key.as_ref().is_some_and(|key| {
+            source
+                .account_document_meta(key)
+                .is_some_and(|meta| !meta.tombstone)
+        });
+        let receiver_meta_present = source_inventory_key.as_ref().is_some_and(|key| {
+            receiver
+                .account_document_meta(key)
+                .is_some_and(|meta| !meta.tombstone)
+        });
+        let canonical_reference_present = observed_channel.is_some_and(|channel| {
+            receiver
+                .group_inventory_references()
+                .contains_key(&hex::encode(channel.as_bytes()))
+        });
+        let source_floor_present = source_floor.is_some();
         let phases = phases.lock().unwrap().clone();
         eprintln!(
-            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,reference)={mandatory:?} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?}",
+            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?}",
             started.elapsed().as_millis()
         );
     }

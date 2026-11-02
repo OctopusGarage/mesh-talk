@@ -811,10 +811,15 @@ Keep the original role, capability and retained-membership proofs alongside thes
 scope completions; the observations neither issue requests nor stop workers.
 
 Same-source partial-page fixtures prepare their immutable signed prefix before
-arming the held request. Require matching metadata at both endpoints and a current
-Control completion without an outstanding pair in every participating sibling
-direction; possessing the rows alone does not settle an older comparison. Only
-then add the controlled tail through the existing source owner. A natural origin
+arming the held request. Require a genuine completed Control scope for the exact
+signed prefix in every participating sibling direction, current matching metadata
+at both endpoints, current operation capabilities and no outstanding comparison
+pair. A subsequent unpaired natural read does not erase proof of an unchanged
+immutable prefix. A paired task, same-source cancellation or mismatched corpus
+invalidates that preparation proof; possessing rows alone cannot pay comparison
+debt. Do not require every independent direction to pause between reads at the
+same instant. Only then add the controlled tail through the existing source owner.
+A natural origin
 and an unprotected dispatch do not imply an unpaired task. Preserve the complete
 corpus, exact live-request checks and checkpoint repayment assertions when moving
 this preparation outside the operation budget.
@@ -1263,6 +1268,13 @@ owned sanitizer, mutation and release profiles remain unchanged. The actual-tool
 information and checks panic diagnostics, debug assertions and overflow handling;
 its no-debug negative control distinguishes stack locations from panic headers.
 See [Cargo debug profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+
+Linux/macOS coverage runs the desktop Host package with pinned Nextest in separate
+case processes, retaining the exact metadata IPC watchdog. The remaining default
+workspace targets run with Cargo; both passes accumulate into one workspace report,
+with doctests checked separately. This bounds case failure and improves diagnostics;
+it does not establish the cause of a previously observed Host hang. The real-tool
+`scripts/ci/native-host-coverage.test.mjs` checks both partitions and failure propagation.
 
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented

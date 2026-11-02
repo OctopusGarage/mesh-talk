@@ -1,5 +1,6 @@
 # Keep a stuck registered metadata IPC case from consuming the whole serial
-# Windows shard. Timeout is a failed case, never permission to skip its result.
+# Windows shard or Linux/macOS Host coverage pass. A timeout fails the case;
+# it never permits skipping its result.
 [[profile.default.overrides]]
 filter = 'package(=mesh-talk) & test(=owner_commands::tests::registered_channel_metadata_preserves_versions_and_owner_admission)'
 slow-timeout = { period = "15s", terminate-after = 4, grace-period = "5s" }

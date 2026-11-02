@@ -2290,6 +2290,9 @@ pub(in crate::node) mod tests {
             DeviceIdentity::from_secret_bytes(reference_secrets.0, reference_secrets.1),
             Account::from_secret_bytes(shared.secret_bytes()),
         );
+        // Reopening retains a lazy local projection. Prepare only this selected
+        // group before asserting the role recovered from its original controls.
+        reference.await_channel_metadata(group).await.unwrap();
         assert_eq!(
             reference.account_group_access(group).unwrap().role,
             if accepted_after {
