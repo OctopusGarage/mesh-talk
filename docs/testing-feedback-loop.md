@@ -952,11 +952,23 @@ which rejects failed, skipped or incomplete dependencies.
 
 Each CodeQL matrix job validates the local SARIF directory returned by its actual
 analysis action after uploading results. Upload success alone does not certify
-zero findings. Reject every finding, including warning/note results, and missing
-or malformed reports; keep Rust, JavaScript/TypeScript and Actions analysis and
-the reviewed query configuration. This enforces the release owner's existing
-zero-open-alert policy before merge, without requiring an extra API permission
-or waiting for findings to appear on main. Hosted analysis remains required.
+zero unresolved findings. Reject unknown or changed findings at every severity,
+analysis errors, and missing or malformed reports. The finite
+`.github/codeql/reviewed-findings.json` inventory binds previously reviewed false
+positives to their exact rule, path, primary-line fingerprint and normalized
+data-flow evidence, including the actual checked-out source spans, with the
+existing alert review and rationale. Moving an
+unchanged finding to another line does not change its identity; changing its
+rule, sink fingerprint or modeled flow does. New findings cannot enter the
+inventory automatically: review their actual source and flow before changing
+this policy through a PR. Remove obsolete entries when their false-positive
+model is fixed. No new alert dismissals or query exclusions are introduced.
+Disable diff-informed queries so PR and main use the same full analysis and
+reviewed-finding gate. Keep Rust, JavaScript/TypeScript and Actions analysis,
+uploads and reviewed query configuration. This enforces the release owner's
+zero-open-alert policy before merge without extra API permissions. Hosted full
+analysis and zero unresolved main alerts remain required; raw SARIF may still
+contain individually reviewed false positives.
 
 Portable validation reuses Health's existing Node, Python and frontend dependency
 setup. Native CI no longer waits for frontend unit tests, help audits or diagnostic
