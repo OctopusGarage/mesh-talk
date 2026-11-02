@@ -10,6 +10,7 @@ mod message_copy;
 mod preparation;
 mod source_work;
 pub use preparation::{AccountGroupStickerInput, AccountGroupTextInput};
+pub(in crate::node) use source_work::AccountGroupDataWorkTurn;
 pub(in crate::node) mod journal;
 pub(in crate::node) mod wire;
 use super::*;

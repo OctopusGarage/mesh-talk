@@ -89,7 +89,7 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
         .await
         .unwrap();
     let event = source.channel_history(group, 10).unwrap()[0].id;
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let bootstrapped = super::cold_account_setup(async {
         loop {
             if sibling
                 .channel_history(group, 10)
@@ -103,8 +103,23 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("the real outgoing copy, entitlement and own-sibling-only evidence must bootstrap");
+    .await;
+    if let Err(error) = bootstrapped {
+        let sibling_outgoing_copy = sibling
+            .channel_history(group, 10)
+            .map(|rows| rows.iter().any(|row| row.id == event && row.from_me));
+        let source_custody = source.channel_custody_count(group, event);
+        let sibling_custody = sibling.channel_custody_count(group, event);
+        let external_has_original = external
+            .log
+            .lock()
+            .unwrap()
+            .get(&event)
+            .map(|event| event.is_some());
+        panic!(
+            "the real outgoing copy, entitlement and own-sibling-only evidence must bootstrap: {error:?}; sibling_outgoing_copy={sibling_outgoing_copy:?} source_custody={source_custody:?} sibling_custody={sibling_custody:?} external_has_original={external_has_original:?}"
+        );
+    }
     assert_eq!(source.channel_custody_count(group, event).unwrap(), Some(0));
     assert!(external.log.lock().unwrap().get(&event).unwrap().is_none());
 

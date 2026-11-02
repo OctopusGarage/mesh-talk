@@ -10,7 +10,7 @@ import { buildAffectedPlan, isFrontendGlobal } from "./affected.mjs";
 import { buildFrontendGraph } from "./frontend-graph.mjs";
 import { loadContracts } from "./contracts.mjs";
 import { runStage } from "./stage.mjs";
-import { runCommand, rustTestCount } from "../pr-platform/guest.mjs";
+import { runCommand, rustTestCount, requireCommandStdout } from "../pr-platform/guest.mjs";
 import { buildStaticChecks, phasePlan } from "./checks.mjs";
 import { frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 import { loadRequirements, selectRequirements } from "./pr-scenarios.mjs";
@@ -176,12 +176,12 @@ async function checked(run, program, args, options) {
     ...options,
     timeoutMs: 2_147_483_647,
   });
-  if (result.code !== 0 || result.timedOut || result.error)
+  if (result.code !== 0 || result.timedOut || result.error || result.cancelled || result.cleanupUnverified)
     throw Object.assign(Error(`${program} failed: ${result.error || result.output?.slice(-6000) || "no output"}`), {
       kind: result.failureKind ?? (result.error && !result.timedOut ? "unavailable" : "failed"),
       reportMessage: `${program} failed (${result.timedOut ? "deadline" : `exit ${result.code ?? "unavailable"}`}); inspect the phase log.`,
     });
-  return result.output;
+  return result;
 }
 export async function prepareRust(
   selections,
@@ -190,7 +190,7 @@ export async function prepareRust(
   const prepared = [];
   for (const selection of selections) {
     const started = Date.now();
-    const output = await checked(
+    const result = await checked(
       run,
       "cargo",
       [
@@ -204,6 +204,7 @@ export async function prepareRust(
       ],
       { cwd },
     );
+    const output = requireCommandStdout(result);
     const executables = [];
     for (const line of output.split("\n")) {
       try {
@@ -225,9 +226,9 @@ export async function prepareRust(
     const executable = executables[0];
     const names = (text) =>
       [...text.matchAll(/^(.+): test\r?$/gmu)].map((match) => match[1]);
-    const listed = names(await checked(run, executable, ["--list"], { cwd }));
+    const listed = names(requireCommandStdout(await checked(run, executable, ["--list"], { cwd })));
     const ignored = new Set(
-      names(await checked(run, executable, ["--list", "--ignored"], { cwd })),
+      names(requireCommandStdout(await checked(run, executable, ["--list", "--ignored"], { cwd }))),
     );
     const runnable = listed.filter((name) => !ignored.has(name));
     for (const filter of selection.filters)
@@ -274,28 +275,29 @@ export async function executePlan(
     throw Error(`Validation blocked: ${plan.blockers.join("\n")}`);
   for (const [index, check] of (plan.checks ?? []).entries()) {
     log(`Static ${check.name}`);
-    const output = await checked(run, process.execPath, [
+    const result = await checked(run, process.execPath, [
       path.join(cwd, "scripts/validation/stage.mjs"), check.name,
       "--profile", "shared", ...(resultPrefix ? ["--result", `${resultPrefix}.${index}.json`] : []), ...(check.inputs ? ["--inputs", check.inputs] : []),
       ...(check.artifacts ?? []).flatMap(artifact => ["--artifact", artifact]),
       "--", ...check.command,
     ], { cwd: path.resolve(cwd, check.cwd) });
-    log(output);
+    log(result.output);
   }
   const prepared = await prepareRust(plan.rust, { cwd, run, log });
   async function execute(program, args, directory) {
     const started = Date.now();
-    const output = await checked(run, program, args, { cwd: directory });
-    log(output);
+    const result = await checked(run, program, args, { cwd: directory });
+    log(result.output);
     log(`Test execution: ${((Date.now() - started) / 1000).toFixed(1)}s`);
-    return output;
+    return result;
   }
   for (const file of plan.node) {
-    const output = await execute(
+    const result = await execute(
       process.execPath,
       ["--test", "--test-reporter=tap", file],
       cwd,
     );
+    const output = requireCommandStdout(result);
     const declared = new Set(
       [...output.matchAll(/^\s*# Subtest: (.+)$/gmu)]
         .map(match => match[1])
@@ -312,10 +314,10 @@ export async function executePlan(
   for (const selection of prepared) {
     // Cargo applies repository configuration (including RUST_TEST_THREADS).
     // Executing the inventoried binary directly bypasses that environment.
-    const output = await execute("cargo", [
+    const result = await execute("cargo", [
       "test", "--locked", "-p", selection.package, "--lib", "--", ...selection.filters,
     ], cwd);
-    if (rustTestCount(output) < selection.count)
+    if (rustTestCount(requireCommandStdout(result)) < selection.count)
       throw Error(
         `Expected ${selection.count} nonignored ${selection.package} tests; fewer executed`,
       );

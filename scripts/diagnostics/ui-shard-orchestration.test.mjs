@@ -72,49 +72,26 @@ test("desktop browser burst waits for Health while Linux starts independently", 
   assert.doesNotMatch(job("linux"), /needs:/);
 });
 
-function renderReports(t, { missing = [], attempt = 1, linux = "success", desktop = "success", mergeCode = 0 } = {}) {
-  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-gate-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const frontend = path.join(directory, "frontend");
-  mkdirSync(frontend);
-  for (const os of ["ubuntu-24.04", "macos-latest", "windows-latest"]) {
-    for (const shard of [1, 2, 3, 4]) {
-      if (missing.includes(`${os}:${shard}`)) continue;
-      const blobs = path.join(directory, "target/ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
-      mkdirSync(blobs, { recursive: true });
-      writeFileSync(path.join(blobs, `report-${shard}.zip`), "selected shard fixture");
-    }
-  }
-  const block = job("reports").split(/^      - /m).find(step => step.startsWith("name: Render each OS report from its raw blobs\n"));
-  const script = 'npx() { return "$REPORT_MERGE_CODE"; }\n' + block.split("        run: |\n")[1].replace(/^          /gm, "").replaceAll("${{ github.run_attempt }}", "1");
-  const result = spawnSync("bash", ["-e", "-c", script], {
-    cwd: frontend,
-    encoding: "utf8",
-    env: { ...process.env, LINUX: linux, DESKTOP: desktop, REPORT_MERGE_CODE: String(mergeCode) },
-  });
-  return result;
-}
-
-test("HTML reports require all four current-attempt shards for every mandatory OS", t => {
-  assert.equal(renderReports(t).status, 0);
-  for (const os of ["ubuntu-24.04", "macos-latest", "windows-latest"]) {
-    const partial = renderReports(t, { missing: [`${os}:2`, `${os}:3`, `${os}:4`] });
+test("HTML reports require all four current-attempt shards for every admitted OS", () => {
+  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  const complete = { desktop: "success", platforms };
+  assert.equal(renderReports(complete).status, 0);
+  for (const os of platforms) {
+    const partial = renderReports({ ...complete, missing: [`${os}-2`, `${os}-3`, `${os}-4`] });
     assert.notEqual(partial.status, 0, `${os} accepted only one shard`);
   }
-  assert.notEqual(renderReports(t, { attempt: 2 }).status, 0, "another attempt cannot satisfy current artifacts");
+  assert.notEqual(renderReports({ ...complete, attempt: "2" }).status, 0, "another attempt cannot satisfy current artifacts");
 });
 
-test("HTML reports do not certify unsuccessful producers or failed merging", t => {
-  assert.match(job("reports"), /LINUX: \$\{\{ needs\.linux\.result \}\}/);
-  assert.match(job("reports"), /DESKTOP: \$\{\{ needs\.desktop\.result \}\}/);
-  for (const producer of ["linux", "desktop"]) {
+test("HTML presentation never substitutes for successful producer acceptance", () => {
+  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  for (const producer of ["LINUX", "DESKTOP"]) {
     for (const result of ["failure", "cancelled", "skipped", ""]) {
-      assert.notEqual(renderReports(t, { [producer]: result }).status, 0, `accepted ${producer} ${result}`);
+      assert.notEqual(gate("Require all full Chromium shards", { LINUX: "success", DESKTOP: "success", [producer]: result }), 0, `accepted ${producer} ${result}`);
     }
   }
-  assert.notEqual(renderReports(t, { mergeCode: 1 }).status, 0);
+  assert.notEqual(renderReports({ desktop: "success", platforms, renderExit: "1" }).status, 0);
 });
-
 
 // GitHub documents that reusable workflows inherit the caller's github context:
 // https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
@@ -181,4 +158,55 @@ test("Firefox core runs on ordinary candidates and the final gate requires its r
   for (const EXTENDED of ["false", "true"]) for (const FIREFOX of ["failure", "cancelled", "skipped", ""]) {
     assert.notEqual(gate("Require complete selected UI matrices", { ...env, EXTENDED, FIREFOX, EXTENDED_CHROMIUM: EXTENDED === "true" ? "success" : "skipped" }), 0);
   }
+});
+
+function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0" } = {}) {
+  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-inventory-"));
+  try {
+    mkdirSync(path.join(directory, "frontend"));
+    for (const os of platforms) for (const shard of [1, 2, 3, 4]) {
+      if (`${os}-${shard}` === omit || missing.includes(`${os}-${shard}`)) continue;
+      const blob = path.join(directory, "target", "ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
+      mkdirSync(blob, { recursive: true });
+      writeFileSync(path.join(blob, `report-${shard}.zip`), "actual shard blob placeholder");
+    }
+    const block = root().split(/^      - /m).find(value => value.startsWith("name: Render each OS report from its raw blobs\n"));
+    const script = block.split("        run: |\n")[1].replace(/^          /gm, "").replaceAll("${{ github.run_attempt }}", "3");
+    const result = spawnSync("bash", ["-e", "-c", 'npx() { printf "%s\\n" "$PLAYWRIGHT_HTML_OUTPUT_DIR" >> "$RENDERED"; return "$RENDER_EXIT"; };\n' + script], {
+      cwd: path.join(directory, "frontend"), encoding: "utf8",
+      env: { ...process.env, LINUX_RESULT: linux, DESKTOP_RESULT: desktop, RENDERED: path.join(directory, "rendered"), RENDER_EXIT: renderExit },
+    });
+    let rendered = [];
+    try { rendered = readFileSync(path.join(directory, "rendered"), "utf8").trim().split("\n"); } catch {}
+    return { ...result, rendered };
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+}
+
+test("HTML reports render admitted producers and distinguish skipped desktop from missing evidence", () => {
+  assert.match(job("reports"), /LINUX_RESULT: \$\{\{ needs\.linux\.result \}\}/);
+  assert.match(job("reports"), /DESKTOP_RESULT: \$\{\{ needs\.desktop\.result \}\}/);
+  const linuxOnly = renderReports();
+  assert.equal(linuxOnly.status, 0, linuxOnly.stderr);
+  assert.deepEqual(linuxOnly.rendered, ["playwright-report/ubuntu-24.04"]);
+  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  const complete = renderReports({ desktop: "success", platforms });
+  assert.equal(complete.status, 0, complete.stderr);
+  assert.deepEqual(complete.rendered, platforms.map(os => `playwright-report/${os}`));
+  for (const linux of ["success", "failure", "cancelled"]) {
+    assert.equal(renderReports({ linux }).status, 0, `admitted ${linux} producer retains its report`);
+    assert.notEqual(renderReports({ linux, omit: "ubuntu-24.04-2" }).status, 0, `${linux} must retain all four raw blobs`);
+  }
+  for (const desktop of ["success", "failure", "cancelled"]) {
+    assert.equal(renderReports({ desktop, platforms }).status, 0, `${desktop} retains every admitted platform report`);
+    assert.notEqual(renderReports({ desktop }).status, 0, `${desktop} cannot silently omit desktop artifacts`);
+    for (const os of platforms) assert.notEqual(renderReports({ desktop, platforms, omit: `${os}-3` }).status, 0, `${os} missing shard`);
+  }
+  assert.notEqual(renderReports({ renderExit: "37" }).status, 0, "renderer failure remains a presentation failure");
+  assert.notEqual(renderReports({ attempt: "2" }).status, 0, "previous-attempt blobs cannot replace this attempt");
+  for (const result of ["", "unknown", "in_progress"]) {
+    assert.notEqual(renderReports({ linux: result }).status, 0, `unknown Linux conclusion ${result}`);
+    assert.notEqual(renderReports({ desktop: result, platforms }).status, 0, `unknown desktop conclusion ${result}`);
+  }
+  assert.equal(renderReports({ linux: "skipped", desktop: "success", platforms: ["macos-latest", "windows-latest"] }).status, 0);
+  assert.notEqual(renderReports({ linux: "skipped", desktop: "skipped", platforms: [] }).status, 0, "empty presentation cannot claim a rendered report");
 });

@@ -531,8 +531,8 @@ for (const code of [0, 23]) test(`ordinary leader exit ${code} retires ignored-s
   let pid;
   t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
   const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
-  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(${code})});`;
-  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  const leader = "const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(Number(process.argv[2]))});";
+  const result = await execute([process.execPath, "-e", leader, leaf, String(code)], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
   assert.ok(pid, "descendant must acknowledge installed handler before leader exits");
   assert.equal(result.code, code, result.error);
   assert.equal(result.cleanupUnverified, false);
@@ -547,8 +547,8 @@ test("clean standalone and managed nested success preserve exit zero", async () 
   const direct = await execute([process.execPath, "-e", "process.exit(0)"], { env });
   assert.equal(direct.code, 0);
   const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
-  const inner = `import {runCommand} from ${JSON.stringify(guest)};const result=await runCommand(process.execPath,['-e','process.exit(0)']);process.exitCode=result.code;`;
-  const nested = await execute([process.execPath, "--input-type=module", "-e", inner], { env });
+  const inner = "const {runCommand}=await import(process.argv[1]);const result=await runCommand(process.execPath,['-e','process.exit(0)']);process.exitCode=result.code;";
+  const nested = await execute([process.execPath, "--input-type=module", "-e", inner, guest], { env });
   assert.equal(nested.code, 0);
 });
 
@@ -556,13 +556,13 @@ test("a hard-killed outer supervisor cannot expose a live owned group to another
   const { spawn } = await import("node:child_process");
   const { setTimeout: pause } = await import("node:timers/promises");
   const f = await fixture(t);
-  const ready = path.join(f.root, "target/ready");
-  const admitted = path.join(f.root, "target/second-admitted");
+  const ready = path.join(f.root, "target/ready-quote\"-apostrophe'-中文-\n");
+  const admitted = path.join(f.root, "target/second-admitted-quote\"-apostrophe'-中文-\n");
   const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
   const env = { ...process.env, CI: "1", MESH_VALIDATION_PROCESS_GROUP_OWNER: "" };
   let leaf, group, first, second;
   t.after(() => { first?.kill("SIGKILL"); second?.kill("SIGKILL"); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} });
-  first = spawn(process.execPath, [cli, "first-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000)`], { cwd: f.root, env, stdio: "ignore" });
+  first = spawn(process.execPath, [cli, "first-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)", ready], { cwd: f.root, env, stdio: "ignore" });
   const stopped = new Promise(resolve => first.once("close", resolve));
   for (let i = 0; i < 500; i++) { try { leaf = Number(await readFile(ready, "utf8")); break; } catch {} await pause(10); }
   assert.ok(leaf, "the real child must acknowledge readiness");
@@ -577,7 +577,7 @@ test("a hard-killed outer supervisor cannot expose a live owned group to another
   first.kill("SIGKILL"); await stopped;
   let queued;
   const waiting = new Promise(resolve => { queued = resolve; });
-  second = spawn(process.execPath, [cli, "second-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(admitted)},'entered')`], { cwd: f.root, env, stdio: ["ignore", "pipe", "pipe"] });
+  second = spawn(process.execPath, [cli, "second-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],'entered')", admitted], { cwd: f.root, env, stdio: ["ignore", "pipe", "pipe"] });
   const completed = new Promise(resolve => second.once("close", resolve));
   second.stdout.on("data", chunk => { if (chunk.toString().includes("waiting for another validation stage")) queued(); });
   await waiting;
@@ -617,8 +617,8 @@ test("leader exit retires descendants retaining inherited output pipes", { skip:
   let pid;
   t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
   const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
-  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});`;
-  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  const leader = "const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});";
+  const result = await execute([process.execPath, "-e", leader, leaf], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
   assert.ok(pid);
   assert.equal(result.code, 0, result.error);
   assert.equal(result.forcedRetirement, true);
@@ -631,8 +631,8 @@ test("leader exit retires descendants retaining inherited output pipes", { skip:
 test("stage attempts record verified forced retirement", { skip: process.platform === "win32", timeout: 15000 }, async t => {
   const f = await fixture(t);
   const leaf = "process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)";
-  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.exit(0));`;
-  const result = await f.run({ command: [process.execPath, "-e", leader] });
+  const leader = "const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.exit(0));";
+  const result = await f.run({ command: [process.execPath, "-e", leader, leaf] });
   assert.equal(result.code, 0);
   assert.equal(result.forcedRetirement, true);
   assert.equal(JSON.parse(await readFile(result.receipt, "utf8")).forcedRetirement, true);
@@ -658,8 +658,8 @@ test("ordinary retirement does not trust an empty process-table snapshot", { ski
   let pid;
   t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
   const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
-  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});`;
-  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  const leader = "const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});";
+  const result = await execute([process.execPath, "-e", leader, leaf], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
   assert.ok(pid);
   assert.equal(result.code, 0, result.error);
   const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();

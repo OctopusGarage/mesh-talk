@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPlan, hasSelectedTests, parseFlags, validateWindowsRoot } from "./plan.mjs";
-import { digestFile, expectedSteps, runCommand, validatePlaywrightEvidence } from "./guest.mjs";
+import { digestFile, expectedSteps, runCommand, requireCommandStdout, validatePlaywrightEvidence } from "./guest.mjs";
 import { loadRequirements, requiredBrowserSpecs, committedFiles, verifyRequiredNative } from "../validation/pr-scenarios.mjs";
 import { linuxTarget, dockerInvocation, remoteInvocation } from "./linux-target.mjs";
 
@@ -17,8 +17,8 @@ function requireRetiredExecution(result) {
 async function checked(program, args, options, run = runCommand) {
   const result = await run(program, args, options);
   requireRetiredExecution(result);
-  if (result.code !== 0 || result.timedOut) throw Error(`${program} ${args[0]} failed${result.timedOut ? " (timeout)" : ""}: ${result.error || result.output.slice(-3000)}`);
-  return result.output.trim();
+  if (result.code !== 0 || result.timedOut || result.error) throw Error(`${program} ${args[0]} failed${result.timedOut ? " (timeout)" : ""}: ${result.error || result.output.slice(-3000)}`);
+  return (program === "git" ? requireCommandStdout(result) : result.output).trim();
 }
 
 export async function createArchive(cwd, filename, { run = runCommand, expectedSha } = {}) {

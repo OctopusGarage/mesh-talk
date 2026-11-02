@@ -496,17 +496,6 @@ mod tests {
             .request_preparation_at(super::super::network::unix_now())
             .unwrap();
         tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(first + Duration::from_millis(90))=>{}}
-        assert!(
-            office
-                .state
-                .preparation_ready_at(super::super::network::unix_now())
-                .unwrap()
-        );
-        assert!(!office.state.profile().cleanup_pending().unwrap());
-        assert_eq!(
-            scalar(&office, "SELECT session_rows FROM relay_federation_runtime"),
-            0
-        );
         assert_eq!(VACUUM_ATTEMPTS.with(|v| v.borrow().len()), 1);
         assert_eq!(
             PHYSICAL_INSPECTIONS.with(|v| v.get()),
@@ -521,6 +510,20 @@ mod tests {
         let attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().clone());
         assert!(attempts[1] - attempts[0] >= PHYSICAL_COOLDOWN);
         assert!(PHYSICAL_INSPECTIONS.with(|v| v.get()) >= 2);
+        // Real SQL duration controls the duty pause even while Tokio time is
+        // paused. Watch work must complete when the paced worker resumes; it
+        // need not finish before the independent physical cooldown expires.
+        assert!(
+            office
+                .state
+                .preparation_ready_at(super::super::network::unix_now())
+                .unwrap()
+        );
+        assert!(!office.state.profile().cleanup_pending().unwrap());
+        assert_eq!(
+            scalar(&office, "SELECT session_rows FROM relay_federation_runtime"),
+            0
+        );
         assert!(db.physical_stats().unwrap().freelist_count < after_first.freelist_count);
         stop.send_replace(true);
         worker.await.unwrap();

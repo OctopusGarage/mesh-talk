@@ -523,16 +523,25 @@ impl Node {
 
     /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
     pub(in crate::node) async fn run_channel_recovery_loop(self: Arc<Self>, changes: Arc<Notify>) {
-        // Freeze the test policy before entering the production worker. Notify,
-        // metadata, discovery, bounded admission and peer rotation are unchanged.
-        #[cfg(test)]
-        let periodic = !self
-            .channel_recovery_periodic_disabled
-            .load(std::sync::atomic::Ordering::Relaxed);
-        #[cfg(not(test))]
         let periodic = true;
         let maintenance = Arc::clone(&self).run_account_channel_maintenance_loop(periodic);
         Box::pin(self.run_channel_recovery_with_maintenance(changes, periodic, maintenance)).await;
+    }
+
+    fn channel_recovery_periodic_enabled(&self, periodic: bool) -> bool {
+        // Tests may finish cold recovery before measuring notification-only work.
+        // An explicitly disabled worker remains disabled throughout its lifetime.
+        #[cfg(test)]
+        {
+            periodic
+                && !self
+                    .channel_recovery_periodic_disabled
+                    .load(std::sync::atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(test))]
+        {
+            periodic
+        }
     }
 
     /// One parent owns both futures; cancellation drops both without detached work.
@@ -557,13 +566,26 @@ impl Node {
         let mut metadata = self.subscribe_channel_changes();
         let mut network = self.network_changes.subscribe();
         loop {
-            tokio::select! {
-                _ = tick.tick(), if periodic => {}
+            let periodic_wake = tokio::select! {
+                _ = tick.tick(), if self.channel_recovery_periodic_enabled(periodic) => true,
                 change = metadata.recv() => match change {
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => false,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
-                change = network.changed() => if change.is_err() { return; },
+                change = network.changed() => {
+                    if change.is_err() { return; }
+                    false
+                },
+            };
+            // The test policy can change while the selected timer is pending.
+            if periodic_wake && !self.channel_recovery_periodic_enabled(periodic) {
+                continue;
+            }
+            #[cfg(test)]
+            if periodic_wake {
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_maintenance_periodic_begin".into()
+                });
             }
             #[cfg(test)]
             self.trace_account_client(&self.identity.public(), || {
@@ -640,8 +662,8 @@ impl Node {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => discovered = true,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
-                _ = tick.tick(), if periodic => { custody_tick = true; },
-                _ = tokio::time::sleep_until(fallback_at), if periodic => {},
+                _ = tick.tick(), if self.channel_recovery_periodic_enabled(periodic) => { custody_tick = true; },
+                _ = tokio::time::sleep_until(fallback_at), if self.channel_recovery_periodic_enabled(periodic) => {},
             }
             loop {
                 match metadata.try_recv() {
@@ -726,7 +748,9 @@ impl Node {
                     "channel_recovery_targets_done".into()
                 });
                 // Notification-only tests exclude discovery-triggered repair as well.
-                if periodic && (discovered || tokio::time::Instant::now() >= fallback_at) {
+                if self.channel_recovery_periodic_enabled(periodic)
+                    && (discovered || tokio::time::Instant::now() >= fallback_at)
+                {
                     #[cfg(test)]
                     self.trace_account_client(&self.identity.public(), || {
                         "channel_recovery_fallback_begin".into()
@@ -753,7 +777,7 @@ impl Node {
                     "channel_recovery_fallback_done".into()
                 });
                 // Custody and failed plaintext retain their existing retry clock.
-                if custody_tick {
+                if custody_tick && self.channel_recovery_periodic_enabled(periodic) {
                     #[cfg(test)]
                     self.trace_account_client(&self.identity.public(), || {
                         "channel_recovery_custody_begin".into()

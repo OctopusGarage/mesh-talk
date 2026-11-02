@@ -58,7 +58,7 @@ async function nativeWorker(t, { hold = false, exitCode = 0 } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-windows-owner-"));
   const ready = path.join(directory, "leaf-ready.json");
   const leaf = path.join(directory, "leaf.mjs");
-  await writeFile(leaf, `import {writeFileSync} from 'node:fs';writeFileSync(process.argv[2],JSON.stringify({pid:process.pid,token:process.argv[3]}));setInterval(()=>{},1000);setTimeout(()=>process.exit(99),60000);`);
+  await writeFile(leaf, "import {writeFileSync} from 'node:fs';writeFileSync(process.argv[2],JSON.stringify({pid:process.pid,token:process.argv[3]}));setInterval(()=>{},1000);setTimeout(()=>process.exit(99),60000);");
   t.after(async () => {
     // Failed-control cleanup only: retain the actual process handle, then check
     // the unique fixture path before terminating it. Never signal a PID tree.
@@ -91,16 +91,17 @@ test("Windows nested runner jobs retire a native descendant before outer success
   const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
   const planModule = new URL("../pr-platform/plan.mjs", import.meta.url).href;
   const program = `
-    import { runCommand, executePlan } from ${JSON.stringify(guest)};
-    import { buildPlan, parseFlags } from ${JSON.stringify(planModule)};
     import { readFileSync } from 'node:fs';
+    const configuration = JSON.parse(process.argv[1]);
+    const { runCommand, executePlan } = await import(configuration.guest);
+    const { buildPlan, parseFlags } = await import(configuration.planModule);
     const plan = { ...buildPlan(parseFlags([]), []), sourceSha: 'a'.repeat(40), archiveSha: 'b'.repeat(64) };
     let admitted = 0;
     const report = await executePlan(plan, { run: async (program, args, options) => {
       // The first provider step is this real native fixture. Later steps use
       // the actual planned tool and may only enter after its leaf is dead.
-      if (admitted++ === 0) return runCommand(${JSON.stringify(f.command[0])}, ${JSON.stringify(f.command.slice(1))}, options);
-      const { pid } = JSON.parse(readFileSync(${JSON.stringify(f.ready)}, 'utf8'));
+      if (admitted++ === 0) return runCommand(configuration.command[0], configuration.command.slice(1), options);
+      const { pid } = JSON.parse(readFileSync(configuration.ready, 'utf8'));
       try { process.kill(pid, 0); throw Error('live retired leaf reached next admission'); }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
       return runCommand(program, args, options);
@@ -110,7 +111,8 @@ test("Windows nested runner jobs retire a native descendant before outer success
     process.stdout.write('nested retired');
   `;
   const output = [];
-  const result = await run([process.execPath, "--input-type=module", "-e", program], {
+  const configuration = JSON.stringify({ guest, planModule, command: f.command, ready: f.ready });
+  const result = await run([process.execPath, "--input-type=module", "-e", program, "--", configuration], {
     signal: t.signal,
     onOutput(chunk) { output.push(chunk); },
   });
@@ -287,7 +289,7 @@ test("Windows pre-aborted and startup cancellation cannot leave unowned work", {
   t.after(() => rm(root, { recursive: true, force: true }));
   const ready = path.join(root, "ready.json");
   const startup = new AbortController();
-  const result = await executeWindows([process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid}));setInterval(()=>{},1000)`], {
+  const result = await executeWindows([process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],JSON.stringify({pid:process.pid}));setInterval(()=>{},1000)", "--", ready], {
     signal: startup.signal, cwd: root, env: process.env, onOutput() {},
     spawnOwner(...args) { const child = spawn(...args); startup.abort(); return child; },
   });
@@ -306,11 +308,12 @@ test("Windows NUL input cannot launch a truncated command", { skip: !windows }, 
   const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-nul-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const marker = path.join(root, "must-not-exist");
-  const source = `require('node:fs').writeFileSync(${JSON.stringify(marker)},'unexpected')`;
+  const source = "require('node:fs').writeFileSync(process.argv[1],'unexpected')";
+  const nulSource = "require('node:fs').writeFileSync(process.argv[1],'unexpected')\0ignored";
   for (const options of [
-    { command: [process.execPath, "-e", `${source}\0ignored`] },
-    { command: [process.execPath, "-e", source], env: { OWNER_VALUE: "truncated\0ignored" } },
-    { command: [process.execPath, "-e", source], cwd: `${root}\0ignored` },
+    { command: [process.execPath, "-e", nulSource, "--", marker] },
+    { command: [process.execPath, "-e", source, "--", marker], env: { OWNER_VALUE: "truncated\0ignored" } },
+    { command: [process.execPath, "-e", source, "--", marker], cwd: `${root}\0ignored` },
   ]) {
     const { command, ...input } = options;
     await assert.rejects(executeWindows(command, { ...input, spawnOwner() { assert.fail("NUL input reached helper admission"); } }), { code: "ERR_INVALID_ARG_VALUE" });
@@ -435,7 +438,7 @@ test("Windows cold and cached Cargo commands finish real tests after owned-scope
     assert.equal(typeof result.forcedRetirement, "boolean");
     t.diagnostic(`${phase}: forcedRetirement=${result.forcedRetirement}, cleanupUnverified=${result.cleanupUnverified}`);
     assert.match(result.output, /test result: ok\. 1 passed; 0 failed;/u);
-    const build = result.output.split(/\r?\n/u).filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.reason === "build-finished");
+    const build = result.stdout.split(/\r?\n/u).filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.reason === "build-finished");
     assert.equal(build?.success, true);
   }
 });
@@ -450,4 +453,86 @@ test("Windows nonzero leader status survives verified descendant retirement", { 
   assert.equal(result.forcedRetirement, true);
   const { pid } = JSON.parse(await readFile(f.ready, "utf8"));
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+});
+
+test("command stream channels preserve structured stdout across stderr fragments", { timeout: 15000 }, async t => {
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-streams-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const logPath = path.join(root, "producer.log");
+  const program = `
+    const { readFile } = require('node:fs/promises');
+    const { setImmediate } = require('node:timers/promises');
+    const log = process.argv[1];
+    async function visible(fragment) {
+      while (true) {
+        try { if ((await readFile(log)).includes(fragment)) return; }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        await setImmediate();
+      }
+    }
+    (async () => {
+      process.stderr.write('progress-prefix ');
+      await visible(Buffer.from('progress-prefix '));
+      process.stdout.write('{"reason":"build-finished","success":true,"text":"');
+      process.stdout.write(Buffer.from([0xf0, 0x9f]));
+      await visible(Buffer.from([0xf0, 0x9f]));
+      process.stderr.write('progress-mid ');
+      await visible(Buffer.from('progress-mid '));
+      process.stdout.write(Buffer.from([0x98, 0x80]));
+      process.stdout.write('"}\\n');
+      await visible(Buffer.from('"}\\n'));
+      process.stderr.write('progress-end\\n');
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `;
+  const result = await runCommand(process.execPath, ["-e", program, "--", logPath], { logPath, timeoutMs: 10000 });
+  assert.equal(result.code, 0, result.error);
+  assert.equal(result.cleanupUnverified, false);
+  assert.equal(typeof result.stdout, "string");
+  assert.equal(result.outputTruncated, false);
+  assert.deepEqual(JSON.parse(result.stdout), { reason: "build-finished", success: true, text: "😀" });
+  assert.equal(result.stderr, "progress-prefix progress-mid progress-end\n");
+  assert.match(result.output, /progress-prefix/u);
+  assert.match(result.output, /progress-mid/u);
+});
+
+test("command stream capture shares one byte window and retains the output-limit failure", { timeout: 15000 }, async () => {
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const program = "process.stdout.write('a'.repeat(4096));process.stderr.write('b'.repeat(4096))";
+  const result = await runCommand(process.execPath, ["-e", program], { maxOutputBytes: 64 });
+  assert.equal(result.code, 0, result.error);
+  assert.equal(typeof result.stdout, "string");
+  assert.equal(typeof result.stderr, "string");
+  assert.equal(result.outputTruncated, true);
+  assert.ok(Buffer.byteLength(result.output) <= 64);
+  assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 64);
+  const limited = await runCommand(process.execPath, ["-e", program], { maxOutputBytes: 64, outputLimitIsFailure: true });
+  assert.notEqual(limited.code, 0);
+  assert.match(limited.error, /output exceeded/u);
+  assert.equal(limited.outputTruncated, true);
+  assert.equal(limited.cleanupUnverified, false);
+});
+
+test("machine output requires an explicitly complete stdout capture", async () => {
+  const { requireCommandStdout } = await import("../pr-platform/guest.mjs");
+  const output = '{"reason":"build-finished","success":true}\n';
+  for (const result of [
+    { output, outputTruncated: false },
+    { output, stdout: output },
+    { output, stdout: output, outputTruncated: true },
+  ]) assert.throws(() => requireCommandStdout(result), /stdout|truncated|truncation|unverified/i);
+  assert.equal(requireCommandStdout({ output: "human log", stdout: output, outputTruncated: false }), output);
+});
+
+test("tiny positive output limits bound the combined human log and shared stream window", { timeout: 15000 }, async () => {
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const observations = [];
+  for (const cap of [1, 2, 3]) {
+    const result = await runCommand(process.execPath, ["-e", "process.stdout.write('x'.repeat(100))"], { maxOutputBytes: cap });
+    assert.equal(result.code, 0, result.error);
+    assert.equal(result.outputTruncated, true);
+    assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= cap);
+    observations.push({ cap, humanBytes: Buffer.byteLength(result.output) });
+  }
+  assert.deepEqual(observations.map(({ cap, humanBytes }) => humanBytes <= cap), [true, true, true], JSON.stringify(observations));
 });

@@ -1083,6 +1083,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         recovery_before.push(chain.nodes[index].channel_recovery(group));
     }
     let initialized = Arc::new(Mutex::new([false; 6]));
+    let maintenance_active = Arc::new(Mutex::new([false; 6]));
     let initial_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let initial_started = std::time::Instant::now();
     let fixture_peers = Arc::new(
@@ -1097,6 +1098,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         let previous = node.account_client_test_hook.lock().unwrap().clone();
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let initialized = initialized.clone();
+            let maintenance_active = maintenance_active.clone();
+            let node = Arc::downgrade(node);
             let trace = initial_trace.clone();
             let fixture_peers = fixture_peers.clone();
             let completed =
@@ -1107,7 +1110,23 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                     previous(peer, phase.clone());
                 }
                 if phase == completed {
-                    initialized.lock().unwrap()[index] = true;
+                    let mut initialized = initialized.lock().unwrap();
+                    if !initialized[index] {
+                        node.upgrade()
+                            .expect("the recovery worker owns its node")
+                            .channel_recovery_periodic_disabled
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        initialized[index] = true;
+                    }
+                }
+                match phase.as_str() {
+                    "channel_recovery_maintenance_begin" => {
+                        maintenance_active.lock().unwrap()[index] = true;
+                    }
+                    "channel_recovery_maintenance_done" => {
+                        maintenance_active.lock().unwrap()[index] = false;
+                    }
+                    _ => {}
                 }
                 if phase.starts_with("channel_recovery_") {
                     let mut trace = trace.lock().unwrap();
@@ -1123,9 +1142,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                 }
             }
         }));
-        node.channel_recovery_periodic_disabled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        // One setup demand precedes each new worker; propagation has no rescue.
+        // Cold setup retains ordinary bounded retry after a failed first exchange.
+        // The exact first clean completion disables this node's periodic work.
         node.schedule_channel_recovery(group);
         listeners.push(TcpListener::bind(chain.addresses[index]).await.unwrap());
     }
@@ -1136,16 +1154,23 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             chain.nodes[index].clone().run_accept_loop(listener),
         ));
     }
-    // Cold authenticated setup can use the existing fifteen-second peer exchange.
-    // Its watchdog is separate from the unchanged post-send notification window.
+    // Cold setup uses normal recovery, then drains already-started maintenance.
+    // The unchanged post-send window starts with periodic work disabled on all nodes.
     let prepared = tokio::time::timeout(Duration::from_secs(30), async {
-        while !initialized.lock().unwrap().iter().all(|ready| *ready) {
+        while !initialized.lock().unwrap().iter().all(|ready| *ready)
+            || maintenance_active
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|active| *active)
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
     if let Err(error) = prepared {
         let completed = *initialized.lock().unwrap();
+        let maintenance = *maintenance_active.lock().unwrap();
         let trace = initial_trace
             .lock()
             .unwrap()
@@ -1157,7 +1182,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             .map(|node| node.channel_recovery(group))
             .collect::<Vec<_>>();
         panic!(
-            "prepared adjacent endpoints must finish their initial background exchange: {error}; completed={completed:?}; before={recovery_before:?}; current={current:?}; trace={trace:?}"
+            "prepared adjacent endpoints must finish their initial background exchange: {error}; completed={completed:?}; maintenance_active={maintenance:?}; before={recovery_before:?}; current={current:?}; trace={trace:?}"
         );
     }
     assert!(chain.nodes[..6].iter().all(|node| {
@@ -1173,7 +1198,9 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
             if matches!(
                 phase.as_str(),
-                "channel_recovery_fallback_begin" | "channel_recovery_custody_begin"
+                "channel_recovery_fallback_begin"
+                    | "channel_recovery_custody_begin"
+                    | "channel_recovery_maintenance_periodic_begin"
             ) {
                 observed_periodic_work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }

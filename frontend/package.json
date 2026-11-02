@@ -78,5 +78,16 @@
     "vite": "^8.3.5",
     "vitest": "^5.0.3"
   },
-  "private": true
+  "private": true,
+  "overrides": {
+    "eslint": {
+      "minimatch": "11.0.1"
+    },
+    "@eslint/config-array": {
+      "minimatch": "11.0.1"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    }
+  }
 }

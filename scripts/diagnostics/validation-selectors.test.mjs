@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { validateSelectors } from "../validation/selectors.mjs";
 
+const completed = output => ({ code: 0, output, stdout: output, stderr: "", outputTruncated: false });
+
 const plan = { coreFilters: ["postoffice::"], hostFilters: ["chat_commands::platform::screenshot_tests::"], coreTests: [] };
 const artifacts = ["mesh_talk_core", "mesh_talk"].map(name => JSON.stringify({ reason: "compiler-artifact", target: { name }, executable: `/tmp/${name}` })).join("\n");
 
@@ -9,7 +11,7 @@ test("selectors are checked against the actual compiled test inventory without r
   const commands = [];
   const run = async (program, args) => {
     commands.push([program, args]);
-    return { code: 0, output: program === "cargo" ? artifacts : program.endsWith("mesh_talk_core") ? "postoffice::tests::event: test\n" : "chat_commands::platform::screenshot_tests::png: test\n" };
+    return completed(program === "cargo" ? artifacts : program.endsWith("mesh_talk_core") ? "postoffice::tests::event: test\n" : "chat_commands::platform::screenshot_tests::png: test\n");
   };
   const result = await validateSelectors(plan, { run });
   assert.equal(result.length, 2);
@@ -18,23 +20,23 @@ test("selectors are checked against the actual compiled test inventory without r
 });
 
 test("a nonexistent host module fails before any test/browser execution", async () => {
-  const run = async program => ({ code: 0, output: program === "cargo" ? artifacts : "chat_commands::platform::screenshot_tests::png: test\n" });
+  const run = async program => completed(program === "cargo" ? artifacts : "chat_commands::platform::screenshot_tests::png: test\n");
   await assert.rejects(validateSelectors({ coreFilters: [], hostFilters: ["chat_commands::platform::tests::"], coreTests: [] }, { run }), /zero.*host.*chat_commands::platform::tests::/i);
 });
 
 test("failed inventory builds and missing binaries cannot validate a selection", async () => {
   await assert.rejects(validateSelectors(plan, { run: async () => ({ code: 1, output: "compile error" }) }), /compile error/);
-  await assert.rejects(validateSelectors(plan, { run: async () => ({ code: 0, output: "" }) }), /test executable/i);
+  await assert.rejects(validateSelectors(plan, { run: async () => completed("") }), /test executable/i);
 });
 
 
 test("integration and MCP selectors use their real compiled inventories and reject empty matches", async () => {
   const selected = { coreFilters: [], hostFilters: [], coreTests: [], integrationFilters: ["grants::"], mcpFilters: ["tools::"] };
   const output = ["mesh_talk_integrations", "mesh_talk_mcp"].map(name => JSON.stringify({ reason: "compiler-artifact", target: { name }, executable: `/tmp/${name}` })).join("\n");
-  const run = async program => ({ code: 0, output: program === "cargo" ? output : program.endsWith("integrations") ? "grants::allows: test\n" : "tools::send: test\n" });
+  const run = async program => completed(program === "cargo" ? output : program.endsWith("integrations") ? "grants::allows: test\n" : "tools::send: test\n");
   assert.deepEqual(await validateSelectors(selected, { run }), [{ kind: "integration", filter: "grants::", count: 1 }, { kind: "mcp", filter: "tools::", count: 1 }]);
   await assert.rejects(validateSelectors({ ...selected, mcpFilters: ["missing::"] }, { run }), /zero.*mcp.*missing::/i);
-  await assert.rejects(validateSelectors(selected, { run: async () => ({ code: 0, output: "" }) }), /integration test executable/i);
+  await assert.rejects(validateSelectors(selected, { run: async () => completed("") }), /integration test executable/i);
 });
 
 test("direct selector CLI owns its command group without an inherited stage", { skip: process.platform === "win32", timeout: 10000 }, async t => {
@@ -50,4 +52,11 @@ test("direct selector CLI owns its command group without an inherited stage", { 
   const result = await runCommand(process.execPath, [fileURLToPath(new URL("../validation/selectors.mjs", import.meta.url)), "--core-filter", "fixture::"], { cwd: directory, env: { ...process.env, MESH_PR_CARGO: cargo, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   assert.equal(result.code, 0, result.error || result.output);
   assert.match(result.output, /fixture::.*1 tests available/);
+});
+
+test("selector inventory rejects missing or truncated stdout instead of parsing diagnostic text", async () => {
+  for (const result of [
+    { code: 0, output: artifacts, outputTruncated: false },
+    { ...completed(artifacts), outputTruncated: true },
+  ]) await assert.rejects(validateSelectors(plan, { run: async () => result }), /stdout|truncat/i);
 });

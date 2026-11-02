@@ -165,7 +165,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo llvm-cov test --no-report --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 2>&1 | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log"
+          large_folder_status=0
+          cargo llvm-cov test --no-report --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 2> "$RUNNER_TEMP/backend-eval-results/large-folder.stderr.log" | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log" || large_folder_status=$?
+          cat "$RUNNER_TEMP/backend-eval-results/large-folder.stderr.log" >&2
+          if (( large_folder_status != 0 )); then exit "$large_folder_status"; fi
           node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
           cargo llvm-cov report --lcov --output-path src-tauri/e2e-lcov.info
 

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runCommand } from "../pr-platform/guest.mjs";
+import { runCommand, requireCommandStdout } from "../pr-platform/guest.mjs";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 export const nativeBuildManifest = root => path.resolve(root, "target/validation/native-build.json");
@@ -84,8 +84,8 @@ export async function buildNative({ root = process.cwd(), env = process.env, run
     log(`[native-build] ${command.program} ${command.args.join(" ")}`);
     const result = await run(command.program, command.args, { cwd: command.cwd, env, timeoutMs: 1_800_000 });
     if (result.output) log(result.output);
-    if (result.code !== 0 || result.timedOut) throw Error(`Native build failed: ${result.error || result.output || (result.timedOut ? "command timed out" : `exit ${result.code}`)}`);
-    if (command.executables) await requireCargoExecutables(result.output, command.executables, paths, root);
+    if (result.code !== 0 || result.timedOut || result.error || result.cancelled || result.cleanupUnverified) throw Error(`Native build failed: ${result.error || result.output || (result.timedOut ? "command timed out" : `exit ${result.code}`)}`);
+    if (command.executables) await requireCargoExecutables(requireCommandStdout(result), command.executables, paths, root);
     requireSource(root, sourceSha);
   }
   const artifacts = await artifactsAt(paths);

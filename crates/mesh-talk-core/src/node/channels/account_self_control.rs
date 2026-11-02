@@ -2044,6 +2044,20 @@ pub(in crate::node) mod tests {
                         }
                     });
                 if ready {
+                    // Capture the first ready history only after the exact
+                    // committed effect and both roles are visible. Keep this
+                    // observation inside the original operation deadline and
+                    // before releasing the held response or running postchecks.
+                    let history = loop {
+                        match reference.history(group, 100) {
+                            Ok(history) => break history,
+                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                            Err(_) => {
+                                panic!("reference history failed outside bounded preparation")
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    };
                     operation_trace
                         .lock()
                         .unwrap()
@@ -2056,7 +2070,7 @@ pub(in crate::node) mod tests {
                             admission_started.elapsed().as_millis()
                         ),
                     ));
-                    break;
+                    break history;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -2114,6 +2128,7 @@ pub(in crate::node) mod tests {
                 "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace} trace={failure_trace:?} external_trace={external_trace:?} listeners_finished={listeners_finished:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
             );
         }
+        let history = convergence.unwrap();
         if let Some(hold) = request_hold.as_ref() {
             hold.release.close();
         }
@@ -2249,25 +2264,6 @@ pub(in crate::node) mod tests {
                 .unwrap(),
             status
         );
-        // Public control propagation may leave this pure history read pending
-        // after the exact operation/role assertions above. Observe only the
-        // existing worker, within the original deadline; accept the first ready
-        // snapshot so an incorrectly imported archive cannot be polled away.
-        let history = tokio::time::timeout(
-            operation_budget.saturating_sub(admission_started.elapsed()),
-            async {
-                loop {
-                    match reference.history(group, 100) {
-                        Ok(history) => break history,
-                        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
-                        Err(_) => panic!("reference history failed outside bounded preparation"),
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            },
-        )
-        .await
-        .expect("reference history must become readable within the original operation deadline");
         assert!(
             !history.iter().any(|row| row.id == archive),
             "explicit self control must not grant optional archive history"

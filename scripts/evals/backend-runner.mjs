@@ -5,7 +5,7 @@ import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
-import { runCommand } from "../pr-platform/guest.mjs";
+import { runCommand, requireCommandStdout } from "../pr-platform/guest.mjs";
 
 export const BACKEND_SUITES = {
   two_node_cli: ["two_cli_nodes_discover_by_routed_query_and_exchange_a_dm", "two_cli_nodes_exchange_a_dm", "participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error", "participant_cli_probe_respects_persisted_invisible_mode"],
@@ -49,7 +49,7 @@ export async function evaluateBackendSuites(runSuite, recordSuite) {
       Object.assign(record, result);
       assert.ok(!result.failure, result.failure);
       assert.equal(result.code, 0, `Backend suite failed: ${target}`);
-      record.scenarios = validateBackendOutput(result.output, expected);
+      record.scenarios = validateBackendOutput(requireCommandStdout(result), expected);
       record.passed = true;
     } catch (error) {
       record.failure = String(error.message);

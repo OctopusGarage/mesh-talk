@@ -75,6 +75,14 @@ successful reusable receipt. Platform evidence must distinguish cancellation fro
 an incomplete or mismatched test inventory; success still requires every selected
 step and its positive test counts.
 
+Keep stdout and stderr distinct through command capture. Cargo JSON, test
+inventories and executed-case summaries consume complete stdout; the interleaved
+log remains diagnostic output. Both raw channel captures share one byte budget,
+and truncation invalidates machine evidence. Preserve original launch,
+cancellation and cleanup errors when capture validation also fails. Fixture
+program bodies stay static; pass paths, module URLs and configuration as argv or
+environment data rather than interpolating serialized values into program text.
+
 Intentional timeout, cancellation and output-limit fixtures declare their own
 execution scope so their faults cannot cancel the real validation caller.
 Verify these fixtures beneath a real managed supervisor as well as directly;
@@ -725,6 +733,14 @@ establish the fixture's real connection state; they are not an eight-second
 operation or custody latency assertion, and they do not drive extra RPCs, warm
 session pools, retry submissions or suppress background workers.
 
+Notification-only group gossip keeps ordinary periodic recovery during cold
+connection preparation. Each node disables that test clock after its first real
+clean exchange; preparation also retires already-started maintenance. The measured
+propagation phase begins only after all nodes have disabled periodic work and
+retains its original deadline, exact message evidence and zero periodic-work
+assertion. A failed cold connection must not silently remove the fixture's only
+remaining preparation path.
+
 Account-group setup uses the shared test-local `cold_account_control_setup` to
 finish cold capability observation before invoking the three-second signed-role
 page helpers. Each caller retains its exact full peer identities, directional
@@ -743,6 +759,17 @@ metadata at the first connection while fanout is pending. Consecutive-control
 tests retain both original eight-second commit/progress assertions, establishing
 the real live held response between them before admitting the second operation.
 
+Recovered-fanout fixtures observe the actual first local-turn completion before
+its durable fanout page is installed by the parent. The exact recovered target
+must still have its stale inventory and original journal revision, with no public
+exchange started. Only then release that handoff and start the unchanged refresh,
+retry and authenticated-receipt bounds. The owner-specific fixture runs the
+production account-history producer and real authenticated member server;
+unrelated recovery and delivery owners retain their full-runtime coverage.
+Capture both success and panic before releasing gates, closing admission, joining
+tasks and draining actual filesystem work. If retirement is unverified, retain the
+private store instead of deleting files beneath an admitted blocking publisher.
+
 `selected_source_cold_capability_setup_precedes_role_page_budget` holds the real
 first authenticated Control responses beyond the role-page budget in a two-device
 bootstrap fixture. It then requires reciprocal capabilities and the exact signed
@@ -750,6 +777,21 @@ source role through the same shared phase owner. The original held-operation
 fixture retains its separate eight-second operation, receipt and recovery proofs.
 Both fault controllers belong to their fixture task sets, with drop guards that
 release held responses and cleanup that joins tasks and drains admitted writers.
+
+Queued-source fixtures retain the independent eight-second private operation
+receipt assertion. After that receipt and release of A, replay of all 66 signed
+rows, real public receipt and actual B comparison-pair retirement use the shared
+thirty-second functional convergence watchdog from the message-action fixture
+owner. This is an explicit correction of the original queued fixture's auxiliary
+eight-second recovery bound, not a product latency relaxation: after paid
+prefix/resume credit and terminal operation, the two retained comparisons follow
+ordinary cross-peer fairness. The product requires both scans to finish without
+combining checkpoints; it does not promise full-corpus convergence in eight
+seconds. Keep every recovery predicate, signature, continuation and lifetime
+check. The original selected-source recovery, other checkpoint/archive progress,
+Wake deadlines and production read clocks retain their existing bounds. Paused
+time controls require all recovery observations, allow convergence after eight
+seconds, and fail when pair retirement is absent at thirty seconds.
 
 Capture account document health before closing runtime admission or stopping
 peers. The test-local `capture_account_sync_before_cleanup` owns that observation
@@ -794,8 +836,9 @@ still live when the canonical partial-page corpus is published. These observatio
 stay within the existing cold budget and issue no extra requests; preserve the
 real signed exchange, protected-resume checks and operation/recovery deadlines.
 
-Once the original operation is admitted, or the external possession proof starts,
-the existing eight-second progress assertions remain unchanged. The same applies
+Except for the explicitly classified queued post-receipt functional convergence
+phase above, once the original operation is admitted, or the external possession
+proof starts, the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
 Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
 work drains. The overall nextest per-test 60-second and mutation 360-second
@@ -1004,6 +1047,14 @@ needed. A manual Health dispatch runs its portable/static responsibilities.
 The protected `Full Linux UI regression` name remains the coverage merge job,
 which rejects failed, skipped or incomplete dependencies.
 
+Each CodeQL matrix job validates the local SARIF directory returned by its actual
+analysis action after uploading results. Upload success alone does not certify
+zero findings. Reject every finding, including warning/note results, and missing
+or malformed reports; keep Rust, JavaScript/TypeScript and Actions analysis and
+the reviewed query configuration. This enforces the release owner's existing
+zero-open-alert policy before merge, without requiring an extra API permission
+or waiting for findings to appear on main. Hosted analysis remains required.
+
 Portable validation reuses Health's existing Node, Python and frontend dependency
 setup. Native CI no longer waits for frontend unit tests, help audits or diagnostic
 regressions before starting Clippy and workspace builds. Health uploads frontend
@@ -1207,9 +1258,10 @@ workspace test binaries once with pinned cargo-nextest 0.9.148 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
-another test on that machine. The four-way split bounds aggregate measured serial
-work within the existing sixty-minute jobs; it does not extend case deadlines or
-omit slow tests. Nextest uses a fresh process per test, so tests
+another test on that machine. Each consumer has a ninety-minute aggregate budget
+for its serial partition and evidence export; the producer retains sixty minutes.
+These job budgets do not extend case deadlines or omit slow tests. Nextest uses a
+fresh process per test, so tests
 must not depend on another test's process-local state.
 The registered channel-metadata IPC regression has a sixty-second isolated
 watchdog and command/lifecycle phase diagnostics. A stuck command fails that
@@ -1285,6 +1337,16 @@ registered send/search wiring. Delivery timing spans distinguish card preparatio
 from restart fairness and transfer completion. These changes must retain timeout,
 resource-release, identity and immutable-byte assertions.
 
+Inbound-only Control fixtures explicitly drive their already-required real
+exchange under the existing cold setup watchdog before the warm signed-role
+proof. Readiness requires the same full authenticated source's access and
+operation capabilities; an already-proven source adds no RPC. Keep the same
+cursor and precise interruption/backpressure classification during preparation.
+The warm role proof and admitted operation retain their original deadlines.
+A held real SessionReady response plus virtual-clock stimulus distinguishes cold
+preparation from the warm role clock; stage traces retain only bounded body-free
+negotiation, Ready and completion diagnostics.
+
 Control scheduling fixtures bind each authenticated request nonce to its exact
 client task, immutable dispatch attributes and a non-owning lifetime witness.
 Live hold gates reject completed or cancelled tasks; the latest peer-level trace
@@ -1292,10 +1354,49 @@ is diagnostic history, not evidence that a particular request is still active.
 Check the intended held task again inside the operation-admission callback, then
 retain the scenario's permitted preemption, continuation and receipt assertions.
 Natural origin, protection and wake hints remain independent attributes.
+Bounded observation ledgers retire inactive history before live task evidence.
+If every retained entry still belongs to a live task, new evidence is refused;
+capacity pressure cannot certify retirement or authorize a synthetic hold.
+The local-maintenance isolation fixture holds the requester at an existing
+publication boundary outside shared journal, document, member and log guards before genuine operation admission. It requires
+the exact demand's child request preparation while that boundary is held, then
+retains the original authenticated receipt, signature and checkpoint assertions.
+This proves scheduler independence from unrelated local work; it does not identify
+the cause of a historical hosted timeout. The same absolute receipt deadline
+bounds the witness, and drop-safe release and actual runtime drain precede any
+failure assertion. Attachment handoff and fanout-cursor tests separately cover
+capacity changes, durable skipped work and concurrent retry-floor rewinds.
+The operation-head overlap fixture coordinates actual runtime publishers around
+an older captured projection, commits the original signed request through the
+source owner without publishing, and requires the final signed head to retain
+that current terminal. Publication contention is an observed unit-lock
+`WouldBlock`, not a claim of FIFO queueing. A guard-disabled control must expose
+the higher-revision stale head; publication-unit poison tests keep underlying
+journal and document owners unpoisoned.
 Lifetime observation is scoped to synchronous test hooks and expires on return,
 abort or panic without calling fixture code during destruction. The delayed-server
 regression uses a real signed sibling publication to retire an older request and
 requires a fresh live request before measuring the existing receipt deadline.
+
+### Protocol fixture response epochs
+
+Wire-scope fixtures that require exact digest equality own a stable provider
+epoch and validate the received signed headers and payloads through the canonical
+store. A later source publication belongs to another epoch; comparing its live
+digest with an earlier completion is not response-integrity evidence. The v5
+access-only scope fixtures use an inbound-only authenticated provider and retain
+positive-role and operation-exclusion checks. Separate live-provider tests retain
+mid-page mutation, retry and re-comparison coverage. Provider teardown closes
+admission, aborts its owned connections and drains actual work under one watchdog.
+Preparation of the queued-source fixture uses an instance-scoped test-only
+client gate after the genuine authenticated acknowledgement and before read
+clocks begin. The exact request nonce receives an explicit server hold or pass
+decision; cancellation and dropped decisions release pending preparation. The
+gate opens permanently before operation admission. A real protocol control
+advances the test clock beyond the unchanged read budget to distinguish an
+ordinary timed-out read from a preparation hold followed by a fresh read.
+The production read deadlines and eight-second operation receipt bound remain
+unchanged.
 
 ## Measure feedback before tuning capacity
 

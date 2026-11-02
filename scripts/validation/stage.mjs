@@ -207,8 +207,8 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
       MESH_VALIDATION_PROCESS_GROUP_OWNER: env.MESH_VALIDATION_PROCESS_GROUP_OWNER || String(process.pid),
     };
     const child = spawn(argv[0], argv.slice(1), { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== "win32" && !nestedGroup && detached });
-    const forward = chunk => { output.write(chunk); onOutput(chunk); };
-    child.stdout?.on("data", forward); child.stderr?.on("data", forward);
+    const forward = (chunk, channel) => { output.write(chunk); onOutput(chunk, channel); };
+    child.stdout?.on("data", chunk => forward(chunk, "stdout")); child.stderr?.on("data", chunk => forward(chunk, "stderr"));
     output.on("error", failure => { error = failure.message; failureKind = "failed"; abort(); });
     child.on("error", failure => { error = failure.message; failureKind = ["ENOENT", "EACCES"].includes(failure.code) ? "unavailable" : "failed"; });
     let cleanup;
