@@ -1517,6 +1517,14 @@ support observations and retry deadlines. Failed or deferred admission does not
 pay for a page turn. Readiness respects both deadlines, and aggregate status cannot
 claim convergence while either comparison remains unfinished.
 
+Repeated legacy-operation rows retain their complete independent comparisons.
+The document store may reuse only its current-process immutable legacy payload
+validation when the incoming full signed metadata exactly matches both the
+current row and its bounded runtime witness. Metadata signatures, budgets,
+incoming length/hash checks, caller authorization and durable blob repair still
+run. Replacement invalidates that witness; encrypted metadata replay and hash-only
+blob reads cannot create it. Other private document validation remains unchanged.
+
 A pair's initial scheduling credit covers one validated foreground page and,
 when its original checkpoint is incomplete, one validated original resume page.
 Failed or deferred reads retain that credit; follow-up publications never renew
