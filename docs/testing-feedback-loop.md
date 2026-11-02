@@ -714,18 +714,24 @@ Keep the original role, capability and retained-membership proofs alongside thes
 scope completions; the observations neither issue requests nor stop workers.
 
 Same-source partial-page fixtures prepare their immutable signed prefix before
-arming the held request. Require a genuine completed Control scope for the exact
-signed prefix in every participating sibling direction, current matching metadata
-at both endpoints, current operation capabilities and no outstanding comparison
-pair. A subsequent unpaired natural read does not erase proof of an unchanged
-immutable prefix. A paired task, same-source cancellation or mismatched corpus
-invalidates that preparation proof; possessing rows alone cannot pay comparison
-debt. Do not require every independent direction to pause between reads at the
-same instant. Only then add the controlled tail through the existing source owner.
-A natural origin
-and an unprotected dispatch do not imply an unpaired task. Preserve the complete
-corpus, exact live-request checks and checkpoint repayment assertions when moving
-this preparation outside the operation budget.
+arming the held request. Every participating node must hold the exact current
+metadata and have consumed every prefix row through the normal verified operation
+input owner; `operation_input_consumed_for_test` binds that evidence to each
+current content hash. Require current directional operation capabilities and no
+outstanding comparison pair as separate facts. Possessing rows alone cannot pay
+comparison debt or certify their processing.
+
+Do not require full Control digest equality in every direction to establish this
+local preparation. The canonical owner can already hold all prefix rows while a
+replica is still empty; that valid comparison cannot make the whole views equal.
+Later imports intentionally do not send a publisher Wake back to the owner, so a
+redundant reverse completion may never occur. Use the current canonical and
+processed-input evidence rather than simultaneous idle workers or historical
+remote-scope observations. Add no bootstrap RPCs, synthetic completions or cache
+marks. Only then add the controlled tail through the existing source owner.
+A natural origin and an unprotected dispatch do not imply an unpaired task.
+Preserve the complete corpus, exact live-request checks and checkpoint repayment
+assertions when moving this preparation outside the operation budget.
 If a real Wake retires that preparation request, a later eligible comparison may
 advance the same signed tail key within the existing setup bound. Stop preparation
 once a live hold is captured; never retry the measured operation. The fault
