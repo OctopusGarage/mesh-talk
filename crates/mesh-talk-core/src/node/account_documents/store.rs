@@ -146,9 +146,6 @@ pub(in crate::node) struct AccountDocumentStore {
     file: EncryptedRecordLog<Vec<u8>>,
     media: MediaStore,
     current: BTreeMap<AccountDocumentKey, AccountDocumentMeta>,
-    // Current-process immutable payload proofs only, bounded by current legacy
-    // operation keys. Replay and hash-only reads never populate this inventory.
-    validated_legacy_payloads: BTreeMap<AccountDocumentKey, AccountDocumentMeta>,
     pub(super) personal_pending: BTreeSet<DocumentConversation>,
     pub(super) personal_floors:
         BTreeMap<DocumentConversation, (AccountDocumentMeta, super::personal::PersonalControl)>,
@@ -273,7 +270,6 @@ impl AccountDocumentStore {
             operation_keys: 0,
             operation_bytes: 0,
             digest_xor: [[0; 32]; 12],
-            validated_legacy_payloads: BTreeMap::new(),
             incomplete: BTreeSet::new(),
             local_receipts: BTreeMap::new(),
             inventory_source_floors: BTreeSet::new(),
@@ -610,7 +606,6 @@ impl AccountDocumentStore {
         receipt: Option<LocalPublicationReceipt>,
         source_authenticated: bool,
     ) {
-        self.validated_legacy_payloads.remove(&meta.key);
         if let Some(old) = self.current.get(&meta.key) {
             let row_len = self.local_receipts.get(&meta.key).map_or_else(
                 || {
@@ -960,27 +955,12 @@ impl AccountDocumentStore {
         receipt: Option<LocalPublicationReceipt>,
     ) -> Result<bool, LogError> {
         self.validate(&meta)?;
-        let legacy_payload =
-            matches!(meta.key, AccountDocumentKey::GroupLegacyOperation { .. }) && !meta.tombstone;
-        // Even a reused immutable proof must authenticate the incoming bytes.
-        // All metadata signatures, quotas and caller authorization remain live.
-        if (!meta.tombstone
-            && (payload.len() != meta.content_len as usize
-                || content_hash(payload) != meta.content_hash))
-            || (meta.tombstone && !payload.is_empty())
-        {
-            return Err(corrupt());
-        }
-        let reuse_legacy_payload = legacy_payload
-            && self.current.get(&meta.key) == Some(&meta)
-            && self.validated_legacy_payloads.get(&meta.key) == Some(&meta);
         if matches!(meta.key, AccountDocumentKey::ConversationPersonal { .. })
             && self.current.get(&meta.key).is_some_and(|old| old != &meta)
         {
             return Err(corrupt());
         }
         if meta.key.is_private_control()
-            && !reuse_legacy_payload
             && !match meta.key {
                 AccountDocumentKey::ConversationPersonal { .. } => {
                     super::personal::decode(&meta, payload).is_some()
@@ -1016,6 +996,13 @@ impl AccountDocumentStore {
         {
             return Err(corrupt());
         }
+        if (!meta.tombstone
+            && (payload.len() != meta.content_len as usize
+                || content_hash(payload) != meta.content_hash))
+            || (meta.tombstone && !payload.is_empty())
+        {
+            return Err(corrupt());
+        }
         if let Some(old) = self
             .current
             .get(&meta.key)
@@ -1039,10 +1026,8 @@ impl AccountDocumentStore {
                         )
                         .map_err(LogError::Io)?;
                     self.incomplete.remove(&meta.key);
-                    self.retain_legacy_payload_validation(&meta);
                     return Ok(true);
                 }
-                self.retain_legacy_payload_validation(&meta);
                 return Ok(false);
             }
         }
@@ -1186,28 +1171,13 @@ impl AccountDocumentStore {
                 self.personal_pending.insert(conversation);
             }
         }
-        let legacy_validation = legacy_payload.then(|| meta.clone());
         self.install_record(meta, receipt, source_authenticated);
-        if let Some(meta) = legacy_validation {
-            self.retain_legacy_payload_validation(&meta);
-        }
         if let Some(old_hash) = old_hash
             && !self.live().contains(&ConversationId::new(old_hash))
         {
             let _ = self.media.remove(ConversationId::new(old_hash));
         }
         Ok(true)
-    }
-    fn retain_legacy_payload_validation(&mut self, meta: &AccountDocumentMeta) {
-        // A successful stale import is not proof of the different current row.
-        // Only a validated payload whose durable merge/repair succeeded qualifies.
-        if matches!(meta.key, AccountDocumentKey::GroupLegacyOperation { .. })
-            && !meta.tombstone
-            && self.current.get(&meta.key) == Some(meta)
-        {
-            self.validated_legacy_payloads
-                .insert(meta.key.clone(), meta.clone());
-        }
     }
     fn validate(&self, meta: &AccountDocumentMeta) -> Result<(), LogError> {
         if !meta.valid(&self.account) {
@@ -1310,321 +1280,6 @@ impl AccountDocumentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn legacy_payload_row(
-        source: &crate::node::Node,
-        group: ConversationId,
-        revision: u64,
-    ) -> (AccountDocumentMeta, Vec<u8>) {
-        use crate::node::account_group::operations::legacy_wire::{
-            LegacyOperationFrame, LegacyOperationProjection,
-        };
-        let payload = LegacyOperationFrame::new(
-            source,
-            group,
-            revision,
-            LegacyOperationProjection::default(),
-        )
-        .encode();
-        let meta = AccountDocumentMeta::new(
-            &source.account,
-            source.user_id(),
-            AccountDocumentKey::GroupLegacyOperation {
-                channel: hex::encode(group.as_bytes()),
-                source_device: source.user_id(),
-            },
-            revision,
-            &payload,
-            false,
-        );
-        (meta, payload)
-    }
-
-    #[test]
-    fn legacy_payload_reuse_preserves_replacement_rejection_and_blob_repair() {
-        use crate::node::account_group::operations::take_frame_decode_counts_for_test;
-        let dir = tempfile::tempdir().unwrap();
-        let account = Account::generate();
-        let source = super::super::tests::node(&dir.path().join("source"), &account);
-        let group = ConversationId::new([18; 32]);
-        let (meta, bytes) = legacy_payload_row(&source, group, 1);
-        let mut store =
-            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
-        store.merge(meta.clone(), &bytes).unwrap();
-        take_frame_decode_counts_for_test();
-        let mut malformed = bytes.clone();
-        malformed[0] ^= 1;
-        assert!(store.merge(meta.clone(), &malformed).is_err());
-        let mut unsigned = meta.clone();
-        unsigned.signature[0] ^= 1;
-        assert!(store.merge(unsigned, &bytes).is_err());
-        let wrong_writer =
-            AccountDocumentMeta::new(&account, "f".repeat(32), meta.key.clone(), 1, &bytes, false);
-        assert!(store.merge(wrong_writer, &bytes).is_err());
-        let wrong_revision = AccountDocumentMeta::new(
-            &account,
-            source.user_id(),
-            meta.key.clone(),
-            2,
-            &bytes,
-            false,
-        );
-        assert!(store.merge(wrong_revision, &bytes).is_err());
-        let wrong_account = AccountDocumentMeta::new(
-            &Account::generate(),
-            source.user_id(),
-            meta.key.clone(),
-            1,
-            &bytes,
-            false,
-        );
-        assert!(store.merge(wrong_account, &bytes).is_err());
-        let wrong_key = AccountDocumentMeta::new(
-            &account,
-            source.user_id(),
-            AccountDocumentKey::GroupLegacyOperation {
-                channel: hex::encode(ConversationId::new([99; 32]).as_bytes()),
-                source_device: source.user_id(),
-            },
-            1,
-            &bytes,
-            false,
-        );
-        assert!(store.merge(wrong_key, &bytes).is_err());
-        take_frame_decode_counts_for_test();
-        assert!(!store.merge(meta.clone(), &bytes).unwrap());
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [0, 0],
-            "rejections cannot change the exact existing proof"
-        );
-        store.remove_blob_for_test(meta.content_hash);
-        assert!(store.merge(meta.clone(), &bytes).unwrap());
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 0]);
-        assert_eq!(store.get(&meta.key).unwrap().unwrap().payload(), bytes);
-        store
-            .media
-            .store_bytes(
-                ConversationId::new(meta.content_hash),
-                "document.bin",
-                b"corrupt encrypted content",
-            )
-            .unwrap();
-        assert!(store.get(&meta.key).is_err());
-        assert!(
-            store.merge(meta.clone(), &bytes).unwrap(),
-            "reuse cannot hide corrupt durable bytes"
-        );
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 0]);
-        assert_eq!(store.get(&meta.key).unwrap().unwrap().payload(), bytes);
-        let (replacement, replacement_bytes) = legacy_payload_row(&source, group, 2);
-        assert!(
-            store
-                .merge(replacement.clone(), &replacement_bytes)
-                .unwrap()
-        );
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [0, 1],
-            "new signed metadata requires a new immutable proof"
-        );
-        assert!(!store.merge(meta, &bytes).unwrap());
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [0, 1],
-            "a stale foreign candidate cannot borrow a newer proof"
-        );
-        assert!(
-            !store
-                .merge(replacement.clone(), &replacement_bytes)
-                .unwrap()
-        );
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [0, 0],
-            "stale successful no-op cannot overwrite the current proof"
-        );
-        let tombstone = AccountDocumentMeta::new(
-            &account,
-            source.user_id(),
-            replacement.key.clone(),
-            3,
-            &[],
-            true,
-        );
-        assert!(store.merge(tombstone, &[]).unwrap());
-        assert!(
-            store.validated_legacy_payloads.is_empty(),
-            "replacement/removal invalidates runtime witnesses"
-        );
-        assert!(!store.merge(replacement, &replacement_bytes).unwrap());
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 1]);
-        assert!(
-            store.validated_legacy_payloads.is_empty(),
-            "stale no-op cannot repopulate a removed current payload"
-        );
-    }
-
-    #[test]
-    fn legacy_payload_proof_requires_successful_current_process_validation_and_commit() {
-        use crate::node::account_group::operations::take_frame_decode_counts_for_test;
-        let dir = tempfile::tempdir().unwrap();
-        let account = Account::generate();
-        let source = super::super::tests::node(&dir.path().join("source"), &account);
-        let (meta, bytes) = legacy_payload_row(&source, ConversationId::new([19; 32]), 1);
-        let mut store =
-            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
-        store.fail_index_for_test(true);
-        take_frame_decode_counts_for_test();
-        assert!(store.merge(meta.clone(), &bytes).is_err());
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 1]);
-        assert!(store.validated_legacy_payloads.is_empty());
-        store.fail_index_for_test(false);
-        assert!(store.merge(meta.clone(), &bytes).unwrap());
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 1]);
-        // Write authenticated metadata and a hash-correct encrypted blob without
-        // invoking semantic merge, reproducing exactly what replay/get can prove.
-        let bad_bytes = b"not a signed legacy operation";
-        let bad_meta = AccountDocumentMeta::new(
-            &account,
-            source.user_id(),
-            meta.key.clone(),
-            2,
-            bad_bytes,
-            false,
-        );
-        store
-            .media
-            .store_bytes(
-                ConversationId::new(bad_meta.content_hash),
-                "document.bin",
-                bad_bytes,
-            )
-            .unwrap();
-        store
-            .file
-            .append_durable(&serde_json::to_vec(&bad_meta).unwrap())
-            .unwrap();
-        drop(store);
-        let mut store =
-            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
-        assert_eq!(
-            store.get(&bad_meta.key).unwrap().unwrap().payload(),
-            bad_bytes
-        );
-        assert!(store.validated_legacy_payloads.is_empty());
-        take_frame_decode_counts_for_test();
-        assert!(
-            store.merge(bad_meta, bad_bytes).is_err(),
-            "durable metadata and hash-only reads cannot certify private semantics"
-        );
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 1]);
-        assert!(store.validated_legacy_payloads.is_empty());
-    }
-
-    #[test]
-    fn repeated_sixty_six_legacy_imports_reuse_payload_proofs_but_modern_imports_do_not() {
-        use crate::node::account_group::operations::{
-            take_frame_decode_counts_for_test,
-            wire::{OperationFrame, OperationProjection},
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let account = Account::generate();
-        let source = super::super::tests::node(&dir.path().join("source"), &account);
-        let rows: Vec<_> = (1..=66)
-            .map(|value| legacy_payload_row(&source, ConversationId::new([value; 32]), 1))
-            .collect();
-        let mut store =
-            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
-        take_frame_decode_counts_for_test();
-        for (meta, bytes) in &rows {
-            assert!(store.merge(meta.clone(), bytes).unwrap());
-        }
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 66]);
-        for _ in 0..2 {
-            for (meta, bytes) in &rows {
-                assert!(!store.merge(meta.clone(), bytes).unwrap());
-            }
-        }
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [0, 0],
-            "both preserved comparison scans reuse immutable validation, not cursor state"
-        );
-        assert_eq!(store.validated_legacy_payloads.len(), rows.len());
-        assert!(
-            store
-                .validated_legacy_payloads
-                .iter()
-                .all(|(key, proof)| store.current.get(key) == Some(proof))
-        );
-        let group = ConversationId::new([67; 32]);
-        let modern_bytes =
-            OperationFrame::new(&source, group, 1, OperationProjection::default()).encode();
-        let modern_meta = AccountDocumentMeta::new(
-            &account,
-            source.user_id(),
-            AccountDocumentKey::GroupOperation {
-                channel: hex::encode(group.as_bytes()),
-                source_device: source.user_id(),
-            },
-            1,
-            &modern_bytes,
-            false,
-        );
-        assert!(store.merge(modern_meta.clone(), &modern_bytes).unwrap());
-        assert_eq!(take_frame_decode_counts_for_test(), [1, 0]);
-        assert!(!store.merge(modern_meta, &modern_bytes).unwrap());
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [1, 0],
-            "other private document rules keep their existing validation path"
-        );
-    }
-
-    #[test]
-    fn unchanged_legacy_import_reuses_only_current_process_payload_validation() {
-        use crate::node::account_group::operations::{
-            legacy_wire::{LegacyOperationFrame, LegacyOperationProjection},
-            take_frame_decode_counts_for_test,
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let account = Account::generate();
-        let source = super::super::tests::node(&dir.path().join("source"), &account);
-        let group = ConversationId::new([17; 32]);
-        let bytes =
-            LegacyOperationFrame::new(&source, group, 1, LegacyOperationProjection::default())
-                .encode();
-        let key = AccountDocumentKey::GroupLegacyOperation {
-            channel: hex::encode(group.as_bytes()),
-            source_device: source.user_id(),
-        };
-        let meta =
-            AccountDocumentMeta::new(&account, source.user_id(), key.clone(), 1, &bytes, false);
-        let store_dir = dir.path().join("receiver");
-        std::fs::create_dir_all(&store_dir).unwrap();
-        let mut store =
-            AccountDocumentStore::open(&store_dir, "pw", &account.public().ed25519_pub).unwrap();
-        take_frame_decode_counts_for_test();
-        assert!(store.merge(meta.clone(), &bytes).unwrap());
-        assert_eq!(take_frame_decode_counts_for_test(), [0, 1]);
-        assert!(!store.merge(meta.clone(), &bytes).unwrap());
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [0, 0],
-            "an exact unchanged legacy import must reuse its current-process immutable payload proof",
-        );
-        drop(store);
-        let mut store =
-            AccountDocumentStore::open(&store_dir, "pw", &account.public().ed25519_pub).unwrap();
-        take_frame_decode_counts_for_test();
-        assert!(!store.merge(meta, &bytes).unwrap());
-        assert_eq!(
-            take_frame_decode_counts_for_test(),
-            [0, 1],
-            "reopened metadata and hash-only blob reads cannot supply a runtime payload proof",
-        );
-    }
-
     #[test]
     fn legacy_child_rows_are_negotiated_before_digest_paging_and_share_operation_quota() {
         let dir = tempfile::tempdir().unwrap();

@@ -274,10 +274,6 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_documents::",
-            "unchanged_legacy_import_reuses_only_current_process_payload_validation",
-            "legacy_payload_reuse_preserves_replacement_rejection_and_blob_repair",
-            "legacy_payload_proof_requires_successful_current_process_validation_and_commit",
-            "repeated_sixty_six_legacy_imports_reuse_payload_proofs_but_modern_imports_do_not",
             "node::account_sync::personal_replay_tests::",
             "node::account_sync::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
