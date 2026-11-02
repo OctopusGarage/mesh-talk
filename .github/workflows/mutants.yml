@@ -70,7 +70,7 @@ jobs:
           npm run build
 
       - name: Install mutation test tools
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
 

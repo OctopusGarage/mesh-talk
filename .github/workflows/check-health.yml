@@ -73,7 +73,7 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
       - name: Install source scanners
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
       - uses: actions/setup-go@v7
