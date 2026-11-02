@@ -830,7 +830,55 @@ describe("non-trickle ICE preparation ownership", () => {
   });
   afterEach(() => vi.useRealTimers());
 
+  const replaceCurrentCall = () => {
+    const callId = useCalls.getState().callId!;
+    useCalls.getState().hangup();
+    useCalls.getState().onSignal(offer("carol", callId));
+    return callId;
+  };
+  const expectReplacement = (callId: string) => {
+    expect(useCalls.getState()).toMatchObject({
+      phase: "incoming",
+      callId,
+      peerId: "carol",
+      error: null,
+    });
+    expect(peers[0].close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+  };
+
   for (const kind of ["offer", "answer"] as const) {
+    it(`retires ${kind} after native local-description completion but before its continuation`, async () => {
+      let finishDescription!: () => void;
+      class DeferredDescriptionPc extends GatheringPc {
+        setLocalDescription = vi.fn(
+          () =>
+            new Promise<void>((resolve) => {
+              finishDescription = resolve;
+            }),
+        );
+      }
+      vi.stubGlobal("RTCPeerConnection", DeferredDescriptionPc);
+      const pending = begin(kind);
+      await vi.advanceTimersByTimeAsync(0);
+      // Native work succeeds first; retirement wins before its queued JS continuation.
+      finishDescription();
+      const replacement = replaceCurrentCall();
+      await pending;
+      expectReplacement(replacement);
+      expect(signals(kind)).toHaveLength(0);
+    });
+
+    it(`retires ${kind} after ICE completes but before publication continues`, async () => {
+      const pending = begin(kind);
+      await vi.advanceTimersByTimeAsync(0);
+      peers[0].complete();
+      const replacement = replaceCurrentCall();
+      await pending;
+      expectReplacement(replacement);
+      expect(signals(kind)).toHaveLength(0);
+    });
+
     it(`waits for actual gathered candidates before publishing an ${kind}`, async () => {
       const pending = begin(kind);
       await vi.advanceTimersByTimeAsync(2_001);
@@ -907,6 +955,49 @@ describe("non-trickle ICE preparation ownership", () => {
       expect(peers[0].close).toHaveBeenCalledOnce();
     });
   }
+
+  it("a retired caller cannot publish after a delayed privacy acknowledgment", async () => {
+    let acknowledge!: () => void;
+    invoke.mockImplementation((command: string) =>
+      command === "initiate_privacy_contact"
+        ? new Promise<void>((resolve) => {
+            acknowledge = resolve;
+          })
+        : Promise.resolve(),
+    );
+    const pending = begin("offer");
+    await vi.advanceTimersByTimeAsync(0);
+    peers[0].complete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acknowledge).toBeTypeOf("function");
+    const replacement = replaceCurrentCall();
+    acknowledge();
+    await pending;
+    expectReplacement(replacement);
+    expect(signals("offer")).toHaveLength(0);
+  });
+
+  it("a retired caller's late send failure cannot terminate a replacement call", async () => {
+    let rejectSend!: (error: Error) => void;
+    invoke.mockImplementation((command: string, args: { payload?: string }) =>
+      command === "send_call_signal" &&
+      JSON.parse(args.payload!).kind === "offer"
+        ? new Promise<void>((_, reject) => {
+            rejectSend = reject;
+          })
+        : Promise.resolve(),
+    );
+    const pending = begin("offer");
+    await vi.advanceTimersByTimeAsync(0);
+    peers[0].complete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signals("offer")).toHaveLength(1);
+    const replacement = replaceCurrentCall();
+    rejectSend(new Error("retired signaling failed"));
+    await pending;
+    expectReplacement(replacement);
+    expect(signals("offer")).toHaveLength(1);
+  });
 });
 
 describe("call deadlines cancel remote ringing", () => {
