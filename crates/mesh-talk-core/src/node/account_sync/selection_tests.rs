@@ -2987,79 +2987,168 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
     let receiver_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
     sibling_peer(&source, &receiver, receiver_listener.local_addr().unwrap());
-    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
-    let receiver_server = tokio::spawn(receiver.clone().run_accept_loop(receiver_listener));
-    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if [&source, &receiver].iter().all(|node| {
-                node.device_sync_status()
-                    .iter()
-                    .any(|status| status.document_phase == SyncPhase::UpToDate)
-            }) {
-                break;
+    let started = std::time::Instant::now();
+    let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let mut previous_hooks = Vec::new();
+    for (index, (node, peer)) in [(&source, &receiver), (&receiver, &source)]
+        .into_iter()
+        .enumerate()
+    {
+        let previous = node.account_client_test_hook.lock().unwrap().take();
+        previous_hooks.push(previous.clone());
+        let expected = peer.identity.public();
+        let phases = phases.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |actual, phase| {
+            if actual == expected {
+                let observed = if phase.starts_with("page_begin ")
+                    || phase.starts_with("page_end ")
+                    || phase.starts_with("document_scope_")
+                    || phase.starts_with("custody_setup_exchange_")
+                {
+                    Some(phase.clone())
+                } else if phase.starts_with("wake_received ") {
+                    Some("wake_received".into())
+                } else {
+                    None
+                };
+                if let Some(observed) = observed {
+                    let mut phases = phases.lock().unwrap();
+                    if phases.len() == 64 {
+                        phases.pop_front();
+                    }
+                    phases.push_back((started.elapsed().as_millis(), index, observed));
+                }
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let channel = source
-            .create_channel("Mandatory group", vec![])
-            .await
-            .unwrap();
-        source
-            .set_account_preference(
-                SyncCategory::Appearance,
-                "theme".into(),
-                Some("dark".into()),
-            )
-            .unwrap();
-        source
-            .enqueue_to_account(&source.account_id(), b"optional history", None)
-            .await
-            .unwrap();
-        loop {
-            if receiver.account_group_access(channel).is_ok()
-                && receiver.channel_shared_reference(channel).is_some()
-            {
-                break;
+            if let Some(previous) = &previous {
+                previous(actual, phase);
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(
-            receiver
-                .account_preferences(SyncCategory::Appearance)
-                .is_empty()
-        );
-        assert!(
-            receiver
-                .account_history(&receiver.account_id(), 10)
-                .unwrap()
-                .is_empty()
-        );
-        for node in [&source, &receiver] {
-            node.set_device_sync_category(SyncCategory::Appearance, true)
+        }));
+    }
+    let source_server = tokio::spawn(
+        source
+            .clone()
+            .run_accept_loop_without_account_repair(source_listener),
+    );
+    let receiver_server = tokio::spawn(
+        receiver
+            .clone()
+            .run_accept_loop_without_account_repair(receiver_listener),
+    );
+    let mut phase = "initial_reciprocal_documents";
+    let mut mandatory = (false, false);
+    let outcome = async {
+        // Cold reciprocal authentication/document setup is a prerequisite,
+        // not part of either subsequent publication's wake observation.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if [&source, &receiver].iter().all(|node| {
+                    node.device_sync_status()
+                        .iter()
+                        .any(|status| status.document_phase == SyncPhase::UpToDate)
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+        // Start before the durable trigger; retain one common five-second
+        // window through mandatory delivery and both optional-off assertions.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            phase = "create_channel";
+            let channel = source
+                .create_channel("Mandatory group", vec![])
+                .await
                 .unwrap();
-        }
-        loop {
-            if receiver
-                .account_preferences(SyncCategory::Appearance)
-                .iter()
-                .any(|record| record.value.as_deref() == Some("dark"))
-            {
-                break;
+            source
+                .set_account_preference(
+                    SyncCategory::Appearance,
+                    "theme".into(),
+                    Some("dark".into()),
+                )
+                .unwrap();
+            phase = "write_disabled_history";
+            source
+                .enqueue_to_account(&source.account_id(), b"optional history", None)
+                .await
+                .unwrap();
+            phase = "mandatory_group_observation";
+            loop {
+                mandatory.0 = receiver.account_group_access(channel).is_ok();
+                mandatory.1 = mandatory.0 && receiver.channel_shared_reference(channel).is_some();
+                if mandatory.0 && mandatory.1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(
-            receiver
-                .account_history(&receiver.account_id(), 10)
-                .unwrap()
-                .is_empty()
-        );
-    })
+            assert!(
+                receiver
+                    .account_preferences(SyncCategory::Appearance)
+                    .is_empty()
+            );
+            assert!(
+                receiver
+                    .account_history(&receiver.account_id(), 10)
+                    .unwrap()
+                    .is_empty()
+            );
+        })
+        .await?;
+        // Policy enable is a distinct trigger. Its observation starts before
+        // either local policy change and still proves History remains disabled.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            phase = "appearance_enable_and_observation";
+            for node in [&source, &receiver] {
+                node.set_device_sync_category(SyncCategory::Appearance, true)
+                    .unwrap();
+            }
+            loop {
+                if receiver
+                    .account_preferences(SyncCategory::Appearance)
+                    .iter()
+                    .any(|record| record.value.as_deref() == Some("dark"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                receiver
+                    .account_history(&receiver.account_id(), 10)
+                    .unwrap()
+                    .is_empty()
+            );
+        })
+        .await
+    }
     .await;
+    if outcome.is_err() {
+        let statuses = [(&source, &receiver), (&receiver, &source)].map(|(node, peer)| {
+            node.device_sync_status()
+                .into_iter()
+                .find(|status| status.device_id == peer.user_id())
+                .map(|status| {
+                    (
+                        status.phase,
+                        status.document_phase,
+                        status.document_error.is_some(),
+                        status.document_requires_upgrade,
+                    )
+                })
+        });
+        let phases = phases.lock().unwrap().clone();
+        eprintln!(
+            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,reference)={mandatory:?} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?}",
+            started.elapsed().as_millis()
+        );
+    }
     source_server.abort();
     receiver_server.abort();
     let _ = source_server.await;
     let _ = receiver_server.await;
+    for (node, previous) in [&source, &receiver].into_iter().zip(previous_hooks) {
+        *node.account_client_test_hook.lock().unwrap() = previous;
+    }
     outcome.expect("mandatory account controls wake before periodic repair while optional content obeys its category policy");
 }
 

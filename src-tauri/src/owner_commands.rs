@@ -3714,13 +3714,38 @@ mod tests {
     #[test]
     fn registered_channel_metadata_preserves_versions_and_owner_admission() {
         use tauri::Manager;
+        let started = std::time::Instant::now();
+        eprintln!(
+            "metadata IPC phase=fixture-start elapsed={:?}",
+            started.elapsed()
+        );
         let fixture = Fixture::new();
-        let channel = fixture
-            .invoke(
-                "create_channel",
-                serde_json::json!({"name":"Group metadata", "memberAccountIds":[]}),
-            )
-            .unwrap();
+        eprintln!(
+            "metadata IPC phase=fixture-ready elapsed={:?}",
+            started.elapsed()
+        );
+        let invoke = |command: &str, body: serde_json::Value| {
+            eprintln!(
+                "metadata IPC phase=invoke-start command={command} elapsed={:?}",
+                started.elapsed()
+            );
+            let result = fixture.invoke(command, body);
+            eprintln!(
+                "metadata IPC phase=invoke-finished command={command} ok={} elapsed={:?}",
+                result.is_ok(),
+                started.elapsed()
+            );
+            result
+        };
+        let channel = invoke(
+            "create_channel",
+            serde_json::json!({"name":"Group metadata", "memberAccountIds":[]}),
+        )
+        .unwrap();
+        eprintln!(
+            "metadata IPC phase=account-read elapsed={:?}",
+            started.elapsed()
+        );
         let account = fixture
             .node
             .0
@@ -3742,44 +3767,38 @@ mod tests {
                 assert!(value["cover"].is_null());
                 assert!(value["announcement"].is_null());
                 assert!(value["announcement_history"].as_array().unwrap().is_empty());
-                value = fixture.invoke("channel_metadata", args.clone()).unwrap();
+                value = invoke("channel_metadata", args.clone()).unwrap();
             }
             panic!("registered metadata query must finish its bounded continuation");
         };
-        let initial = settled(fixture.invoke("channel_metadata", args.clone()).unwrap());
+        let initial = settled(invoke("channel_metadata", args.clone()).unwrap());
         assert!(initial["announcement"].is_null());
         let mut publish = args.clone();
         publish["content"] = "Welcome".into();
         publish["expectedRevision"] = serde_json::Value::Null;
-        let saved = settled(
-            fixture
-                .invoke("set_channel_announcement", publish.clone())
-                .unwrap(),
-        );
+        let saved = settled(invoke("set_channel_announcement", publish.clone()).unwrap());
         assert_eq!(saved["announcement"]["content"], "Welcome");
         assert!(
-            fixture
-                .invoke("set_channel_announcement", publish.clone())
-                .is_err(),
+            invoke("set_channel_announcement", publish.clone()).is_err(),
             "a stale editor cannot overwrite a published version"
         );
         let mut wrong = args.clone();
         wrong["expectedAccount"] = "another-account".into();
         assert_eq!(
-            fixture.invoke("channel_metadata", wrong).unwrap_err()["kind"],
+            invoke("channel_metadata", wrong).unwrap_err()["kind"],
             "authorization"
         );
         publish["expectedRevision"] = saved["announcement"]["revision"].clone();
         publish["content"] = serde_json::Value::Null;
-        let cleared = settled(
-            fixture
-                .invoke("set_channel_announcement", publish.clone())
-                .unwrap(),
-        );
+        let cleared = settled(invoke("set_channel_announcement", publish.clone()).unwrap());
         assert!(cleared["announcement"]["content"].is_null());
         assert_ne!(
             cleared["announcement"]["revision"],
             saved["announcement"]["revision"]
+        );
+        eprintln!(
+            "metadata IPC phase=lock-start elapsed={:?}",
+            started.elapsed()
         );
         crate::app_lock::lock_app(
             fixture.webview.state::<AppState>(),
@@ -3787,15 +3806,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            fixture.invoke("channel_metadata", args).unwrap_err()["kind"],
+            invoke("channel_metadata", args).unwrap_err()["kind"],
             "authorization"
         );
         assert_eq!(
-            fixture
-                .invoke("set_channel_announcement", publish)
-                .unwrap_err()["kind"],
+            invoke("set_channel_announcement", publish).unwrap_err()["kind"],
             "authorization"
         );
+        eprintln!(
+            "metadata IPC phase=retire-start elapsed={:?}",
+            started.elapsed()
+        );
+        drop(fixture);
+        eprintln!("metadata IPC phase=retired elapsed={:?}", started.elapsed());
     }
 
     #[test]

@@ -366,6 +366,40 @@ impl Node {
     /// Maintenance runs on the blocking pool and stops when this future is dropped;
     /// CLI and SDK hosts get the same log maintenance as the desktop runtime.
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
+        Box::pin(self.run_accept_loop_inner(
+            listener,
+            #[cfg(test)]
+            true,
+        ))
+        .await;
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) async fn run_accept_loop_without_account_repair(
+        self: Arc<Self>,
+        listener: TcpListener,
+    ) {
+        Box::pin(self.run_accept_loop_inner(listener, false)).await;
+    }
+
+    async fn run_accept_loop_inner(
+        self: Arc<Self>,
+        listener: TcpListener,
+        #[cfg(test)] account_periodic_repair: bool,
+    ) {
+        #[cfg(test)]
+        let account_history = {
+            let node = Arc::clone(&self);
+            async move {
+                if account_periodic_repair {
+                    Box::pin(node.run_account_history_loop()).await;
+                } else {
+                    Box::pin(node.run_account_history_loop_with_tick(None)).await;
+                }
+            }
+        };
+        #[cfg(not(test))]
+        let account_history = Arc::clone(&self).run_account_history_loop();
         let changes = self
             .roster
             .lock()
@@ -376,7 +410,7 @@ impl Node {
             _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
-            _ = Arc::clone(&self).run_account_history_loop() => {}
+            _ = account_history => {}
             _ = Arc::clone(&self).run_account_wake_loop() => {}
             _ = Arc::clone(&self).run_expiry_loop() => {}
             _ = self.accept_connections(listener) => {}

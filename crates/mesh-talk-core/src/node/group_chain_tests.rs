@@ -1194,6 +1194,12 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             ));
         }));
     }
+    // Register independent UI observation before send; never consume the
+    // recovery Notify whose causality this scenario measures.
+    let mut ui_changes = chain.nodes[1..6]
+        .iter()
+        .map(|node| node.subscribe_ui_changes())
+        .collect::<Vec<_>>();
     chain.nodes[0]
         .send_channel_message(group, b"notification-driven background gossip")
         .await
@@ -1212,6 +1218,12 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let mut polls = 0_u64;
     let mut poll_us = 0_u128;
     let mut max_poll_us = 0_u128;
+    let mut query_needed = [false; 5];
+    let mut generation_changes = [0_u64; 5];
+    let mut query_trace = std::collections::VecDeque::with_capacity(64);
+    // Retain the owner even if the common deadline cancels its await. Join the
+    // one outstanding read before failure diagnostics or fixture retirement.
+    let mut pending_query = None;
     // A live worker can invalidate a read checkpoint between polling turns.
     // Only that typed pending state is retried, within the original deadline;
     // no manual projection or network recovery is driven by these pure reads.
@@ -1222,32 +1234,66 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         loop {
             let poll_started = std::time::Instant::now();
             polls = polls.saturating_add(1);
-            let all_received = (1..6).all(|index| {
-                if first_visible_ms[index - 1].is_some() {
-                    return true;
+            for index in 1..6 {
+                let slot = index - 1;
+                if first_visible_ms[slot].is_some() {
+                    continue;
                 }
-                history_reads[index - 1] = history_reads[index - 1].saturating_add(1);
-                match chain.nodes[index].channel_history(group, 100) {
+                if ui_changes[slot]
+                    .has_changed()
+                    .expect("the receiver keeps its UI publisher alive")
+                {
+                    // Acknowledge BEFORE the query. A generation published during
+                    // the admitted read remains observable on the next turn.
+                    let _generation = *ui_changes[slot].borrow_and_update();
+                    generation_changes[slot] = generation_changes[slot].saturating_add(1);
+                    query_needed[slot] = true;
+                }
+                if !query_needed[slot] {
+                    continue;
+                }
+                history_reads[slot] = history_reads[slot].saturating_add(1);
+                if query_trace.len() == 64 {
+                    query_trace.pop_front();
+                }
+                query_trace.push_back((route_started.elapsed().as_millis(), index, "query_begin"));
+                let node = chain.nodes[index].clone();
+                pending_query = Some(tokio::spawn(async move {
+                    node.account_blocking(move |node| node.channel_history(group, 100))
+                        .await
+                }));
+                let history = pending_query
+                    .as_mut()
+                    .unwrap()
+                    .await
+                    .expect("the history observation owner must not panic");
+                let _ = pending_query.take();
+                if query_trace.len() == 64 {
+                    query_trace.pop_front();
+                }
+                query_trace.push_back((route_started.elapsed().as_millis(), index, "query_end"));
+                match history {
                     Ok(history) => {
+                        query_needed[slot] = false;
                         let message = history.iter().find(|row| {
                             row.text == b"notification-driven background gossip"
                                 && original.is_none_or(|id| row.id == id)
                         });
                         if let Some(message) = message {
                             original.get_or_insert(message.id);
-                            first_visible_ms[index - 1] = Some(route_started.elapsed().as_millis());
-                            true
-                        } else {
-                            false
+                            first_visible_ms[slot] = Some(route_started.elapsed().as_millis());
                         }
                     }
                     Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
-                        stale_reads[index - 1] = stale_reads[index - 1].saturating_add(1);
-                        false
+                        stale_reads[slot] = stale_reads[slot].saturating_add(1);
+                        // A durable publication can precede its final read-ready
+                        // checkpoint. Only that typed pending state is retried.
+                        query_needed[slot] = true;
                     }
                     Err(error) => panic!("background history read failed: {error}"),
                 }
-            });
+            }
+            let all_received = first_visible_ms.iter().all(Option::is_some);
             let elapsed = poll_started.elapsed().as_micros();
             poll_us = poll_us.saturating_add(elapsed);
             max_poll_us = max_poll_us.max(elapsed);
@@ -1261,6 +1307,18 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let deadline_elapsed = deadline_started.elapsed();
     let deadline_elapsed_ms = deadline_elapsed.as_millis();
     let within_two_seconds = deadline_elapsed <= Duration::from_secs(2);
+    if let Some(query) = pending_query.take() {
+        // This is cleanup after the measured result, never extra acceptance time.
+        // account_blocking retains admission until the actual read returns.
+        match tokio::time::timeout(Duration::from_secs(15), query)
+            .await
+            .expect("outstanding history observation must retire before its fixture")
+            .expect("history observation cleanup must join its owner")
+        {
+            Ok(_) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+            Err(error) => panic!("background history observation retirement failed: {error}"),
+        }
+    }
     for node in &chain.nodes[..6] {
         *node.account_client_test_hook.lock().unwrap() = None;
     }
@@ -1269,7 +1327,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         || std::env::var("MESH_TALK_TEST_TIMING").as_deref() == Ok("1")
     {
         eprintln!(
-            "gossip observer send_returned_ms={send_returned_ms} deadline_start_ms={deadline_start_ms} deadline_elapsed_ms={deadline_elapsed_ms} within_two_seconds={within_two_seconds} first_visible_ms={first_visible_ms:?} history_reads={history_reads:?} stale_reads={stale_reads:?} polls={polls} poll_us={poll_us} max_poll_us={max_poll_us}"
+            "gossip observer send_returned_ms={send_returned_ms} deadline_start_ms={deadline_start_ms} deadline_elapsed_ms={deadline_elapsed_ms} within_two_seconds={within_two_seconds} first_visible_ms={first_visible_ms:?} history_reads={history_reads:?} stale_reads={stale_reads:?} generation_changes={generation_changes:?} query_trace={query_trace:?} polls={polls} poll_us={poll_us} max_poll_us={max_poll_us}"
         );
     }
     if received.is_err() {

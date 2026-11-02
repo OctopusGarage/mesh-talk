@@ -2778,7 +2778,7 @@ impl Node {
 
     // Tests can exclude periodic repair to prove that retained work itself
     // schedules progress, without coupling fixture setup to the first tick.
-    async fn run_account_history_loop_with_tick(
+    pub(in crate::node) async fn run_account_history_loop_with_tick(
         self: Arc<Self>,
         mut tick: Option<tokio::time::Interval>,
     ) {

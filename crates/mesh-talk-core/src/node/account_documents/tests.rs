@@ -1336,8 +1336,12 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
         assert!(active.load(Ordering::Acquire) > 0, "the setup predicate must remain pending during the live hold");
         release.close();
         if held_domain == AccountDocumentDomain::GroupInventory {
-            tokio::time::timeout(Duration::from_secs(30), async {
+            let optional_started = std::time::Instant::now();
+            let mut optional_phase = "waiting_for_paid_hold";
+            let mut optional_evidence = (false, false, false);
+            let optional_result = tokio::time::timeout(Duration::from_secs(30), async {
                 optional_held.await.expect("a paid optional continuation must reach the same-lane live hold");
+                optional_phase = "waiting_for_heads_capabilities_and_status";
                 loop {
                     let imported = source_heads.iter().all(|head| {
                         sibling.account_document(&head.key).unwrap().is_some_and(|document| {
@@ -1351,12 +1355,24 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
                             && status.document_phase == crate::node::SyncPhase::CatchingUp
                             && status.document_error.is_none() && !status.document_requires_upgrade
                     });
-                    if imported && custody_linked_capabilities_ready(&source, &sibling) && optional_pending {
+                    let capabilities = custody_linked_capabilities_ready(&source, &sibling);
+                    optional_evidence = (imported, capabilities, optional_pending);
+                    if imported && capabilities && optional_pending {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-            }).await.expect("real authenticated head floors and capabilities must arrive while same-lane optional work is pending");
+            }).await;
+            if optional_result.is_err() {
+                let status = sibling.device_sync_status().into_iter()
+                    .find(|status| status.device_id == source.user_id())
+                    .map(|status| (status.document_phase, status.document_error.is_some(), status.document_requires_upgrade));
+                let custody = *observation.settled.lock().unwrap();
+                let optional = *observation.optional_settled.lock().unwrap();
+                let phases = observation.phases.lock().unwrap().clone();
+                eprintln!("custody optional boundary phase={optional_phase} elapsed_ms={} evidence(imported,capabilities,clean_catching_up)={optional_evidence:?} status(phase,error,upgrade)={status:?} paid={} active={} released={} custody={custody:?} optional={optional:?} phases={phases:?}", optional_started.elapsed().as_millis(), optional_paid.load(Ordering::Acquire), optional_active.load(Ordering::Acquire), optional_release.is_closed());
+            }
+            optional_result.expect("real authenticated head floors and capabilities must arrive while same-lane optional work is pending");
             assert!(optional_paid.load(Ordering::Acquire));
             assert!(optional_active.load(Ordering::Acquire) > 0);
             assert!(!optional_release.is_closed());
@@ -1585,9 +1601,28 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         // Advance actual descriptive inventory after the Directory lane is
         // parked on hostname. This later display publication must not move the
         // already authenticated channel-bootstrap barrier.
+        let before_display = source.account_document_meta(&keys[0]).unwrap();
         source.set_profile_display_name("post-hold inventory display").unwrap();
         source.publish_group_inventory_for(channel);
-        let later_inventory = source.account_document_meta(&keys[0]).unwrap();
+        // The publisher may defer to bounded source/directory preparation. Its
+        // void return is not a durable-publication receipt. Observe the actual
+        // signed display update without driving another publication turn.
+        let later_inventory = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if source.account_document_meta(&keys[0]).is_some_and(|meta| meta.order() > before_display.order()) {
+                    let document = source.account_document(&keys[0]).unwrap().expect("the locally published inventory body must be durable");
+                    let meta = &document.meta;
+                    assert!(!meta.tombstone && meta.valid(&account.public().ed25519_pub) && meta.writer_device == source.user_id(), "the later inventory must retain its exact authenticated source");
+                    let reference: GroupInventoryReference = serde_json::from_slice(document.payload()).unwrap();
+                    if meta.order() > before_display.order()
+                        && reference.members.iter().any(|member| member.public == source.identity.public() && member.name.as_deref() == Some("post-hold inventory display"))
+                    {
+                        break meta.clone();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the owning publisher must advance the real signed display inventory after the hold");
         assert!(later_inventory.order() > bootstrap_floor[0].order(), "the owning publisher must advance the real signed inventory after the hold");
         assert!(sibling.account_document_meta(&keys[0]).unwrap().order() < later_inventory.order(), "the held Directory lane must retain its already imported bootstrap inventory");
         tokio::time::timeout(Duration::from_secs(30), async {

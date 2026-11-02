@@ -1137,6 +1137,11 @@ another test on that machine. The four-way split bounds aggregate measured seria
 work within the existing sixty-minute jobs; it does not extend case deadlines or
 omit slow tests. Nextest uses a fresh process per test, so tests
 must not depend on another test's process-local state.
+The registered channel-metadata IPC regression has a sixty-second isolated
+watchdog and command/lifecycle phase diagnostics. A stuck command fails that
+case instead of consuming the complete serial shard; it does not produce a
+successful or complete execution receipt. Longer existing core fixtures retain
+their own budgets.
 The producer retains the former Windows workspace cache namespace through an
 explicit shared key. Only the cache step normalizes the inherited color/thread
 environment to its previous key inputs; actual tests keep serial execution and
