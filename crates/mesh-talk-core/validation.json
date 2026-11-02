@@ -171,7 +171,7 @@
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
-            "name": "Independent-executor overtaking prepares B's exact current and normally consumed A request/result heads and retires its unrelated requester comparison pair before B intent exists, while the requester's exact held A child stays live. Real held-pair controls reject A-terminal-only readiness; original eight-second B receipt, status-query nonce load and separate deliberate paid-boundary coverage remain unchanged.",
+            "name": "Independent-executor overtaking prepares B's exact current and normally consumed A request/result heads and retires its unrelated requester comparison pair before B intent exists, while the requester's exact held A child stays live. The separate real held-pair control completes cold A preparation before arming its timed pair, rejects A-terminal-only readiness until actual pair retirement and never admits B. Original eight-second B receipt, status-query nonce load and separate deliberate paid-boundary coverage remain unchanged.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {

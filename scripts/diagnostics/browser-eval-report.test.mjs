@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 80], ["extended", 81]]) {
+  for (const [tier, count] of [["core", 81], ["extended", 82]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "browser-error-evidence.spec.ts" && path[1] === "browser evidence retains nested causes and preserves the strict error gate"));
@@ -35,8 +35,9 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.equal(paths.filter(path => path[0] === "directory-transfer.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "attachment-approval.spec.ts").length, 4);
     assert.ok(paths.some(path => path[0] === "attachment-approval.spec.ts" && path[1] === "an expired previously ready attachment becomes unavailable"));
-    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 14);
+    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 15);
     assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "channel mention indicator survives later traffic and clears when the mention is viewed"));
+    assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "channel mention indicator survives later traffic and clears when the mention is viewed after deferred initial presentation"));
     assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "one logical DM remains one unread badge across duplicate live events and history scanning"));
     const report = complete();
     report.stats.expected = count;
@@ -95,7 +96,7 @@ test("swapping evidence between viewports fails even when titles and revision ma
 test("isolated portable shards preserve the complete strict inventory and every failure", async () => {
   const { portableShards, mergePortableReports } = await import("../evals/portable-runner.mjs");
   const { validateBrowserReport } = await import("../evals/browser-report.mjs");
-  assert.equal(portableShards("win32"), 4);
+  assert.equal(portableShards("win32"), 5);
   assert.equal(portableShards("win32", 80), 4);
   assert.equal(portableShards("win32", 81), 5);
   for (const count of [0, -1, NaN, Infinity]) assert.throws(() => portableShards("win32", count), /inventory/);

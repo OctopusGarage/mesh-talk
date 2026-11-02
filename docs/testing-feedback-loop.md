@@ -126,6 +126,13 @@ Deferred native answer application separately covers a live connection beyond
 the default assertion timeout. Every successful scenario still requires real
 DTLS, advancing audio/video counters, playback and capture cleanup.
 
+Conversation navigation also has a presentation boundary: the current virtual
+message list must finish its initial layout and become visible before a scenario
+checks message and unread semantics. Wait for that current list through the
+browser's native locator under the existing whole-test watchdog. Preserve the
+subsequent message and mention assertions; use retained real animation frames to
+prove that presentation waits for layout rather than a fixed delay.
+
 PR Chromium portable core acceptance reuses the complete full-suite execution on
 each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
 core scenario paths from each of four shards, copies and validates screenshots,
@@ -193,11 +200,11 @@ Browser/dev-server lifetimes remain separate. Each shard writes a unique nested 
 root and must exit successfully. The runner merges every outcome and validates
 the unchanged full scenario inventory before the existing screenshot/trace
 validator runs. Missing, duplicate, skipped, flaky or failed cases remain failures.
-The current 80-case core uses four Windows processes and the 81-case extended
-inventory uses five; discovery regressions verify the per-process bound and exact
+The current 81-case core and 82-case extended inventories each use five Windows
+processes; discovery regressions verify the per-process bound and exact
 once-only union. The full Chromium workflow retains its separate four-shard contract. Two 38-case processes exceeded the 20-minute hosted job
 deadline after 75 of 76 scenarios passed, with later page loads slowing down.
-Four processes reduce that accumulation without increasing the job deadline,
+Separate processes reduce that accumulation without increasing the job deadline,
 retrying failed scenarios or establishing a product latency guarantee.
 
 A media-cache/virtualization fixture must establish both reader intent and the
@@ -762,15 +769,18 @@ ordinary unpaired B work may continue. Preparation imports no B intent and issue
 no extra RPC. The separate paid-boundary scenario deliberately retains its B pair
 and keeps that workload unchanged.
 
-The real-protocol preparation control holds an authenticated B ingestion pair:
-requester-side A completion alone accepts while independent-executor readiness
-still rejects. Releasing the original pair must permit real import, processing
-and retirement before B's original eight-second admission-to-receipt assertion.
-Keep public status polling inside that assertion: its one-second query nonces
-are intentional request-publication load. Compose frame hooks with prior hooks,
-publish a captured child descriptor before announcing readiness, and defer setup
-panics until gates are open and admitted work has drained. Preserve the original
-failure and retain private storage if actual retirement cannot be established.
+The real-protocol preparation control finishes A and verifies B's current inputs
+before arming an authenticated B comparison pair. Requester-side A completion
+alone accepts while the exact live pair still makes executor readiness reject;
+releasing it must permit actual retirement and readiness without creating B's
+intent. This control proves comparison debt separately from the original scenario,
+which retains B's eight-second admission-to-receipt assertion and public status
+polling. Its one-second query nonces are intentional request-publication load.
+Complete unrelated cold preparation before holding a task with a live protocol
+deadline. Compose frame hooks with prior hooks, publish a captured child descriptor
+before announcing readiness, and defer setup panics until gates are open and
+admitted work has drained. Preserve the original failure and retain private
+storage if actual retirement cannot be established.
 
 Do not require full Control digest equality in every direction to establish this
 local preparation. The canonical owner can already hold all prefix rows while a

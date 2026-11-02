@@ -1251,6 +1251,10 @@
           {
             "name": "Mention alerts follow exact read identities across ordinary arrivals, navigation and owner-scoped persistence; own and protected messages do not trigger alerts",
             "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Channel mention browser assertions await the current virtual message list's actual presentation under the existing whole-test watchdog; retained real animation frames cannot produce premature readiness, and message visibility and mention-clear assertions remain intact",
+            "reference": "docs/testing-feedback-loop.md#browser-integration-evidence"
           }
         ]
       },
