@@ -92,7 +92,9 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
 
       - name: Verify coverage accumulation with the actual tool
-        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs
+        # These fixtures launch real Cargo/rustc processes and share this job's
+        # package cache. Give each compiler contract exclusive execution.
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend

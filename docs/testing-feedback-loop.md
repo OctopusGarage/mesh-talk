@@ -1253,6 +1253,14 @@ information and checks panic diagnostics, debug assertions and overflow handling
 its no-debug negative control distinguishes stack locations from panic headers.
 See [Cargo debug profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
 
+The real coverage, debug-profile and Windows archive compiler contracts execute
+serially within each native job (`node --test --test-concurrency=1`). They share
+the job's Cargo package cache and compiler resources. Separate temporary source
+and target directories do not isolate that cache lock. Preserve every contract
+and its existing command/test watchdog; remove competing compiler work rather
+than extending deadlines when a contract waits for a sibling fixture's lock.
+Portable diagnostics and independent CI jobs retain their existing scheduling.
+
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and

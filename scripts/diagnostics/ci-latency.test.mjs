@@ -7,6 +7,19 @@ import { versions } from "../ci/windows-coverage.mjs";
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
 
+test("real compiler contracts do not compete for the native job's Cargo cache", () => {
+  for (const [workflow, name, expected] of [
+    ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "rust-profile"]],
+    ["windows-workspace.yml", "Validate archive and coverage contracts", ["backend-coverage", "rust-profile", "windows-coverage-cli"]],
+  ]) {
+    const caller = step(read(workflow), name);
+    assert.ok(caller, `${workflow}: compiler contract step is missing`);
+    assert.match(caller, /run: node --test --test-concurrency=1 /, `${workflow}: real compiler contracts share Cargo's package-cache lock`);
+    for (const fixture of expected) assert.ok(caller.includes(`scripts/ci/${fixture}.test.mjs`), `${workflow}: missing ${fixture}`);
+    assert.doesNotMatch(caller, /continue-on-error|\|\| true|&\s*$/m);
+  }
+});
+
 test("verification Rust caches restore on PRs and publish reusable main caches", () => {
   for (const file of ["ci.yml", "windows-workspace.yml", "e2e-backend.yml", "hidden-contacts-native.yml", "sanitizers.yml", "mutants.yml"]) {
     const cache = read(file).split(/^      - /m).find(value => value.includes("uses: Swatinem/rust-cache@v2"));
