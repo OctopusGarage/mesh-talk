@@ -662,6 +662,17 @@ metadata at the first connection while fanout is pending. Consecutive-control
 tests retain both original eight-second commit/progress assertions, establishing
 the real live held response between them before admitting the second operation.
 
+Recovered-fanout fixtures observe the actual first local-turn completion before
+its durable fanout page is installed by the parent. The exact recovered target
+must still have its stale inventory and original journal revision, with no public
+exchange started. Only then release that handoff and start the unchanged refresh,
+retry and authenticated-receipt bounds. The owner-specific fixture runs the
+production account-history producer and real authenticated member server;
+unrelated recovery and delivery owners retain their full-runtime coverage.
+Capture both success and panic before releasing gates, closing admission, joining
+tasks and draining actual filesystem work. If retirement is unverified, retain the
+private store instead of deleting files beneath an admitted blocking publisher.
+
 `selected_source_cold_capability_setup_precedes_role_page_budget` holds the real
 first authenticated Control responses beyond the role-page budget in a two-device
 bootstrap fixture. It then requires reciprocal capabilities and the exact signed

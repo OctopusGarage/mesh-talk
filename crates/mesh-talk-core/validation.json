@@ -108,6 +108,8 @@
             "selected_source_cold_capability_setup_precedes_role_page_budget",
             "cold_inbound_control_proves_capabilities_before_the_warm_role_clock",
             "account_fixture_health_snapshot_precedes_real_peer_shutdown",
+            "recovered_group_beyond_publication_slice_refreshes_before_exact_network_fanout",
+            "failed_refresh_retains_original_fanout_revision_for_authenticated_retry",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
             "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
             "incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume",
@@ -211,6 +213,10 @@
           {
             "name": "Affected canonical group access and inventory, followed by the exact durable operation result, publish before public fanout waits; canonical no-op retries allocate no invented public effect and obsolete owner authority cannot execute an awaiting control. Exact committed message IDs request durable member/relay custody in the same bounded full-control fanout round, excluding own-account siblings.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Recovered-fanout fixtures observe actual cold local-turn handoff before their unchanged refresh/retry clocks, keep the exact target stale and original durable revision intact until fanout refresh, and retire admitted filesystem work before deleting their private stores on both success and panic.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
             "name": "Direct or eligible-relay local admission backpressure retains the same committed fanout revision for bounded delayed retry; successful revisions deduplicate and overflow remains owned by the source journal.",

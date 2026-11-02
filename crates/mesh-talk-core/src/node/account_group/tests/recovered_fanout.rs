@@ -4,6 +4,16 @@ use crate::node::{AccountDocumentKey, GroupInventoryReference};
 use std::time::Duration;
 use tokio::sync::{Semaphore, oneshot};
 
+type FanoutChronology = Arc<Mutex<std::collections::VecDeque<(u128, String)>>>;
+
+fn record_fanout_phase(trace: &FanoutChronology, started: std::time::Instant, phase: String) {
+    let mut trace = trace.lock().unwrap();
+    if trace.len() == 128 {
+        trace.pop_front();
+    }
+    trace.push_back((started.elapsed().as_millis(), phase));
+}
+
 fn inventory(node: &Node, group: ConversationId) -> GroupInventoryReference {
     let document = node
         .account_document(&AccountDocumentKey::GroupInventory {
@@ -44,6 +54,8 @@ async fn failed_refresh_retains_original_fanout_revision_for_authenticated_retry
 }
 
 async fn assert_recovered_group_fanout(fail_refresh: bool) {
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let path = dir.path().join("owner");
@@ -209,7 +221,8 @@ async fn assert_recovered_group_fanout(fail_refresh: bool) {
                     let peer = peer.clone(); let gate = released.clone();
                     let arrived = arrived.clone(); let expected = expected.clone();
                     let attempted = attempted.clone();
-                    connections.spawn(async move {
+                    let Some(permit) = peer.runtime_work.admit() else { return; };
+                    connections.spawn(permit.track(Box::pin(async move {
                         let mut channel = peer.privacy_accept(stream).await.unwrap();
                         assert_eq!(channel.peer_identity(), &expected);
                         let first = channel.recv().await.unwrap();
@@ -220,7 +233,7 @@ async fn assert_recovered_group_fanout(fail_refresh: bool) {
                         assert!(crate::node::session::requests_response(&first));
                         attempted.store(true, std::sync::atomic::Ordering::Release);
                         if let Some(signal) = arrived.lock().unwrap().take() { let _ = signal.send(()); }
-                        let _permit = gate.acquire().await.unwrap();
+                        let Ok(_permit) = gate.acquire().await else { return; };
                         let store = peer.sync_store(channel.peer_identity());
                         if crate::node::session::serve_wire_bytes(&mut channel, &store, &first).await.is_err() { return; }
                         peer.process_channel(group);
@@ -228,109 +241,221 @@ async fn assert_recovered_group_fanout(fail_refresh: bool) {
                             crate::node::session::serve_one(&mut channel, &store).await {
                             peer.process_channel(conversation);
                         }
-                    });
+                    })));
+
                 }
                 _ = connections.join_next(), if !connections.is_empty() => {}
             }
         }
     });
-    let original_revision = owner.account_group_fanout_sequence(group).unwrap();
-    let (published, first_fanout) = oneshot::channel();
-    let weak_owner = Arc::downgrade(&owner);
-    *owner.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
-        let source = weak_owner.upgrade().unwrap();
-        let _ = published.send((
-            inventory(&source, group).name,
-            public_attempted.load(std::sync::atomic::Ordering::Acquire),
-        ));
-        if fail_refresh {
-            // Panic occurs inside the admitted blocking refresh after signed
-            // publication, before distribution can start. The same durable
-            // revision must survive the resulting worker error.
-            panic!("injected fanout publication worker failure");
+    let handoff = Arc::new(PublicationGate::default());
+    let later_local = Arc::new(PublicationGate::default());
+    let _release_handoff = ReleasePublications([handoff.clone(), later_local.clone()]);
+    let first_local_task = Arc::new(Mutex::new(None));
+    let chronology = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let started = std::time::Instant::now();
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let handoff = handoff.clone();
+        let later_local = later_local.clone();
+        let first_local_task = first_local_task.clone();
+        let chronology = chronology.clone();
+        move |_, phase| {
+            if phase.starts_with("operation_owner ")
+                || phase.starts_with("operation_publication_owner ")
+            {
+                let owner = if phase.starts_with("operation_publication_owner ") {
+                    "publication"
+                } else {
+                    "local"
+                };
+                let label = phase
+                    .split_ascii_whitespace()
+                    .find(|token| token.starts_with("phase="))
+                    .unwrap_or("phase=progress");
+                let label = format!("{owner} {label}");
+                record_fanout_phase(&chronology, started, label);
+            }
+            if phase.starts_with("operation_owner phase=legacy_inputs_begin ") {
+                let current = tokio::task::id();
+                let later = {
+                    let mut first = first_local_task.lock().unwrap();
+                    match *first {
+                        Some(first) => first != current,
+                        None => {
+                            *first = Some(current);
+                            false
+                        }
+                    }
+                };
+                if later {
+                    // Only later actual maintenance tasks stop here, before
+                    // journal/store/publication guards. Exact fanout refresh
+                    // does not enter this phase and must publish the target.
+                    record_fanout_phase(&chronology, started, "later_local_turn_held".into());
+                    later_local.hold();
+                }
+            }
+            if phase == "operation_owner phase=local_turn_completed" {
+                // Actual blocking work has retired; the parent has not installed
+                // the fanout snapshot yet. No journal/store guard is retained.
+                handoff.hold();
+            }
         }
     }));
-    tasks.spawn(owner.clone().run_accept_loop(owner_listener));
-    let (at_start, public_started) = tokio::time::timeout(Duration::from_secs(8), first_fanout)
-        .await
-        .expect("recovered work must enter its actual public fanout owner")
-        .unwrap();
-    assert!(
-        !public_started,
-        "public distribution cannot precede the exact source refresh"
-    );
-    assert_eq!(
-        at_start, "Recovered exact name",
-        "the exact recovered group must publish synchronously before fanout starts"
-    );
-    tokio::time::timeout(Duration::from_secs(8), first_sync)
-        .await
-        .expect("recovered durable work must start a real authenticated external exchange")
-        .unwrap();
-    assert_eq!(
-        owner.account_group_fanout_sequence(group),
-        Some(original_revision)
-    );
-    assert_eq!(
-        inventory(&owner, group).name,
-        "Recovered exact name",
-        "the recovered exact group must publish before its public fanout starts"
-    );
-    let operation = owner
-        .account_document(&AccountDocumentKey::GroupOperation {
-            channel: hex::encode(group.as_bytes()),
-            source_device: owner.user_id(),
-        })
-        .unwrap()
-        .unwrap();
-    let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
-        operation.payload(),
-        &account.public().ed25519_pub,
-    )
-    .unwrap();
-    assert!(
-        frame
-            .projection
-            .results
-            .iter()
-            .any(|result| result.status == status)
-    );
-    gate.add_permits(4);
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            if external.log.lock().unwrap().get(&effect.id).is_some() {
-                break;
+    let original_revision = owner.account_group_fanout_sequence(group).unwrap();
+    // The fixture owns only the production account fanout producer. Public
+    // recovery/delivery loops are separate owners, not arrival evidence here.
+    tasks.spawn(owner.clone().run_account_history_loop());
+    let outcome = AssertUnwindSafe(async {
+        super::cold_account_setup(handoff.entered.notified())
+            .await
+            .expect("the cold local turn must hand its durable fanout snapshot to the parent");
+        assert_eq!(
+            inventory(&owner, group).name,
+            "Before recovery",
+            "cold preparation must not refresh the exact recovered target"
+        );
+        assert_eq!(
+            owner.account_group_fanout_sequence(group),
+            Some(original_revision)
+        );
+        assert!(
+            !public_attempted.load(std::sync::atomic::Ordering::Acquire),
+            "no public exchange may precede the owned fanout handoff"
+        );
+        let (published, first_fanout) = oneshot::channel();
+        let weak_owner = Arc::downgrade(&owner);
+        let hook_chronology = chronology.clone();
+        *owner.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
+            record_fanout_phase(
+                &hook_chronology,
+                started,
+                "hook_entry_inventory_begin".into(),
+            );
+            let source = weak_owner.upgrade().unwrap();
+            let name = inventory(&source, group).name;
+            record_fanout_phase(&hook_chronology, started, "hook_inventory_end".into());
+            let _ = published.send((
+                name,
+                public_attempted.load(std::sync::atomic::Ordering::Acquire),
+            ));
+            if fail_refresh {
+                // Panic occurs inside the admitted blocking refresh after signed
+                // publication, before distribution can start. The same durable
+                // revision must survive the resulting worker error.
+                panic!("injected fanout publication worker failure");
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the restarted runtime must distribute the original recovered event");
-    let received = external
-        .log
-        .lock()
-        .unwrap()
-        .get(&effect.id)
-        .unwrap()
-        .clone();
-    assert_eq!(received.id, effect.id);
-    assert_eq!(received.ciphertext, effect.ciphertext);
-    assert!(received.verify_integrity() && received.verify_signature());
-    assert_eq!(
-        received.author.ed25519_pub(),
-        &owner.identity.public().ed25519_pub
-    );
-    assert_eq!(
-        owner
+        }));
+        // Construct the original eight-second arrival/progress clocks only after
+        // the actual cold handoff is proven, while target refresh remains owed.
+        handoff.release();
+        let (at_start, public_started) = tokio::time::timeout(Duration::from_secs(8), first_fanout)
+            .await
+            .expect("recovered work must enter its actual public fanout owner")
+            .unwrap();
+        assert!(
+            !public_started,
+            "public distribution cannot precede the exact source refresh"
+        );
+        assert_eq!(
+            at_start, "Recovered exact name",
+            "the exact recovered group must publish synchronously before fanout starts"
+        );
+        tokio::time::timeout(Duration::from_secs(8), first_sync)
+            .await
+            .expect("recovered durable work must start a real authenticated external exchange")
+            .unwrap();
+        assert_eq!(
+            owner.account_group_fanout_sequence(group),
+            Some(original_revision)
+        );
+        assert_eq!(
+            inventory(&owner, group).name,
+            "Recovered exact name",
+            "the recovered exact group must publish before its public fanout starts"
+        );
+        let operation = owner
+            .account_document(&AccountDocumentKey::GroupOperation {
+                channel: hex::encode(group.as_bytes()),
+                source_device: owner.user_id(),
+            })
+            .unwrap()
+            .unwrap();
+        let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+            operation.payload(),
+            &account.public().ed25519_pub,
+        )
+        .unwrap();
+        assert!(
+            frame
+                .projection
+                .results
+                .iter()
+                .any(|result| result.status == status)
+        );
+        gate.add_permits(4);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if external.log.lock().unwrap().get(&effect.id).is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the restarted runtime must distribute the original recovered event");
+        let received = external
             .log
             .lock()
             .unwrap()
-            .events(&group)
-            .into_iter()
-            .filter(|event| event.kind == EventKind::ChannelRename)
-            .count(),
-        1
-    );
+            .get(&effect.id)
+            .unwrap()
+            .clone();
+        assert_eq!(received.id, effect.id);
+        assert_eq!(received.ciphertext, effect.ciphertext);
+        assert!(received.verify_integrity() && received.verify_signature());
+        assert_eq!(
+            received.author.ed25519_pub(),
+            &owner.identity.public().ed25519_pub
+        );
+        assert_eq!(
+            owner
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .into_iter()
+                .filter(|event| event.kind == EventKind::ChannelRename)
+                .count(),
+            1
+        );
+    })
+    .catch_unwind()
+    .await;
+    // JoinSet cancellation alone cannot retire spawn_blocking filesystem work.
+    // Keep the private store alive until the actual admitted closures drain.
+    handoff.release();
+    later_local.release();
+    gate.close();
+    owner.runtime_work.close();
+    external.runtime_work.close();
+    let retired = super::cold_account_setup(async {
+        tasks.shutdown().await;
+        owner.runtime_work.drain().await;
+        external.runtime_work.drain().await;
+    })
+    .await;
+    *owner.account_client_test_hook.lock().unwrap() = None;
+    *owner.control_fanout_start_test_hook.lock().unwrap() = None;
+    if retired.is_err() {
+        // Never remove files beneath work whose retirement was not proven.
+        let _retained_store = dir.keep();
+        panic!("fanout fixture retirement was unverified; its private store was retained");
+    }
+    if let Err(error) = outcome {
+        eprintln!("recovered fanout phases: {:?}", chronology.lock().unwrap());
+        std::panic::resume_unwind(error);
+    }
 }
 async fn assert_stalled_fanout_retires_with_account_loop(adopt: bool) {
     let dir = tempfile::tempdir().unwrap();
@@ -450,8 +575,8 @@ impl PublicationGate {
         self.released.1.notify_all();
     }
 }
-struct ReleasePublications([Arc<PublicationGate>; 3]);
-impl Drop for ReleasePublications {
+struct ReleasePublications<const N: usize>([Arc<PublicationGate>; N]);
+impl<const N: usize> Drop for ReleasePublications<N> {
     fn drop(&mut self) {
         for gate in &self.0 {
             gate.release();
