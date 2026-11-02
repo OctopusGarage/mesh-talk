@@ -2134,17 +2134,51 @@ mod tests {
             serde_json::json!({}),
         )
         .unwrap();
+        let requested_ticket = fixture.node.test_lifecycle_ticket();
         tauri::async_runtime::block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let started = std::time::Instant::now();
+            let installed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
                     if fixture.node.test_installed_for(&lease) {
                         break;
                     }
-                    tokio::task::yield_now().await;
+                    // Startup retires and reopens real storage on other tasks.
+                    // Yielding an always-ready observer repeatedly contends with
+                    // its lifecycle mutex instead of giving that owner CPU time.
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             })
-            .await
-            .unwrap();
+            .await;
+            if installed.is_err() {
+                let startup = fixture
+                    .node
+                    .startup_identity(
+                        fixture.app_state.session(),
+                        &lease,
+                        fixture.app_state.app_lock(),
+                    )
+                    .ok()
+                    .flatten()
+                    .and_then(|state| serde_json::to_value(state).ok());
+                // Select only static phase labels; never log the IDs projection.
+                let phase = match startup.as_ref().and_then(|value| value["phase"].as_str()) {
+                    Some("pending") => "pending",
+                    Some("identity") => "identity",
+                    Some("ready") => "ready",
+                    Some("failed") => "failed",
+                    _ => "unavailable",
+                };
+                let runtime_present = fixture.node.0.try_read().ok().map(|slot| slot.is_some());
+                eprintln!(
+                    "adoption install timeout elapsed_ms={} phase={phase} requested_ticket={requested_ticket} current_ticket={} installed_for_lease={} runtime_present={runtime_present:?} startup_gate_busy={}",
+                    started.elapsed().as_millis(),
+                    fixture.node.test_lifecycle_ticket(),
+                    fixture.node.test_installed_for(&lease),
+                    fixture.node.test_startup_gate().try_lock().is_err(),
+                );
+            }
+            installed
+                .expect("the current session must install its adopted runtime within five seconds");
         });
         let runtime = fixture.node.0.blocking_write();
         assert_eq!(runtime.as_ref().unwrap().user_id(), original_device);
