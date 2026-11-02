@@ -714,10 +714,15 @@ Keep the original role, capability and retained-membership proofs alongside thes
 scope completions; the observations neither issue requests nor stop workers.
 
 Same-source partial-page fixtures prepare their immutable signed prefix before
-arming the held request. Require matching metadata at both endpoints and a current
-Control completion without an outstanding pair in every participating sibling
-direction; possessing the rows alone does not settle an older comparison. Only
-then add the controlled tail through the existing source owner. A natural origin
+arming the held request. Require a genuine completed Control scope for the exact
+signed prefix in every participating sibling direction, current matching metadata
+at both endpoints, current operation capabilities and no outstanding comparison
+pair. A subsequent unpaired natural read does not erase proof of an unchanged
+immutable prefix. A paired task, same-source cancellation or mismatched corpus
+invalidates that preparation proof; possessing rows alone cannot pay comparison
+debt. Do not require every independent direction to pause between reads at the
+same instant. Only then add the controlled tail through the existing source owner.
+A natural origin
 and an unprotected dispatch do not imply an unpaired task. Preserve the complete
 corpus, exact live-request checks and checkpoint repayment assertions when moving
 this preparation outside the operation budget.
