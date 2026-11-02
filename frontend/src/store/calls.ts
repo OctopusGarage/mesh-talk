@@ -9,8 +9,8 @@ import type { CallSignalEvent } from "@/lib/types";
  * 1:1 voice/video calling over WebRTC, signaled across the mesh (see lib/api `calls`).
  *
  * Topology: LAN, peers know each other's IPs, so the RTCPeerConnection uses ONLY host
- * candidates (`iceServers: []`) — no STUN/TURN. ICE is NON-trickle: we wait for gathering
- * to finish (instant on a LAN) and bundle all candidates into the one offer/answer, so each
+ * candidates (`iceServers: []`) — no STUN/TURN. ICE is NON-trickle: we wait for native
+ * gathering to finish and bundle all candidates into the one offer/answer, so each
  * call is just a couple of signaling sends rather than a Noise dial per candidate.
  *
  * Security: the media leg is DTLS-SRTP (mandatory in WebRTC), but that only protects bytes
@@ -111,6 +111,7 @@ interface CallState {
 // Non-reactive engine handles (one call at a time), kept out of store state so they don't
 // trigger re-renders and so we never serialize a live RTCPeerConnection.
 let pc: RTCPeerConnection | null = null;
+let pcPreparation: AbortController | null = null;
 let pendingOffer: { sdp: string; video: boolean } | null = null;
 let connectTimer: ReturnType<typeof setTimeout> | null = null;
 /** While an OUTGOING call is ringing, the devices still being rung (we offered to all of the
@@ -120,7 +121,6 @@ let ringingPeers: string[] = [];
 let outgoingOffered = false;
 
 const CONNECT_TIMEOUT_MS = 20_000;
-const GATHER_TIMEOUT_MS = 2_000;
 
 function send(target: string, msg: Signal): Promise<void> {
   return calls.signal(target, JSON.stringify(msg)).catch(() => {});
@@ -149,27 +149,52 @@ async function getLocalMedia(
   }
 }
 
-/** Wait until ICE gathering completes (host-only candidates finish near-instantly on a LAN),
- * with a fallback timeout so a webview that never flips to "complete" can't hang the call. */
-function gatherComplete(conn: RTCPeerConnection): Promise<void> {
-  if (conn.iceGatheringState === "complete") return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => {
+/** Non-trickle signaling requires a complete, usable description. Call retirement
+ * cancels this wait; elapsed time alone never certifies candidate readiness. */
+function gatherComplete(
+  conn: RTCPeerConnection,
+  signal: AbortSignal,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
       conn.removeEventListener("icegatheringstatechange", check);
-      resolve();
+      signal.removeEventListener("abort", cancelled);
+    };
+    const cancelled = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new DOMException("Call preparation was cancelled", "AbortError"));
     };
     const check = () => {
-      if (conn.iceGatheringState === "complete") done();
+      if (settled) return;
+      if (signal.aborted) {
+        cancelled();
+        return;
+      }
+      if (conn.iceGatheringState !== "complete") return;
+      settled = true;
+      cleanup();
+      const sdp = conn.localDescription?.sdp;
+      if (!sdp || !/^a=candidate:\S+/m.test(sdp)) {
+        reject(new Error("ICE gathering completed without a media candidate"));
+        return;
+      }
+      resolve(sdp);
     };
     conn.addEventListener("icegatheringstatechange", check);
-    setTimeout(done, GATHER_TIMEOUT_MS);
+    signal.addEventListener("abort", cancelled, { once: true });
+    check();
   });
 }
 
 export const useCalls = create<CallState>((set, get) => {
   /** Build a peer connection wired to surface the remote stream + connection state. */
-  function newPc(): RTCPeerConnection {
+  function newPc(): { conn: RTCPeerConnection; signal: AbortSignal } {
     const conn = new RTCPeerConnection({ iceServers: [] });
+    const preparation = new AbortController();
+    pcPreparation = preparation;
     const callId = get().callId;
     conn.ontrack = (e) => {
       if (get().callId !== callId || pc !== conn) return;
@@ -186,12 +211,14 @@ export const useCalls = create<CallState>((set, get) => {
         end("failed", "failed");
       }
     };
-    return conn;
+    return { conn, signal: preparation.signal };
   }
 
   function cleanup() {
     if (connectTimer) clearTimeout(connectTimer);
     connectTimer = null;
+    pcPreparation?.abort();
+    pcPreparation = null;
     if (pc) {
       pc.ontrack = null;
       pc.onconnectionstatechange = null;
@@ -303,14 +330,17 @@ export const useCalls = create<CallState>((set, get) => {
           return;
         }
         set({ localStream: stream, hasVideo, camOn: hasVideo });
+        // Preparation has the same bounded owner as ringing. Its retirement
+        // aborts an unfinished native ICE wait and releases captured media.
+        armConnectTimeout();
         // Use a local handle for negotiation so a concurrent cleanup() (which nulls the
         // module `pc`) can't turn these awaits into a null deref.
-        const conn = newPc();
+        const { conn, signal } = newPc();
         pc = conn;
         for (const t of stream.getTracks()) conn.addTrack(t, stream);
         const offer = await conn.createOffer();
         await conn.setLocalDescription(offer);
-        await gatherComplete(conn);
+        const sdp = await gatherComplete(conn, signal);
         if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
         if (useAuth.getState().user?.id !== owner) {
           end("failed", "failed");
@@ -328,7 +358,7 @@ export const useCalls = create<CallState>((set, get) => {
         const payload = JSON.stringify({
           callId,
           kind: "offer",
-          sdp: conn.localDescription?.sdp ?? "",
+          sdp,
           name: myName,
           video,
         });
@@ -382,20 +412,20 @@ export const useCalls = create<CallState>((set, get) => {
           camOn: hasVideo,
           phase: "connecting",
         });
-        const conn = newPc();
+        const { conn, signal } = newPc();
         pc = conn;
         for (const t of stream.getTracks()) conn.addTrack(t, stream);
         await conn.setRemoteDescription({ type: "offer", sdp: offer.sdp });
         const answer = await conn.createAnswer();
         await conn.setLocalDescription(answer);
-        await gatherComplete(conn);
+        const sdp = await gatherComplete(conn, signal);
         if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
         await calls.signal(
           peerId,
           JSON.stringify({
             callId,
             kind: "answer",
-            sdp: conn.localDescription?.sdp ?? "",
+            sdp,
           }),
         );
         if (get().callId !== callId) return;

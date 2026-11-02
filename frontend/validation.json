@@ -1945,6 +1945,10 @@
             "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
           },
           {
+            "name": "Non-trickle signaling requires actual completed ICE gathering with a local candidate. The existing call deadline bounds outgoing preparation; retirement aborts the exact peer's pending wait and removes its listeners without affecting a replacement call. Browser acceptance observes that call's connected or terminal transition and retains real media assertions.",
+            "reference": "docs/network-design-reference.md#f-calls-live-signaling-and-separate-media"
+          },
+          {
             "name": "Calls with only explicitly unavailable direct routes explain the limitation before capture; legacy unknown and routed candidates remain attemptable, and session-bound retries resolve current routes. Cross-LAN calls still require live direct authenticated signaling and an independent host-candidate media route; mailboxes provide neither signaling fallback nor TURN.",
             "reference": "docs/network-design-reference.md#f-calls-live-signaling-and-separate-media"
           }

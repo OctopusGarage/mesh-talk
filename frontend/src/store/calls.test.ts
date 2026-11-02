@@ -12,15 +12,16 @@ import { useAuth } from "./auth";
 
 /** A no-op RTCPeerConnection whose ICE gathering is already "complete" (so the non-trickle
  * wait resolves at once) and whose localDescription is a fixed SDP. */
-class FakePc {
+const COMPLETE_SDP =
+  "v=0\r\na=candidate:1 1 udp 2130706431 127.0.0.1 49152 typ host\r\n";
+
+class FakePc extends EventTarget {
   iceGatheringState = "complete";
   connectionState = "new";
-  localDescription = { sdp: "LOCAL_SDP" };
+  localDescription = { sdp: COMPLETE_SDP };
   ontrack: ((e: unknown) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   addTrack() {}
-  addEventListener() {}
-  removeEventListener() {}
   async createOffer() {
     return { type: "offer", sdp: "OFFER" };
   }
@@ -560,7 +561,7 @@ describe("outgoing call (engine happy path)", () => {
     expect(arg.target).toBe("bob");
     const msg = JSON.parse(arg.payload);
     expect(msg.kind).toBe("offer");
-    expect(msg.sdp).toBe("LOCAL_SDP");
+    expect(msg.sdp).toBe(COMPLETE_SDP);
   });
 
   it("ends the call as failed if the offer can't be delivered to any device", async () => {
@@ -788,6 +789,119 @@ describe("multi-device fan-out", () => {
     await flush();
     expect(useCalls.getState().peerId).toBe("d1"); // unchanged; the late answer is ignored
   });
+});
+
+describe("non-trickle ICE preparation ownership", () => {
+  const peers: GatheringPc[] = [];
+  class GatheringPc extends FakePc {
+    iceGatheringState = "gathering";
+    localDescription = { sdp: "v=0\r\n" };
+    close = vi.fn();
+    constructor() {
+      super();
+      peers.push(this);
+    }
+    complete(sdp = COMPLETE_SDP) {
+      this.localDescription = { sdp };
+      this.iceGatheringState = "complete";
+      this.dispatchEvent(new Event("icegatheringstatechange"));
+    }
+  }
+  const signals = (kind: string) =>
+    invoke.mock.calls.filter(
+      ([command, args]) =>
+        command === "send_call_signal" &&
+        JSON.parse(args.payload).kind === kind,
+    );
+  const begin = (kind: "offer" | "answer") => {
+    if (kind === "answer") {
+      useCalls.getState().onSignal(offer("bob", "gathering-call"));
+      return useCalls.getState().accept();
+    }
+    return useCalls
+      .getState()
+      .startCall({ name: "Bob", accountId: "bob", deviceIds: ["bob"] }, true);
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    peers.length = 0;
+    vi.stubGlobal("RTCPeerConnection", GatheringPc);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  for (const kind of ["offer", "answer"] as const) {
+    it(`waits for actual gathered candidates before publishing an ${kind}`, async () => {
+      const pending = begin(kind);
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(peers).toHaveLength(1);
+      expect(signals(kind)).toHaveLength(0);
+      if (kind === "offer")
+        expect(invoke).not.toHaveBeenCalledWith(
+          "initiate_privacy_contact",
+          expect.anything(),
+        );
+      peers[0].complete();
+      await pending;
+      expect(signals(kind)).toHaveLength(1);
+      expect(JSON.parse(signals(kind)[0][1].payload).sdp).toBe(COMPLETE_SDP);
+    });
+
+    it(`retires an unfinished ${kind} preparation at the existing call deadline`, async () => {
+      const stop = vi.fn();
+      getUserMedia.mockResolvedValueOnce({
+        getTracks: () => [{ stop }],
+        getVideoTracks: () => [],
+      });
+      const pending = begin(kind);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await pending;
+      expect(useCalls.getState()).toMatchObject({
+        phase: "idle",
+        failureKind: "timeout",
+        localStream: null,
+      });
+      expect(stop).toHaveBeenCalledOnce();
+      expect(peers[0].close).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(signals(kind)).toHaveLength(0);
+      peers[0].complete();
+      expect(signals(kind)).toHaveLength(0);
+    });
+
+    it(`settles cancelled ${kind} preparation without affecting a replacement call`, async () => {
+      const pending = begin(kind);
+      await vi.advanceTimersByTimeAsync(0);
+      const old = peers[0];
+      useCalls.getState().hangup();
+      useCalls.getState().onSignal(offer("carol", "replacement"));
+      await pending;
+      old.complete();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useCalls.getState()).toMatchObject({
+        phase: "incoming",
+        callId: "replacement",
+        peerId: "carol",
+      });
+      expect(old.close).toHaveBeenCalledOnce();
+      expect(signals(kind)).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(1); // Only the replacement call's deadline.
+    });
+
+    it(`rejects a completed ${kind} without any candidate instead of sending empty SDP`, async () => {
+      const pending = begin(kind);
+      await vi.advanceTimersByTimeAsync(0);
+      peers[0].complete("v=0\r\n");
+      await pending;
+      expect(signals(kind)).toHaveLength(0);
+      expect(useCalls.getState()).toMatchObject({
+        phase: "idle",
+        failureKind: "connection",
+        localStream: null,
+      });
+      expect(peers[0].close).toHaveBeenCalledOnce();
+    });
+  }
 });
 
 describe("call deadlines cancel remote ringing", () => {

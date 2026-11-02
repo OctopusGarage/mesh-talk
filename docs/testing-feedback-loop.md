@@ -115,6 +115,17 @@ shared strict error gate; the primary page still enters the real React app.
 Captured causes are diagnostics: a recovered React error still fails acceptance,
 and richer evidence alone does not establish a product fix.
 
+Browser call-media acceptance observes the current call's actual connected or
+terminal transition. Clicking Accept does not await asynchronous capture and
+native negotiation; Playwright's default assertion timeout is not a second call
+deadline. The production call owner bounds unfinished preparation and connection.
+Real-browser controls retain an actual native ICE completion event until release,
+reject premature candidate-free signaling beyond the former gathering fallback,
+and prove cancellation removes both the connection waiter and retained listener.
+Deferred native answer application separately covers a live connection beyond
+the default assertion timeout. Every successful scenario still requires real
+DTLS, advancing audio/video counters, playback and capture cleanup.
+
 PR Chromium portable core acceptance reuses the complete full-suite execution on
 each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
 core scenario paths from each of four shards, copies and validates screenshots,

@@ -1087,6 +1087,15 @@ sequenceDiagram
 
 Current `send_call_signal` is ephemeral, device-addressed and uses a fresh live Noise connection. It does not append signals to the durable message log or upload them to post-office mailboxes. A participant visible only through opaque federation therefore does not automatically have a usable call-signaling path. WebRTC then needs its own permitted ICE/media path; post offices supply no TURN service. Text/file relay success proves neither requirement.
 
+The call store owns non-trickle SDP preparation. It sends an offer or answer only
+after native ICE gathering completes with a usable local candidate. The existing
+twenty-second call timer also bounds outgoing preparation after media capture;
+ringing and accepted-call timers retain their existing ownership. Hangup,
+timeout and session teardown abort the exact peer connection's pending gathering
+wait before closing it. Every settlement removes its native and cancellation
+listeners, and a late completion cannot signal for or terminate a replacement
+call. Candidate readiness is an observed protocol condition, not elapsed time.
+
 
 ### G. Linking and ongoing account synchronization
 
