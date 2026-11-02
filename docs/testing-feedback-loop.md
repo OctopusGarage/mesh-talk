@@ -747,6 +747,12 @@ before operation admission or before the external custody source starts. They
 establish the fixture's real connection state; they are not an eight-second
 operation or custody latency assertion, and they do not drive extra RPCs, warm
 session pools, retry submissions or suppress background workers.
+An authenticated socket closed before its first application request does not
+qualify as a stalled public response. Consecutive-control fixtures may tolerate
+the existing typed retryable transport errors at that boundary only. They still
+require a real public request and the same live response hold before and after
+the second committed operation under its original deadline. A controlled unused
+authenticated dial must not substitute for that qualified hold.
 
 Notification-only group gossip keeps ordinary periodic recovery during cold
 connection preparation. Each node disables that test clock after its first real

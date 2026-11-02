@@ -952,6 +952,75 @@ fn initial_file_result_timeout_stage(
     "explicit File timeout: completion predicate missed its deadline"
 }
 
+// Diagnostic snapshots use the same exact signed source key as the real result
+// importer. Errors remain unknown, never an apparent absent/processed result.
+fn trace_initial_file_result(
+    origin: &Node,
+    source: &Node,
+    account: &Account,
+    group: crate::eventlog::ConversationId,
+    id: AccountGroupOperationId,
+    last_header: Option<&crate::node::AccountDocumentMeta>,
+) {
+    use crate::node::account_group::operations::wire::OperationFrame;
+    let key = crate::node::AccountDocumentKey::GroupOperation {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let published = source.account_document(&key);
+    let received = origin.account_document(&key);
+    let committed = |document: &crate::node::AccountDocument| {
+        OperationFrame::decode(document.payload(), &account.public().ed25519_pub).is_some_and(
+            |frame| {
+                frame.group == group
+                    && frame.proof.public() == source.identity.public()
+                    && frame.revision == document.meta.revision
+                    && frame.projection.results.iter().any(|result| {
+                        result.reference.id == id
+                            && result.status.phase == AccountGroupOperationPhase::Committed
+                    })
+            },
+        )
+    };
+    let published_doc = published.as_ref().ok().and_then(Option::as_ref);
+    let received_doc = received.as_ref().ok().and_then(Option::as_ref);
+    let source_committed_published = published_doc.map(committed);
+    let origin_committed_received = received_doc.map(committed);
+    let same_canonical_head = published_doc
+        .zip(received_doc)
+        .is_some_and(|(a, b)| a.meta == b.meta);
+    let last_header_is_current = published_doc
+        .zip(last_header)
+        .is_some_and(|(document, header)| document.meta == *header);
+    let input_processed =
+        received_doc.map(|document| origin.operation_input_consumed_for_test(&document.meta));
+    let origin_status = origin.account_group_operation_status(&account.account_id(), id);
+    let origin_phase = origin_status
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .map(|status| &status.phase);
+    let card_installed = source
+        .account_group_operation_status(&account.account_id(), id)
+        .ok()
+        .flatten()
+        .and_then(|status| status.primary_event)
+        .and_then(|event| {
+            origin
+                .received_files
+                .lock()
+                .unwrap()
+                .entry(event)
+                .ok()
+                .map(|entry| entry.is_some())
+        });
+    let document_read_errors = [published.is_err(), received.is_err()];
+    let origin_status_read_error = origin_status.is_err();
+    eprintln!(
+        "initial File adoption source_committed_published={source_committed_published:?} origin_committed_received={origin_committed_received:?} same_canonical_head={same_canonical_head} last_header_is_current={last_header_is_current} input_processed={input_processed:?} card_installed={card_installed:?} origin_phase={origin_phase:?} document_read_errors={document_read_errors:?} origin_status_read_error={origin_status_read_error}"
+    );
+}
+
 async fn file_result_roundtrip(mode: u8) {
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
@@ -1081,30 +1150,157 @@ async fn file_result_roundtrip(mode: u8) {
     }
     let public_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let public_started = std::time::Instant::now();
-    for (label, node, expected) in [
-        ("source", &source, external.identity.public()),
-        ("external", &external, source.identity.public()),
+    // Restore chained hooks after this initial adoption boundary, including
+    // assertion unwind; later retry/fault scenarios retain their own hooks.
+    struct RestoreTrace(Option<Box<dyn FnOnce() + Send>>);
+    impl Drop for RestoreTrace {
+        fn drop(&mut self) {
+            if let Some(restore) = self.0.take() {
+                restore();
+            }
+        }
+    }
+    let mut previous_hooks = Vec::new();
+    for (label, node, public_peer, account_peer) in [
+        (
+            "source",
+            &source,
+            Some(external.identity.public()),
+            Some(origin.identity.public()),
+        ),
+        ("external", &external, Some(source.identity.public()), None),
+        ("origin", &origin, None, Some(source.identity.public())),
     ] {
         let previous = node.account_client_test_hook.lock().unwrap().clone();
+        previous_hooks.push((node.clone(), previous.clone()));
+        let own = node.identity.public();
         let trace = public_trace.clone();
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
-            if peer == expected
+            let observed = if peer == own && phase.starts_with("operation_") {
+                // Keep only the static owner/phase vocabulary, never ids or
+                // group keys carried by the existing detailed owner hook.
+                let mut words = phase.split_ascii_whitespace();
+                let family = words.next().unwrap_or("operation");
+                let detail = words
+                    .clone()
+                    .find_map(|word| word.strip_prefix("phase="))
+                    .or_else(|| words.next().filter(|word| !word.contains('=')))
+                    .unwrap_or("observation");
+                Some(("local", format!("{family} {detail}")))
+            } else if public_peer.as_ref() == Some(&peer)
                 && (phase.starts_with("control_fanout_round_")
                     || phase == "network_view_captured"
                     || phase.starts_with("dial_"))
             {
-                let label_phase = phase.split_ascii_whitespace().next().unwrap().to_owned();
+                Some((
+                    "public",
+                    phase
+                        .split_ascii_whitespace()
+                        .next()
+                        .unwrap()
+                        .split('=')
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                ))
+            } else if account_peer.as_ref() == Some(&peer)
+                && (phase.starts_with("page_begin ")
+                    || phase.starts_with("page_end ")
+                    || phase.starts_with("document_scope_")
+                    || phase.starts_with("dial_"))
+            {
+                Some((
+                    "account",
+                    phase
+                        .split_ascii_whitespace()
+                        .next()
+                        .unwrap()
+                        .split('=')
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                ))
+            } else {
+                None
+            };
+            if let Some((route, observed)) = observed {
                 let mut trace = trace.lock().unwrap();
                 if trace.len() == 64 {
                     trace.pop_front();
                 }
-                trace.push_back((public_started.elapsed().as_millis(), label, label_phase));
+                trace.push_back((public_started.elapsed().as_millis(), label, route, observed));
             }
             if let Some(previous) = &previous {
                 previous(peer, phase);
             }
         }));
     }
+    #[derive(Default)]
+    struct ResultWire {
+        headers: usize,
+        completes: usize,
+        first_header_ms: Option<u128>,
+        last_header_ms: Option<u128>,
+        last_complete_ms: Option<u128>,
+        last_header: Option<crate::node::AccountDocumentMeta>,
+    }
+    let result_wire = Arc::new(Mutex::new(ResultWire::default()));
+    let previous_session = source.account_session_test_hook.lock().unwrap().clone();
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let previous = previous_session.clone();
+        let observed = result_wire.clone();
+        let expected = origin.identity.public();
+        let key = crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        move |peer, frame| {
+            use crate::node::account_sync_wire::AccountHistoryFrame;
+            if peer == expected {
+                let mut observed = observed.lock().unwrap();
+                let selected_header = match &frame {
+                    AccountHistoryFrame::DocumentHeader { body } => {
+                        serde_json::from_slice::<crate::node::AccountDocumentMeta>(body)
+                            .ok()
+                            .filter(|meta| meta.key == key)
+                    }
+                    _ => None,
+                };
+                if let Some(meta) = selected_header {
+                    observed.headers += 1;
+                    let now = public_started.elapsed().as_millis();
+                    observed.first_header_ms.get_or_insert(now);
+                    observed.last_header_ms = Some(now);
+                    observed.last_header = Some(meta);
+                } else if let AccountHistoryFrame::DocumentsComplete { body } = &frame
+                    && serde_json::from_slice::<serde_json::Value>(body)
+                        .ok()
+                        .is_some_and(|value| {
+                            value.get("domain").and_then(serde_json::Value::as_str)
+                                == Some("group_control")
+                        })
+                {
+                    observed.completes += 1;
+                    observed.last_complete_ms = Some(public_started.elapsed().as_millis());
+                }
+            }
+            let previous = previous.clone();
+            Box::pin(async move {
+                if let Some(previous) = previous {
+                    previous(peer, frame).await;
+                }
+            })
+        }
+    }));
+    let restore_trace = RestoreTrace(Some(Box::new({
+        let source = source.clone();
+        move || {
+            *source.account_session_test_hook.lock().unwrap() = previous_session;
+            for (node, previous) in previous_hooks {
+                *node.account_client_test_hook.lock().unwrap() = previous;
+            }
+        }
+    })));
     let bytes = vec![0x61; crate::file::CHUNK_SIZE * 2 + 137];
     let original_path = dir.path().join("origin").join("explicit.bin");
     std::fs::write(&original_path, &bytes).unwrap();
@@ -1150,11 +1346,23 @@ async fn file_result_roundtrip(mode: u8) {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
+        let (counts, last_header) = {
+            let wire = result_wire.lock().unwrap();
+            (
+                (wire.headers, wire.completes, wire.first_header_ms,
+                    wire.last_header_ms, wire.last_complete_ms),
+                wire.last_header.clone(),
+            )
+        };
+        // Emit the captured transport evidence before fresh diagnostic reads.
+        eprintln!("initial File transport trace={trace:?} selected_source_key_wire(headers,control_completes,first_header_ms,last_header_ms,last_complete_ms)={counts:?}");
+        trace_initial_file_result(&origin, &source, &account, group, id, last_header.as_ref());
         panic!(
-            "{}; public_trace={trace:?}",
+            "{}",
             initial_file_result_timeout_stage(&origin, &source, &external, &account, id),
         )
     });
+    drop(restore_trace);
     let event_id = status.primary_event.unwrap();
     let event = external
         .log

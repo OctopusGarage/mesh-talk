@@ -788,15 +788,24 @@ async fn an_awaiting_control_cannot_use_transferred_owner_authority() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consecutive_account_controls_progress_while_public_fanout_is_stalled() {
-    consecutive_control_fanout_fixture(false).await;
+    consecutive_control_fanout_fixture(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consecutive_controls_establish_a_cold_public_hold_before_measuring_progress() {
-    consecutive_control_fanout_fixture(true).await;
+    consecutive_control_fanout_fixture(true, false).await;
 }
 
-async fn consecutive_control_fanout_fixture(delayed_responder: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn consecutive_controls_require_a_live_public_hold_after_an_unused_authenticated_connection()
+{
+    consecutive_control_fanout_fixture(false, true).await;
+}
+
+async fn consecutive_control_fanout_fixture(
+    delayed_responder: bool,
+    close_unused_connection: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("owner"), &account);
@@ -858,6 +867,8 @@ async fn consecutive_control_fanout_fixture(delayed_responder: bool) {
         }
     }
     let _stop_on_drop = StopOnDrop(release.clone(), stopping.clone());
+    let pre_request_closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pre_request_closed = Arc::new(tokio::sync::Notify::new());
     let (arrived, stalled_response) = tokio::sync::oneshot::channel::<std::sync::Weak<()>>();
     let arrived = Arc::new(Mutex::new(Some(arrived)));
     let (begin_response, response_may_start) = tokio::sync::oneshot::channel();
@@ -869,6 +880,8 @@ async fn consecutive_control_fanout_fixture(delayed_responder: bool) {
     let peer_release = release.clone();
     let peer_stopping = stopping.clone();
     let started = responder_started.clone();
+    let closed_count = pre_request_closes.clone();
+    let closed_notification = pre_request_closed.clone();
     tasks.spawn(async move {
         if delayed_responder {
             response_may_start.await.expect("the first committed effect must start the controlled responder");
@@ -887,6 +900,8 @@ async fn consecutive_control_fanout_fixture(delayed_responder: bool) {
                     let stopping = peer_stopping.clone();
                     let arrived = arrived.clone();
                     let expected = expected.clone();
+                    let closed_count = closed_count.clone();
+                    let closed_notification = closed_notification.clone();
                     connections.spawn(Box::pin(async move {
                         let mut channel = match peer.privacy_accept(stream).await {
                             Ok(channel) => channel,
@@ -897,6 +912,14 @@ async fn consecutive_control_fanout_fixture(delayed_responder: bool) {
                         let first = match channel.recv().await {
                             Ok(first) => first,
                             Err(_) if stopping.load(std::sync::atomic::Ordering::SeqCst) => return,
+                            // An authenticated dial may be cancelled before its first
+                            // application request. It has not qualified as our public
+                            // hold; only that later real request owns the live witness.
+                            Err(error) if crate::node::session_pool::retryable_transport_error(&error) => {
+                                closed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                closed_notification.notify_waiters();
+                                return;
+                            }
                             Err(error) => panic!("public fixture request closed before cleanup: {error}"),
                         };
                         if let Some(request) = crate::node::channel_account_bootstrap::AccountGroupRequest::decode(&first) {
@@ -927,6 +950,29 @@ async fn consecutive_control_fanout_fixture(delayed_responder: bool) {
         }
     });
     let observation = std::panic::AssertUnwindSafe(async {
+        if close_unused_connection {
+            // Only this controlled companion opens an unused authenticated dial.
+            // Its close cannot substitute for the subsequent actual public hold.
+            let before = pre_request_closes.load(std::sync::atomic::Ordering::SeqCst);
+            super::cold_account_setup(async {
+                let unused = owner
+                    .privacy_dial(external_address, &external.identity.public())
+                    .await
+                    .unwrap();
+                drop(unused);
+                loop {
+                    let changed = pre_request_closed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    if pre_request_closes.load(std::sync::atomic::Ordering::SeqCst) > before {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .expect("the real unused authenticated connection must close before first admission");
+        }
         let first = owner
             .new_account_group_operation_id(&account.account_id())
             .unwrap();
