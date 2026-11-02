@@ -1055,6 +1055,164 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
     );
 }
 
+#[derive(Default)]
+struct GossipReadReceipts {
+    canonical: Option<crate::eventlog::EventId>,
+    completed: [Option<std::time::Instant>; 5],
+}
+impl GossipReadReceipts {
+    fn record(
+        &mut self,
+        slot: usize,
+        id: crate::eventlog::EventId,
+        completed: std::time::Instant,
+        deadline: std::time::Instant,
+    ) {
+        if completed > deadline || self.canonical.is_some_and(|known| known != id) {
+            return;
+        }
+        self.canonical.get_or_insert(id);
+        self.completed[slot].get_or_insert(completed);
+    }
+
+    fn all_timely(&self) -> bool {
+        self.completed.iter().all(Option::is_some)
+    }
+}
+
+fn read_gossip_history(
+    node: &Node,
+    group: ConversationId,
+) -> Result<(Option<crate::eventlog::EventId>, std::time::Instant), super::NodeError> {
+    let rows = node.channel_history(group, 100)?;
+    let id = rows
+        .iter()
+        .find(|row| row.text == b"notification-driven background gossip")
+        .map(|row| row.id);
+    // Capture actual successful read/extraction completion on this admitted
+    // blocking worker, before either async owner needs to be scheduled again.
+    Ok((id, std::time::Instant::now()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gossip_history_receipts_distinguish_read_completion_from_delayed_delivery() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("events.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    node.set_post_office_enabled(false);
+    let group = node
+        .create_channel("Read completion witness", vec![])
+        .await
+        .unwrap();
+    node.send_channel_message(group, b"notification-driven background gossip")
+        .await
+        .unwrap();
+    let expected = read_gossip_history(&node, group).unwrap().0.unwrap();
+    let mut receipts = GossipReadReceipts::default();
+
+    // The real read finishes before the cutoff, but this task deliberately
+    // withholds delivery until the observation timeout has fired.
+    let cutoff = std::time::Instant::now() + Duration::from_secs(8);
+    let (read_tx, read_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let queried = node.clone();
+    let mut owner = tokio::spawn(async move {
+        let result = queried
+            .account_blocking(move |node| read_gossip_history(&node, group))
+            .await;
+        let _ = read_tx.send(());
+        let _ = release_rx.await;
+        result
+    });
+    let read_arrived =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), read_rx).await;
+    let observed =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), &mut owner).await;
+    let delayed = observed.is_err();
+    let _ = release_tx.send(());
+    let result = match observed {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(15), owner)
+            .await
+            .expect("the delayed read owner must join"),
+    }
+    .expect("the delayed read owner must not panic");
+    let (id, completed) = result.expect("the real pre-deadline read must succeed");
+    assert!(
+        matches!(read_arrived, Ok(Ok(()))),
+        "the actual read must qualify before the cutoff"
+    );
+    assert!(
+        delayed,
+        "the task delivery must remain held through the cutoff"
+    );
+    assert_eq!(id, Some(expected));
+    receipts.record(0, expected, completed, cutoff);
+    assert_eq!(receipts.completed[0], Some(completed));
+
+    // Now hold the admitted blocking closure before its real history read.
+    // The same durable row arriving after the cutoff must not count.
+    let cutoff = std::time::Instant::now() + Duration::from_secs(8);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let queried = node.clone();
+    let mut owner = tokio::spawn(async move {
+        queried
+            .account_blocking(move |node| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+                read_gossip_history(&node, group)
+            })
+            .await
+    });
+    let entered = tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), entered_rx).await;
+    let observed =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), &mut owner).await;
+    let delayed = observed.is_err();
+    let _ = release_tx.send(());
+    let result = match observed {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(15), owner)
+            .await
+            .expect("the late read owner must join"),
+    }
+    .expect("the late read owner must not panic");
+    node.runtime_work.close();
+    node.runtime_work.drain().await;
+    let (id, completed) = result.expect("the real post-deadline read must succeed");
+    assert!(
+        matches!(entered, Ok(Ok(()))),
+        "the held read must be admitted before the cutoff"
+    );
+    assert!(
+        delayed,
+        "the actual read must remain held through the cutoff"
+    );
+    assert_eq!(id, Some(expected));
+    assert!(completed > cutoff);
+    receipts.record(1, expected, completed, cutoff);
+    assert!(
+        receipts.completed[1].is_none(),
+        "late actual completion must never count"
+    );
+    assert!(
+        !receipts.all_timely(),
+        "missing receiver reads remain a failure"
+    );
+}
+
 // These independent hosts use synchronous durable storage. Match the production
 // multithread executor. Excluding periodic repair proves notification causality
 // directly; elapsed propagation remains observable under a functional watchdog.
@@ -1238,8 +1396,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let deadline_start_ms = route_started.elapsed().as_millis();
     let deadline_started = std::time::Instant::now();
     let deadline = Duration::from_secs(8);
-    let mut original = None;
-    let mut first_visible_ms = [None; 5];
+    let cutoff = deadline_started + deadline;
+    let mut receipts = GossipReadReceipts::default();
     let mut history_reads = [0_u64; 5];
     let mut stale_reads = [0_u64; 5];
     let mut polls = 0_u64;
@@ -1257,13 +1415,13 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     // This fixture has no erasure, recall, or roster change after the send. Each
     // receiver needs one successful durable read, not repeated hydration after
     // it has already proved receipt of the same canonical message.
-    let received = tokio::time::timeout(deadline, async {
+    let received = tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), async {
         loop {
             let poll_started = std::time::Instant::now();
             polls = polls.saturating_add(1);
             for index in 1..6 {
                 let slot = index - 1;
-                if first_visible_ms[slot].is_some() {
+                if receipts.completed[slot].is_some() {
                     continue;
                 }
                 if ui_changes[slot]
@@ -1279,19 +1437,25 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                 if !query_needed[slot] {
                     continue;
                 }
+                // Do not admit another observation after the common cutoff,
+                // even if Tokio resumes this task before polling its timer.
+                if std::time::Instant::now() >= cutoff {
+                    return;
+                }
                 history_reads[slot] = history_reads[slot].saturating_add(1);
                 if query_trace.len() == 64 {
                     query_trace.pop_front();
                 }
                 query_trace.push_back((route_started.elapsed().as_millis(), index, "query_begin"));
                 let node = chain.nodes[index].clone();
-                pending_query = Some(tokio::spawn(async move {
-                    node.account_blocking(move |node| node.channel_history(group, 100))
-                        .await
-                }));
-                let history = pending_query
-                    .as_mut()
-                    .unwrap()
+                pending_query = Some((
+                    slot,
+                    tokio::spawn(async move {
+                        node.account_blocking(move |node| read_gossip_history(&node, group))
+                            .await
+                    }),
+                ));
+                let history = (&mut pending_query.as_mut().unwrap().1)
                     .await
                     .expect("the history observation owner must not panic");
                 let _ = pending_query.take();
@@ -1300,15 +1464,18 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                 }
                 query_trace.push_back((route_started.elapsed().as_millis(), index, "query_end"));
                 match history {
-                    Ok(history) => {
+                    Ok((id, completed)) => {
                         query_needed[slot] = false;
-                        let message = history.iter().find(|row| {
-                            row.text == b"notification-driven background gossip"
-                                && original.is_none_or(|id| row.id == id)
-                        });
-                        if let Some(message) = message {
-                            original.get_or_insert(message.id);
-                            first_visible_ms[slot] = Some(route_started.elapsed().as_millis());
+                        if query_trace.len() == 64 {
+                            query_trace.pop_front();
+                        }
+                        query_trace.push_back((
+                            completed.duration_since(route_started).as_millis(),
+                            index,
+                            "read_completed",
+                        ));
+                        if let Some(id) = id {
+                            receipts.record(slot, id, completed, cutoff);
                         }
                     }
                     Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
@@ -1320,7 +1487,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                     Err(error) => panic!("background history read failed: {error}"),
                 }
             }
-            let all_received = first_visible_ms.iter().all(Option::is_some);
+            let all_received = receipts.all_timely();
             let elapsed = poll_started.elapsed().as_micros();
             poll_us = poll_us.saturating_add(elapsed);
             max_poll_us = max_poll_us.max(elapsed);
@@ -1333,19 +1500,43 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     .await;
     let deadline_elapsed = deadline_started.elapsed();
     let deadline_elapsed_ms = deadline_elapsed.as_millis();
-    let within_two_seconds = deadline_elapsed <= Duration::from_secs(2);
-    if let Some(query) = pending_query.take() {
-        // This is cleanup after the measured result, never extra acceptance time.
-        // account_blocking retains admission until the actual read returns.
+    if let Some((slot, query)) = pending_query.take() {
+        // Join only the read admitted before the cutoff. Its immutable completion
+        // stamp may prove timely work despite late async delivery; a late read
+        // can never count. No new observation runs during this cleanup.
         match tokio::time::timeout(Duration::from_secs(15), query)
             .await
             .expect("outstanding history observation must retire before its fixture")
             .expect("history observation cleanup must join its owner")
         {
-            Ok(_) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+            Ok((id, completed)) => {
+                if query_trace.len() == 64 {
+                    query_trace.pop_front();
+                }
+                query_trace.push_back((
+                    completed.duration_since(route_started).as_millis(),
+                    slot + 1,
+                    "read_completed_during_join",
+                ));
+                if let Some(id) = id {
+                    receipts.record(slot, id, completed, cutoff);
+                }
+            }
+            Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
             Err(error) => panic!("background history observation retirement failed: {error}"),
         }
     }
+    let first_visible_ms = receipts
+        .completed
+        .map(|at| at.map(|at| at.duration_since(route_started).as_millis()));
+    let within_two_seconds = receipts.all_timely()
+        && receipts
+            .completed
+            .iter()
+            .flatten()
+            .all(|at| *at <= deadline_started + Duration::from_secs(2));
+    let all_timely = receipts.all_timely();
+    let original = receipts.canonical;
     for node in &chain.nodes[..6] {
         *node.account_client_test_hook.lock().unwrap() = None;
     }
@@ -1357,7 +1548,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             "gossip observer send_returned_ms={send_returned_ms} deadline_start_ms={deadline_start_ms} deadline_elapsed_ms={deadline_elapsed_ms} within_two_seconds={within_two_seconds} first_visible_ms={first_visible_ms:?} history_reads={history_reads:?} stale_reads={stale_reads:?} generation_changes={generation_changes:?} query_trace={query_trace:?} polls={polls} poll_us={poll_us} max_poll_us={max_poll_us}"
         );
     }
-    if received.is_err() {
+    if !all_timely {
         // Preserve already-collected route evidence before any fallible read.
         let phases = route_trace.try_lock().ok().map(|trace| trace.clone());
         eprintln!("bounded recovery phases={phases:?}");
@@ -1430,11 +1621,9 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         0,
         "periodic or discovery fallback must not rescue notification-only propagation"
     );
-    received
-        .expect("message notifications must reach all receivers with periodic recovery disabled");
     assert!(
-        deadline_elapsed <= deadline,
-        "all five exact-message history reads must finish within the functional watchdog: {deadline_elapsed:?}"
+        all_timely,
+        "all five exact-message history reads must finish within the original functional watchdog; observer resumed after {deadline_elapsed:?}"
     );
     let original = original.expect("all receivers proved one canonical message");
     assert!(

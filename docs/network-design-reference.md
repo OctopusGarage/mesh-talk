@@ -983,7 +983,12 @@ migrate automatically without replacing newer shared revisions.
 
 When initial copy confirmation fails, the existing recovery slot may query a
 currently certified account sibling for the exact retained event if that turn
-did not attempt external replication. This reuses the authenticated read-only
+did not attempt external replication. When both kinds of work remain pending
+for the same message, successive scan cycles alternate their priority. Peer
+rotation advances independently of that alternation, so an unavailable external
+route cannot indefinitely suppress the sibling report or skip alternate peers.
+This retains one exchange in the existing slot and the original time budgets.
+The report reuses the authenticated read-only
 durable-have exchange, including for siblings without a physical group grant;
 it neither transfers the original nor grants membership. An honest negative
 report is sufficient for synchronized known-zero status. History plaintext alone

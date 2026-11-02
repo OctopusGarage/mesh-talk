@@ -107,6 +107,23 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     })
     .await;
     if let Err(error) = bootstrapped {
+        let custody_state = |node: &Node| {
+            let observations = node.channel_custody_observations(group, event);
+            let positive = observations.iter().filter(|meta| !meta.tombstone);
+            let readable = positive
+                .clone()
+                .filter(|meta| node.channel_custody_holder_binding(&meta.key).is_some())
+                .count();
+            let physical = node
+                .channels
+                .lock()
+                .unwrap()
+                .state(&group)
+                .is_some_and(|state| node.channel_identity_matches_account(state));
+            (observations.len(), positive.count(), readable, physical)
+        };
+        let source_evidence = custody_state(&source);
+        let sibling_evidence = custody_state(&sibling);
         let sibling_outgoing_copy = sibling
             .channel_history(group, 10)
             .map(|rows| rows.iter().any(|row| row.id == event && row.from_me));
@@ -119,7 +136,7 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
             .get(&event)
             .map(|event| event.is_some());
         panic!(
-            "the real outgoing copy, entitlement and own-sibling-only evidence must bootstrap: {error:?}; sibling_outgoing_copy={sibling_outgoing_copy:?} source_custody={source_custody:?} sibling_custody={sibling_custody:?} external_has_original={external_has_original:?}"
+            "the real outgoing copy, entitlement and own-sibling-only evidence must bootstrap: {error:?}; sibling_outgoing_copy={sibling_outgoing_copy:?} source_custody={source_custody:?} sibling_custody={sibling_custody:?} external_has_original={external_has_original:?} evidence=(total,positive,readable,physical) source={source_evidence:?} sibling={sibling_evidence:?}"
         );
     }
     assert_eq!(source.channel_custody_count(group, event).unwrap(), Some(0));

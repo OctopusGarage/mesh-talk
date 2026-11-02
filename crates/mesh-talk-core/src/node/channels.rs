@@ -116,6 +116,12 @@ fn select_custody_peer(mut peers: Vec<PeerRecord>, cycle: usize) -> Option<PeerR
     (len > 0).then(|| peers.swap_remove(cycle % len))
 }
 
+// Two competing work classes share the existing recovery slot. Advance peer
+// rotation once per pair, so alternating classes cannot skip every other peer.
+fn custody_retry_order(cycle: usize) -> (bool, usize) {
+    (!cycle.is_multiple_of(2), cycle / 2)
+}
+
 /// Local bounded recovery observations. A successful peer exchange never proves
 /// that offline members have no additional events.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2723,8 +2729,9 @@ impl Node {
 
     /// Retry one insufficiently replicated own message per tick. The event log is
     /// the durable pending queue, so a restart cannot forget local-only messages.
-    /// If no replication exchange starts, return at most one missing-report
-    /// candidate for the same recovery slot's read-only durable-have query.
+    /// Alternate competing replication and missing-report work across message
+    /// scan cycles. Return at most one read-only query instead of a replication
+    /// exchange, preserving the existing recovery slot and peer rotation.
     pub(in crate::node) async fn retry_one_channel_custody(
         &self,
         cursor: usize,
@@ -2792,6 +2799,7 @@ impl Node {
             while let Some((event_id, cycle)) =
                 next_custody_retry_key(&mut candidates, channel, after, cycles)
             {
+                let (report_first, report_cycle) = custody_retry_order(cycle);
                 if missing_report.is_none()
                     && self
                         .channel_custody_observations(channel, event_id)
@@ -2826,7 +2834,19 @@ impl Node {
                             .filter(|peer| peer.public == *member)
                     })
                     .collect();
-                if let Some(peer) = select_custody_peer(peers, cycle) {
+                let competing_report = missing_report
+                    .as_ref()
+                    .is_some_and(|(_, report_event, _)| *report_event == event_id);
+                let peer_cycle = if competing_report {
+                    report_cycle
+                } else {
+                    cycle
+                };
+                if let Some(peer) = select_custody_peer(peers, peer_cycle) {
+                    if competing_report && report_first {
+                        return Ok(select_custody_peer(report_peers.clone(), report_cycle)
+                            .map(|peer| (channel, event_id, peer)));
+                    }
                     let _ = tokio::time::timeout(
                         CHANNEL_RECOVERY_PEER_TIMEOUT,
                         self.sync_and_confirm_custody(channel, event_id, &peer),
@@ -3638,6 +3658,37 @@ mod fanout_tests {
         assert_eq!(next.len(), 2);
         assert_ne!(first[0].public, next[0].public);
         assert_eq!(select_channel_targets(peers.clone(), 5, 0, 2).len(), 5);
+    }
+
+    #[test]
+    fn custody_retry_classes_each_rotate_through_all_competing_peers() {
+        for peer_count in 2..=4 {
+            let peers: Vec<_> = (0..peer_count)
+                .map(|port| PeerRecord {
+                    public: DeviceIdentity::generate().public(),
+                    addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 4300 + port)),
+                    routes: Vec::new(),
+                    name: String::new(),
+                    post_office: false,
+                    account_id: None,
+                    last_seen: Instant::now(),
+                })
+                .collect();
+            let mut replication = HashSet::new();
+            let mut reports = HashSet::new();
+            for cycle in 0..2 * peers.len() {
+                let (report_first, peer_cycle) = custody_retry_order(cycle);
+                let peer = select_custody_peer(peers.clone(), peer_cycle).unwrap();
+                if report_first {
+                    reports.insert(peer.public.user_id());
+                } else {
+                    replication.insert(peer.public.user_id());
+                }
+            }
+            assert_eq!(replication.len(), peers.len());
+            assert_eq!(reports.len(), peers.len());
+            assert_eq!(replication, reports);
+        }
     }
 
     #[test]

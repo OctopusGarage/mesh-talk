@@ -170,6 +170,15 @@ fn completed_channel_metadata_wakes_deferred_inventory_without_an_idle_loop() {
 
 #[tokio::test]
 async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
+    failed_initial_sibling_custody_recovery(false).await;
+}
+
+#[tokio::test]
+async fn routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers() {
+    failed_initial_sibling_custody_recovery(true).await;
+}
+
+async fn failed_initial_sibling_custody_recovery(with_offline_route: bool) {
     use crate::{discovery::Announce, node::account_devices::AccountDevice};
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -226,6 +235,20 @@ async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
     let event = source.channel_history(group, 10).unwrap()[0].id;
     assert!(source.channel_custody_observations(group, event).is_empty());
     assert_eq!(source.channel_custody_count(group, event).unwrap(), Some(0));
+    if with_offline_route {
+        // Publish the signed offline route only after the original one-peer
+        // failure. This member never serves its identity at the advertised port.
+        source.roster.lock().unwrap().update(
+            &Announce::new(&external, "Offline custody member", 9),
+            source_addr.ip(),
+            &source.user_id(),
+        );
+        assert!(
+            source
+                .routing_peer(&external.public().user_id())
+                .is_some_and(|peer| peer.public == external.public() && peer.addr.port() == 9)
+        );
+    }
     let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
     let sibling_server = tokio::spawn(sibling.clone().run_accept_loop(sibling_listener));
     let history = tokio::time::timeout(Duration::from_secs(8), async {
@@ -253,7 +276,9 @@ async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
     history.expect("authenticated History recovers the exact original outgoing message");
     assert!(
         repaired.is_ok(),
-        "real failed initial custody must remain repairable: source={source_observations:?} sibling={sibling_observations:?}"
+        "real failed initial custody must remain repairable: offline_route={with_offline_route} source_observations={} sibling_observations={}",
+        source_observations.len(),
+        sibling_observations.len()
     );
     assert!(!source_observations.is_empty());
     assert!(!sibling_observations.is_empty());

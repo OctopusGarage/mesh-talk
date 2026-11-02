@@ -350,7 +350,9 @@
             "node::media_store::",
             "node::node::tests::channel_custody_inherited_holder_requires_signed_account_authority",
             "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
-            "channel_custody_retry_skips_own_siblings_and_already_confirmed_account"
+            "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
+            "custody_retry_classes_each_rotate_through_all_competing_peers",
+            "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers"
           ]
         }
       ],
@@ -359,7 +361,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. Unused recovery slots may repair reports through authenticated read-only sibling queries without replication or membership grants; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls.",
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -370,7 +372,7 @@
       },
       "consumers": ["desktop-shared-channel-custody"],
       "escalation": [
-        "Require real linked-sibling/other-member loopback evidence, holder-offline/restart and delayed confirmation/revocation convergence. Verify old optional-domain rejection preserves supported domains.",
+        "Require real linked-sibling/other-member loopback evidence, holder-offline/restart and delayed confirmation/revocation convergence. A forced initial sibling confirmation failure plus a signed unreachable external route must still recover the original History and signed sibling report under the existing deadlines; competing report and replication turns must each rotate through every peer, including even-sized peer sets. Verify old optional-domain rejection preserves supported domains.",
         "Custody fixtures must observe post-creation authenticated channel inventory/control heads, reciprocal exact-peer capabilities and a real settled Custody-domain sweep before starting the existing custody observation. The whole Optional bootstrap must currently be settled in both directions: a new pass invalidates it, and held same-lane DmRecall or paid GroupActivity work must keep setup pending. A separate Directory hold retains its captured authenticated inventory/control floor so later display-only publications cannot move the barrier. Require enabled completion without continuation and a nonzero matching postcommit digest; a new attempt invalidates the fixture-local witness. Aggregate document status is not a substitute for this scope proof. After actual startup, hold an independent Directory/DeviceHostname update through setup and fresh message/custody progress. Stop the real external holder after its source receipt and require source-authored sibling import so a direct query cannot satisfy the proof. Observe the exact positive source count through read-only custody notifications within the thirty-second setup watchdog before stopping a holder or changing its certificate binding; a successful send alone is not this receipt. For an offline-holder proof, hold only the exact source-to-sibling custody response until the holder is stopped and drained, prove the signed source observation is still absent at that cut and the sibling has no independent holder route, then require that authentic captured or newer observation within the original custody deadline. A held real inventory response must keep setup pending; release must permit real authenticated convergence. Accept authentic superseding heads without waiting for obsolete metadata. Keep setup separate from custody timing and preserve mandatory-lane independence, source-offline restart and missing-state assertions. Keep intentional missing-blob repair in an independent real-holder fixture with no autonomous source worker during corruption; prove unknown state, authenticated repair without signed metadata churn and durable readability after reopen. Automatic holder-offline propagation must retain its original deadline without explicit pull or prior custody warmup. Controlled fault-path evidence must not be presented as proof of an unobserved historical timeout mechanism. Matching ASan execution is required when an instrumented failure exposed the fixture ordering."
       ]
     },
@@ -1917,6 +1919,7 @@
             "participant_durable_have_request_uses_no_historical_bodies",
             "participant_selection_retirement_",
             "background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
+            "gossip_history_receipts_distinguish_read_completion_from_delayed_delivery",
             "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet"
           ]
         }
@@ -1932,6 +1935,10 @@
           {
             "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative. Finite participant selections preserve exact Have-dependent ancestry, fresh proof/source revocation, atomic receipt-control publication and pending invitations; unchanged paging reads no historical bodies, and cancellation cleanup is bounded.",
             "reference": "docs/help/topics/channels.md#network-data-protection"
+          },
+          {
+            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions.",
+            "reference": "docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities"
           },
           {
             "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility.",

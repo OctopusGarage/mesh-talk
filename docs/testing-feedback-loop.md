@@ -427,6 +427,12 @@ recovery, resend, or roster change is allowed. The fixture also rejects fallback
 or custody-tick work during propagation. Its recorded two-second comparison is a
 performance observation, not an end-to-end latency SLA; disabling periodic rescue
 proves notification-driven progress directly instead of inferring it from timing.
+Timestamp each canonical history read on its admitted blocking worker after the
+read and exact-ID extraction finish, against the same absolute eight-second
+cutoff. Async resumption after that cutoff cannot change the immutable completion
+witness. Cleanup may join and inspect only the original pending read; it cannot
+start another read or accept a completion after the cutoff. Real-history controls
+must accept timely reads with delayed result delivery and reject late actual reads.
 All listeners must be bound before cold exchanges start. Initial authenticated
 recovery has a separate thirty-second setup watchdog, accommodating the existing
 fifteen-second peer exchange; it does not consume or extend the post-send window.

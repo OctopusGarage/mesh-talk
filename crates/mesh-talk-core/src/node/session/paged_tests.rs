@@ -7,68 +7,99 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        for sql_requests in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let db = Arc::new(
-                EncryptedDatabase::open(&dir.path().join("profile.db"), "pw", b"profile").unwrap(),
+    let preparation_started = std::time::Instant::now();
+    let mut fixtures = Vec::new();
+    // Prepare both complete durable corpora before their shared TCP window.
+    // The 1501 roots must still cross the protocol's 1500-ID Have chunk.
+    for sql_requests in [false, true] {
+        let orientation_started = std::time::Instant::now();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            EncryptedDatabase::open(&dir.path().join("profile.db"), "pw", b"profile").unwrap(),
+        );
+        let repository = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
+        let signer = DeviceIdentity::generate();
+        let conversation = ConversationId::new([7; 32]);
+        let mut log = EventLog::default();
+        let mut parent = None;
+        let mut missing_roots = Vec::new();
+        // More than one Have chunk. SQL-only roots are inserted opposite
+        // canonical clock priority; their child has an inverted signed clock.
+        for seq in 1..=1501 {
+            let event = Event::new(
+                &signer,
+                conversation,
+                seq,
+                vec![],
+                2000 - seq,
+                0,
+                EventKind::Message,
+                vec![],
             );
-            let repository = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
-            let signer = DeviceIdentity::generate();
-            let conversation = ConversationId::new([7; 32]);
-            let mut log = EventLog::default();
-            let mut parent = None;
-            let mut missing_roots = Vec::new();
-            // More than one Have chunk. SQL-only roots are inserted opposite
-            // canonical clock priority; their child has an inverted signed clock.
-            for seq in 1..=1501 {
-                let event = Event::new(
-                    &signer,
-                    conversation,
-                    seq,
-                    vec![],
-                    2000 - seq,
-                    0,
-                    EventKind::Message,
-                    vec![],
-                );
-                repository.append(&event).unwrap();
-                if seq <= 2 {
-                    missing_roots.push(event.id);
-                } else {
-                    log.append(event.clone()).unwrap();
-                }
-                parent = Some(event.id);
+            repository.append(&event).unwrap();
+            if seq <= 2 {
+                missing_roots.push(event.id);
+            } else {
+                log.append(event.clone()).unwrap();
             }
-            let sql_extra = Event::new(
-                &signer,
-                conversation,
-                1502,
-                missing_roots,
-                0,
-                0,
-                EventKind::Message,
-                vec![1],
-            );
-            let legacy_extra = Event::new(
-                &signer,
-                conversation,
-                1503,
-                parent.into_iter().collect(),
-                1,
-                0,
-                EventKind::Message,
-                vec![2],
-            );
-            repository.append(&sql_extra).unwrap();
-            log.append(legacy_extra.clone()).unwrap();
-            let sql = Arc::new(Mutex::new(TinyPagedStore::new(repository)));
-            let legacy = Arc::new(Mutex::new(log));
+            parent = Some(event.id);
+        }
+        let sql_extra = Event::new(
+            &signer,
+            conversation,
+            1502,
+            missing_roots,
+            0,
+            0,
+            EventKind::Message,
+            vec![1],
+        );
+        let legacy_extra = Event::new(
+            &signer,
+            conversation,
+            1503,
+            parent.into_iter().collect(),
+            1,
+            0,
+            EventKind::Message,
+            vec![2],
+        );
+        repository.append(&sql_extra).unwrap();
+        log.append(legacy_extra.clone()).unwrap();
+        let sql = Arc::new(Mutex::new(TinyPagedStore::new(repository)));
+        let legacy = Arc::new(Mutex::new(log));
+        eprintln!(
+            "mixed SQL/legacy prepared sql_requests={sql_requests} sql_events=1502 legacy_events=1500 elapsed_ms={}",
+            orientation_started.elapsed().as_millis(),
+        );
+        fixtures.push((
+            dir,
+            sql_requests,
+            conversation,
+            sql,
+            legacy,
+            sql_extra,
+            legacy_extra,
+        ));
+    }
+    let preparation_elapsed = preparation_started.elapsed();
+    let phase = std::cell::Cell::new((false, "not started"));
+    let exchange_started = std::time::Instant::now();
+    let mut servers = tokio::task::JoinSet::new();
+    // One unchanged sixty-second exchange watchdog covers BOTH orientations.
+    // Retain the directories and stores until every server has retired.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for (_, sql_requests, conversation, sql, legacy, sql_extra, legacy_extra) in &fixtures {
+            let sql_requests = *sql_requests;
+            let conversation = *conversation;
+            let sql = sql.clone();
+            let legacy = legacy.clone();
+            phase.set((sql_requests, "TCP bind"));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server_sql = sql.clone();
             let server_legacy = legacy.clone();
-            let server = tokio::spawn(async move {
+            servers.spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut channel = SecureChannel::accept(stream, &DeviceIdentity::generate())
                     .await
@@ -85,6 +116,7 @@ async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
                     }
                 }
             });
+            phase.set((sql_requests, "TCP/Noise connect"));
             let mut channel = SecureChannel::connect(
                 tokio::net::TcpStream::connect(address).await.unwrap(),
                 &DeviceIdentity::generate(),
@@ -92,6 +124,7 @@ async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
             )
             .await
             .unwrap();
+            phase.set((sql_requests, "request round"));
             if sql_requests {
                 request_round_paged(&mut channel, &sql, conversation)
                     .await
@@ -102,6 +135,7 @@ async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
                     .unwrap();
             }
             if !sql_requests {
+                phase.set((sql_requests, "durable Have"));
                 assert!(
                     request_durable_have(&mut channel, conversation, legacy_extra.id)
                         .await
@@ -109,13 +143,30 @@ async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
                 );
             }
             drop(channel);
-            server.await.unwrap();
+            phase.set((sql_requests, "server completion"));
+            servers.join_next().await.unwrap().unwrap();
+            phase.set((sql_requests, "convergence assertions"));
             assert!(sql.lock().unwrap().repo.has(&legacy_extra.id).unwrap());
             assert!(legacy.lock().unwrap().get(&sql_extra.id).is_some());
         }
     })
-    .await
-    .expect("mixed paged/legacy TCP exchange timed out");
+    .await;
+    servers.abort_all();
+    while let Some(joined) = servers.join_next().await {
+        if let Err(error) = joined {
+            assert!(error.is_cancelled(), "mixed TCP server panicked: {error}");
+        }
+    }
+    eprintln!(
+        "mixed SQL/legacy complete setup_ms={} exchange_ms={} phase={:?}",
+        preparation_elapsed.as_millis(),
+        exchange_started.elapsed().as_millis(),
+        phase.get(),
+    );
+    result.unwrap_or_else(|error| panic!(
+        "mixed paged/legacy TCP exchange timed out: {error:?}; setup_ms={} exchange_ms={} phase={:?}",
+        preparation_elapsed.as_millis(), exchange_started.elapsed().as_millis(), phase.get(),
+    ));
 }
 
 use crate::eventlog::sync::network::{
