@@ -120,10 +120,363 @@ fn queued_source_requires_current_settlement_after_retired_request_publication()
     assert!(readiness.ready());
 }
 
+// First relevant setup transitions survive unrelated traffic and recovery.
+fn record_setup_milestone(
+    trace: &BTrace,
+    clock: std::time::Instant,
+    milestone: &'static str,
+    details: String,
+) {
+    let mut rows = trace.lock().unwrap();
+    if rows.len() < 8 && !rows.iter().any(|row| row.1 == milestone) {
+        rows.push_back((
+            clock.elapsed().as_millis(),
+            milestone,
+            tokio::task::try_id(),
+            details,
+        ));
+    }
+}
+
+#[derive(Default)]
+struct SetupCancellationState {
+    task: Option<tokio::task::Id>,
+    open: bool,
+    published: bool,
+    entered: bool,
+}
+#[derive(Default)]
+struct SetupCancellationGate {
+    state: Mutex<SetupCancellationState>,
+    changed: std::sync::Condvar,
+    entered: Notify,
+}
+impl SetupCancellationGate {
+    fn arm(&self, task: tokio::task::Id) {
+        self.state.lock().unwrap().task = Some(task);
+    }
+    fn before_cancel(&self, task: tokio::task::Id) -> Option<bool> {
+        let mut state = self.state.lock().unwrap();
+        if state.task != Some(task) {
+            return None;
+        }
+        state.entered = true;
+        self.entered.notify_one();
+        // Condvar releases its mutex. No node, ledger or trace guard may be
+        // retained by the caller: the other runtime worker publishes B's rows.
+        while !state.open {
+            state = self.changed.wait(state).unwrap();
+        }
+        Some(state.published)
+    }
+    fn publish_complete(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.published = true;
+        state.open = true;
+        self.changed.notify_all();
+    }
+    fn release(&self) {
+        self.state.lock().unwrap().open = true;
+        self.changed.notify_all();
+    }
+}
+struct ReleaseSetupCancellation(Arc<SetupCancellationGate>);
+impl Drop for ReleaseSetupCancellation {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[derive(Default)]
+struct PreparationReadState {
+    open: bool,
+    overflow: bool,
+    decisions: std::collections::HashMap<[u8; 32], (bool, std::sync::Weak<()>)>,
+}
+#[derive(Default)]
+struct PreparationReadGate {
+    state: Mutex<PreparationReadState>,
+    changed: Notify,
+}
+impl PreparationReadGate {
+    fn decide(&self, nonce: [u8; 32], hold: bool, lifetime: Option<std::sync::Weak<()>>) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .decisions
+            .retain(|_, (_, lifetime)| lifetime.strong_count() > 0);
+        if !state.open
+            && let Some(lifetime) = lifetime.filter(|value| value.strong_count() > 0)
+        {
+            if state.decisions.len() == 64 && !state.decisions.contains_key(&nonce) {
+                state.overflow = true;
+            } else {
+                state.decisions.insert(nonce, (hold, lifetime));
+            }
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+    async fn wait(&self, nonce: [u8; 32]) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let (ready, overflow) = {
+                let mut state = self.state.lock().unwrap();
+                let ready =
+                    state.open || state.decisions.get(&nonce).is_some_and(|(hold, _)| !hold);
+                if ready {
+                    state.decisions.remove(&nonce);
+                }
+                (ready, state.overflow)
+            };
+            assert!(
+                !overflow,
+                "preparation decision inventory exceeded its bounded owner"
+            );
+            if ready {
+                return;
+            }
+            changed.await;
+        }
+    }
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.open = true;
+        state.decisions.clear();
+        drop(state);
+        self.changed.notify_waiters();
+    }
+}
+struct ReleasePreparationRead(Arc<PreparationReadGate>);
+impl Drop for ReleasePreparationRead {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+struct PreparationServerDecision {
+    gate: Arc<PreparationReadGate>,
+    nonce: Option<[u8; 32]>,
+    lifetime: Option<std::sync::Weak<()>>,
+    decided: bool,
+}
+impl PreparationServerDecision {
+    fn decide(&mut self, hold: bool) {
+        if let Some(nonce) = self.nonce {
+            self.gate.decide(nonce, hold, self.lifetime.clone());
+        }
+        self.decided = true;
+    }
+}
+impl Drop for PreparationServerDecision {
+    fn drop(&mut self) {
+        if !self.decided {
+            self.decide(false);
+        }
+    }
+}
+
+#[tokio::test]
+async fn preparation_server_decisions_and_drop_release_preserve_child_lifetimes() {
+    for outcome in ["pass", "drop", "hold_then_release"] {
+        let gate = Arc::new(PreparationReadGate::default());
+        let (created, observed) = oneshot::channel();
+        let child_gate = gate.clone();
+        let child = tokio::spawn(async move {
+            let lifetime = Arc::new(());
+            created.send(Arc::downgrade(&lifetime)).unwrap();
+            child_gate.wait([1; 32]).await;
+            drop(lifetime);
+        });
+        let lifetime = observed.await.unwrap();
+        assert!(
+            !child.is_finished(),
+            "a client cannot guess the server's decision"
+        );
+        let mut decision = PreparationServerDecision {
+            gate: gate.clone(),
+            nonce: Some([1; 32]),
+            lifetime: Some(lifetime.clone()),
+            decided: false,
+        };
+        match outcome {
+            "pass" => decision.decide(false),
+            "drop" => drop(decision),
+            "hold_then_release" => {
+                decision.decide(true);
+                tokio::task::yield_now().await;
+                assert!(!child.is_finished());
+                assert!(lifetime.strong_count() > 0);
+                drop(ReleasePreparationRead(gate.clone()));
+                // The release is permanent, including previously unknown nonces.
+                gate.wait([2; 32]).await;
+            }
+            _ => unreachable!(),
+        }
+        child.await.unwrap();
+        assert_eq!(lifetime.strong_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn preparation_decision_inventory_prunes_retired_witnesses_and_rejects_live_overflow() {
+    let gate = Arc::new(PreparationReadGate::default());
+    for nonce in 0..65u8 {
+        let child = Arc::new(());
+        gate.decide([nonce; 32], false, Some(Arc::downgrade(&child)));
+        drop(child);
+    }
+    let (count, overflow) = {
+        let state = gate.state.lock().unwrap();
+        (state.decisions.len(), state.overflow)
+    };
+    assert!(count <= 1 && !overflow);
+    let dead = {
+        let child = Arc::new(());
+        Arc::downgrade(&child)
+    };
+    gate.decide([90; 32], false, Some(dead));
+    let count = gate.state.lock().unwrap().decisions.len();
+    assert_eq!(
+        count, 0,
+        "a late retired server cannot create a pending decision"
+    );
+    let live: Vec<_> = (0..64).map(|_| Arc::new(())).collect();
+    for (nonce, child) in live.iter().enumerate() {
+        gate.decide([nonce as u8; 32], true, Some(Arc::downgrade(child)));
+    }
+    let (count, overflow) = {
+        let state = gate.state.lock().unwrap();
+        (state.decisions.len(), state.overflow)
+    };
+    assert_eq!(count, 64);
+    assert!(!overflow);
+    let extra = Arc::new(());
+    gate.decide([99; 32], true, Some(Arc::downgrade(&extra)));
+    let (count, overflow) = {
+        let state = gate.state.lock().unwrap();
+        (state.decisions.len(), state.overflow)
+    };
+    assert_eq!(count, 64);
+    assert!(
+        overflow,
+        "never discard a live decision to admit another witness"
+    );
+    let refused = tokio::spawn(async move {
+        gate.wait([99; 32]).await;
+    })
+    .await;
+    assert!(refused.unwrap_err().is_panic());
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_functional_recovery_keeps_all_predicates_after_the_receipt_budget() {
+    let changed = Notify::new();
+    let state = std::cell::Cell::new(QueuedRecoverySnapshot {
+        rows_complete: false,
+        public_receipt: false,
+        pair_retired: false,
+    });
+    let started = tokio::time::Instant::now();
+    let mut recovery = Box::pin(super::functional_account_convergence(
+        observe_queued_recovery(&changed, || state.get()),
+    ));
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(8_001)).await;
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    for incomplete in [
+        QueuedRecoverySnapshot {
+            rows_complete: false,
+            public_receipt: true,
+            pair_retired: true,
+        },
+        QueuedRecoverySnapshot {
+            rows_complete: true,
+            public_receipt: false,
+            pair_retired: true,
+        },
+        QueuedRecoverySnapshot {
+            rows_complete: true,
+            public_receipt: true,
+            pair_retired: false,
+        },
+    ] {
+        state.set(incomplete);
+        changed.notify_one();
+        assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    }
+    tokio::time::advance(Duration::from_millis(20_999)).await;
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    state.set(QueuedRecoverySnapshot {
+        pair_retired: true,
+        ..state.get()
+    });
+    changed.notify_one();
+    assert!(recovery.await.is_ok());
+    assert_eq!(started.elapsed(), Duration::from_secs(29));
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_functional_recovery_fails_without_actual_pair_retirement() {
+    let changed = Notify::new();
+    let mut recovery = Box::pin(super::functional_account_convergence(
+        observe_queued_recovery(&changed, || QueuedRecoverySnapshot {
+            rows_complete: true,
+            public_receipt: true,
+            pair_retired: false,
+        }),
+    ));
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(8_001)).await;
+    changed.notify_one();
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(21_999)).await;
+    assert!(
+        recovery.await.is_err(),
+        "functional convergence still requires the real pair to retire before its watchdog"
+    );
+}
+
 struct ReleaseQueuedReads(Arc<Semaphore>);
 impl Drop for ReleaseQueuedReads {
     fn drop(&mut self) {
         self.0.close();
+    }
+}
+// This gate runs only after the local maintenance helpers have returned and
+// released their journal, document, log and membership guards. It isolates the
+// parent scheduler's wait dependency from contention on shared storage locks.
+#[derive(Default)]
+struct LocalMaintenanceGate {
+    armed: std::sync::atomic::AtomicBool,
+    entered: Notify,
+    released: (Mutex<bool>, std::sync::Condvar),
+}
+impl LocalMaintenanceGate {
+    fn hold_if_armed(&self) {
+        if !self.armed.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let (released, changed) = &self.released;
+        let mut released = released.lock().unwrap();
+        self.entered.notify_one();
+        while !*released {
+            released = changed.wait(released).unwrap();
+        }
+    }
+    fn release(&self) {
+        let (released, changed) = &self.released;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+    }
+    fn held(&self) -> bool {
+        !*self.released.0.lock().unwrap()
+    }
+}
+struct ReleaseLocalMaintenance(Arc<LocalMaintenanceGate>);
+impl Drop for ReleaseLocalMaintenance {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 fn effective_after(request: &DocumentRequest) -> Option<crate::node::AccountDocumentKey> {
@@ -193,20 +546,107 @@ fn install_owner_group(owner: &Node, external: &Node, group: ConversationId) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page() {
-    Box::pin(run_queued_source(false, false)).await;
+    Box::pin(run_queued_source(false, false, false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_terminal_reuses_completed_background_before_stale_foreground_suffix() {
-    Box::pin(run_queued_source(true, false)).await;
+    Box::pin(run_queued_source(true, false, false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_source_ignores_retired_natural_request_before_capturing_live_resume() {
-    Box::pin(run_queued_source(true, true)).await;
+    Box::pin(run_queued_source(true, true, false, false)).await;
 }
 
-async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_source_retains_live_natural_hold_through_forced_early_cancellation() {
+    Box::pin(run_queued_source(false, false, true, false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held() {
+    Box::pin(run_queued_source(false, false, false, true)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_scheduler_retains_blocked_local_maintenance_until_actual_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = node(&dir.path().join("source"), &Account::generate());
+    let gate = Arc::new(LocalMaintenanceGate::default());
+    let _release = ReleaseLocalMaintenance(gate.clone());
+    gate.armed.store(true, std::sync::atomic::Ordering::Release);
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let gate = gate.clone();
+        move |_, phase| {
+            if phase.starts_with("operation_owner phase=legacy_publication_end ") {
+                gate.hold_if_armed();
+            }
+        }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let worker = tokio::spawn(source.clone().run_accept_loop(listener));
+    super::cold_account_setup(gate.entered.notified())
+        .await
+        .unwrap();
+    source.runtime_work.close();
+    worker.abort();
+    // Closed admission can retire a supervised arm before abort is observed.
+    // Either route must still retain the actual blocked storage admission.
+    if let Err(error) = worker.await {
+        assert!(
+            error.is_cancelled(),
+            "accept owner failed while retiring: {error}"
+        );
+    }
+    let drained = source.runtime_work.drain();
+    tokio::pin!(drained);
+    assert!(
+        futures_util::poll!(drained.as_mut()).is_pending(),
+        "cancelling the scheduler cannot retire its still-blocked local storage closure"
+    );
+    gate.release();
+    super::cold_account_setup(drained).await.unwrap();
+    *source.account_client_test_hook.lock().unwrap() = None;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_maintenance_panic_propagates_through_actual_accept_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = node(&dir.path().join("source"), &Account::generate());
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(|_, phase| {
+        if phase.starts_with("operation_owner phase=legacy_publication_end ") {
+            panic!("injected local maintenance panic");
+        }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let worker = tokio::spawn(source.clone().run_accept_loop(listener));
+    let failure = super::cold_account_setup(worker)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        failure.is_panic(),
+        "storage worker panic cannot become normal accept-owner completion"
+    );
+    let panic = failure.into_panic();
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"injected local maintenance panic")
+    );
+    source.runtime_work.close();
+    super::cold_account_setup(source.runtime_work.drain())
+        .await
+        .unwrap();
+    *source.account_client_test_hook.lock().unwrap() = None;
+}
+
+async fn run_queued_source(
+    gate_terminal: bool,
+    delay_retired_request: bool,
+    force_early_cancel: bool,
+    gate_local_maintenance: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let a = node(&dir.path().join("a"), &account);
@@ -322,7 +762,21 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     let origins = Arc::new(Mutex::new(Vec::new()));
     let b_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let recovery_changed = Arc::new(Notify::new());
+    let local_maintenance = Arc::new(LocalMaintenanceGate::default());
+    let _release_local_maintenance = ReleaseLocalMaintenance(local_maintenance.clone());
+    let (held_dispatch_tx, held_dispatch_rx) = oneshot::channel();
+    let held_dispatch_tx = Arc::new(Mutex::new(Some(held_dispatch_tx)));
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
+    let preparation_read = Arc::new(PreparationReadGate::default());
+    let _release_preparation_read = ReleasePreparationRead(preparation_read.clone());
+    let setup_cancellation = Arc::new(SetupCancellationGate::default());
+    let _release_setup_cancellation = ReleaseSetupCancellation(setup_cancellation.clone());
+    // Independent bounded owner rings keep frequent requester maintenance from
+    // evicting the executor's last stalled phase. Snapshot before recovery.
+    let executor_owner_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let requester_owner_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let clock = std::time::Instant::now();
     let operation = Arc::new(Mutex::new(None));
     let pages = Arc::new(Mutex::new(ControlTestPages::default()));
@@ -345,7 +799,15 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let trace = trace.clone();
         let peer = reference.identity.public();
         let terminal_published = terminal_published.clone();
+        let owner_trace = executor_owner_trace.clone();
+        let admitted = admitted.clone();
         move |observed, phase| {
+            if admitted.load(std::sync::atomic::Ordering::Acquire)
+                && (phase.starts_with("operation_owner ")
+                    || phase.starts_with("operation_publication_owner "))
+            {
+                record_b_trace(&owner_trace, clock, "B_owner", phase.clone());
+            }
             if phase.starts_with("operation_local_published") {
                 if let Some(source) = source.upgrade() {
                     let snapshot = result_snapshot(&source, group_b, *operation.lock().unwrap());
@@ -417,6 +879,9 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let peer_a = a.identity.public();
         let peer_b = b.identity.public();
+        let own = reference.identity.public();
+        let local_maintenance = local_maintenance.clone();
+        let held_dispatch_tx = held_dispatch_tx.clone();
         let requester = Arc::downgrade(&reference);
         let retired_publication_key = crate::node::AccountDocumentKey::GroupLegacyOperation {
             channel: hex::encode([1u8; 32]),
@@ -439,7 +904,45 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let operation = operation.clone();
         let b_readiness = b_readiness.clone();
         let demand_dispatch = demand_dispatch.clone();
+        let owner_trace = requester_owner_trace.clone();
+        let setup_trace = setup_trace.clone();
+        let first_held_task = first_held_task.clone();
+        let setup_cancellation = setup_cancellation.clone();
         move |peer, phase| {
+            // Copy first, so the wait retains no diagnostic mutex guard.
+            let held_task = *first_held_task.lock().unwrap();
+            if peer == peer_a
+                && let Some(task) = held_task
+                && phase.starts_with(&format!("control_cancel task={task:?} "))
+            {
+                record_setup_milestone(&setup_trace, clock, "first_A_cancel", phase.clone());
+                if let Some(published) = setup_cancellation.before_cancel(task) {
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "first_A_cancel_released",
+                        format!("task={task:?} canonical_published={published} {phase}"),
+                    );
+                }
+            }
+            if peer == peer_a
+                && phase.starts_with("page_end ")
+                && held_task == tokio::task::try_id()
+            {
+                record_setup_milestone(&setup_trace, clock, "first_A_terminal", phase.clone());
+            }
+            if admitted.load(std::sync::atomic::Ordering::Acquire)
+                && (phase.starts_with("operation_owner ")
+                    || phase.starts_with("operation_publication_owner "))
+            {
+                record_b_trace(&owner_trace, clock, "requester_owner", phase.clone());
+            }
+            if gate_local_maintenance
+                && peer == own
+                && phase.starts_with("operation_owner phase=legacy_publication_end ")
+            {
+                local_maintenance.hold_if_armed();
+            }
             if peer == peer_a || peer == peer_b {
                 pages.lock().unwrap().observe(&phase);
             }
@@ -451,6 +954,12 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                     .unwrap()
                     .is_some_and(|id| page.contains_demand(id))
             {
+                if gate_local_maintenance
+                    && local_maintenance.held()
+                    && let Some(sender) = held_dispatch_tx.lock().unwrap().take()
+                {
+                    let _ = sender.send(());
+                }
                 // Open the window at the exact committed-demand dispatch.
                 // Later recovery pages remain observable after it completes.
                 demand_dispatch
@@ -538,6 +1047,20 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 && phase.starts_with("page_end")
                 && phase.contains("pending=true after=true")
             {
+                if let Some(page) = pages.lock().unwrap().task(tokio::task::id()) {
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "first_B_partial",
+                        format!(
+                            "task={:?} nonce={} request_checkpoint={:?} origin={} validated={phase}",
+                            page.task,
+                            hex::encode(page.request.operation.as_ref().unwrap().nonce),
+                            effective_after(&page.request),
+                            page.origin
+                        ),
+                    );
+                }
                 b_partial.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             if peer == peer_b
@@ -547,6 +1070,26 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 b_retired.store(true, std::sync::atomic::Ordering::Relaxed);
                 recovery_changed.notify_one();
             }
+        }
+    }));
+    *reference.account_document_read_test_hook.lock().unwrap() = Some(Arc::new({
+        let exact = a.identity.public();
+        let gate = preparation_read.clone();
+        let pages = pages.clone();
+        move |peer, request| {
+            let exact = exact.clone();
+            let gate = gate.clone();
+            let pages = pages.clone();
+            Box::pin(async move {
+                let live = pages.lock().unwrap().live_request(&request).is_some();
+                if peer == exact
+                    && request.domain == AccountDocumentDomain::GroupControl
+                    && let Some(probe) = request.operation.as_ref()
+                    && live
+                {
+                    gate.wait(probe.nonce).await;
+                }
+            })
         }
     }));
     *a.account_session_test_hook.lock().unwrap() = Some(Arc::new({
@@ -563,6 +1106,10 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let resumed_task = resumed_task.clone();
         let retired_request_rejected = retired_request_rejected.clone();
         let rejected_tx = rejected_tx.clone();
+        let setup_trace = setup_trace.clone();
+        let first_held_task = first_held_task.clone();
+        let setup_cancellation = setup_cancellation.clone();
+        let preparation_read = preparation_read.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let release = release.clone();
@@ -577,6 +1124,10 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             let resumed_task = resumed_task.clone();
             let retired_request_rejected = retired_request_rejected.clone();
             let rejected_tx = rejected_tx.clone();
+            let setup_trace = setup_trace.clone();
+            let first_held_task = first_held_task.clone();
+            let setup_cancellation = setup_cancellation.clone();
+            let preparation_read = preparation_read.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -588,6 +1139,19 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                     .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
                 else {
                     return;
+                };
+                // SessionReady can reach the client before this callback
+                // decides whether the genuine request establishes the hold.
+                let mut read_decision = PreparationServerDecision {
+                    gate: preparation_read,
+                    nonce: request.operation.as_ref().map(|probe| probe.nonce),
+                    lifetime: {
+                        let observed = pages.lock().unwrap();
+                        observed
+                            .request(&request)
+                            .and_then(|page| observed.lifetime(page.task))
+                    },
+                    decided: false,
                 };
                 let first_pending = first_tx.lock().unwrap().is_some();
                 if first_pending
@@ -608,6 +1172,9 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                     && delay_retired_request
                     && !delayed_once.swap(true, std::sync::atomic::Ordering::Relaxed)
                 {
+                    // This old adversarial request must retain its real read
+                    // lifetime while waiting for cancellation, not our hold.
+                    read_decision.decide(false);
                     let page = pages.lock().unwrap().request(&request).unwrap();
                     // A real authenticated publication cancels this exact old
                     // client while its acknowledged server callback is delayed.
@@ -649,7 +1216,29 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 let first = first_tx.lock().unwrap().take();
                 if let Some(first) = first {
                     assert!(effective_after(&request).is_none());
-                    let _ = first.send(page.task);
+                    {
+                        let mut held = first_held_task.lock().unwrap();
+                        setup_cancellation.arm(page.task);
+                        *held = Some(page.task);
+                    }
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "first_A_held",
+                        format!(
+                            "task={:?} nonce={} origin={}",
+                            page.task,
+                            hex::encode(request.operation.as_ref().unwrap().nonce),
+                            page.origin
+                        ),
+                    );
+                    let lifetime = pages
+                        .lock()
+                        .unwrap()
+                        .lifetime(page.task)
+                        .expect("the exact natural child has an observed weak lifetime");
+                    read_decision.decide(true);
+                    let _ = first.send((page.task, lifetime));
                     let _ = release.acquire().await;
                 } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
                     && dispatch.resumed
@@ -662,6 +1251,21 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                         let _ = resumed.send(());
                         let _ = release.acquire().await;
                     }
+                } else if dispatch.resumed && !dispatch.replacement && dispatch.protected {
+                    // The preceding capture condition rejected this eligible
+                    // resume because no B partial had yet been observed.
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "early_A_resume_ignored",
+                        format!(
+                            "task={:?} nonce={} request_checkpoint={:?} origin={}",
+                            page.task,
+                            hex::encode(request.operation.as_ref().unwrap().nonce),
+                            effective_after(&request),
+                            page.origin
+                        ),
+                    );
                 }
             })
         }
@@ -792,7 +1396,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         }
     }));
     reference.account_sync_notify.notify_one();
-    let first_task = super::cold_account_setup(async {
+    let (first_task, first_task_lifetime) = super::cold_account_setup(async {
         let task = first_rx.await?;
         if delay_retired_request { rejected_rx.await?; }
         Ok::<_, oneshot::error::RecvError>(task)
@@ -806,14 +1410,49 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             "the delayed historical request is rejected before canonical publication"
         );
     }
+    let first_active = pages.lock().unwrap().is_active(first_task);
     assert!(
-        pages.lock().unwrap().is_active(first_task),
+        first_active,
         "the exact natural A hold must remain live at canonical B publication"
     );
-    let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
-    super::cold_account_setup(resume_rx)
+    let keys = super::cold_account_setup(async {
+        if force_early_cancel {
+            // One of the same 66 canonical signed rows, not an empty Wake or
+            // an extra row. Force cancellation before the rest are published.
+            crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 1);
+            record_setup_milestone(&setup_trace, clock, "forced_B1_publication", format!("canonical_rows=1 wake_token={:?}", b.account_wake_token_for_test()));
+            // The publication's automatic authenticated Wake causes the
+            // cancellation. Do not open another connection while the gate
+            // can block the reference's combined accept/scheduler owner.
+            setup_cancellation.entered.notified().await;
+            let entered = setup_cancellation.state.lock().unwrap().entered;
+            assert!(entered);
+            let unrelated_wake = setup_trace.lock().unwrap().iter().any(|row| row.1 == "first_A_cancel" && row.3.ends_with("reason=wake"));
+            assert!(unrelated_wake, "the forced control must reach the exact unrelated-Wake cancellation");
+            let first_active = pages.lock().unwrap().is_active(first_task);
+            assert!(first_active);
+        }
+        record_setup_milestone(&setup_trace, clock, "B66_publication_begin", format!("first_A_task={first_task:?}"));
+        let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
+        // Keep the actual child's Weak separately from the bounded history;
+        // never retain a strong Arc or accept retirement as a live hold.
+        let (ledger_active, origin_retained) = {
+            let observed = pages.lock().unwrap();
+            (observed.is_active(first_task), observed.lifetime(first_task).is_some())
+        };
+        let direct_child_alive = first_task_lifetime.strong_count() > 0;
+        let setup_snapshot = setup_trace.lock().unwrap().clone();
+        let phase_snapshot = trace.lock().unwrap().clone();
+        assert!(ledger_active,
+            "natural A retired during canonical publication: task={first_task:?} direct_child_alive={direct_child_alive} origin_retained={origin_retained} elapsed_ms={} setup={setup_snapshot:?} phases={phase_snapshot:?}", clock.elapsed().as_millis());
+        record_setup_milestone(&setup_trace, clock, "B66_publication_end", format!("first_A_task={first_task:?}"));
+        // Permanently open before the protected resume and real operation.
+        preparation_read.release();
+        setup_cancellation.publish_complete();
+        resume_rx.await.map(|()| keys)
+    })
         .await
-        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), trace.lock().unwrap()))
+        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; setup={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), setup_trace.lock().unwrap(), trace.lock().unwrap()))
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
     let saved = saved_after
@@ -844,6 +1483,23 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
     *operation.lock().unwrap() = Some(id);
+    if gate_local_maintenance {
+        local_maintenance
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+        reference.account_sync_notify.notify_one();
+        super::cold_account_setup(local_maintenance.entered.notified())
+            .await
+            .expect(
+                "requester maintenance outside shared storage guards is held before B admission",
+            );
+        record_b_trace(
+            &trace,
+            clock,
+            "fixture",
+            "requester_local_maintenance_held".into(),
+        );
+    }
     record_b_trace(&trace, clock, "fixture", "B_admission_begin".into());
     b_retired.store(false, std::sync::atomic::Ordering::Relaxed);
     let accepted = reference
@@ -871,7 +1527,26 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     record_b_trace(&trace, clock, "fixture", "B_admitted".into());
     assert_eq!(accepted.executions.len(), 1);
     assert_eq!(accepted.executions[0].device_id, b.user_id());
-    let receipt = tokio::time::timeout(Duration::from_secs(8), async {
+    let receipt_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let held_dispatch = if gate_local_maintenance {
+        let observed = tokio::time::timeout_at(receipt_deadline, held_dispatch_rx).await;
+        local_maintenance.release();
+        record_b_trace(
+            &trace,
+            clock,
+            "fixture",
+            format!(
+                "requester_local_maintenance_released dispatch_while_held={}",
+                matches!(&observed, Ok(Ok(())))
+            ),
+        );
+        Some(observed)
+    } else {
+        None
+    };
+    let receipt = tokio::time::timeout_at(receipt_deadline, async {
+        let mut executor_committed_observed = false;
+        let mut requester_committed_observed = false;
         loop {
             let local = reference
                 .account_group_operation_status(&account.account_id(), id)
@@ -879,6 +1554,32 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             let remote = b
                 .account_group_operation_status(&account.account_id(), id)
                 .unwrap();
+            if !executor_committed_observed
+                && remote
+                    .as_ref()
+                    .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+            {
+                executor_committed_observed = true;
+                record_b_trace(
+                    &executor_owner_trace,
+                    clock,
+                    "fixture",
+                    "B_executor_committed_first_observed".into(),
+                );
+            }
+            if !requester_committed_observed
+                && local
+                    .as_ref()
+                    .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+            {
+                requester_committed_observed = true;
+                record_b_trace(
+                    &requester_owner_trace,
+                    clock,
+                    "fixture",
+                    "B_requester_committed_first_observed".into(),
+                );
+            }
             if let (Some(local), Some(remote)) = (local, remote)
                 && local.phase == AccountGroupOperationPhase::Committed
                 && remote.phase == AccountGroupOperationPhase::Committed
@@ -913,6 +1614,15 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         }
         .into(),
     );
+    // Recovery can make a late terminal look timely. Preserve each owner's
+    // bounded body-free phase history at the original receipt boundary.
+    eprintln!(
+        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} delay_retired_request={delay_retired_request} receipt_ok={} setup={:?} executor={:?} requester={:?}",
+        receipt.is_ok(),
+        setup_trace.lock().unwrap().clone(),
+        executor_owner_trace.lock().unwrap().clone(),
+        requester_owner_trace.lock().unwrap().clone(),
+    );
     release_intent.close();
     intent_entered.close();
     wake_changed.close();
@@ -936,19 +1646,21 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     };
     let recovery_started = clock.elapsed();
     let mut last_recovery_observation = None;
-    let recovered = tokio::time::timeout(
-        Duration::from_secs(8),
-        observe_queued_recovery(&recovery_changed, || {
+    // The private receipt above retains its measured eight-second bound.
+    // After releasing A, full corpus replay and retirement of both independent
+    // comparisons are functional convergence under ordinary cross-peer fairness.
+    let recovered =
+        super::functional_account_convergence(observe_queued_recovery(&recovery_changed, || {
             let snapshot = recovery_snapshot();
             last_recovery_observation = Some((clock.elapsed(), snapshot));
             snapshot
-        }),
-    )
-    .await;
+        }))
+        .await;
     let recovery_at_completion = (clock.elapsed(), recovery_snapshot());
     *a.account_session_test_hook.lock().unwrap() = None;
     *b.account_session_test_hook.lock().unwrap() = None;
     *b.account_client_test_hook.lock().unwrap() = None;
+    *reference.account_document_read_test_hook.lock().unwrap() = None;
     *reference.account_session_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;
     for (_, node) in &devices {
@@ -959,6 +1671,13 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
             .await
             .expect("all queued-source owners drain");
+    }
+    if let Some(observed) = held_dispatch {
+        assert!(
+            matches!(observed, Ok(Ok(()))),
+            "the exact selected B request must dispatch while unrelated local maintenance outside shared storage guards remains held; phases={:?}",
+            trace.lock().unwrap()
+        );
     }
     assert!(
         recovered.is_ok(),

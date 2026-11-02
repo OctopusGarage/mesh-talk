@@ -14,6 +14,16 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::net::TcpStream;
+// The authenticated request is already sent and SessionReady acknowledged.
+// Test-only preparation waits precede the unchanged production read clocks.
+#[cfg(test)]
+pub(in crate::node) type AccountDocumentReadTestHook = dyn Fn(
+        crate::identity::device::PublicIdentity,
+        DocumentRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
 /// A validated exchange proves protocol support for one full source identity.
 /// Its local observation time retires only failures predating that exchange.
 pub(in crate::node) struct GroupProtocolSupport {
@@ -1209,6 +1219,13 @@ impl Node {
                 || !self.account_allowed(channel.peer_identity(), channel.peer_announcement()))
         {
             return Err(failure());
+        }
+        #[cfg(test)]
+        {
+            let hook = self.account_document_read_test_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(peer.public.clone(), request.clone()).await;
+            }
         }
         let mut pending: Option<(AccountDocumentMeta, zeroize::Zeroizing<Vec<u8>>)> = None;
         let mut group_records = Vec::new();
@@ -3645,16 +3662,35 @@ mod group_control_tests {
         fixture.servers.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn access_only_v5_keeps_its_role_scope_when_operation_rows_exist() {
-        let mut fixture = UpgradeFixture::new().await;
-        let group = fixture
-            .source
-            .create_channel("legacy known roles", vec![])
-            .await
-            .unwrap();
-        fixture.source.publish_account_group_access_for(group);
-        install_operation_head(&fixture);
+    struct AccessOnlyReply {
+        complete: DocumentComplete,
+        roles: usize,
+    }
+
+    fn install_received_role(fixture: &UpgradeFixture, meta: AccountDocumentMeta, payload: &[u8]) {
+        assert!(matches!(meta.key, AccountDocumentKey::GroupControl { .. }));
+        assert_eq!(meta.writer_device, fixture.peer.public.user_id());
+        assert_eq!(meta.content_len as usize, payload.len());
+        if !meta.tombstone {
+            let head = crate::node::account_group::wire::GroupControlHead::decode(
+                payload,
+                &fixture.target.account.public().ed25519_pub,
+            )
+            .expect("the received role payload must retain its actual signed proof");
+            assert_eq!(head.proof.public(), fixture.peer.public);
+        }
+        let installed = fixture
+            .target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(meta, payload);
+        installed.expect(
+            "received signed role metadata and payload must validate through their store owner",
+        );
+    }
+
+    async fn receive_access_only_v5(fixture: &UpgradeFixture) -> AccessOnlyReply {
         let request = DocumentRequest {
             version: 5,
             account_id: fixture.target.account_id(),
@@ -3669,43 +3705,251 @@ mod group_control_tests {
                 &fixture.peer,
                 AccountSyncVersion::V2,
                 AccountHistoryFrame::DocumentsRequest {
-                    body: serde_json::to_vec(&request).unwrap(),
+                    body: request.encode(),
                 },
             )
             .await
             .unwrap();
         let mut roles = 0;
-        loop {
+        let mut pending: Option<AccountDocumentMeta> = None;
+        let mut payload = Vec::new();
+        let mut previous = None;
+        let complete = loop {
             let bytes = channel.recv().await.unwrap();
             match AccountHistoryFrame::decode_versioned(&bytes).unwrap().1 {
                 AccountHistoryFrame::DocumentHeader { body } => {
+                    if let Some(meta) = pending.take() {
+                        install_received_role(fixture, meta, &payload);
+                    }
                     let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
-                    assert!(matches!(meta.key, AccountDocumentKey::GroupControl { .. }));
+                    assert!(
+                        matches!(meta.key, AccountDocumentKey::GroupControl { .. }),
+                        "the legacy role scope excludes ordinary, legacy-operation and personal rows"
+                    );
+                    assert!(previous.as_ref().is_none_or(|key| key < &meta.key));
+                    assert!(meta.content_len as usize <= meta.key.limit());
+                    previous = Some(meta.key.clone());
+                    pending = Some(meta);
+                    payload.clear();
                     roles += 1;
                 }
-                AccountHistoryFrame::DocumentsComplete { body } => {
-                    let complete: DocumentComplete = serde_json::from_slice(&body).unwrap();
-                    assert!(complete.operation.is_none());
-                    assert_eq!(
-                        complete.digest,
-                        fixture
-                            .source
-                            .account_documents
-                            .lock()
-                            .unwrap()
-                            .digest_scope(AccountDocumentDomain::GroupControl, false)
-                    );
-                    break;
+                AccountHistoryFrame::DocumentChunk { bytes } => {
+                    let meta = pending
+                        .as_ref()
+                        .expect("role chunks require their signed header");
+                    assert!(payload.len().saturating_add(bytes.len()) <= meta.content_len as usize);
+                    payload.extend(bytes);
                 }
-                AccountHistoryFrame::DocumentChunk { .. } => {}
+                AccountHistoryFrame::DocumentsComplete { body } => {
+                    if let Some(meta) = pending.take() {
+                        install_received_role(fixture, meta, &payload);
+                    }
+                    break serde_json::from_slice::<DocumentComplete>(&body).unwrap();
+                }
                 _ => panic!("the legacy role scope must retain its existing frame kinds"),
             }
-        }
-        assert!(roles > 0);
+        };
+        assert_eq!(complete.domain, AccountDocumentDomain::GroupControl);
+        assert!(complete.enabled);
+        assert!(complete.operation.is_none());
+        assert!(
+            complete.next.is_none(),
+            "these scope fixtures fit one complete page"
+        );
         channel.recycle(&fixture.target);
-        fixture.servers.shutdown().await;
+        AccessOnlyReply { complete, roles }
     }
 
+    fn assert_received_role_digest(fixture: &UpgradeFixture, reply: &AccessOnlyReply) {
+        // Bind the completion to the actual validated wire rows. A later source
+        // publication belongs to another epoch, not this completed response.
+        let received = fixture
+            .target
+            .account_documents
+            .lock()
+            .unwrap()
+            .digest_scope(AccountDocumentDomain::GroupControl, false);
+        assert_eq!(
+            reply.complete.digest, received,
+            "the role-only digest must cover its actual signed received scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn access_only_v5_keeps_its_role_scope_when_operation_rows_exist() {
+        let mut fixture = UpgradeFixture::inbound_only().await;
+        let group = fixture
+            .source
+            .create_channel("legacy known roles", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access_for(group);
+        let operation = install_operation_head(&fixture);
+        let reply = receive_access_only_v5(&fixture).await;
+        fixture.stop_provider().await;
+        assert!(reply.roles > 0);
+        assert!(fixture.target.account_document_meta(&operation).is_none());
+        assert_received_role_digest(&fixture, &reply);
+    }
+
+    #[tokio::test]
+    async fn completed_v5_role_digest_retains_received_epoch_after_source_publication() {
+        let mut fixture = UpgradeFixture::inbound_only().await;
+        let group = fixture
+            .source
+            .create_channel("received role epoch", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access_for(group);
+        let operation = install_operation_head(&fixture);
+        let reply = receive_access_only_v5(&fixture).await;
+        // Deliberately advance the real source after the completed reply, before
+        // its consumer asserts integrity. Never substitute a delay for this event.
+        let later = fixture
+            .source
+            .create_channel("later source epoch", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access_for(later);
+        let live = fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .digest_scope(AccountDocumentDomain::GroupControl, false);
+        fixture.stop_provider().await;
+        assert!(reply.roles > 0);
+        assert_ne!(
+            reply.complete.digest, live,
+            "the controlled publication must advance the live source epoch"
+        );
+        assert!(fixture.target.account_document_meta(&operation).is_none());
+        assert!(
+            fixture
+                .target
+                .account_document_meta(&AccountDocumentKey::GroupControl {
+                    channel: hex::encode(later.as_bytes()),
+                    source_device: fixture.source.user_id(),
+                })
+                .is_none(),
+            "a post-response role cannot enter the received scope"
+        );
+        assert_received_role_digest(&fixture, &reply);
+    }
+
+    #[tokio::test]
+    async fn authenticated_preparation_wait_precedes_unchanged_document_read_clock() {
+        struct Release(std::sync::Arc<tokio::sync::Semaphore>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+        for hold_read in [false, true] {
+            let mut fixture = UpgradeFixture::inbound_only().await;
+            fixture.prove_support().await;
+            let key = publish_legacy_control_page_for_test(&fixture.source, 1).remove(0);
+            let expected = fixture.source.account_document_meta(&key).unwrap();
+            let server_ready = Arc::new(tokio::sync::Notify::new());
+            let client_ready = Arc::new(tokio::sync::Notify::new());
+            let server_release = Arc::new(tokio::sync::Semaphore::new(0));
+            let client_release = Arc::new(tokio::sync::Semaphore::new(0));
+            let _server_release = Release(server_release.clone());
+            let _client_release = Release(client_release.clone());
+            *fixture.source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+                let ready = server_ready.clone();
+                let release = server_release.clone();
+                let exact = fixture.target.identity.public();
+                move |peer, frame| {
+                    let ready = ready.clone();
+                    let release = release.clone();
+                    let exact = exact.clone();
+                    Box::pin(async move {
+                        if peer == exact
+                            && let AccountHistoryFrame::DocumentsRequest { body } = frame
+                            && DocumentRequest::decode(&body).is_some_and(|request| {
+                                request.domain == AccountDocumentDomain::GroupControl
+                            })
+                        {
+                            ready.notify_one();
+                            let _ = release.acquire().await;
+                        }
+                    })
+                }
+            }));
+            *fixture
+                .target
+                .account_document_read_test_hook
+                .lock()
+                .unwrap() = Some(Arc::new({
+                let ready = client_ready.clone();
+                let release = client_release.clone();
+                let exact = fixture.source.identity.public();
+                move |peer, request| {
+                    let ready = ready.clone();
+                    let release = release.clone();
+                    let exact = exact.clone();
+                    Box::pin(async move {
+                        if peer == exact && request.domain == AccountDocumentDomain::GroupControl {
+                            ready.notify_one();
+                            if hold_read {
+                                let _ = release.acquire().await;
+                            }
+                        }
+                    })
+                }
+            }));
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let target = fixture.target.clone();
+            let peer = fixture.peer.clone();
+            let pulling = tokio::spawn(async move {
+                let lifetime = Arc::new(());
+                started.send(Arc::downgrade(&lifetime)).unwrap();
+                let result = target
+                    .pull_account_documents_page(&peer, &mut DocumentSyncCursor::control())
+                    .await;
+                drop(lifetime);
+                result
+            });
+            let lifetime = observed.await.unwrap();
+            // This watchdog is cold authenticated arrival, not the operation bound.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                client_ready.notified().await;
+                server_ready.notified().await;
+            })
+            .await
+            .expect("both real SessionReady owners reached preparation");
+            tokio::time::pause();
+            // Explicit timeout stimulus: beyond the normal 30s zero-byte total
+            // budget. This is not elapsed-time readiness or a production extension.
+            tokio::time::advance(Duration::from_secs(31)).await;
+            if hold_read {
+                assert!(!pulling.is_finished());
+                assert!(lifetime.strong_count() > 0);
+                tokio::time::resume();
+                server_release.close();
+                client_release.close();
+                pulling.await.unwrap().unwrap();
+                assert_eq!(fixture.target.account_document_meta(&key), Some(expected));
+            } else {
+                // With no preparation hold, the actual unchanged read clock
+                // expires while the authenticated source still withholds its reply.
+                assert!(pulling.await.unwrap().is_err());
+                tokio::time::resume();
+                server_release.close();
+                client_release.close();
+                assert!(fixture.target.account_document_meta(&key).is_none());
+            }
+            assert_eq!(lifetime.strong_count(), 0);
+            *fixture
+                .target
+                .account_document_read_test_hook
+                .lock()
+                .unwrap() = None;
+            *fixture.source.account_session_test_hook.lock().unwrap() = None;
+            fixture.stop_provider().await;
+        }
+    }
     struct UpgradeFixture {
         _directory: tempfile::TempDir,
         source: Arc<Node>,
@@ -3713,8 +3957,18 @@ mod group_control_tests {
         peer: PeerRecord,
         servers: tokio::task::JoinSet<()>,
     }
+    enum UpgradeSourceOwner {
+        Runtime,
+        InboundOnly,
+    }
     impl UpgradeFixture {
         async fn new() -> Self {
+            Self::with_source_owner(UpgradeSourceOwner::Runtime).await
+        }
+        async fn inbound_only() -> Self {
+            Self::with_source_owner(UpgradeSourceOwner::InboundOnly).await
+        }
+        async fn with_source_owner(owner: UpgradeSourceOwner) -> Self {
             use crate::node::{account_devices::AccountDevice, account_documents::tests::node};
             let directory = tempfile::tempdir().unwrap();
             let account = Account::generate();
@@ -3741,7 +3995,32 @@ mod group_control_tests {
                 routes: vec![],
             };
             let mut servers = tokio::task::JoinSet::new();
-            servers.spawn(source.clone().run_accept_loop(listener));
+            match owner {
+                UpgradeSourceOwner::Runtime => {
+                    servers.spawn(source.clone().run_accept_loop(listener));
+                }
+                UpgradeSourceOwner::InboundOnly => {
+                    let serving = source.clone();
+                    servers.spawn(async move {
+                        let mut connections = tokio::task::JoinSet::new();
+                        loop {
+                            tokio::select! {
+                                incoming = listener.accept() => {
+                                    let (stream, _) = incoming.unwrap();
+                                    let serving = serving.clone();
+                                    let Some(permit) = serving.runtime_work.admit() else { return; };
+                                    connections.spawn(permit.track(Box::pin(async move {
+                                        if let Ok(channel) = serving.privacy_accept(stream).await {
+                                            serving.serve_connection(channel).await;
+                                        }
+                                    })));
+                                }
+                                _ = connections.join_next(), if !connections.is_empty() => {}
+                            }
+                        }
+                    });
+                }
+            }
             Self {
                 _directory: directory,
                 source,
@@ -3749,6 +4028,15 @@ mod group_control_tests {
                 peer,
                 servers,
             }
+        }
+        async fn stop_provider(&mut self) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                self.source.runtime_work.close();
+                self.target.runtime_work.close();
+                self.servers.shutdown().await;
+                self.source.runtime_work.drain().await;
+                self.target.runtime_work.drain().await;
+            }).await.expect("the protocol provider and its admitted work must retire within the teardown watchdog");
         }
         async fn prove_support(&self) {
             self.target
@@ -4395,55 +4683,16 @@ mod group_control_tests {
     }
     #[tokio::test]
     async fn access_only_v5_request_excludes_operation_rows_and_their_digest() {
-        let mut fixture = UpgradeFixture::new().await;
-        install_operation_head(&fixture);
-        let request = DocumentRequest {
-            version: 5,
-            account_id: fixture.target.account_id(),
-            domain: AccountDocumentDomain::GroupControl,
-            after: None,
-            known_digest: [0; 32],
-            operation: None,
-        };
-        let mut channel = fixture
-            .target
-            .begin_account_exchange(
-                &fixture.peer,
-                AccountSyncVersion::V2,
-                AccountHistoryFrame::DocumentsRequest {
-                    body: request.encode(),
-                },
-            )
-            .await
-            .unwrap();
-        let mut records = 0;
-        let digest = loop {
-            let bytes = channel.recv().await.unwrap();
-            match AccountHistoryFrame::decode_versioned(&bytes).unwrap().1 {
-                AccountHistoryFrame::DocumentHeader { .. } => records += 1,
-                AccountHistoryFrame::DocumentChunk { .. } => {}
-                AccountHistoryFrame::DocumentsComplete { body } => {
-                    break serde_json::from_slice::<DocumentComplete>(&body)
-                        .unwrap()
-                        .digest;
-                }
-                _ => panic!("expected document response"),
-            }
-        };
+        let mut fixture = UpgradeFixture::inbound_only().await;
+        let operation = install_operation_head(&fixture);
+        let reply = receive_access_only_v5(&fixture).await;
+        fixture.stop_provider().await;
         assert_eq!(
-            records, 0,
+            reply.roles, 0,
             "a peer without an explicit operation probe receives only access rows"
         );
-        assert_eq!(
-            digest,
-            fixture
-                .source
-                .account_documents
-                .lock()
-                .unwrap()
-                .digest_scope(AccountDocumentDomain::GroupControl, false)
-        );
-        fixture.servers.shutdown().await;
+        assert!(fixture.target.account_document_meta(&operation).is_none());
+        assert_received_role_digest(&fixture, &reply);
     }
     #[tokio::test]
     async fn operation_rows_are_not_installed_without_the_matching_completion_capability() {

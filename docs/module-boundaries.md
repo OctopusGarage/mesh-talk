@@ -1023,6 +1023,12 @@ immutable completion result. A canonical no-op still requires a durable parent
 view and never invents a public event ID. Affected source access and inventory
 publish through their existing signed owners before public fanout can wait on a
 slow member.
+Ordinary and legacy operation-document publishers own their per-Node unit
+ordering gate. Each group pass takes it before capturing the journal projection
+and retains it through signed store merge, with no caller-held journal, document,
+membership or delivery guard. The unit contains no durable payload, so recovering
+its poison does not recover or bypass a poisoned journal or store. No gate spans
+network work; invitation preparation precedes its admitted blocking local commit.
 
 Authenticated body-free sibling invalidations remain active independently of
 optional content categories. Mandatory control requests and results reuse that

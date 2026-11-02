@@ -130,6 +130,7 @@ const plan = {
   node: [],
   blockers: [],
 };
+const completed = output => ({ code: 0, output, stdout: output, stderr: "", outputTruncated: false });
 const binary = "/tmp/test-core";
 const artifact = JSON.stringify({
   reason: "compiler-artifact",
@@ -141,15 +142,11 @@ test("Rust inventory compiles only selected packages and rejects zero/ignored-on
   const calls = [];
   const run = async (program, args) => {
     calls.push([program, args]);
-    return {
-      code: 0,
-      output:
-        program === "cargo"
+    return completed(program === "cargo"
           ? artifact
           : args.includes("--ignored")
             ? "profile::ignored: test\n"
-            : "profile::actual: test\nprofile::ignored: test\n",
-    };
+            : "profile::actual: test\nprofile::ignored: test\n");
   };
   const prepared = await prepareRust(plan.rust, { run, log: () => {} });
   assert.equal(prepared[0].count, 1);
@@ -181,14 +178,11 @@ test("selected Rust execution uses Cargo so repository environment limits apply"
     log: () => {},
     run: async (program, args) => {
       calls.push([program, args]);
-      if (args.includes("--no-run")) return { code: 0, output: artifact };
-      if (args.includes("--list")) return {
-        code: 0,
-        output: args.includes("--ignored") ? "" : "profile::actual: test\n",
-      };
+      if (args.includes("--no-run")) return completed(artifact);
+      if (args.includes("--list")) return completed(args.includes("--ignored") ? "" : "profile::actual: test\n");
       assert.equal(program, "cargo");
       assert.deepEqual(args, ["test", "--locked", "-p", "core", "--lib", "--", "profile::"]);
-      return { code: 0, output: "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n" };
+      return completed("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n");
     },
   });
   assert.equal(calls.length, 4);
@@ -267,12 +261,9 @@ test("selected frontend and Node files remain literal argv and no full suite is 
               ],
             }),
           );
-        return {
-          code: 0,
-          output: args.includes("--outputFile")
+        return completed(args.includes("--outputFile")
             ? "passed"
-            : "# Subtest: validates behavior\r\nok 1 - validates behavior\r\n# pass 1\r\n",
-        };
+            : "# Subtest: validates behavior\r\nok 1 - validates behavior\r\n# pass 1\r\n");
       },
     },
   );
@@ -356,10 +347,7 @@ test("Node diagnostics with only skipped tests fail rather than authorizing an e
     executePlan(
       { rust: [], blockers: [], node: ["scripts/skip.test.mjs"], frontend: [] },
       {
-        run: async () => ({
-          code: 0,
-          output: "# tests 1\n# pass 0\n# skipped 1\n",
-        }),
+        run: async () => (completed("# tests 1\n# pass 0\n# skipped 1\n")),
         log: () => {},
       },
     ),
@@ -377,11 +365,7 @@ test("a synthetic passing Node file wrapper cannot stand in for declared tests",
         frontend: [],
       },
       {
-        run: async () => ({
-          code: 0,
-          output:
-            "# Subtest: scripts/empty.test.mjs\nok 1 - scripts/empty.test.mjs\n# pass 1\n",
-        }),
+        run: async () => (completed("# Subtest: scripts/empty.test.mjs\nok 1 - scripts/empty.test.mjs\n# pass 1\n")),
         log: () => {},
       },
     ),
@@ -400,7 +384,7 @@ for (const body of [
     executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/empty.test.mjs"] },
       { cwd: f.root, run: async (program, args, options) => {
         const result = spawnSync(program, args, { ...options, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
-        return { code: result.status, output: result.stdout + result.stderr };
+        return { code: result.status, output: result.stdout + result.stderr, stdout: result.stdout, stderr: result.stderr, outputTruncated: false };
       }, log: () => {} }),
     /zero.*Node/i,
   );
@@ -410,12 +394,12 @@ for (const name of ["ordinary test", "name # SKIP literal", "back\\slash", "nest
   const f = repository(t);
   const body = name === "nested"
     ? "import test from 'node:test'; test('parent', async t => { await t.test('child', () => {}); });"
-    : `import test from 'node:test'; test(${JSON.stringify(name)}, () => {});`;
+    : "import test from 'node:test'; test(process.env.MESH_FIXTURE_TEST_NAME, () => {});";
   f.write("scripts/passing.test.mjs", body);
   await executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/passing.test.mjs"] },
     { cwd: f.root, run: async (program, args, options) => {
-        const result = spawnSync(program, args, { ...options, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
-        return { code: result.status, output: result.stdout + result.stderr };
+        const result = spawnSync(program, args, { ...options, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined, MESH_FIXTURE_TEST_NAME: name } });
+        return { code: result.status, output: result.stdout + result.stderr, stdout: result.stdout, stderr: result.stderr, outputTruncated: false };
       }, log: () => {} });
 });
 
@@ -835,4 +819,15 @@ test("a malformed planning contract produces blocked feedback instead of a passi
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/blocked.json"), "utf8"));
   assert.equal(report.status, "blocked");
   assert(report.blockers.some(item => /capability/i.test(item)));
+});
+
+test("structured inventory and execution never accept stderr-only or partial proof", async () => {
+  for (const result of [
+    { code: 0, output: artifact, outputTruncated: false },
+    { ...completed(artifact), outputTruncated: true },
+  ]) await assert.rejects(prepareRust(plan.rust, { run: async () => result, log() {} }), /stdout|truncat/i);
+  const tap = "# Subtest: validates behavior\nok 1 - validates behavior\n# pass 1\n";
+  await assert.rejects(executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/stderr-only.test.mjs"] }, {
+    run: async () => ({ code: 0, stdout: "", stderr: tap, output: tap, outputTruncated: false }), log() {},
+  }), /zero.*Node/i);
 });

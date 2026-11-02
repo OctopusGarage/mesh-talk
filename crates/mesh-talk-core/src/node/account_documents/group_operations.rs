@@ -5,6 +5,27 @@ use crate::node::account_group::operations::wire::{
 };
 
 impl Node {
+    pub(in crate::node) fn lock_group_operation_publication(
+        &self,
+    ) -> std::sync::MutexGuard<'_, ()> {
+        use std::sync::TryLockError;
+        // Poison cannot invalidate this unit ordering gate: it contains no
+        // payload. Journal/store guards retain their own fatal poison policy.
+        match self.group_operation_publication.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "operation_owner phase=publication_contended".into()
+                });
+                self.group_operation_publication
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            }
+        }
+    }
+
     pub(super) fn operation_input_key(key: &AccountDocumentKey) -> Option<String> {
         match key {
             AccountDocumentKey::GroupOperation {
@@ -168,6 +189,7 @@ impl Node {
     }
     fn publish_account_group_operation_groups(&self, groups: &[crate::eventlog::ConversationId]) {
         for &group in groups {
+            let _publication = self.lock_group_operation_publication();
             #[cfg(test)]
             let phase_clock = std::time::Instant::now();
             #[cfg(test)]
@@ -275,6 +297,91 @@ mod input_tests {
         self,
         legacy_wire::{LegacyOperationFrame, LegacyOperationProjection},
     };
+
+    #[tokio::test]
+    async fn publication_unit_poison_recovers_without_poisoning_durable_owners() {
+        let directory = tempfile::tempdir().unwrap();
+        let account = crate::identity::account::Account::generate();
+        let source = super::super::tests::node(&directory.path().join("source"), &account);
+        let group = source
+            .create_channel("Before publication", vec![])
+            .await
+            .unwrap();
+        let id = source
+            .new_account_group_operation_id(&account.account_id())
+            .unwrap();
+        source
+            .submit_account_group_operation(
+                &account.account_id(),
+                id,
+                group,
+                crate::node::AccountGroupOperation::Rename {
+                    name: "After recovered publication".into(),
+                },
+            )
+            .unwrap();
+        source
+            .commit_account_group_control_without_publication_for_test(group, id)
+            .unwrap();
+        *source.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new(|_, phase| {
+            if phase.starts_with("operation_publication_owner ")
+                && phase.contains("phase=projection_begin ")
+            {
+                // The unit ordering guard is held; journal/document/log/member
+                // owners have not been entered by this publication.
+                panic!("injected publication ordering panic");
+            }
+        }));
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            source.publish_account_group_operations_for(group)
+        }));
+        *source.account_client_test_hook.lock().unwrap() = None;
+        assert!(interrupted.is_err());
+        assert!(source.group_operation_publication.is_poisoned());
+        assert!(!source.group_operations.is_poisoned());
+        assert!(!source.account_documents.is_poisoned());
+        // A poisoned try_lock error owns the acquired unit guard. Recover it
+        // directly; trying lock() again here would wait on that same guard.
+        source.publish_account_group_operations_for(group);
+        source.publish_account_group_legacy_operations();
+        let key = AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let document = source.account_document(&key).unwrap().unwrap();
+        let frame =
+            OperationFrame::decode(document.payload(), &account.public().ed25519_pub).unwrap();
+        let canonical = source
+            .retained_account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            canonical.phase,
+            crate::node::AccountGroupOperationPhase::Committed
+        );
+        assert!(
+            frame
+                .projection
+                .results
+                .iter()
+                .any(|row| row.status == canonical)
+        );
+        assert_eq!(frame.proof.public(), source.identity.public());
+        assert_eq!(frame.group, group);
+        assert_eq!(frame.revision, document.meta.revision);
+        let event = source
+            .log
+            .lock()
+            .unwrap()
+            .get(&canonical.committed_events[0])
+            .unwrap()
+            .clone();
+        assert!(event.verify_integrity() && event.verify_signature());
+        assert_eq!(
+            event.author.ed25519_pub(),
+            &source.identity.public().ed25519_pub
+        );
+    }
 
     #[tokio::test]
     async fn unchanged_local_operation_publication_does_not_repeat_signature_verification() {

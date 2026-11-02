@@ -7,6 +7,7 @@ import test from "node:test";
 
 import * as native from "../validation/native-build.mjs";
 const suffix = process.platform === "win32" ? ".exe" : "";
+const completed = output => ({ code: 0, output, stdout: output, stderr: "", outputTruncated: false });
 
 async function fixture(t) {
   assert.equal(typeof native.buildNative, "function", "source-pinned native build helper exists");
@@ -27,7 +28,7 @@ async function fixture(t) {
       await mkdir(path.dirname(path.join(root, file)), { recursive: true });
       await writeFile(path.join(root, file), `built from ${git(["rev-parse", "HEAD"])}: ${file}`);
     }
-    return { code: 0, output: program === "npm" ? "built" : relative.map(file => JSON.stringify({ reason: "compiler-artifact", target: { name: path.basename(file, suffix), kind: [args.includes("--example") ? "example" : "bin"] }, executable: path.join(root, file), fresh: true })).join("\n") };
+    return completed(program === "npm" ? "built" : relative.map(file => JSON.stringify({ reason: "compiler-artifact", target: { name: path.basename(file, suffix), kind: [args.includes("--example") ? "example" : "bin"] }, executable: path.join(root, file), fresh: true })).join("\n"));
   };
   const appBinary = path.join(root, `target/release/examples/native-contact-eval${suffix}`);
   const nodeBinary = path.join(root, `target/release/mesh-talk-node${suffix}`);
@@ -147,7 +148,7 @@ test("successful redirected Cargo output cannot stamp stale binaries from the pr
       await writeFile(executable, `current output ${name}`);
       records.push(JSON.stringify({ reason: "compiler-artifact", target: { name, kind: [args.includes("--example") ? "example" : "bin"] }, executable }));
     }
-    return { code: 0, output: records.join("\n") };
+    return completed(records.join("\n"));
   };
   await assert.rejects(f.build({ run }), /Cargo.*executable.*target\/release/i);
   assert.equal(await readFile(f.nodeBinary, "utf8"), staleNode, "old default output exists to expose accidental certification");
@@ -161,9 +162,9 @@ test("successful Cargo exit without every requested executable artifact cannot p
     const run = async (program, args, options) => {
       const result = await f.run(program, args, options);
       if (program !== "cargo") return result;
-      if (mode === "no-records") return { code: 0, output: "cargo finished successfully" };
+      if (mode === "no-records") return completed("cargo finished successfully");
       const records = result.output.split("\n").map(line => JSON.parse(line));
-      return { code: 0, output: records.filter(record => mode !== "missing-node" || record.target.name !== "mesh-talk-node").map(record => JSON.stringify(mode === "wrong-target-kind" ? { ...record, target: { ...record.target, kind: ["lib"] } } : record)).join("\n") };
+      return completed(records.filter(record => mode !== "missing-node" || record.target.name !== "mesh-talk-node").map(record => JSON.stringify(mode === "wrong-target-kind" ? { ...record, target: { ...record.target, kind: ["lib"] } } : record)).join("\n"));
     };
     await assert.rejects(f.build({ run }), /Cargo.*artifact/i);
     assert.equal((await f.verify()).buildVerified, false, mode);
@@ -195,4 +196,23 @@ test("platform-generated Tauri schemas do not dirty source or invalidate native 
   assert.equal(manifest.sourceSha, f.git(["rev-parse", "HEAD"]));
   assert.equal(native.nativeSourceIdentity(f.root).cleanSource, true);
   assert.equal((await f.verify()).buildVerified, true);
+});
+
+test("native artifact proof uses complete stdout rather than the combined human log", async t => {
+  const f = await fixture(t);
+  await f.build({ run: async (...args) => {
+    const result = await f.run(...args);
+    return args[0] === "cargo" ? { ...result, stderr: "progress-prefix ", output: `progress-prefix ${result.stdout}` } : result;
+  } });
+  assert.equal((await f.verify()).buildVerified, true);
+  for (const mode of ["missing", "truncated", "stderr-only"]) {
+    await assert.rejects(f.build({ run: async (...args) => {
+      const result = await f.run(...args);
+      if (args[0] !== "cargo") return result;
+      if (mode === "missing") { delete result.stdout; return result; }
+      if (mode === "truncated") return { ...result, outputTruncated: true };
+      return { ...result, stdout: "", stderr: result.stdout };
+    } }), /stdout|truncated|truncation|artifact/i);
+    assert.equal((await f.verify()).buildVerified, false, mode);
+  }
 });

@@ -256,6 +256,9 @@ pub struct Node {
     pub(in crate::node) account_client_test_hook:
         Mutex<Option<Arc<super::account_session::AccountClientTestHook>>>,
     #[cfg(test)]
+    pub(in crate::node) account_document_read_test_hook:
+        Mutex<Option<Arc<super::account_documents::sync::AccountDocumentReadTestHook>>>,
+    #[cfg(test)]
     pub(in crate::node) account_channel_maintenance_test_hook:
         Mutex<Option<Arc<super::channel_account_maintenance::AccountChannelMaintenanceTestHook>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
@@ -281,6 +284,9 @@ pub struct Node {
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
     pub(in crate::node) group_file_prepare_gate: Arc<tokio::sync::Mutex<()>>,
+    /// Orders each signed operation head from projection capture through merge.
+    /// This unit gate owns no journal or document payload.
+    pub(in crate::node) group_operation_publication: Mutex<()>,
     pub(in crate::node) group_operations:
         Mutex<super::account_group::operations::journal::OperationJournal>,
     pub(in crate::node) account_document_updates: tokio::sync::watch::Sender<u64>,
@@ -900,6 +906,8 @@ impl Node {
             #[cfg(test)]
             account_client_test_hook: Mutex::new(None),
             #[cfg(test)]
+            account_document_read_test_hook: Mutex::new(None),
+            #[cfg(test)]
             account_channel_maintenance_test_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
@@ -908,6 +916,7 @@ impl Node {
             account_transitions: Mutex::new(account_transitions),
             account_documents: Mutex::new(account_documents),
             group_file_prepare_gate: Arc::new(tokio::sync::Mutex::new(())),
+            group_operation_publication: Mutex::new(()),
             group_operations: Mutex::new(group_operations),
             account_document_updates,
             account_group_versions: Mutex::new(HashMap::new()),

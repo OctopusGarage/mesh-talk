@@ -109,6 +109,24 @@ impl Node {
         self.execute_source_control(id)
     }
 
+    /// Commit the real original signed request without publishing its head.
+    /// Publication-interleaving tests keep those two owners separately gated.
+    #[cfg(test)]
+    pub(in crate::node) fn commit_account_group_control_without_publication_for_test(
+        &self,
+        group: ConversationId,
+        id: AccountGroupOperationId,
+    ) -> Result<Option<ConversationId>, NodeError> {
+        let request = self
+            .operation_projection(group)
+            .requests
+            .into_iter()
+            .find(|request| request.reference.id == id)
+            .expect("a submitted original request is required");
+        self.admit_source_group_request(request)?;
+        self.execute_source_control(id)
+    }
+
     /// Commit bounded local work and publish its private metadata without waiting
     /// for public distribution. The runtime owns scheduling that network work.
     pub(in crate::node) fn maintain_account_group_operation_effects(

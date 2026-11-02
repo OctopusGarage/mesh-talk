@@ -88,8 +88,8 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
       // handle closes its sole job handle, but never substitutes for a receipt.
       abortTimer = setTimeout(() => child.kill(), 7000);
     };
-    const forward = chunk => { output.write(chunk); onOutput(chunk); };
-    child.stdout.on("data", forward); child.stderr.on("data", forward);
+    const forward = (chunk, channel) => { output.write(chunk); onOutput(chunk, channel); };
+    child.stdout.on("data", chunk => forward(chunk, "stdout")); child.stderr.on("data", chunk => forward(chunk, "stderr"));
     output.on("error", error => { failure ||= error.message; abort(); });
     child.on("error", error => { helperFailure = error; });
     child.stdin.on("error", () => { /* Missing retirement receipt fails closed. */ });

@@ -21,8 +21,36 @@ export async function digestFile(filename) {
 }
 
 export async function runCommand(program, args, { cwd, env = process.env, timeoutMs = 1_800_000, logPath, detached = process.platform !== "win32", maxOutputBytes = 128 * 1024 * 1024, outputLimitIsFailure = false, signal } = {}) {
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) throw Error("Output byte limit must be a positive safe integer");
   const started = Date.now();
-  let output = "", bytes = 0, timedOut = false, failure;
+  let output = "", bytes = 0, timedOut = false, failure, outputTruncated = false;
+  // Structured consumers require stream provenance. A single shared raw-byte
+  // window bounds both channel captures; the existing combined log is retained.
+  const captured = [];
+  let first = 0, retainedBytes = 0;
+  const capture = (chunk, channel) => {
+    if (!chunk.length) return;
+    captured.push({ chunk, channel });
+    retainedBytes += chunk.length;
+    while (retainedBytes > maxOutputBytes) {
+      outputTruncated = true;
+      const item = captured[first];
+      const excess = retainedBytes - maxOutputBytes;
+      if (item.chunk.length <= excess) {
+        retainedBytes -= item.chunk.length;
+        captured[first++] = undefined;
+      } else {
+        item.chunk = Buffer.from(item.chunk.subarray(excess));
+        retainedBytes -= excess;
+      }
+    }
+    if (first > 256 && first * 2 >= captured.length) { captured.splice(0, first); first = 0; }
+  };
+  const channels = () => {
+    const records = captured.slice(first);
+    const text = channel => Buffer.concat(records.filter(item => item.channel === channel).map(item => item.chunk)).toString();
+    return { stdout: text("stdout"), stderr: text("stderr"), outputTruncated };
+  };
   const controller = new AbortController();
   let timer;
   const stop = () => { clearTimeout(timer); controller.abort(); };
@@ -36,22 +64,36 @@ export async function runCommand(program, args, { cwd, env = process.env, timeou
     let command = [executable, ...args];
     if (program === "npm") {
       const npm = [env.npm_execpath, path.join(path.dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"), path.resolve(path.dirname(process.execPath), "../lib/node_modules/npm/bin/npm-cli.js")].find(candidate => candidate && existsSync(candidate));
-      if (!npm) return { code: null, timedOut: false, output: "", error: "Cannot locate npm-cli.js beside the installed Node executable" };
+      if (!npm) return { code: null, timedOut: false, output: "", ...channels(), error: "Cannot locate npm-cli.js beside the installed Node executable" };
       command = [process.execPath, npm, ...args];
     }
-    const result = await execute(command, { cwd, env, logPath, signal: controller.signal, detached, notifyOwnerOnAbort: true, onOutput(chunk) {
+    const result = await execute(command, { cwd, env, logPath, signal: controller.signal, detached, notifyOwnerOnAbort: true, onOutput(chunk, channel) {
       bytes += chunk.length;
+      if (bytes > maxOutputBytes) outputTruncated = true;
       if (outputLimitIsFailure && bytes > maxOutputBytes) { failure ||= "Command output exceeded evidence limit"; stop(); return; }
       output += chunk.toString();
-      if (Buffer.byteLength(output) > maxOutputBytes) output = output.slice(-Math.floor(maxOutputBytes / 4));
+      if (Buffer.byteLength(output) > maxOutputBytes) {
+        outputTruncated = true;
+        const keep = Math.floor(maxOutputBytes / 4);
+        output = keep ? output.slice(-keep) : "";
+      }
+      capture(chunk, channel);
     } });
-    return { code: controller.signal.aborted && !timedOut ? 130 : result.error && result.exitCode === 0 ? 1 : result.exitCode, timedOut, output, error: failure || result.error, signal: result.signal, cleanupUnverified: result.cleanupUnverified, forcedRetirement: !!result.forcedRetirement, cancelled: controller.signal.aborted && !timedOut && !failure, elapsedMs: Date.now() - started };
+    return { code: controller.signal.aborted && !timedOut ? 130 : result.error && result.exitCode === 0 ? 1 : result.exitCode, timedOut, output, ...channels(), error: failure || result.error, signal: result.signal, cleanupUnverified: result.cleanupUnverified, forcedRetirement: !!result.forcedRetirement, cancelled: controller.signal.aborted && !timedOut && !failure, elapsedMs: Date.now() - started };
   } catch (error) {
-    return { code: controller.signal.aborted ? 130 : null, timedOut, output, error: error.message, cancelled: controller.signal.aborted && !timedOut, elapsedMs: Date.now() - started };
+    return { code: controller.signal.aborted ? 130 : null, timedOut, output, ...channels(), error: error.message, cancelled: controller.signal.aborted && !timedOut, elapsedMs: Date.now() - started };
   } finally {
     clearTimeout(timer); signal?.removeEventListener("abort", stop);
     process.off("SIGINT", stop); process.off("SIGTERM", stop);
   }
+}
+
+
+/** Machine acceptance never parses the interleaved human log or a partial view. */
+export function requireCommandStdout(result) {
+  if (typeof result.stdout !== "string") throw Error("Command stdout capture is unavailable");
+  if (result.outputTruncated !== false) throw Error("Command output capture is truncated or unverified");
+  return result.stdout;
 }
 
 /** Normalize Playwright's JSON reporter (rootDir-relative files) to frontend paths. */
@@ -142,8 +184,12 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
       try { ui = playwrightEvidence(JSON.parse(await readFile(uiReport, "utf8")), path.join(cwd, "frontend")); validatePlaywrightEvidence(ui, plan.uiSpecs); }
       catch (error) { uiError = error.message; }
     }
-    const count = step.kind === "rust" ? rustTestCount(result.output) : undefined;
-    const error = result.error || uiError || (result.cleanupUnverified ? "Descendant retirement could not be verified" : result.cancelled ? "Platform execution cancelled" : result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
+    let count, captureError;
+    if (step.kind === "rust" && result.code === 0 && !result.error && !result.timedOut && !result.cancelled && !result.cleanupUnverified) {
+      try { count = rustTestCount(requireCommandStdout(result)); }
+      catch (failure) { captureError = failure.message; }
+    }
+    const error = result.error || uiError || captureError || (result.cleanupUnverified ? "Descendant retirement could not be verified" : result.cancelled ? "Platform execution cancelled" : result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
     results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, cancelled: !!result.cancelled, cleanupUnverified: !!result.cleanupUnverified, forcedRetirement: !!result.forcedRetirement, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
     if (result.cancelled || result.cleanupUnverified) break;
   }

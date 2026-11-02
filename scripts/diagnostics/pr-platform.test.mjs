@@ -6,6 +6,7 @@ import { executePlan, expectedSteps, rustTestCount, runCommand } from "../pr-pla
 import { collectPlatforms, createArchive, validateGuestReport, windowsBootstrap } from "../pr-platform/run.mjs";
 
 const sha = "a".repeat(40);
+const capturedOutput = (stdout, stderr = "") => ({ stdout, stderr, output: stdout + stderr, outputTruncated: false });
 
 test("one explicit test plan preserves selectors as argv data on both platforms", async () => {
   const flags = parseFlags(["--core-filter", "name;$(touch sentinel)", "--host-filter", "owner_commands", "e2e/privacy.spec.ts"]);
@@ -18,7 +19,7 @@ test("one explicit test plan preserves selectors as argv data on both platforms"
     const commands = [];
     await executePlan({ ...plan, sourceSha: sha }, { env: environment, run: async (program, args, options) => {
       commands.push([program, args, options.env.EVAL_SOURCE_SHA]);
-      return { code: 0, output: "test result: ok. 1 passed; 0 failed; 0 ignored;" };
+      return { code: 0, ...capturedOutput("test result: ok. 1 passed; 0 failed; 0 ignored;") };
     } });
     executions.push(commands);
   }
@@ -67,8 +68,8 @@ test("guest rejects zero Rust tests and collects later failures using shell-free
   const plan = { ...buildPlan(parseFlags(["--core-filter", "literal;echo nope", "--host-filter", "owner"]), []), sourceSha: sha };
   const report = await executePlan(plan, { cwd: "/source", run: async (program, args, options) => {
     seen.push({ program, args, options });
-    if (program === "cargo" && args[0] === "test") return { code: args.includes("mesh-talk-core") ? 0 : 1, output: "test result: ok. 0 passed; 0 failed; 0 ignored;" };
-    return { code: 0, output: "ok" };
+    if (program === "cargo" && args[0] === "test") return { code: args.includes("mesh-talk-core") ? 0 : 1, ...capturedOutput("test result: ok. 0 passed; 0 failed; 0 ignored;") };
+    return { code: 0, ...capturedOutput("ok") };
   } });
   assert.equal(report.ok, false);
   assert.equal(report.results.filter(r => r.kind === "rust").length, 2);
@@ -136,7 +137,7 @@ test("bounded child execution reports timeout rather than a successful empty run
 
 test("guest evidence cannot silently omit tests, broaden selectors, or claim zero tests passed", async () => {
   const plan = { ...buildPlan(parseFlags(["--core-test", "decoder_smoke"]), []), sourceSha: sha, archiveSha: "b".repeat(64) };
-  const report = await executePlan(plan, { run: async () => ({ code: 0, output: "test result: ok. 2 passed; 0 failed; 0 ignored;" }) });
+  const report = await executePlan(plan, { run: async () => ({ code: 0, ...capturedOutput("test result: ok. 2 passed; 0 failed; 0 ignored;") }) });
   assert.equal(validateGuestReport(report, plan, process.platform), report);
   assert.throws(() => validateGuestReport({ ...report, results: report.results.slice(1) }, plan, process.platform), /mismatched/);
   const broadened = structuredClone(report);
@@ -152,7 +153,7 @@ test("revision changes after selection fail before archive creation; docs alone 
   let archived = false;
   await assert.rejects(createArchive("/repo", "/archive", { expectedSha: "b".repeat(40), run: async (_, args) => {
     if (args[0] === "archive") archived = true;
-    return { code: 0, output: args[0] === "status" ? "" : sha };
+    return { code: 0, ...capturedOutput(args[0] === "status" ? "" : sha) };
   } }), /revision changed/);
   assert.equal(archived, false);
   assert.equal(hasSelectedTests(buildPlan(parseFlags([]), ["docs/README.md"])), false);
@@ -181,7 +182,7 @@ test("selected Playwright files require real passing executions, not an all-skip
     if (args.includes("test") && args.includes("--project=chromium") && options.env.PLAYWRIGHT_JSON_OUTPUT_FILE) {
       await writeFile(options.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(raw));
     }
-    return { code: 0, output: "browser command exited zero" };
+    return { code: 0, ...capturedOutput("browser command exited zero") };
   } });
   const skipped = await runReport(json("skipped"));
   assert.equal(skipped.ok, false, "all-skipped selected files must fail despite exit zero");
@@ -230,7 +231,7 @@ test("related workflow changes select the same bounded Node diagnostics without 
       const commands = [];
       const report = await executePlan(plan, { env, run: async (program, args) => {
         commands.push([program, args]);
-        return { code: 0, output: "passed" };
+        return { code: 0, ...capturedOutput("passed") };
       } });
       assert.equal(validateGuestReport(report, plan, process.platform), report);
       assert.throws(() => validateGuestReport({ ...report, results: report.results.filter(row => row.name !== "workflow-diagnostics") }, plan, process.platform), /mismatched/);
@@ -279,7 +280,7 @@ test("new package selectors remain literal, reject zero tests and retain platfor
   const seen = [];
   const report = await executePlan(plan, { run: async (program, args, options) => {
     seen.push({ program, args, options });
-    return { code: args[0] === "clippy" ? 1 : 0, output: args[0] === "test" ? "test result: ok. 0 passed; 0 failed; 0 ignored;" : "platform lint" };
+    return { code: args[0] === "clippy" ? 1 : 0, ...capturedOutput(args[0] === "test" ? "test result: ok. 0 passed; 0 failed; 0 ignored;" : "platform lint") };
   } });
   assert.equal(report.ok, false);
   assert.equal(report.results.filter(step => step.kind === "rust").length, 2);
@@ -295,7 +296,7 @@ test("new package selectors remain literal, reject zero tests and retain platfor
 
 test("platform reports require successful lint evidence for integration and MCP selections", async () => {
   const plan = { ...buildPlan(parseFlags(["--integration-filter", "grants::", "--mcp-filter", "tools::"]), []), sourceSha: sha, archiveSha: "b".repeat(64) };
-  const report = await executePlan(plan, { run: async () => ({ code: 0, output: "test result: ok. 1 passed; 0 failed; 0 ignored;" }) });
+  const report = await executePlan(plan, { run: async () => ({ code: 0, ...capturedOutput("test result: ok. 1 passed; 0 failed; 0 ignored;") }) });
   assert.equal(report.ok, true);
   assert.equal(validateGuestReport(report, plan, process.platform), report);
   const omitted = { ...report, results: report.results.filter(step => step.name !== "mcp-clippy") };
@@ -346,11 +347,12 @@ for (const signal of ["SIGTERM", "SIGINT"]) test(`guest cancellation ${signal} r
   const { join } = await import("node:path");
   const { setTimeout: pause } = await import("node:timers/promises");
   const directory = await mkdtemp(join(tmpdir(), "mesh-guest-cancel-"));
-  const marker = join(directory, "ready");
-  const leaf = `process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000)`;
-  const leader = `process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:'ignore'});setInterval(()=>{},1000)`;
+  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
+  const leaf = "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)";
+  const leader = "process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:'ignore'});setInterval(()=>{},1000)";
   const module = new URL("../pr-platform/guest.mjs", import.meta.url).href;
-  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", `import {runCommand} from ${JSON.stringify(module)};const result=await runCommand(process.execPath,['-e',${JSON.stringify(leader)}]);process.exitCode=result.code;`], { stdio: "ignore", env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  const program = "const {runCommand}=await import(process.argv[1]);const result=await runCommand(process.execPath,['-e',process.argv[2],process.argv[3],process.argv[4]]);process.exitCode=result.code;";
+  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", program, module, leader, leaf, marker], { stdio: "ignore", env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   let pid;
   t.after(async () => { supervisor.kill("SIGKILL"); if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } await rm(directory, { recursive: true, force: true }); });
   for (let i = 0; i < 300; i++) { try { pid = Number(await readFile(marker, "utf8")); break; } catch {} await pause(10); }
@@ -369,13 +371,13 @@ test("a nested guest timeout notifies its existing stage owner and retires the g
   const { join } = await import("node:path");
   const { setTimeout: pause } = await import("node:timers/promises");
   const directory = await mkdtemp(join(tmpdir(), "mesh-nested-guest-"));
-  const marker = join(directory, "ready");
-  const leaf = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000)`;
+  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
+  const leaf = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)";
   const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
   const stage = new URL("../validation/stage.mjs", import.meta.url).href;
-  const inner = `import {runCommand} from ${JSON.stringify(guest)};console.log('GROUP='+process.pid);await runCommand(process.execPath,['-e',${JSON.stringify(leaf)}],{timeoutMs:1500});`;
-  const outer = `import {execute} from ${JSON.stringify(stage)};const controller=new AbortController();process.on('SIGTERM',()=>controller.abort());const r=await execute([process.execPath,'--input-type=module','-e',${JSON.stringify(inner)}],{env:process.env,signal:controller.signal});process.exitCode=r.code;`;
-  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", outer], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  const inner = "const {runCommand}=await import(process.argv[1]);console.log('GROUP='+process.pid);await runCommand(process.execPath,['-e',process.argv[2],process.argv[3]],{timeoutMs:1500});";
+  const outer = "const {execute}=await import(process.argv[1]);const controller=new AbortController();process.on('SIGTERM',()=>controller.abort());const r=await execute([process.execPath,'--input-type=module','-e',process.argv[2],process.argv[3],process.argv[4],process.argv[5]],{env:process.env,signal:controller.signal});process.exitCode=r.code;";
+  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", outer, stage, inner, guest, leaf, marker], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   let group, pid;
   supervisor.stdout.on("data", chunk => { const match = chunk.toString().match(/GROUP=(\d+)/); if (match) group = Number(match[1]); });
   t.after(async () => { supervisor.kill("SIGKILL"); if (group) try { process.kill(-group, "SIGKILL"); } catch {} if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
@@ -392,7 +394,7 @@ test("guest cancellation stops admission of subsequent plan steps", async () => 
   const plan = { ...buildPlan(parseFlags(["--core-filter", "node::account_sync"]), ["crates/mesh-talk-core/src/node.rs"]), sourceSha: sha };
   for (const stopped of [{ code: 130, cancelled: true }, { code: 0, cleanupUnverified: true }]) {
     let calls = 0;
-    const report = await executePlan(plan, { run: async () => { calls++; return { output: "", ...stopped }; } });
+    const report = await executePlan(plan, { run: async () => { calls++; return { ...capturedOutput(""), ...stopped }; } });
     assert.equal(calls, 1);
     assert.equal(report.ok, false);
   }
@@ -403,7 +405,7 @@ test("interrupted execution reports retain an exact failed selection prefix", as
   for (const flag of ["cancelled", "cleanupUnverified"]) {
     for (const stopAt of [1, expectedSteps(plan).length]) {
       let calls = 0;
-      const report = await executePlan(plan, { run: async () => ++calls === stopAt ? { code: 0, output: "", [flag]: true } : { code: 0, output: "test result: ok. 2 passed; 0 failed;" } });
+      const report = await executePlan(plan, { run: async () => ++calls === stopAt ? { code: 0, ...capturedOutput(""), [flag]: true } : { code: 0, ...capturedOutput("test result: ok. 2 passed; 0 failed;") } });
       assert.equal(validateGuestReport(report, plan, process.platform), report);
       assert.equal(report[flag], true);
       assert.equal(report.results.at(-1)[flag], true);
@@ -417,9 +419,58 @@ test("interrupted execution reports retain an exact failed selection prefix", as
       ]) { const bad = structuredClone(report); mutate(bad); assert.throws(() => validateGuestReport(bad, plan, process.platform)); }
     }
   }
-  const complete = await executePlan(plan, { run: async () => ({ code: 0, output: "test result: ok. 2 passed; 0 failed;" }) });
+  const complete = await executePlan(plan, { run: async () => ({ code: 0, ...capturedOutput("test result: ok. 2 passed; 0 failed;") }) });
   const truncated = { ...complete, ok: false, results: complete.results.slice(0, 1) };
   assert.throws(() => validateGuestReport(truncated, plan, process.platform), /mismatched|interrupt/i);
   const forged = structuredClone(complete); forged.cancelled = true; forged.ok = false; forged.results[0].cancelled = true; forged.results[0].ok = false;
   assert.throws(() => validateGuestReport(forged, plan, process.platform), /interrupt|terminal/i);
+});
+
+
+test("guest Rust evidence requires complete stdout rather than combined or stderr harness text", async () => {
+  const plan = { ...buildPlan(parseFlags(["--core-filter", "fixture::actual"]), []), sourceSha: sha };
+  const valid = "test result: ok. 2 passed; 0 failed; 0 ignored;";
+  const split = valid.indexOf("2 passed");
+  const missing = capturedOutput(valid); delete missing.stdout;
+  const unspecified = capturedOutput(valid); delete unspecified.outputTruncated;
+  for (const evidence of [
+    capturedOutput("", valid),
+    missing,
+    { ...capturedOutput(valid), outputTruncated: true },
+    unspecified,
+    capturedOutput(valid.slice(0, split), valid.slice(split)),
+  ]) {
+    const report = await executePlan(plan, { run: async (_, args) => ({ code: 0,
+      ...(args[0] === "test" ? evidence : capturedOutput("tool output")) }) });
+    assert.equal(report.ok, false, "diagnostic output cannot substitute for complete stdout");
+    const rust = report.results.find(result => result.kind === "rust");
+    assert.equal(rust.ok, false);
+    assert.match(rust.error, /stdout|truncated|truncation|zero/i);
+  }
+  const report = await executePlan(plan, { run: async (_, args) => ({ code: 0,
+    ...capturedOutput(args[0] === "test" ? valid : "tool output", "test result: ok. 99 passed; 0 failed;\n") }) });
+  assert.equal(report.ok, true);
+  assert.equal(report.results.find(result => result.kind === "rust").testCount, 2);
+});
+
+test("guest execution failures take precedence over missing machine stdout", async () => {
+  const plan = { ...buildPlan(parseFlags(["--core-filter", "fixture::actual"]), []), sourceSha: sha, archiveSha: "b".repeat(64) };
+  for (const [failure, expected] of [
+    [{ code: 37 }, /exited 37/i],
+    [{ code: null, error: "original launch unavailable" }, /original launch unavailable/],
+    [{ code: 0, timedOut: true }, /timed out/i],
+    [{ code: 0, cancelled: true }, /cancelled/i],
+    [{ code: 0, cleanupUnverified: true }, /retirement/i],
+  ]) {
+    const report = await executePlan(plan, { run: async (_, args) => args[0] === "test"
+      ? { output: "human diagnostics", ...failure }
+      : { code: 0, ...capturedOutput("tool output") } });
+    assert.equal(report.ok, false);
+    assert.match(report.results.find(result => result.kind === "rust").error, expected);
+    if (failure.cancelled || failure.cleanupUnverified) {
+      assert.equal(report.cancelled, !!failure.cancelled);
+      assert.equal(report.cleanupUnverified, !!failure.cleanupUnverified);
+      assert.equal(validateGuestReport(report, plan, process.platform), report);
+    }
+  }
 });

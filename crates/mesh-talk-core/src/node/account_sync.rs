@@ -46,6 +46,7 @@ struct SelectedAttachment {
 mod archive;
 mod fanout;
 mod favorites;
+mod local_maintenance;
 mod wake;
 pub(in crate::node) use wake::AccountWake;
 mod page;
@@ -2752,19 +2753,15 @@ impl Node {
         let mut document_statuses: HashMap<DocumentPeer, DocumentStatus> = HashMap::new();
         let mut attachment_owners: HashMap<tokio::task::Id, String> = HashMap::new();
         let mut attachments = tokio::task::JoinSet::new();
-        let mut operation_work_cursor: Option<super::AccountGroupOperationId> = None;
+        let mut local_maintenance = Some(local_maintenance::LocalMaintenance::default());
+        let mut local_tasks = tokio::task::JoinSet::new();
+        let mut maintenance_requested = true;
         let mut active_attachments = HashSet::new();
         let mut retry_attachment: HashMap<String, std::time::Instant> = HashMap::new();
         let mut unavailable: HashMap<(String, ConversationId), tokio::time::Instant> =
             HashMap::new();
         let mut attachment_unsupported: HashMap<String, tokio::time::Instant> = HashMap::new();
         let mut revision = self.device_sync_policy_snapshot().1;
-        let mut custody_migration = None;
-        let mut inventory_publication = None;
-        let mut public_profile_publication = None;
-        let mut personal_after = None;
-        let mut personal_retry_at: Option<std::time::Instant> = None;
-        let mut group_access_publication = None;
         let mut fanout = fanout::FanoutQueue::default();
         let mut fanout_cursor = 0u64;
         let mut fanout_tasks = tokio::task::JoinSet::new();
@@ -2776,89 +2773,19 @@ impl Node {
             {
                 return;
             }
-            if personal_retry_at.is_none_or(|at| at <= std::time::Instant::now())
-                && let Some(conversation) = self.personal_cleanup_next(personal_after.as_ref())
-            {
-                personal_after = Some(conversation.clone());
-                let result = self
-                    .account_blocking(move |node| node.retry_personal_cleanup_for(&conversation))
-                    .await;
-                personal_retry_at = result
-                    .is_err()
-                    .then(|| std::time::Instant::now() + Duration::from_secs(5));
-            }
-            let affected = self.maintain_account_group_operation_effects();
-            for (sequence, group) in self.account_group_fanout_page(fanout_cursor, fanout::CAPACITY)
-            {
-                if !fanout.observe(group, sequence) {
-                    break;
-                }
-                fanout_cursor = sequence;
-            }
-            for group in affected {
-                if let Some(sequence) = self.account_group_fanout_sequence(group) {
-                    // A full queue leaves this group in the durable journal
-                    // index. Do not advance the cursor past its older slot.
-                    if !fanout.observe(group, sequence) {
-                        fanout_cursor = fanout_cursor.min(sequence.saturating_sub(1));
-                    }
-                }
-            }
-            self.migrate_channel_custody(&mut custody_migration);
-            self.publish_account_group_access(&mut group_access_publication);
-            self.publish_group_inventory(&mut inventory_publication);
-            if let Err(error) =
-                self.publish_public_profile_documents_page(&mut public_profile_publication)
-            {
-                log::debug!("contact profile publication deferred: {error}");
-            }
-            // Explicit File copies and invitation capability/history preparation
-            // share the existing attachment slots. Optional archive policy cannot stop
-            // an already authorized account operation; control slots stay free.
-            if attachments.len() < ATTACHMENT_WORKERS {
-                let turn = self.account_group_data_work(operation_work_cursor);
-                operation_work_cursor = turn.after;
-                if turn.more {
-                    self.account_sync_notify.notify_one();
-                }
-                for job in turn.work {
-                    if attachments.len() >= ATTACHMENT_WORKERS {
-                        break;
-                    }
-                    let worker_key = job.worker_key();
-                    if active_attachments.contains(&worker_key)
-                        || retry_attachment
-                            .get(&worker_key)
-                            .is_some_and(|at| *at > std::time::Instant::now())
-                    {
-                        continue;
-                    }
-                    let id = worker_key;
-                    let file = job.conversation();
-                    let operation = job.id();
-                    let deadline = attachment_deadline(job.size());
-                    let node = self.clone();
-                    let Some(permit) = self.runtime_work.admit() else {
-                        return;
-                    };
-                    active_attachments.insert(id.clone());
-                    let owner = id.clone();
-                    let task = attachments.spawn(permit.track(async move {
-                        let result = tokio::time::timeout(
-                            deadline,
-                            node.execute_account_group_data_work(job),
-                        )
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(NodeError::File(
-                                "account operation data exchange timed out".into(),
-                            ))
-                        })
-                        .map(|_| AttachmentOutcome::Complete);
-                        (id, file, false, result, Some(operation))
-                    }));
-                    attachment_owners.insert(task.id(), owner);
-                }
+            if maintenance_requested && let Some(state) = local_maintenance.take() {
+                maintenance_requested = false;
+                let node = self.clone();
+                let Some(permit) = self.runtime_work.admit() else {
+                    return;
+                };
+                let select_data = attachments.len() < ATTACHMENT_WORKERS;
+                local_tasks.spawn_blocking(move || {
+                    // The actual filesystem closure owns admission even if its
+                    // scheduler is cancelled before the blocking work retires.
+                    let _permit = permit;
+                    state.run(node, fanout_cursor, select_data)
+                });
             }
             // Reuse the cursor's existing authenticated observation-time rule
             // before calculating a paired cooldown. A successful newer proof
@@ -3177,21 +3104,31 @@ impl Node {
                 // Bootstrap recovery may commit a group outside this turn's
                 // ordinary publication slice. Refresh that exact source before
                 // its owned public distribution can start.
-                self.publish_account_group_access_for(group);
-                self.publish_group_inventory_for(group);
-                self.publish_account_group_operations_for(group);
-                #[cfg(test)]
-                {
-                    let hook = self.control_fanout_start_test_hook.lock().unwrap().take();
-                    if let Some(hook) = hook {
-                        hook();
-                    }
-                }
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
                 };
                 let task = fanout_tasks.spawn(permit.track(async move {
+                    if let Err(error) = node
+                        .account_blocking(move |node| {
+                            node.publish_account_group_access_for(group);
+                            node.publish_group_inventory_for(group);
+                            node.publish_account_group_operations_for(group);
+                            #[cfg(test)]
+                            {
+                                let hook =
+                                    node.control_fanout_start_test_hook.lock().unwrap().take();
+                                if let Some(hook) = hook {
+                                    hook();
+                                }
+                            }
+                            Ok(())
+                        })
+                        .await
+                    {
+                        log::debug!("account control publication worker deferred: {error}");
+                        return (group, true);
+                    }
                     let members = node.channel_members(group);
                     let deferred = node.distribute_account_group_effects(group, &members).await;
                     (group, deferred)
@@ -3360,6 +3297,62 @@ impl Node {
                 .flatten();
             let worker_retry = document_retry.into_iter().chain(history_retry).min();
             tokio::select! {
+                result = local_tasks.join_next(), if !local_tasks.is_empty() => {
+                    match result {
+                        Some(Ok(turn)) => {
+                            local_maintenance = Some(turn.state);
+                            #[cfg(test)]
+                            self.trace_account_client(&self.identity.public(), ||
+                                "operation_owner phase=local_turn_completed".into());
+                            local_maintenance::observe_fanout_turn(
+                                &mut fanout, &mut fanout_cursor,
+                                turn.fanout_after, turn.fanout, turn.affected,
+                            );
+                            if let Some(turn) = turn.data {
+                                // Selection is read-only. Reserve against current
+                                // capacity; skipped work remains in the journal
+                                // behind its rotating cursor for an ordinary turn.
+                                let jobs = local_maintenance::reserve_data(
+                                    turn.work, ATTACHMENT_WORKERS - attachments.len(),
+                                    &mut active_attachments, &retry_attachment,
+                                    std::time::Instant::now(), |job| job.worker_key(),
+                                );
+                                for job in jobs {
+                                    let worker_key = job.worker_key();
+                                    let id = worker_key;
+                                    let file = job.conversation();
+                                    let operation = job.id();
+                                    let deadline = attachment_deadline(job.size());
+                                    let node = self.clone();
+                                    let Some(permit) = self.runtime_work.admit() else {
+                                        return;
+                                    };
+                                    let owner = id.clone();
+                                    let task = attachments.spawn(permit.track(async move {
+                                        let result =
+                                            tokio::time::timeout(deadline, node.execute_account_group_data_work(job))
+                                                .await
+                                                .unwrap_or_else(|_| {
+                                                    Err(NodeError::File(
+                                                        "account operation data exchange timed out".into(),
+                                                    ))
+                                                })
+                                                .map(|_| AttachmentOutcome::Complete);
+                                        (id, file, false, result, Some(operation))
+                                    }));
+                                    attachment_owners.insert(task.id(), owner);
+                                }
+                            }
+                        }
+                        Some(Err(error)) => {
+                            if error.is_panic() {
+                                std::panic::resume_unwind(error.into_panic());
+                            }
+                            panic!("owned account local maintenance task was unexpectedly cancelled: {error}");
+                        }
+                        None => unreachable!("owned local maintenance task"),
+                    }
+                }
                 _ = async {
                     if let Some(at) = worker_retry {
                         tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
@@ -3382,6 +3375,7 @@ impl Node {
                 } => { enqueue_all = true; }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
+                    maintenance_requested = true;
                     let completion = match result {
                         Some(Ok((task, completion))) => {
                             fanout_owners.remove(&task);
@@ -3389,7 +3383,7 @@ impl Node {
                         },
                         Some(Err(error)) => {
                             log::debug!("account control fanout worker terminated: {error}");
-                            fanout_owners.remove(&error.id()).map(|group| (group, false))
+                            fanout_owners.remove(&error.id()).map(|group| (group, true))
                         }
                         None => None,
                     };
@@ -3624,6 +3618,9 @@ impl Node {
                     }
                 }
                 result = attachments.join_next_with_id(), if !attachments.is_empty() => {
+                    // Actual capacity release is an ordinary local-data turn;
+                    // it does not manufacture an all-peer network refresh.
+                    maintenance_requested = true;
                     if let Some(Err(error)) = &result
                         && let Some(id) = attachment_owners.remove(&error.id()) {
                             active_attachments.remove(&id);
@@ -3711,6 +3708,7 @@ impl Node {
                 enqueue_all = true;
             }
             if enqueue_all {
+                maintenance_requested = true;
                 let devices = self.linked_devices();
                 let certified: HashSet<_> = devices
                     .iter()

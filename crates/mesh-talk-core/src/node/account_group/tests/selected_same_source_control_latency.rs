@@ -325,9 +325,17 @@ impl ControlTestPages {
 
     pub fn observe(&mut self, event: &str) {
         if event.starts_with("control_task ") {
-            if self.origins.len() == 64
-                && let Some(origin) = self.origins.pop_front()
-            {
+            if self.origins.len() == 64 {
+                let Some(retired) = self
+                    .origins
+                    .iter()
+                    .position(|origin| !self.is_active(origin.task))
+                else {
+                    // Impossible scheduler overcapacity is not dispatch evidence.
+                    // Keep all existing live witnesses and reject the new one.
+                    return;
+                };
+                let origin = self.origins.remove(retired).unwrap();
                 self.active.remove(&origin.task);
             }
             self.active.insert(tokio::task::id());
@@ -370,7 +378,14 @@ impl ControlTestPages {
                 return;
             };
             if self.pages.len() == 64 {
-                self.pages.pop_front();
+                let Some(retired) = self
+                    .pages
+                    .iter()
+                    .position(|page| !self.is_active(page.task))
+                else {
+                    return;
+                };
+                self.pages.remove(retired);
             }
             self.pages.push_back(ControlTestPage {
                 task,
@@ -505,21 +520,68 @@ async fn control_page_observer_rejects_retired_children_and_preserves_exact_disp
         });
         observed.await.unwrap();
         let original = pages.lock().unwrap().live_request(&request).unwrap();
+        let original_lifetime = pages.lock().unwrap().lifetime(original.task).unwrap();
         assert_eq!(original.task, child.id());
         let dispatch = original.dispatch().unwrap();
         assert!(dispatch.protected && dispatch.resumed && !dispatch.replacement && !dispatch.hint);
-        let newer_source = source.clone();
-        let mut newer_request = request.clone();
-        newer_request.operation.as_mut().unwrap().nonce = [2; 32];
-        tokio::spawn(async move {
+        // Retired comparison churn must not evict the one still-live child
+        // from either bounded ledger. This fails under oldest-first eviction.
+        for nonce in 2..=66u8 {
+            let newer_source = source.clone();
+            let mut newer_request = request.clone();
+            newer_request.operation.as_mut().unwrap().nonce = [nonce; 32];
+            tokio::spawn(async move {
             let lifetime = Arc::new(());
             newer_source.trace_control_task(&newer_source.identity.public(),
                 "control_task paired=false protected=false requests={} resumed=false replacement=false hint=true".into(), Arc::downgrade(&lifetime));
             newer_source.trace_account_client(&newer_source.identity.public(), || format!("control_request_body={}", hex::encode(serde_json::to_vec(&newer_request).unwrap())));
         }).await.unwrap();
+        }
+        assert!(pages.lock().unwrap().origins.len() <= 64);
+        assert!(pages.lock().unwrap().pages.len() <= 64);
+        assert!(
+            original_lifetime.strong_count() > 0,
+            "the real original child remains held across history churn"
+        );
         let exact = pages.lock().unwrap().live_request(&request).unwrap();
         assert_eq!(exact.task, original.task);
         assert_eq!(exact.dispatch(), Some(dispatch));
+        // Saturate the bounded observer with genuinely live child tokens.
+        // Reject the 65th witness instead of evicting any existing live one.
+        let capacity_release = Arc::new(Semaphore::new(0));
+        let _capacity_release = ReleaseReadOnDrop(capacity_release.clone());
+        let mut capacity_children = tokio::task::JoinSet::new();
+        for nonce in 70..=133u8 {
+            let candidate_source = source.clone();
+            let release = capacity_release.clone();
+            let mut candidate = request.clone();
+            candidate.operation.as_mut().unwrap().nonce = [nonce; 32];
+            let sent_request = candidate.clone();
+            let (sent, seen) = oneshot::channel();
+            capacity_children.spawn(async move {
+                let lifetime = Arc::new(());
+                candidate_source.trace_control_task(&candidate_source.identity.public(),
+                    "control_task paired=false protected=false requests={} resumed=false replacement=false hint=false".into(), Arc::downgrade(&lifetime));
+                candidate_source.trace_account_client(&candidate_source.identity.public(), || format!("control_request_body={}", hex::encode(serde_json::to_vec(&sent_request).unwrap())));
+                sent.send(()).unwrap();
+                let _ = release.acquire().await;
+                drop(lifetime);
+            });
+            seen.await.unwrap();
+            let accepted = pages.lock().unwrap().live_request(&candidate).is_some();
+            assert_eq!(accepted, nonce < 133);
+            let original_active = pages.lock().unwrap().is_active(original.task);
+            assert!(original_active);
+        }
+        let bounds = {
+            let observed = pages.lock().unwrap();
+            (observed.origins.len(), observed.pages.len())
+        };
+        assert_eq!(bounds, (64, 64));
+        capacity_release.close();
+        while let Some(ended) = capacity_children.join_next().await {
+            ended.unwrap();
+        }
         if outcome == "abort" {
             child.abort();
         } else {

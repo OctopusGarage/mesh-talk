@@ -63,6 +63,7 @@ impl Node {
         groups: &[crate::eventlog::ConversationId],
     ) {
         for &group in groups {
+            let _publication = self.lock_group_operation_publication();
             let projection = self.legacy_leave_projection(group);
             let key = AccountDocumentKey::GroupLegacyOperation {
                 channel: hex::encode(group.as_bytes()),

@@ -4,6 +4,16 @@ use crate::node::{AccountDocumentKey, GroupInventoryReference};
 use std::time::Duration;
 use tokio::sync::{Semaphore, oneshot};
 
+type FanoutChronology = Arc<Mutex<std::collections::VecDeque<(u128, String)>>>;
+
+fn record_fanout_phase(trace: &FanoutChronology, started: std::time::Instant, phase: String) {
+    let mut trace = trace.lock().unwrap();
+    if trace.len() == 128 {
+        trace.pop_front();
+    }
+    trace.push_back((started.elapsed().as_millis(), phase));
+}
+
 fn inventory(node: &Node, group: ConversationId) -> GroupInventoryReference {
     let document = node
         .account_document(&AccountDocumentKey::GroupInventory {
@@ -35,6 +45,17 @@ fn reopen(path: &Path, account: &Account, identity: DeviceIdentity) -> Arc<Node>
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network_fanout() {
+    assert_recovered_group_fanout(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_refresh_retains_original_fanout_revision_for_authenticated_retry() {
+    assert_recovered_group_fanout(true).await;
+}
+
+async fn assert_recovered_group_fanout(fail_refresh: bool) {
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let path = dir.path().join("owner");
@@ -186,6 +207,8 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
     let (arrived, first_sync) = oneshot::channel();
     let arrived = Arc::new(Mutex::new(Some(arrived)));
     let mut tasks = tokio::task::JoinSet::new();
+    let public_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let attempted = public_attempted.clone();
     let peer = external.clone();
     let released = gate.clone();
     let expected = owner.identity.public();
@@ -197,7 +220,9 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
                     let (stream, _) = incoming.unwrap();
                     let peer = peer.clone(); let gate = released.clone();
                     let arrived = arrived.clone(); let expected = expected.clone();
-                    connections.spawn(async move {
+                    let attempted = attempted.clone();
+                    let Some(permit) = peer.runtime_work.admit() else { return; };
+                    connections.spawn(permit.track(Box::pin(async move {
                         let mut channel = peer.privacy_accept(stream).await.unwrap();
                         assert_eq!(channel.peer_identity(), &expected);
                         let first = channel.recv().await.unwrap();
@@ -206,8 +231,9 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
                             return;
                         }
                         assert!(crate::node::session::requests_response(&first));
+                        attempted.store(true, std::sync::atomic::Ordering::Release);
                         if let Some(signal) = arrived.lock().unwrap().take() { let _ = signal.send(()); }
-                        let _permit = gate.acquire().await.unwrap();
+                        let Ok(_permit) = gate.acquire().await else { return; };
                         let store = peer.sync_store(channel.peer_identity());
                         if crate::node::session::serve_wire_bytes(&mut channel, &store, &first).await.is_err() { return; }
                         peer.process_channel(group);
@@ -215,91 +241,221 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
                             crate::node::session::serve_one(&mut channel, &store).await {
                             peer.process_channel(conversation);
                         }
-                    });
+                    })));
+
                 }
                 _ = connections.join_next(), if !connections.is_empty() => {}
             }
         }
     });
-    let (published, first_fanout) = oneshot::channel();
-    let weak_owner = Arc::downgrade(&owner);
-    *owner.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
-        let source = weak_owner.upgrade().unwrap();
-        let _ = published.send(inventory(&source, group).name);
-    }));
-    tasks.spawn(owner.clone().run_accept_loop(owner_listener));
-    let at_start = tokio::time::timeout(Duration::from_secs(8), first_fanout)
-        .await
-        .expect("recovered work must enter its actual public fanout owner")
-        .unwrap();
-    assert_eq!(
-        at_start, "Recovered exact name",
-        "the exact recovered group must publish synchronously before fanout starts"
-    );
-    tokio::time::timeout(Duration::from_secs(8), first_sync)
-        .await
-        .expect("recovered durable work must start a real authenticated external exchange")
-        .unwrap();
-    assert_eq!(
-        inventory(&owner, group).name,
-        "Recovered exact name",
-        "the recovered exact group must publish before its public fanout starts"
-    );
-    let operation = owner
-        .account_document(&AccountDocumentKey::GroupOperation {
-            channel: hex::encode(group.as_bytes()),
-            source_device: owner.user_id(),
-        })
-        .unwrap()
-        .unwrap();
-    let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
-        operation.payload(),
-        &account.public().ed25519_pub,
-    )
-    .unwrap();
-    assert!(
-        frame
-            .projection
-            .results
-            .iter()
-            .any(|result| result.status == status)
-    );
-    gate.add_permits(4);
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            if external.log.lock().unwrap().get(&effect.id).is_some() {
-                break;
+    let handoff = Arc::new(PublicationGate::default());
+    let later_local = Arc::new(PublicationGate::default());
+    let _release_handoff = ReleasePublications([handoff.clone(), later_local.clone()]);
+    let first_local_task = Arc::new(Mutex::new(None));
+    let chronology = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let started = std::time::Instant::now();
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let handoff = handoff.clone();
+        let later_local = later_local.clone();
+        let first_local_task = first_local_task.clone();
+        let chronology = chronology.clone();
+        move |_, phase| {
+            if phase.starts_with("operation_owner ")
+                || phase.starts_with("operation_publication_owner ")
+            {
+                let owner = if phase.starts_with("operation_publication_owner ") {
+                    "publication"
+                } else {
+                    "local"
+                };
+                let label = phase
+                    .split_ascii_whitespace()
+                    .find(|token| token.starts_with("phase="))
+                    .unwrap_or("phase=progress");
+                let label = format!("{owner} {label}");
+                record_fanout_phase(&chronology, started, label);
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            if phase.starts_with("operation_owner phase=legacy_inputs_begin ") {
+                let current = tokio::task::id();
+                let later = {
+                    let mut first = first_local_task.lock().unwrap();
+                    match *first {
+                        Some(first) => first != current,
+                        None => {
+                            *first = Some(current);
+                            false
+                        }
+                    }
+                };
+                if later {
+                    // Only later actual maintenance tasks stop here, before
+                    // journal/store/publication guards. Exact fanout refresh
+                    // does not enter this phase and must publish the target.
+                    record_fanout_phase(&chronology, started, "later_local_turn_held".into());
+                    later_local.hold();
+                }
+            }
+            if phase == "operation_owner phase=local_turn_completed" {
+                // Actual blocking work has retired; the parent has not installed
+                // the fanout snapshot yet. No journal/store guard is retained.
+                handoff.hold();
+            }
         }
-    })
-    .await
-    .expect("the restarted runtime must distribute the original recovered event");
-    let received = external
-        .log
-        .lock()
-        .unwrap()
-        .get(&effect.id)
-        .unwrap()
-        .clone();
-    assert_eq!(received.id, effect.id);
-    assert_eq!(received.ciphertext, effect.ciphertext);
-    assert!(received.verify_integrity() && received.verify_signature());
-    assert_eq!(
-        received.author.ed25519_pub(),
-        &owner.identity.public().ed25519_pub
-    );
-    assert_eq!(
-        owner
+    }));
+    let original_revision = owner.account_group_fanout_sequence(group).unwrap();
+    // The fixture owns only the production account fanout producer. Public
+    // recovery/delivery loops are separate owners, not arrival evidence here.
+    tasks.spawn(owner.clone().run_account_history_loop());
+    let outcome = AssertUnwindSafe(async {
+        super::cold_account_setup(handoff.entered.notified())
+            .await
+            .expect("the cold local turn must hand its durable fanout snapshot to the parent");
+        assert_eq!(
+            inventory(&owner, group).name,
+            "Before recovery",
+            "cold preparation must not refresh the exact recovered target"
+        );
+        assert_eq!(
+            owner.account_group_fanout_sequence(group),
+            Some(original_revision)
+        );
+        assert!(
+            !public_attempted.load(std::sync::atomic::Ordering::Acquire),
+            "no public exchange may precede the owned fanout handoff"
+        );
+        let (published, first_fanout) = oneshot::channel();
+        let weak_owner = Arc::downgrade(&owner);
+        let hook_chronology = chronology.clone();
+        *owner.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
+            record_fanout_phase(
+                &hook_chronology,
+                started,
+                "hook_entry_inventory_begin".into(),
+            );
+            let source = weak_owner.upgrade().unwrap();
+            let name = inventory(&source, group).name;
+            record_fanout_phase(&hook_chronology, started, "hook_inventory_end".into());
+            let _ = published.send((
+                name,
+                public_attempted.load(std::sync::atomic::Ordering::Acquire),
+            ));
+            if fail_refresh {
+                // Panic occurs inside the admitted blocking refresh after signed
+                // publication, before distribution can start. The same durable
+                // revision must survive the resulting worker error.
+                panic!("injected fanout publication worker failure");
+            }
+        }));
+        // Construct the original eight-second arrival/progress clocks only after
+        // the actual cold handoff is proven, while target refresh remains owed.
+        handoff.release();
+        let (at_start, public_started) = tokio::time::timeout(Duration::from_secs(8), first_fanout)
+            .await
+            .expect("recovered work must enter its actual public fanout owner")
+            .unwrap();
+        assert!(
+            !public_started,
+            "public distribution cannot precede the exact source refresh"
+        );
+        assert_eq!(
+            at_start, "Recovered exact name",
+            "the exact recovered group must publish synchronously before fanout starts"
+        );
+        tokio::time::timeout(Duration::from_secs(8), first_sync)
+            .await
+            .expect("recovered durable work must start a real authenticated external exchange")
+            .unwrap();
+        assert_eq!(
+            owner.account_group_fanout_sequence(group),
+            Some(original_revision)
+        );
+        assert_eq!(
+            inventory(&owner, group).name,
+            "Recovered exact name",
+            "the recovered exact group must publish before its public fanout starts"
+        );
+        let operation = owner
+            .account_document(&AccountDocumentKey::GroupOperation {
+                channel: hex::encode(group.as_bytes()),
+                source_device: owner.user_id(),
+            })
+            .unwrap()
+            .unwrap();
+        let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+            operation.payload(),
+            &account.public().ed25519_pub,
+        )
+        .unwrap();
+        assert!(
+            frame
+                .projection
+                .results
+                .iter()
+                .any(|result| result.status == status)
+        );
+        gate.add_permits(4);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if external.log.lock().unwrap().get(&effect.id).is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the restarted runtime must distribute the original recovered event");
+        let received = external
             .log
             .lock()
             .unwrap()
-            .events(&group)
-            .into_iter()
-            .filter(|event| event.kind == EventKind::ChannelRename)
-            .count(),
-        1
-    );
+            .get(&effect.id)
+            .unwrap()
+            .clone();
+        assert_eq!(received.id, effect.id);
+        assert_eq!(received.ciphertext, effect.ciphertext);
+        assert!(received.verify_integrity() && received.verify_signature());
+        assert_eq!(
+            received.author.ed25519_pub(),
+            &owner.identity.public().ed25519_pub
+        );
+        assert_eq!(
+            owner
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .into_iter()
+                .filter(|event| event.kind == EventKind::ChannelRename)
+                .count(),
+            1
+        );
+    })
+    .catch_unwind()
+    .await;
+    // JoinSet cancellation alone cannot retire spawn_blocking filesystem work.
+    // Keep the private store alive until the actual admitted closures drain.
+    handoff.release();
+    later_local.release();
+    gate.close();
+    owner.runtime_work.close();
+    external.runtime_work.close();
+    let retired = super::cold_account_setup(async {
+        tasks.shutdown().await;
+        owner.runtime_work.drain().await;
+        external.runtime_work.drain().await;
+    })
+    .await;
+    *owner.account_client_test_hook.lock().unwrap() = None;
+    *owner.control_fanout_start_test_hook.lock().unwrap() = None;
+    if retired.is_err() {
+        // Never remove files beneath work whose retirement was not proven.
+        let _retained_store = dir.keep();
+        panic!("fanout fixture retirement was unverified; its private store was retained");
+    }
+    if let Err(error) = outcome {
+        eprintln!("recovered fanout phases: {:?}", chronology.lock().unwrap());
+        std::panic::resume_unwind(error);
+    }
 }
 async fn assert_stalled_fanout_retires_with_account_loop(adopt: bool) {
     let dir = tempfile::tempdir().unwrap();
@@ -399,4 +555,291 @@ async fn adoption_cancels_stalled_fanout_and_drains_its_runtime_admission() {
 #[tokio::test]
 async fn closing_account_loop_cancels_stalled_fanout_and_drains_runtime_admission() {
     assert_stalled_fanout_retires_with_account_loop(false).await;
+}
+
+#[derive(Default)]
+pub(super) struct PublicationGate {
+    pub(super) entered: tokio::sync::Notify,
+    released: (Mutex<bool>, std::sync::Condvar),
+}
+impl PublicationGate {
+    pub(super) fn hold(&self) {
+        let mut released = self.released.0.lock().unwrap();
+        self.entered.notify_one();
+        while !*released {
+            released = self.released.1.wait(released).unwrap();
+        }
+    }
+    pub(super) fn release(&self) {
+        *self.released.0.lock().unwrap() = true;
+        self.released.1.notify_all();
+    }
+}
+pub(super) struct ReleasePublications<const N: usize>(pub(super) [Arc<PublicationGate>; N]);
+impl<const N: usize> Drop for ReleasePublications<N> {
+    fn drop(&mut self) {
+        for gate in &self.0 {
+            gate.release();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actual_local_and_fanout_publishers_preserve_current_terminal_head() {
+    assert_current_terminal_publication(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contending_local_publisher_recovers_unit_poison_from_failed_fanout() {
+    assert_current_terminal_publication(true).await;
+}
+
+async fn assert_current_terminal_publication(panic_older: bool) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let genesis = legacy_group(&owner, &external);
+    let group = genesis.conversation_id;
+    for target in [&owner, &external] {
+        install(target, &genesis);
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let owner_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    configure(
+        &owner,
+        &dir.path().join("owner"),
+        owner_listener.local_addr().unwrap().port(),
+    );
+    configure(&external, &dir.path().join("external"), address.port());
+    owner.roster.lock().unwrap().update(
+        &external.signed_announce("External member", address.port()),
+        address.ip(),
+        &owner.user_id(),
+    );
+    let first = owner
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    owner
+        .submit_account_group_operation(
+            &account.account_id(),
+            first,
+            group,
+            AccountGroupOperation::Rename {
+                name: "First terminal".into(),
+            },
+        )
+        .unwrap();
+    owner.maintain_account_group_operation_effects();
+
+    let initial = Arc::new(PublicationGate::default());
+    let before_execution = Arc::new(PublicationGate::default());
+    let older = Arc::new(PublicationGate::default());
+    let _release = ReleasePublications([initial.clone(), before_execution.clone(), older.clone()]);
+    let initial_armed = Arc::new(AtomicBool::new(true));
+    let execution_armed = Arc::new(AtomicBool::new(true));
+    let older_armed = Arc::new(AtomicBool::new(true));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let contended = Arc::new(tokio::sync::Notify::new());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let local_task = Arc::new(Mutex::new(None));
+    let key = AccountDocumentKey::GroupOperation {
+        channel: hex::encode(group.as_bytes()),
+        source_device: owner.user_id(),
+    };
+    let (published, mut publication) = oneshot::channel();
+    let published = Arc::new(Mutex::new(Some(published)));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let initial = initial.clone();
+        let older = older.clone();
+        let before_execution = before_execution.clone();
+        let completed = completed.clone();
+        let contended = contended.clone();
+        let events = events.clone();
+        let local_task = local_task.clone();
+        let source = Arc::downgrade(&owner);
+        let key = key.clone();
+        let prefix = format!(
+            "operation_publication_owner group={} phase=projection_end_store_lock_begin ",
+            hex::encode(group.as_bytes())
+        );
+        move |_, phase| {
+            if phase == "operation_owner phase=local_turn_completed" {
+                completed.fetch_add(1, Ordering::AcqRel);
+            }
+            if phase.starts_with("operation_owner phase=legacy_publication_end ")
+                && initial_armed.swap(false, Ordering::AcqRel)
+            {
+                initial.hold();
+            }
+            if phase.starts_with("operation_owner phase=legacy_inputs_begin ")
+                && completed.load(Ordering::Acquire) == 1
+                && execution_armed.swap(false, Ordering::AcqRel)
+            {
+                *local_task.lock().unwrap() = tokio::task::try_id();
+                events
+                    .lock()
+                    .unwrap()
+                    .push(("local_before_execution", tokio::task::try_id()));
+                before_execution.hold();
+            }
+            if phase.starts_with(&prefix)
+                && completed.load(Ordering::Acquire) == 1
+                && older_armed.swap(false, Ordering::AcqRel)
+            {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(("older_fanout_projection", tokio::task::try_id()));
+                older.hold();
+                if panic_older {
+                    panic!("injected older publication failure before shared data guards");
+                }
+            }
+            if phase == "operation_owner phase=publication_contended"
+                && tokio::task::try_id() == *local_task.lock().unwrap()
+            {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(("local_publication_contended", tokio::task::try_id()));
+                contended.notify_one();
+            }
+            if phase.starts_with("operation_local_published ")
+                && tokio::task::try_id() == *local_task.lock().unwrap()
+                && let Some(published) = published.lock().unwrap().take()
+            {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(("local_published", tokio::task::try_id()));
+                let source = source.upgrade().unwrap();
+                let _ = published.send(
+                    source
+                        .account_document(&key)
+                        .map(|doc| doc.map(|doc| doc.payload().to_vec())),
+                );
+            }
+        }
+    }));
+    let mut producer = Box::pin(owner.clone().run_account_history_loop());
+    super::cold_account_setup(async {
+        tokio::select! { _ = initial.entered.notified() => {}, _ = producer.as_mut() => panic!("history owner stopped") }
+    }).await.unwrap();
+    // Admit the real intent before the older fanout captures its pending
+    // projection. The next local turn stops before it could execute that intent.
+    let newer = owner
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    owner
+        .submit_account_group_operation(
+            &account.account_id(),
+            newer,
+            group,
+            AccountGroupOperation::Rename {
+                name: "Current terminal".into(),
+            },
+        )
+        .unwrap();
+    owner.account_sync_notify.notify_one();
+    assert!(futures_util::poll!(producer.as_mut()).is_pending());
+    initial.release();
+    super::cold_account_setup(async {
+        let both = async {
+            tokio::join!(
+                before_execution.entered.notified(),
+                older.entered.notified()
+            );
+        };
+        tokio::select! { _ = both => {}, _ = producer.as_mut() => panic!("history owner stopped") }
+    })
+    .await
+    .unwrap();
+    // Exercise the existing source admission/WAL/commit owner without invoking a
+    // second publisher under the held publication guard. No forged journal rows.
+    owner
+        .commit_account_group_control_without_publication_for_test(group, newer)
+        .unwrap();
+    let canonical = owner
+        .retained_account_group_operation_status(&account.account_id(), newer)
+        .unwrap()
+        .unwrap();
+    let event = owner
+        .log
+        .lock()
+        .unwrap()
+        .get(&canonical.committed_events[0])
+        .unwrap()
+        .clone();
+    before_execution.release();
+    // The private guard-disabled control may instead complete a real newer
+    // publication. Release the old writer in either case, before assertions.
+    let (at_local, waited) = super::cold_account_setup(async {
+        tokio::select! {
+            _ = contended.notified() => { older.release(); (publication.await, true) }
+            published = &mut publication => { older.release(); (published, false) }
+        }
+    })
+    .await
+    .unwrap();
+    older.release();
+    initial.release();
+    before_execution.release();
+    owner.runtime_work.close();
+    drop(producer);
+    super::cold_account_setup(owner.runtime_work.drain())
+        .await
+        .unwrap();
+    *owner.account_client_test_hook.lock().unwrap() = None;
+    let at_local = at_local.unwrap().unwrap().unwrap();
+    let published = crate::node::account_group::operations::wire::OperationFrame::decode(
+        &at_local,
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    let final_document = owner.account_document(&key).unwrap().unwrap();
+    let final_frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+        final_document.payload(),
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    assert!(!owner.account_documents.is_poisoned());
+    assert!(!owner.group_operations.is_poisoned());
+    assert_eq!(canonical.phase, AccountGroupOperationPhase::Committed);
+    assert!(event.verify_integrity() && event.verify_signature());
+    assert_eq!(
+        event.author.ed25519_pub(),
+        &owner.identity.public().ed25519_pub
+    );
+    assert!(
+        published
+            .projection
+            .results
+            .iter()
+            .any(|row| row.status == canonical)
+    );
+    assert!(
+        final_frame
+            .projection
+            .results
+            .iter()
+            .any(|row| row.status == canonical),
+        "an older owned projection cannot remain above the current terminal: local_revision={} final_revision={} contended={waited} events={:?}",
+        published.revision,
+        final_frame.revision,
+        events.lock().unwrap()
+    );
+    assert_eq!(final_frame.proof.public(), owner.identity.public());
+    assert_eq!(final_frame.group, group);
+    assert_eq!(final_frame.revision, final_document.meta.revision);
+    assert_eq!(
+        final_frame.projection.fingerprint(),
+        owner.operation_projection(group).fingerprint()
+    );
+    assert!(
+        waited,
+        "the actual newer local publisher must contend behind the older fanout projection"
+    );
 }

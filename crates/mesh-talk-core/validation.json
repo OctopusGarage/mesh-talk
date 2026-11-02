@@ -5,6 +5,7 @@
       "id": "core-account-group-operations",
       "paths": [
         "crates/mesh-talk-core/src/node/account_group/",
+        "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
         "crates/mesh-talk-core/src/node/account_documents/store.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
@@ -32,6 +33,7 @@
         "crates/mesh-talk-core/src/node/reaction_store.rs",
         "crates/mesh-talk-core/src/node/reactions.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_file.rs",
         "crates/mesh-talk-core/src/node/channels/account_self_control.rs",
@@ -43,6 +45,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "node::account_documents::group_operations::",
+            "node::account_sync::local_maintenance::",
+            "node::runtime_work::",
             "control_task_lifetime_scope_restores_outer_witness_after_panic",
             "local_cancel_ack_during_remote_commit_rolls_forward_without_action_required",
             "owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance",
@@ -101,7 +106,10 @@
             "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
             "selected_source_cold_capability_setup_precedes_role_page_budget",
+            "cold_inbound_control_proves_capabilities_before_the_warm_role_clock",
             "account_fixture_health_snapshot_precedes_real_peer_shutdown",
+            "recovered_group_beyond_publication_slice_refreshes_before_exact_network_fanout",
+            "failed_refresh_retains_original_fanout_revision_for_authenticated_retry",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
             "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
             "incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume",
@@ -123,6 +131,10 @@
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
             "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
+            "queued_source_retains_live_natural_hold_through_forced_early_cancellation",
+            "preparation_server_decisions_and_drop_release_preserve_child_lifetimes",
+            "preparation_decision_inventory_prunes_retired_witnesses_and_rejects_live_overflow",
+            "authenticated_preparation_wait_precedes_unchanged_document_read_clock",
             "control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback",
             "control_checkpoint_refresh_clears_start_only_after_comparison_completion",
             "group_publication_reaches_pending_groups_behind_terminal_history",
@@ -130,7 +142,9 @@
             "new_account_group_preflight_has_one_deadline_and_creates_no_partial_group",
             "new_group_invites_one_account_and_starts_with_account_owner_authority",
             "new_account_group_rejects_a_route_whose_authenticated_account_changed",
-            "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks"
+            "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks",
+            "queued_functional_recovery_keeps_all_predicates_after_the_receipt_budget",
+            "queued_functional_recovery_fails_without_actual_pair_retirement"
           ]
         }
       ],
@@ -138,6 +152,14 @@
         "summary": "Apply one account group role across certified devices while preserving public signer authority and explicit execution availability.",
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
+          {
+            "name": "Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
+          },
+          {
+            "name": "Inbound-only role fixtures establish actual exact-source access and operation capabilities under cold setup before the unchanged warm signed-role and admitted-operation deadlines; already-proven capabilities add no RPC.",
+            "reference": "docs/testing-feedback-loop.md#windows-workspace-archives-and-slow-fixtures"
+          },
           {
             "name": "A legacy leave with a committed physical leg preserves roll-forward after another leg acknowledges cancellation; owner preparation requires each original physical lifetime, acceptance state and certified proof to match as one complete witness.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
@@ -191,12 +213,16 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick or a held mandatory directory response. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
+            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick, a held mandatory directory response, or unrelated local maintenance outside shared storage guards. One admitted local storage turn runs independently of document dispatch, coalesces real changes without a completion-driven loop, and retains actual-work retirement. Attachment selection rechecks current reservations on handoff and preserves durable rotating scans; failed exact-source fanout refresh defers its original revision. Ordinary and legacy operation publishers serialize each projection and signed merge through their feature-owned per-Node unit gate, including invitation completion; no publication gate spans network work. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
             "name": "Affected canonical group access and inventory, followed by the exact durable operation result, publish before public fanout waits; canonical no-op retries allocate no invented public effect and obsolete owner authority cannot execute an awaiting control. Exact committed message IDs request durable member/relay custody in the same bounded full-control fanout round, excluding own-account siblings.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Recovered-fanout fixtures observe actual cold local-turn handoff before their unchanged refresh/retry clocks, keep the exact target stale and original durable revision intact until fanout refresh, and retire admitted filesystem work before deleting their private stores on both success and panic.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
             "name": "Direct or eligible-relay local admission backpressure retains the same committed fanout revision for bounded delayed retry; successful revisions deduplicate and overflow remains owned by the source journal.",
@@ -245,6 +271,7 @@
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
         "crates/mesh-talk-core/src/node/channels.rs"
       ],
@@ -505,6 +532,7 @@
             "only_remote_dial_timeout_allows_wake_recovery",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
             "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
+            "completed_v5_role_digest_retains_received_epoch_after_source_publication",
             "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"
           ]
         }
@@ -513,6 +541,10 @@
         "summary": "Synchronize typed private drafts, exact read receipts, customization assets, authenticated DM controls and account-personal conversation removal through existing certified account sessions.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
+          {
+            "name": "Access-only v5 scope fixtures validate actual received signed role metadata and payloads against their completion digest inside an authenticated stable-provider epoch; later source publication belongs to another epoch. Live-provider mutation retains its cursor re-comparison contract.",
+            "reference": "docs/testing-feedback-loop.md#protocol-fixture-response-epochs"
+          },
           {
             "name": "Certified same-account authority, bounded versioned records and deletion tombstones preserve convergence without exposing private records to other group members",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
@@ -541,6 +573,7 @@
       "id": "core-account-file-availability",
       "paths": [
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/account_sync_wire.rs"
@@ -1793,6 +1826,7 @@
         "crates/mesh-talk-core/src/node/session_pool.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/recovery.rs",
         "crates/mesh-talk-core/src/recovery/snapshot.rs",

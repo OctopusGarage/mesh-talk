@@ -30,6 +30,14 @@ async fn cold_account_setup<T>(
     tokio::time::timeout(std::time::Duration::from_secs(30), future).await
 }
 
+// Functional provenance/convergence watchdog shared with explicit message
+// actions. Dedicated operation receipt and held-progress latency stay separate.
+async fn functional_account_convergence<T>(
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, tokio::time::error::Elapsed> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), future).await
+}
+
 fn has_account_group_operation_support(
     node: &Node,
     peer: &Node,
@@ -564,9 +572,15 @@ async fn pull_group_control(
     address: std::net::SocketAddr,
     group: crate::eventlog::ConversationId,
 ) {
-    // Reuse the bounded role-page bootstrap, including exact local capacity
-    // backpressure. Authentication and protocol failures still fail the fixture.
-    message_action_reference::pull_reference_action_control(target, source, address, group).await;
+    // First-contact providers may be inbound-only: establish actual protocol
+    // readiness under cold setup before the unchanged warm signed-role proof.
+    cold_account_control_setup(
+        message_action_reference::prepare_inbound_reference_control_protocol(
+            target, source, address, None,
+        ),
+        message_action_reference::pull_reference_action_control(target, source, address, group),
+    )
+    .await;
 }
 
 fn inbound_server(node: Arc<Node>, listener: TcpListener) -> tokio::task::JoinHandle<()> {

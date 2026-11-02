@@ -775,6 +775,31 @@ Mandatory document workers retain interrupted pages in the queue until their
 retry deadline. Other ready peers may proceed, and the exact queued deadline
 wakes the runner; a pending page must not create repeated maintenance turns
 before it is due. Optional history and favorites retain independent scheduling.
+One admitted local-maintenance turn runs on the blocking pool independently of
+this document scheduler. Notifications received during that turn retain one
+follow-up; completing a no-op turn alone does not schedule another. The actual
+blocking closure owns its runtime retirement permit through cancellation, so
+shutdown cannot reopen stores before that work retires. Source execution and
+signed publication retain their existing durable order. Ordinary and legacy
+operation-document publishers share a feature-owned per-Node unit guard. Each
+group pass acquires it before projection capture and retains it through the
+signed store merge, so an older snapshot cannot overwrite a newer published
+head at a higher revision. Callers enter without journal, document, membership
+or delivery guards; the publication gate never spans network work. Its unit
+poison can be recovered because it owns no payload; journal and store poison
+retain their own failure policy. Invitation asset preparation remains outside
+this gate; its durable local commit and publication use the blocking pool.
+Exact-source fanout
+refresh finishes inside its existing worker before public distribution. A failed
+refresh defers the same durable fanout revision. Shared journal and store guards
+still serialize work that requires the same authority; scheduling independence
+does not bypass those guards or promise progress through a blocked journal.
+Explicit attachment selection remains a bounded, read-only rotating scan. Its
+completed batch rechecks current worker capacity, active identities and retry
+deadlines before reservation. Skipped jobs remain in the durable journal for an
+ordinary wake, completion or repair turn; a retained same-peer batch cannot pin
+later peers. This adds neither network workers nor another durable work queue.
+
 Reading a pending operation's unchanged status retains its retry nonce and does
 not wake all-peer reconciliation. Only advancing the existing one-second query
 retry gate emits that wake; admission and cancellation keep their own immediate

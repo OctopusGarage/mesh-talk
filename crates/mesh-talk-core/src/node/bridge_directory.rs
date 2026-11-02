@@ -70,13 +70,18 @@ pub(crate) fn origin_request(
     office: &PublicIdentity,
     share: bool,
 ) -> Vec<u8> {
-    let consent = share.then(|| {
-        OriginConsent::new(
-            identity,
-            office,
-            unix_seconds_now().saturating_add(ORIGIN_LEASE_SECS),
-        )
-    });
+    let unix_now = if share { unix_seconds_now() } else { 0 };
+    origin_request_at(identity, office, share, unix_now)
+}
+
+fn origin_request_at(
+    identity: &DeviceIdentity,
+    office: &PublicIdentity,
+    share: bool,
+    unix_now: u64,
+) -> Vec<u8> {
+    let consent = share
+        .then(|| OriginConsent::new(identity, office, unix_now.saturating_add(ORIGIN_LEASE_SECS)));
     let mut bytes = REQUEST_V6.to_vec();
     bytes.extend(bincode::serialize(&consent).expect("bounded origin request"));
     bytes
@@ -1040,7 +1045,7 @@ mod tests {
             .register(&user.public(), Some(&proof), true, now)
             .unwrap();
         source.apply_origin_request(
-            &origin_request(&user, &office.public(), true),
+            &origin_request_at(&user, &office.public(), true, unix),
             &user.public(),
             Some(&office),
             unix,
@@ -1092,6 +1097,46 @@ mod tests {
     }
 
     #[test]
+    fn origin_fixture_uses_one_clock_across_a_second_boundary() {
+        let user = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
+        let mut directory = BridgeDirectory::default();
+        directory.set_office_name("Fixture office");
+        let now = Instant::now();
+        directory
+            .register(&user.public(), Some(&proof), true, now)
+            .unwrap();
+        // Crypto/request construction may cross a second after an earlier test
+        // sample. A receiver cannot accept a lease outside its strict 15s bound.
+        let before_construction = 100;
+        let request_time = before_construction + 1;
+        let request = origin_request_at(&user, &office.public(), true, request_time);
+        assert!(!directory.apply_origin_request(
+            &request,
+            &user.public(),
+            Some(&office),
+            before_construction
+        ));
+        assert!(
+            directory.export_with_origins(now, before_construction)[0]
+                .origin
+                .is_none()
+        );
+        assert!(directory.apply_origin_request(
+            &request,
+            &user.public(),
+            Some(&office),
+            request_time
+        ));
+        let exported = directory.export_with_origins(now, request_time);
+        let origin = exported[0].origin.as_ref().unwrap();
+        assert_eq!(origin.expires_at_secs(), request_time + ORIGIN_LEASE_SECS);
+        assert!(origin.valid_for(&user.public(), request_time));
+        assert!(!origin.valid_for(&user.public(), request_time + ORIGIN_LEASE_SECS));
+    }
+
+    #[test]
     fn origin_survives_forwarding_and_opt_out_removes_the_local_binding() {
         let now = Instant::now();
         let unix = unix_seconds_now();
@@ -1100,7 +1145,7 @@ mod tests {
         let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
         let mut directory = BridgeDirectory::default();
         directory.set_office_name("Windows 10 office");
-        let request = origin_request(&user, &office.public(), true);
+        let request = origin_request_at(&user, &office.public(), true, unix);
         directory
             .register(&user.public(), Some(&proof), true, now)
             .unwrap();

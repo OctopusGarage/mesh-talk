@@ -166,21 +166,38 @@ jobs:
           pattern: playwright-ui-*-${{ github.run_attempt }}
           path: target/ui-reports
       - name: Render each OS report from its raw blobs
+        env:
+          LINUX_RESULT: ${{ needs.linux.result }}
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
         shell: bash
         run: |
           status=0
+          rendered=0
           for os in ubuntu-24.04 macos-latest windows-latest; do
+            result="$DESKTOP_RESULT"
+            if [ "$os" = ubuntu-24.04 ]; then result="$LINUX_RESULT"; fi
+            case "$result" in
+              skipped) continue ;; # No shard was admitted; acceptance still rejects this producer.
+              success|failure|cancelled) ;;
+              *) echo "Unknown producer conclusion for $os: $result" >&2; status=1; continue ;;
+            esac
             mkdir -p "../target/ui-report-blobs/$os"
             available=true
-            for artifact in ../target/ui-reports/playwright-ui-"$os"-*-${{ github.run_attempt }}; do
+            for shard in 1 2 3 4; do
+              artifact="../target/ui-reports/playwright-ui-$os-$shard-${{ github.run_attempt }}"
               cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/" || available=false
             done
             if [ "$available" != true ]; then
               status=1
               continue
             fi
-            PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$os" npx playwright merge-reports --config playwright.config.ts --reporter=html "../target/ui-report-blobs/$os" || status=1
+            if PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$os" npx playwright merge-reports --config playwright.config.ts --reporter=html "../target/ui-report-blobs/$os"; then
+              rendered=$((rendered + 1))
+            else
+              status=1
+            fi
           done
+          if [ "$rendered" -eq 0 ]; then status=1; fi
           exit "$status"
       - uses: actions/upload-artifact@v7
         if: always() && hashFiles('frontend/playwright-report/**') != ''
