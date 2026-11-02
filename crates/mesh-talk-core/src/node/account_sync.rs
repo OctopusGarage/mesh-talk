@@ -3349,12 +3349,7 @@ impl Node {
                                         #[cfg(test)]
                                         if file_trace {
                                             node.trace_account_client(&node.identity.public(), || {
-                                                let outcome = match &result {
-                                                    Err(NodeError::File(message)) if message == "account group file assets unavailable" => "assets_unavailable",
-                                                    Err(NodeError::File(message)) if message == "file asset source scope is not current" => "scope_retired",
-                                                    Err(NodeError::File(message)) if message == "account operation data exchange timed out" => "worker_deadline",
-                                                    other => super::account_session::client_trace_outcome(other),
-                                                };
+                                                let outcome = super::account_session::client_trace_outcome(&result);
                                                 format!("operation_file_data_end outcome={outcome} capacity_busy={} elapsed_ms={}", result.as_ref().is_err_and(local_sync_capacity_busy), file_started.elapsed().as_millis())
                                             });
                                         }
