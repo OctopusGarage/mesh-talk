@@ -205,9 +205,22 @@ impl Node {
     }
     pub fn channel_metadata(&self, channel: ConversationId) -> Result<ChannelMetadata, NodeError> {
         use indexed::Progress;
+        #[cfg(test)]
+        {
+            let hook = self
+                .channel_metadata_read_test_hook
+                .lock()
+                .expect("metadata read hook lock")
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        // Installation takes Book before the source log, including groups
+        // with no metadata publication. Keep that order during classification.
+        let book = self.channels.lock().expect("channels lock");
         let log = self.log.lock().expect("log lock");
         if !log.requires_channel_v5(&channel)? {
-            let book = self.channels.lock().expect("channels lock");
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
@@ -220,6 +233,7 @@ impl Node {
             }
             return Ok(ChannelMetadata::default());
         }
+        drop(book);
         let mut budget = indexed::Budget::default();
         if !self.prepare_metadata_projection(log.repository()?, channel, &mut budget)? {
             return Ok(Self::pending_metadata());

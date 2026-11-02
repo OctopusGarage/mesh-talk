@@ -83,6 +83,66 @@ fn release_metadata(node: &Node, channel: crate::eventlog::ConversationId) {
 }
 
 #[tokio::test]
+async fn initial_metadata_read_does_not_hold_log_while_waiting_for_channel_book() {
+    use std::sync::{TryLockError, mpsc};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(dir.path());
+    let group = owner
+        .create_account_channel_invited_if("metadata lock order", vec![], |commit| commit())
+        .await
+        .unwrap();
+    assert!(owner.channel_owner_account_id(group).is_some());
+    assert!(
+        !owner
+            .log
+            .lock()
+            .unwrap()
+            .requires_channel_v5(&group)
+            .unwrap(),
+        "a new account-owned group has no metadata publication yet"
+    );
+
+    let (entered, waiting) = mpsc::channel();
+    let (release, proceed) = mpsc::channel();
+    let proceed = std::sync::Mutex::new(proceed);
+    *owner.channel_metadata_read_test_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = entered.send(());
+        let _ = proceed.lock().unwrap().recv_timeout(Duration::from_secs(5));
+    }));
+
+    // Installation holds Book before taking the source log. Pause the real
+    // getter at its Book acquisition boundary while that first lock is owned.
+    // Observing the second lock avoids creating an unrecoverable ABBA in RED.
+    let book = owner.channels.lock().unwrap();
+    let reading = owner.clone();
+    let reader = std::thread::spawn(move || reading.channel_metadata(group));
+    let reached_book = waiting.recv_timeout(Duration::from_secs(5)).is_ok();
+    let log_available = match owner.log.try_lock() {
+        Ok(_) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Poisoned(_)) => Err("source log was poisoned"),
+    };
+
+    // Release every gate and join before assertions, including on the old
+    // inverted implementation or a failed entry observation.
+    drop(book);
+    let _ = release.send(());
+    let result = reader.join();
+    owner.channel_metadata_read_test_hook.lock().unwrap().take();
+    assert!(reached_book, "metadata getter did not reach its Book read");
+    let Ok(Ok(metadata)) = result else {
+        panic!("metadata getter failed after its read gate was released");
+    };
+    assert!(metadata == super::ChannelMetadata::default());
+    assert!(
+        log_available.expect("metadata source lock failed"),
+        "metadata getter retained the source log while waiting for the channel book"
+    );
+}
+
+#[tokio::test]
 async fn independent_cover_and_announcement_survive_restart_with_clear_tombstone() {
     let dir = tempfile::tempdir().unwrap();
     let owner = node(dir.path());

@@ -1117,6 +1117,9 @@ mod tests {
     impl Drop for AuthFixture {
         fn drop(&mut self) {
             let _startup = self.node.test_startup_gate().blocking_lock();
+            // A detached login startup may still be queued behind this gate.
+            // Retire its authority before releasing the fixture's profile root.
+            self.node.next_lifecycle_ticket();
             let old = self.node.0.blocking_write().take();
             if let Some(old) = old {
                 tauri::async_runtime::block_on(old.stop());
@@ -1427,6 +1430,37 @@ mod tests {
         assert_eq!(persisted["last_user"], fixture.bob);
         // Credential provider is cfg(test) memory-backed, while auth service,
         // session generation, settings state + isolated JSON and runtime are real.
+    }
+
+    #[test]
+    fn registered_auth_fixture_teardown_rejects_queued_startup() {
+        let fixture = AuthFixture::new("queued-startup-teardown");
+        let node = fixture.node.clone();
+        let root = fixture.root.path().to_owned();
+        // Production allocates this authority synchronously before spawning the
+        // startup task. Keep begin unpolled until teardown wins the startup gate.
+        let queued = crate::chat_commands::RuntimeAuthority::request(
+            fixture.app_state.session().clone(),
+            fixture.app_state.session().capture().unwrap(),
+            node.clone(),
+        )
+        .unwrap();
+        drop(fixture);
+        assert!(
+            !root.exists(),
+            "fixture teardown must remove its profile root"
+        );
+        tauri::async_runtime::block_on(async {
+            assert!(
+                queued.begin().await.is_err(),
+                "fixture teardown must reject queued startup authority"
+            );
+            assert!(node.0.read().await.is_none());
+        });
+        assert!(
+            !root.exists(),
+            "queued startup must not recreate fixture data"
+        );
     }
 
     #[test]
