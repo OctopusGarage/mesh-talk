@@ -10,7 +10,7 @@ const step = (source, name) => source.split(/^      - /m).find(value => value.st
 test("real compiler contracts do not compete for the native job's Cargo cache", () => {
   for (const [workflow, name, expected] of [
     ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "native-host-coverage", "rust-profile"]],
-    ["windows-workspace.yml", "Validate archive and coverage contracts", ["backend-coverage", "rust-profile", "windows-coverage-cli"]],
+    ["windows-workspace.yml", "Validate archive and coverage contracts", ["windows-native-deps", "backend-coverage", "rust-profile", "windows-coverage-cli"]],
   ]) {
     const caller = step(read(workflow), name);
     assert.ok(caller, `${workflow}: compiler contract step is missing`);

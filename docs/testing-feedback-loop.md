@@ -1235,7 +1235,13 @@ absolute path through `OPENSSL_SRC_PERL` and `PERL`. This avoids Git Bash's part
 MSYS Perl during vendored OpenSSL configuration without changing vendoring,
 compiler settings or test gates. Missing or incomplete native installations
 fail the dependency step. Portable probe fixtures do not replace the hosted
-Windows build.
+Windows build. The unchanged actual native-interpreter acceptance case runs in
+the producer's serial contract cohort after bootstrap, using its validated
+absolute path and original ten-second probe watchdog. The parallel portable
+diagnostic suite owns the injected selector/error cases and enforces this native
+wiring. It does not launch another native-environment qualification alongside
+unrelated process fixtures. A prior launch timeout in that portable suite did
+not establish a missing interpreter or module.
 
 Windows full-regression runners expand the IPv4 TCP client port pool to
 10000–65534 before browser execution. Repeated fresh contexts load Vite's module

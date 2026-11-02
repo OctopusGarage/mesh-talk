@@ -63,9 +63,9 @@ jobs:
         with:
           tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       - name: Validate archive and coverage contracts
-        # Real Cargo fixtures share the package cache and compiler resources;
-        # cross-file Node parallelism must not consume their command budgets.
-        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
+        # Native environment probes and real Cargo fixtures belong to this
+        # serial owner, outside the parallel portable diagnostic suite.
+        run: node --test --test-concurrency=1 scripts/ci/windows-native-deps.test.mjs scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
       - name: Build frontend
         working-directory: frontend
         run: |
