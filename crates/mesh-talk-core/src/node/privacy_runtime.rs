@@ -2,6 +2,7 @@
 use super::peer_directory::PeerDirectory;
 use super::*;
 use crate::discovery::{Announce, visibility::DiscoveryVisibility};
+use crate::eventlog::LogError;
 use crate::identity::device::PublicIdentity;
 use crate::transport::{SecureChannel, TransportError, VerifiedPeer};
 use std::{
@@ -29,10 +30,6 @@ pub(in crate::node) struct PrivacyState {
     pub own: Announce,
     pub visibility: Arc<DiscoveryVisibility>,
     pub routes: super::privacy_routes::RouteCache,
-    pub sent_manifest_scopes: crate::storage::record_log::EncryptedRecordLog<StoredManifestScope>,
-    pub scope_repair_needed: bool,
-    pub legacy_scope_ids: std::collections::HashSet<crate::eventlog::EventId>,
-    pub file_scopes: std::collections::HashMap<crate::eventlog::ConversationId, Vec<ManifestScope>>,
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::node) struct ManifestScope {
@@ -43,17 +40,30 @@ pub(in crate::node) struct ManifestScope {
 /// Local encrypted metadata only: never included in message history or wire frames.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(in crate::node) struct StoredManifestScope {
-    file: crate::eventlog::ConversationId,
-    parent: crate::eventlog::ConversationId,
-    author: crate::eventlog::Author,
-    event: crate::eventlog::EventId,
+    pub(in crate::node) file: crate::eventlog::ConversationId,
+    pub(in crate::node) parent: crate::eventlog::ConversationId,
+    pub(in crate::node) author: crate::eventlog::Author,
+    pub(in crate::node) event: crate::eventlog::EventId,
 }
 #[derive(Default)]
 pub(in crate::node) struct PrivacyControl {
     pub state: RwLock<Option<PrivacyState>>,
     pub gate: Arc<tokio::sync::RwLock<()>>,
     pub generation: AtomicU64,
+    pub projection_revision: AtomicU64,
     pub route_probe_cursor: AtomicU64,
+    // Last: legacy privacy files and admission captures drop before storage.
+    _storage: Option<Arc<crate::storage::profile::context::ProfileStorage>>,
+}
+impl PrivacyControl {
+    pub(in crate::node) fn with_storage(
+        storage: Arc<crate::storage::profile::context::ProfileStorage>,
+    ) -> Self {
+        Self {
+            _storage: Some(storage),
+            ..Self::default()
+        }
+    }
 }
 fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "privacy operation denied")
@@ -144,87 +154,12 @@ impl Node {
         }
         let routes =
             super::privacy_routes::RouteCache::open(&directory.join("peer-routes"), password)?;
-        let (mut sent_manifest_scopes, stored_scopes) =
-            crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-                &directory.join("sent-manifest-scopes.log"),
-                password,
-                b"MTFSC1",
-            )
-            .map_err(io::Error::other)?;
-        // The shared record log accepts a torn trailing append. Normalize it before
-        // further writes so later valid scopes cannot land behind the torn bytes.
-        sent_manifest_scopes
-            .rewrite(&stored_scopes)
-            .map_err(io::Error::other)?;
-        let mut file_scopes: std::collections::HashMap<_, Vec<ManifestScope>> = Default::default();
-        let mut legacy_scope_ids = std::collections::HashSet::new();
-        if stored_scopes.len() > super::delivery_store::DeliveryLimits::default().completed_receipts
-        {
-            return Err(io::Error::other("legacy file scope capacity exhausted"));
-        }
-        {
-            let records = self
-                .received_files
-                .lock()
-                .expect("received files lock not poisoned");
-            let log = self.log.lock().expect("log lock not poisoned");
-            let events: std::collections::HashMap<_, _> = log
-                .conversations()
-                .into_iter()
-                .flat_map(|c| {
-                    log.events(&c)
-                        .into_iter()
-                        .filter(|e| e.kind == crate::eventlog::EventKind::FileManifest)
-                        .map(|e| (e.id, e.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            for scope in stored_scopes {
-                if scope.file != scope.parent
-                    && events.get(&scope.event).is_some_and(|event| {
-                        event.conversation_id == scope.parent && event.author == scope.author
-                    })
-                {
-                    let scopes = file_scopes.entry(scope.file).or_default();
-                    let restored = ManifestScope {
-                        parent: scope.parent,
-                        author: scope.author,
-                        event: scope.event,
-                    };
-                    if !scopes.contains(&restored) {
-                        legacy_scope_ids.insert(restored.event);
-                        scopes.push(restored);
-                    }
-                }
-            }
-            for conversation in records.conversations() {
-                for record in records.entries(&conversation) {
-                    if let (Some(manifest), Some(event)) = (
-                        crate::file::decode_manifest(&record.plaintext),
-                        events.get(&record.event_id),
-                    ) {
-                        file_scopes
-                            .entry(manifest.file_conv())
-                            .or_default()
-                            .push(ManifestScope {
-                                parent: event.conversation_id,
-                                author: event.author,
-                                event: event.id,
-                            });
-                    }
-                }
-            }
-        }
         let next = PrivacyState {
             policy,
             proofs,
             own: own.clone(),
             visibility,
             routes,
-            sent_manifest_scopes,
-            scope_repair_needed: false,
-            legacy_scope_ids,
-            file_scopes,
         };
         let mut state = self.privacy.state.write().map_err(|_| denied())?;
         if state.is_some() {
@@ -232,8 +167,6 @@ impl Node {
         }
         *state = Some(next);
         drop(state);
-        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        self.reseed_live_file_book(&delivery);
         Ok(())
     }
     /// Return current local policy; unconfigured SDK nodes report the public default.
@@ -768,7 +701,7 @@ impl Node {
         });
         account.is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
     }
-    pub(in crate::node) fn group_member(&self, public: &PublicIdentity) -> bool {
+    pub(in crate::node) fn group_member(&self, public: &PublicIdentity) -> Result<bool, LogError> {
         let channel_ids = {
             let book = self.channels.lock().expect("channels lock not poisoned");
             book.channel_ids()
@@ -776,12 +709,15 @@ impl Node {
         // Admission must use the durable, signed membership controls, including
         // leaves and transfers that the live book has not processed yet.
         let log = self.log.lock().expect("log lock not poisoned");
-        channel_ids.into_iter().any(|id| {
-            let events = log.events(&id);
-            crate::node::channel::ChannelBook::projected_members(id, &events).is_some_and(
+        for id in channel_ids {
+            let events = log.events(&id)?;
+            if crate::node::channel::ChannelBook::projected_members(id, &events).is_some_and(
                 |members| members.contains(public) && members.contains(&self.identity.public()),
-            )
-        })
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(in crate::node) fn group_departure_peer(&self, public: &PublicIdentity) -> bool {
@@ -797,96 +733,76 @@ impl Node {
             .cloned();
         self.account_allowed(public, announce.as_ref())
     }
-    pub(in crate::node) fn remember_manifest_scope(
+    pub(in crate::node) fn manifest_scopes(
         &self,
         file: crate::eventlog::ConversationId,
-        parent: crate::eventlog::ConversationId,
-        author: crate::eventlog::Author,
-        event: crate::eventlog::EventId,
-    ) {
-        if file == parent {
-            return;
-        }
-        let mut state = self
-            .privacy
-            .state
-            .write()
-            .expect("privacy lock not poisoned");
-        if let Some(state) = state.as_mut() {
-            let scopes = state.file_scopes.entry(file).or_default();
-            let scope = ManifestScope {
-                parent,
-                author,
-                event,
-            };
-            if !scopes.contains(&scope) {
-                scopes.push(scope);
-            }
-        }
+    ) -> impl Iterator<Item = Result<ManifestScope, LogError>> + use<> {
+        let offers = self
+            .files
+            .lock()
+            .expect("files lock")
+            .offers(Some(file), None)
+            .map(|offer| {
+                offer.map(|offer| ManifestScope {
+                    parent: offer.parent,
+                    author: offer.author,
+                    event: offer.event,
+                })
+            });
+        #[cfg(test)]
+        let withheld = self.withheld_file_scopes.lock().unwrap().contains(&file);
+        #[cfg(not(test))]
+        let withheld = false;
+        offers
+            .chain(self.manifest_scopes.scopes(file))
+            .filter(move |_| !withheld)
     }
-    /// Keep all fanout scopes durable without duplicating the account history bubble.
+    pub(in crate::node) fn has_file_scope(
+        &self,
+        file: crate::eventlog::ConversationId,
+    ) -> Result<bool, LogError> {
+        self.manifest_scopes(file)
+            .next()
+            .transpose()
+            .map(|scope| scope.is_some())
+    }
+    pub(in crate::node) fn file_scope_revision(&self) -> Result<(u64, u64), LogError> {
+        Ok((
+            self.files.lock().expect("files lock").revision()?,
+            self.manifest_scopes.revision()?,
+        ))
+    }
+    // Incoming scopes are installed with their validated FILES row. This hint
+    // invalidates existing network projections without retaining another copy.
+    pub(in crate::node) fn remember_manifest_scope(
+        &self,
+        _file: crate::eventlog::ConversationId,
+        _parent: crate::eventlog::ConversationId,
+        _author: crate::eventlog::Author,
+        _event: crate::eventlog::EventId,
+    ) {
+        self.privacy
+            .projection_revision
+            .fetch_add(1, Ordering::SeqCst);
+    }
     pub(in crate::node) fn remember_sent_manifest_scope(
         &self,
         file: crate::eventlog::ConversationId,
         parent: crate::eventlog::ConversationId,
         author: crate::eventlog::Author,
         event: crate::eventlog::EventId,
-    ) -> Result<(), crate::eventlog::LogError> {
-        if file == parent {
-            return Ok(());
-        }
-        let mut state = self
-            .privacy
-            .state
-            .write()
-            .map_err(|_| crate::eventlog::LogError::Io(denied()))?;
-        if let Some(state) = state.as_mut() {
-            let scope = ManifestScope {
+    ) -> Result<(), LogError> {
+        self.manifest_scopes.insert(
+            file,
+            ManifestScope {
                 parent,
                 author,
                 event,
-            };
-            if !state
-                .file_scopes
-                .get(&file)
-                .is_some_and(|scopes| scopes.contains(&scope))
-            {
-                if state.legacy_scope_ids.len()
-                    >= super::delivery_store::DeliveryLimits::default().completed_receipts
-                {
-                    return Err(crate::eventlog::LogError::CorruptFile(
-                        "legacy file scope capacity exhausted".into(),
-                    ));
-                }
-                if state.scope_repair_needed {
-                    let valid = state
-                        .file_scopes
-                        .iter()
-                        .flat_map(|(file, scopes)| {
-                            scopes.iter().map(|scope| StoredManifestScope {
-                                file: *file,
-                                parent: scope.parent,
-                                author: scope.author,
-                                event: scope.event,
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    state.sent_manifest_scopes.rewrite(&valid)?;
-                    state.scope_repair_needed = false;
-                }
-                if let Err(error) = state.sent_manifest_scopes.append(&StoredManifestScope {
-                    file,
-                    parent,
-                    author,
-                    event,
-                }) {
-                    state.scope_repair_needed = true;
-                    return Err(error);
-                }
-                state.legacy_scope_ids.insert(event);
-                state.file_scopes.entry(file).or_default().push(scope);
-            }
-        }
+            },
+        )?;
+        self.privacy
+            .projection_revision
+            .fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     pub(in crate::node) fn update_presence(&self, own: &Announce) -> io::Result<()> {
@@ -940,7 +856,7 @@ impl Node {
                     .any(|a| a.id == id && a.source == PermissionSource::Manual)
         })
     }
-    fn admitted(&self, peer: &VerifiedPeer) -> bool {
+    fn admitted(&self, peer: &VerifiedPeer) -> Result<bool, LogError> {
         let binding_conflicts = {
             let guard = self
                 .privacy
@@ -955,9 +871,11 @@ impl Node {
         if binding_conflicts {
             return self.account_transition_admitted(peer);
         }
-        self.account_allowed(peer.public_identity(), peer.announcement())
-            || self.group_member(peer.public_identity())
-            || self.group_departure_peer(peer.public_identity())
+        Ok(
+            self.account_allowed(peer.public_identity(), peer.announcement())
+                || self.group_member(peer.public_identity())?
+                || self.group_departure_peer(peer.public_identity()),
+        )
     }
     // This bit describes disclosure on this connection. Physical-LAN-only
     // peers stay visible to their actual LAN neighbors while overlay contacts
@@ -1009,7 +927,10 @@ impl Node {
         if announce.public() != *public || !announce.verify() {
             return Err(TransportError::IdentityMismatch);
         }
-        let group_member = self.group_member(public) || self.group_departure_peer(public);
+        let group_member = self
+            .group_member(public)
+            .map_err(|error| TransportError::Io(io::Error::other(error)))?
+            || self.group_departure_peer(public);
         #[cfg(test)]
         if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
             hook();
@@ -1069,7 +990,8 @@ impl Node {
     }
 
     /// Async hosts persist the captured snapshot on the blocking pool. No roster
-    /// guard or Node reference is carried into the filesystem operation.
+    /// guard or Node reference is carried into the filesystem operation. The
+    /// privacy facade retains its profile context through actual destruction.
     pub async fn cached_peer_snapshot_async(
         &self,
     ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
@@ -1081,8 +1003,7 @@ impl Node {
             .ok_or_else(|| io::Error::other("node runtime retired"))?;
         #[cfg(test)]
         let hook = self.peer_snapshot_hook.lock().unwrap().take();
-        tokio::task::spawn_blocking(move || {
-            let _work = work;
+        work.spawn_blocking(move || {
             #[cfg(test)]
             if let Some(hook) = hook {
                 hook();
@@ -1091,6 +1012,7 @@ impl Node {
         })
         .await
         .map_err(|_| io::Error::other("peer cache task failed"))?
+        .into_inner()
     }
 
     fn persist_discovery_snapshot(
@@ -1299,7 +1221,9 @@ impl Node {
             .announcement(expected)
             .cloned();
         if !self.account_allowed(expected, announce.as_ref())
-            && !self.group_member(expected)
+            && !self
+                .group_member(expected)
+                .map_err(|error| TransportError::Io(io::Error::other(error)))?
             && !self.group_departure_peer(expected)
         {
             return Err(TransportError::AdmissionDenied);
@@ -1519,7 +1443,8 @@ impl Node {
         self.trace_account_client(&self.identity.public(), || {
             format!("responder_noise_begin socket_ports={observer_socket_ports:?}")
         });
-        let mut channel = tokio::time::timeout(
+        let admission_error = std::sync::Mutex::new(None);
+        let channel_result = tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
             SecureChannel::accept_with_transitions(
                 stream,
@@ -1527,14 +1452,25 @@ impl Node {
                 own.as_ref(),
                 publicly_visible,
                 &transitions,
-                |peer| {
-                    self.admitted(peer)
-                        || self.pairing_retry_allowed(peer.public_identity(), peer.announcement())
+                |peer| match self.admitted(peer) {
+                    Ok(allowed) => {
+                        allowed
+                            || self
+                                .pairing_retry_allowed(peer.public_identity(), peer.announcement())
+                    }
+                    Err(error) => {
+                        *admission_error.lock().expect("admission error lock") = Some(error);
+                        false
+                    }
                 },
             ),
         )
         .await
-        .map_err(|_| TransportError::Noise("accept timed out".into()))??;
+        .map_err(|_| TransportError::Noise("accept timed out".into()));
+        if let Some(error) = admission_error.into_inner().expect("admission error lock") {
+            return Err(TransportError::Io(io::Error::other(error)));
+        }
+        let mut channel = channel_result??;
         #[cfg(test)]
         timing.phase("accept-remember-peer");
         #[cfg(test)]

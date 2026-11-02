@@ -18,25 +18,22 @@ impl Node {
         &self,
         reference: &journal::OperationReference,
         payload: &GroupFilePayload,
-    ) -> bool {
-        reference.executor.device == self.identity.public()
-            && self.account_group_file_cached_assets_ready(reference, payload)
+    ) -> Result<bool, crate::eventlog::LogError> {
+        Ok(reference.executor.device == self.identity.public()
+            && self.account_group_file_cached_assets_ready(reference, payload)?)
     }
-
-    /// Local content reuse for the original requester. This does not establish
-    /// executor authority or allow mixing another signer's chunk events.
     pub(in crate::node) fn account_group_file_cached_assets_ready(
         &self,
         reference: &journal::OperationReference,
         payload: &GroupFilePayload,
-    ) -> bool {
+    ) -> Result<bool, crate::eventlog::LogError> {
         if !reference.valid(&self.account.public().ed25519_pub)
             || !payload
                 .descriptor
                 .as_ref()
                 .is_some_and(|descriptor| descriptor.valid_for(reference, &payload.logical))
         {
-            return false;
+            return Ok(false);
         }
         let receipt = {
             let journal = self
@@ -44,23 +41,25 @@ impl Node {
                 .lock()
                 .expect("group operation journal mutex");
             if journal.file_preparation(reference.id) != Some(payload) {
-                return false;
+                return Ok(false);
             }
             journal.file_asset_receipt(reference.id).cloned()
         };
         let Some(receipt) = receipt else {
-            return false;
+            return Ok(false);
         };
-        receipt.valid_for(payload)
+        Ok(receipt.valid_for(payload)
             && self
                 .log
                 .lock()
                 .expect("event log mutex")
-                .fingerprint_and_len(&receipt.file_conv)
-                == (receipt.fingerprint, receipt.event_count as usize)
+                .fingerprint_and_len(&receipt.file_conv)?
+                == (receipt.fingerprint, receipt.event_count as usize))
     }
-
-    fn group_file_executor_current(&self, reference: &journal::OperationReference) -> bool {
+    fn group_file_executor_current(
+        &self,
+        reference: &journal::OperationReference,
+    ) -> Result<bool, crate::eventlog::LogError> {
         if reference.executor.device != self.identity.public()
             || self.runtime_work.is_closed()
             || self
@@ -69,7 +68,7 @@ impl Node {
             || !reference.valid(&self.account.public().ed25519_pub)
             || !self.account_group_binding_current(&reference.origin)
         {
-            return false;
+            return Ok(false);
         }
         let entry = self
             .group_operations
@@ -78,27 +77,30 @@ impl Node {
             .entries
             .get(&reference.id)
             .cloned();
-        if entry.is_none_or(|entry| {
-            !entry.reference.same(reference)
-                || entry.cancel
-                || matches!(
-                    entry.status.phase,
-                    AccountGroupOperationPhase::Cancelled
-                        | AccountGroupOperationPhase::Rejected { .. }
-                )
-                || entry.status.primary_event.is_some_and(|event| {
-                    self.recalls
-                        .lock()
-                        .expect("recalls mutex")
-                        .targets(&reference.group)
-                        .contains(&event)
-                })
-        }) {
-            return false;
+        let Some(entry) = entry else {
+            return Ok(false);
+        };
+        if !entry.reference.same(reference)
+            || entry.cancel
+            || matches!(
+                entry.status.phase,
+                AccountGroupOperationPhase::Cancelled | AccountGroupOperationPhase::Rejected { .. }
+            )
+        {
+            return Ok(false);
+        }
+        if let Some(event) = entry.status.primary_event
+            && self
+                .recalls
+                .lock()
+                .expect("recalls mutex")
+                .contains(reference.group, event)?
+        {
+            return Ok(false);
         }
         let proof = self.own_group_proof();
-        let projection = self.account_group_projection(reference.group);
-        Self::public_account_group_source(
+        let projection = self.account_group_projection(reference.group)?;
+        Ok(Self::public_account_group_source(
             reference.group,
             &projection,
             &self.identity.public(),
@@ -110,15 +112,14 @@ impl Node {
                 AccountGroupRole::Member | AccountGroupRole::Owner
             ) && source.lifetime == reference.executor.lifetime
                 && source.authority == reference.executor.authority
-        })
+        }))
     }
-
     fn group_file_result_current(
         &self,
         reference: &journal::OperationReference,
         payload: &GroupFilePayload,
         event: &Event,
-    ) -> bool {
+    ) -> Result<bool, crate::eventlog::LogError> {
         if self.runtime_work.is_closed()
             || self
                 .delivery_suspended
@@ -128,7 +129,7 @@ impl Node {
             || event.conversation_id != reference.group
             || event.author.ed25519_pub() != &reference.executor.device.ed25519_pub
         {
-            return false;
+            return Ok(false);
         }
         let entry = self
             .group_operations
@@ -147,22 +148,21 @@ impl Node {
                     .as_ref()
                     .is_none_or(|copy| payload.descriptor.as_ref() != Some(&copy.descriptor))
         }) {
-            return false;
+            return Ok(false);
         }
         if self
             .recalls
             .lock()
             .expect("recalls mutex")
-            .targets(&reference.group)
-            .contains(&event.id)
+            .contains(reference.group, event.id)?
         {
-            return false;
+            return Ok(false);
         }
         let live = self
             .received_files
             .lock()
             .expect("received files mutex")
-            .entry(event.id)
+            .entry(event.id)?
             .is_some_and(|row| {
                 row.conversation == reference.group
                     && row.from == reference.executor.device.user_id()
@@ -171,36 +171,34 @@ impl Node {
                         .as_ref()
                         .is_some_and(|descriptor| row.plaintext == descriptor.manifest)
             });
-        live && self
-            .account_file_proofs
-            .lock()
-            .expect("file proofs mutex")
-            .get(&event.id)
-            .is_some()
+        Ok(live
+            && self
+                .account_file_proofs
+                .lock()
+                .expect("file proofs mutex")
+                .get(&event.id)?
+                .is_some())
     }
-
     fn group_file_fetch_current(
         &self,
         reference: &journal::OperationReference,
         payload: &GroupFilePayload,
         event: Option<&Event>,
-    ) -> bool {
+    ) -> Result<bool, crate::eventlog::LogError> {
         if payload
             .logical
             .expires_at_ms
             .is_some_and(|time| time <= self.expiry_now())
         {
-            return false;
+            return Ok(false);
         }
         match event {
-            Some(event) => {
-                self.group_file_result_current(reference, payload, event)
-                    && !self
-                        .delivery
-                        .lock()
-                        .expect("delivery mutex")
-                        .manifest_event_erased(event.id)
-            }
+            Some(event) => Ok(self.group_file_result_current(reference, payload, event)?
+                && !self
+                    .delivery
+                    .lock()
+                    .expect("delivery mutex")
+                    .manifest_event_erased(event.id)),
             None => self.group_file_executor_current(reference),
         }
     }
@@ -241,7 +239,7 @@ impl Node {
             .ok_or_else(unavailable)?;
         let manifest =
             crate::node::files::validated_manifest(&descriptor.manifest).ok_or_else(unavailable)?;
-        if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref()) {
+        if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref())? {
             return Err(NodeError::File(
                 "file asset source scope is not current".into(),
             ));
@@ -254,12 +252,12 @@ impl Node {
             return Err(unavailable());
         }
         if result_event.is_some()
-            && self.account_group_file_cached_assets_ready(&reference, &payload)
+            && self.account_group_file_cached_assets_ready(&reference, &payload)?
         {
             let delivery = self.delivery.lock().expect("delivery mutex");
             let event = result_event.as_ref().ok_or_else(unavailable)?;
             if delivery.manifest_event_erased(event.id)
-                || !self.group_file_result_current(&reference, &payload, event)
+                || !self.group_file_result_current(&reference, &payload, event)?
                 || payload
                     .logical
                     .expires_at_ms
@@ -275,7 +273,7 @@ impl Node {
                 .map_err(NodeError::Log);
         }
         if result_event.is_none() {
-            if self.account_group_file_assets_ready(&reference, &payload) {
+            if self.account_group_file_assets_ready(&reference, &payload)? {
                 return Ok(());
             }
             // Execution alone retains the independently signed original preparation.
@@ -288,7 +286,7 @@ impl Node {
         let file = manifest.file_conv();
         let ids: Vec<_> = {
             let log = self.log.lock().expect("event log mutex");
-            let events = log.events(&file);
+            let events = log.events(&file)?;
             let author = events.first().map(|event| event.author);
             if events
                 .iter()
@@ -330,15 +328,14 @@ impl Node {
             if index != 0 && index % 16 == 0 {
                 tokio::task::yield_now().await;
             }
-            if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref()) {
+            if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref())? {
                 return Err(unavailable());
             }
             let event = self
                 .log
                 .lock()
                 .expect("event log mutex")
-                .get(id)
-                .cloned()
+                .get(id)?
                 .ok_or_else(unavailable)?;
             if !event.verify_integrity() || !event.verify_signature() {
                 return Err(unavailable());
@@ -412,7 +409,7 @@ impl Node {
             let mut started = false;
             let mut buffer = Vec::with_capacity(crate::file::CHUNK_SIZE + 16);
             loop {
-                if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref())
+                if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref())?
                     || payload
                         .logical
                         .expires_at_ms
@@ -436,7 +433,7 @@ impl Node {
                     .map_err(|_| unavailable())?;
                 // The authenticated read can outlive cancellation, expiry, or
                 // account/runtime retirement. Recheck before using its bytes.
-                if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref())
+                if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref())?
                     || payload
                         .logical
                         .expires_at_ms
@@ -515,10 +512,11 @@ impl Node {
                                                             &append_reference,
                                                             &append_payload,
                                                             event,
-                                                        )
+                                                        )?
                                                 }
-                                                None => node
-                                                    .group_file_executor_current(&append_reference),
+                                                None => node.group_file_executor_current(
+                                                    &append_reference,
+                                                )?,
                                             };
                                             if !current
                                                 || append_payload
@@ -556,7 +554,7 @@ impl Node {
         {
             return Err(unavailable());
         }
-        if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref()) {
+        if !self.group_file_fetch_current(&reference, &payload, result_event.as_ref())? {
             return Err(unavailable());
         }
         if let Some(output) = media_output.take() {
@@ -572,11 +570,14 @@ impl Node {
                             &payload.logical.name,
                             &dir.path().join("verified-file"),
                             || {
-                                if node.group_file_fetch_current(
-                                    &reference,
-                                    &payload,
-                                    result_event.as_ref(),
-                                ) {
+                                if node
+                                    .group_file_fetch_current(
+                                        &reference,
+                                        &payload,
+                                        result_event.as_ref(),
+                                    )
+                                    .map_err(std::io::Error::other)?
+                                {
                                     Ok(())
                                 } else {
                                     Err(std::io::Error::other(
@@ -594,9 +595,9 @@ impl Node {
             let current = match result_event.as_ref() {
                 Some(event) => {
                     !delivery.manifest_event_erased(event.id)
-                        && node.group_file_result_current(&reference, &payload, event)
+                        && node.group_file_result_current(&reference, &payload, event)?
                 }
-                None => node.group_file_executor_current(&reference),
+                None => node.group_file_executor_current(&reference)?,
             };
             if !current
                 || payload
@@ -609,7 +610,7 @@ impl Node {
             let (fingerprint, count) = {
                 let log = node.log.lock().expect("event log mutex");
                 log.sync().map_err(NodeError::Log)?;
-                log.fingerprint_and_len(&file)
+                log.fingerprint_and_len(&file)?
             };
             if result_event.is_some() {
                 if let Some(prepared) = prepared {

@@ -41,16 +41,16 @@ pub struct DmEnvelope {
 #[derive(Deserialize)]
 pub(super) struct DmEnvelopeRef<'a> {
     #[serde(borrow)]
-    _route: DmRouteRef<'a>,
+    pub route: DmRouteRef<'a>,
     pub msg_id: [u8; 32],
     #[serde(borrow)]
     pub body: &'a [u8],
 }
 
 #[derive(Deserialize)]
-struct DmRouteRef<'a> {
-    _sender_account: &'a str,
-    _recipient_account: &'a str,
+pub(super) struct DmRouteRef<'a> {
+    pub sender_account: &'a str,
+    pub recipient_account: &'a str,
 }
 
 impl DmEnvelope {

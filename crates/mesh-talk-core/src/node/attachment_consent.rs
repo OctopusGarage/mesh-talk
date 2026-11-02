@@ -5,13 +5,19 @@ use crate::eventlog::EventId;
 use crate::eventlog::{ConversationId, LogError};
 use crate::identity::device::PublicIdentity;
 use crate::node::{Node, NodeError};
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 
 const MAGIC: &[u8; 6] = b"MTACPT";
+#[cfg(test)]
 const COMPACT_AFTER: usize = 8192;
+mod indexed;
+pub(crate) use indexed::IndexedAttachmentConsent;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ReceiveDecision {
@@ -29,6 +35,7 @@ enum Record {
 
 /// Preferences apply to offers without exact decisions. Media is handled by the caller
 /// before consulting this store. Every successful change is synced before publication.
+#[cfg(test)]
 pub struct AttachmentConsent {
     log: EncryptedRecordLog<Record>,
     global_auto: bool,
@@ -39,6 +46,7 @@ pub struct AttachmentConsent {
     generation: u64,
 }
 
+#[cfg(test)]
 impl AttachmentConsent {
     /// Load the account-local encrypted preferences and exact offer decisions.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -117,10 +125,6 @@ impl AttachmentConsent {
         Ok(())
     }
 
-    pub(super) fn generation(&self) -> u64 {
-        self.generation
-    }
-
     /// Whether generic attachments are received automatically by default.
     pub fn global_auto(&self) -> bool {
         self.global_auto
@@ -182,21 +186,19 @@ impl AttachmentConsent {
 
 impl Node {
     pub(in crate::node) fn queue_approved_incomplete_files(&self) {
-        let files = self
-            .files
-            .lock()
-            .expect("files lock not poisoned")
-            .file_convs();
-        for file in files {
-            if self.attachment_consent_status(file) == Some(ReceiveDecision::Accepted)
-                && !(self.media.contains(file) && self.has_verified_file_completion(file))
-                && matches!(self.file_progress(file), Some(progress) if progress.done < progress.total)
-            {
-                self.pending_files
-                    .lock()
-                    .expect("pending files lock not poisoned")
-                    .insert(file);
-            }
+        let schedule = (|| -> Result<(), LogError> {
+            let generation = self
+                .attachment_consent
+                .lock()
+                .expect("consent lock")
+                .generation()?;
+            self.files
+                .lock()
+                .expect("files lock")
+                .request_download_scan(generation)
+        })();
+        if let Err(error) = schedule {
+            log::warn!("file policy scan deferred: {error}");
         }
         self.file_pull_notify.notify_one();
         self.note_file_change();
@@ -207,34 +209,28 @@ impl Node {
         file: ConversationId,
         event_id: Option<EventId>,
         sender: Option<&PublicIdentity>,
-    ) -> Option<(bool, String, EventId, PublicIdentity)> {
-        let (manifest, mut ids) = {
-            let files = self.files.lock().expect("files lock not poisoned");
-            (
-                files.manifest(&file)?.clone(),
-                match event_id {
-                    Some(id) if files.has_manifest_event(file, id) => vec![id],
-                    Some(_) => return None,
-                    None => files.manifest_events(file),
-                },
-            )
+    ) -> Result<Option<(bool, String, EventId, PublicIdentity)>, crate::eventlog::LogError> {
+        let book = self.files.lock().expect("files lock").clone();
+        let Some(manifest) = book.manifest(file)? else {
+            return Ok(None);
         };
-        if manifest.file_conv() != file {
-            return None;
-        }
-        ids.sort_unstable();
+        let ids: Box<dyn Iterator<Item = Result<EventId, LogError>>> = match event_id {
+            Some(id) if book.has_manifest_event(file, id)? => Box::new(std::iter::once(Ok(id))),
+            Some(_) => return Ok(None),
+            None => Box::new(
+                book.offers(Some(file), None)
+                    .map(|offer| offer.map(|offer| offer.event)),
+            ),
+        };
+        let mut selected = None;
         let own = self.identity.public();
         for id in ids {
+            let id = id?;
             if event_id.is_some_and(|expected| expected != id) {
                 continue;
             }
-            let Some(event) = ({
-                self.log
-                    .lock()
-                    .expect("log lock not poisoned")
-                    .get(&id)
-                    .cloned()
-            }) else {
+            let Some(event) = ({ self.log.lock().expect("log lock not poisoned").get(&id)? })
+            else {
                 continue;
             };
             if event.kind != crate::eventlog::EventKind::FileManifest
@@ -261,15 +257,20 @@ impl Node {
             let account = proof
                 .account_id()
                 .unwrap_or_else(|| proof.public().user_id());
-            return Some((
-                crate::node::media_store::automatic_inline_image(&manifest)
-                    || account == self.account_id(),
-                account,
-                id,
-                proof.public(),
-            ));
+            if selected
+                .as_ref()
+                .is_none_or(|(_, _, previous, _)| id < *previous)
+            {
+                selected = Some((
+                    crate::node::media_store::automatic_inline_image(&manifest)
+                        || account == self.account_id(),
+                    account,
+                    id,
+                    proof.public(),
+                ));
+            }
         }
-        None
+        Ok(selected)
     }
 
     /// A sender may query only its own exact manifest after the recipient has opened it.
@@ -279,136 +280,152 @@ impl Node {
         file: ConversationId,
         manifest_event: EventId,
         peer: &PublicIdentity,
-    ) -> ReceiveDecision {
+    ) -> Result<ReceiveDecision, crate::eventlog::LogError> {
         let Some((automatic, account, _, _)) =
-            self.incoming_offer(file, Some(manifest_event), Some(peer))
+            self.incoming_offer(file, Some(manifest_event), Some(peer))?
         else {
-            return ReceiveDecision::Pending;
+            return Ok(ReceiveDecision::Pending);
         };
         if automatic {
-            return ReceiveDecision::Accepted;
+            return Ok(ReceiveDecision::Accepted);
         }
-        let events = self.equivalent_offer_events(file);
-        self.attachment_consent
-            .lock()
-            .expect("consent lock not poisoned")
-            .status_for_events(&events, &account)
+        self.consent_for_file_account(self.equivalent_offer_decision(file)?, &account)
     }
 
-    /// Status for an attachment surfaced to this account. `None` means there is
-    /// no verified incoming offer for the requested file conversation.
-    pub fn attachment_consent_status(&self, file: ConversationId) -> Option<ReceiveDecision> {
-        let events = self.equivalent_offer_events(file);
-        let offers: Vec<_> = events
-            .iter()
-            .filter_map(|id| self.incoming_offer(file, Some(*id), None))
-            .collect();
-        if offers.is_empty() {
-            return None;
-        }
-        let consent = self
-            .attachment_consent
+    /// Status combines exact decisions across equivalent signed offers. Each
+    /// traversal holds only one bounded metadata page.
+    pub fn attachment_consent_status(
+        &self,
+        file: ConversationId,
+    ) -> Result<Option<ReceiveDecision>, LogError> {
+        let explicit = self.equivalent_offer_decision(file)?;
+        let offers = self
+            .files
             .lock()
-            .expect("consent lock not poisoned");
+            .expect("files lock")
+            .offers(Some(file), None);
+        let mut found = false;
         let mut pending = false;
         let mut accepted = false;
-        for (automatic, account, _, _) in offers {
-            let decision = if automatic {
+        for offer in offers {
+            let Some((automatic, account, _, _)) =
+                self.incoming_offer(file, Some(offer?.event), None)?
+            else {
+                continue;
+            };
+            found = true;
+            match if automatic {
                 ReceiveDecision::Accepted
             } else {
-                consent.status_for_events(&events, &account)
-            };
-            match decision {
-                ReceiveDecision::Accepted => accepted = true,
+                self.consent_for_file_account(explicit, &account)?
+            } {
                 ReceiveDecision::Pending => pending = true,
+                ReceiveDecision::Accepted => accepted = true,
                 ReceiveDecision::Declined => {}
             }
         }
-        Some(if pending {
+        Ok(found.then_some(if pending {
             ReceiveDecision::Pending
         } else if accepted {
             ReceiveDecision::Accepted
         } else {
             ReceiveDecision::Declined
-        })
+        }))
     }
-
     pub(in crate::node) fn attachment_chunk_author_allowed(
         &self,
         file: ConversationId,
         author: &[u8; 32],
-    ) -> bool {
-        if !self
+    ) -> Result<bool, LogError> {
+        let author = crate::eventlog::Author::from_ed25519(*author);
+        let explicit = self.equivalent_offer_decision(file)?;
+        let offers = self
             .files
             .lock()
-            .expect("files lock not poisoned")
-            .has_author(file, crate::eventlog::Author::from_ed25519(*author))
-        {
-            return false;
+            .expect("files lock")
+            .offers(Some(file), Some(author));
+        for offer in offers {
+            if let Some((automatic, account, _, _)) =
+                self.incoming_offer(file, Some(offer?.event), None)?
+                && (automatic
+                    || self.consent_for_file_account(explicit, &account)?
+                        == ReceiveDecision::Accepted)
+            {
+                return Ok(true);
+            }
         }
-        let events = self.equivalent_offer_events(file);
-        let offers: Vec<_> = events
-            .iter()
-            .filter_map(|id| self.incoming_offer(file, Some(*id), None))
-            .filter(|(_, _, _, sender)| &sender.ed25519_pub == author)
-            .collect();
-        let consent = self
-            .attachment_consent
+        Ok(false)
+    }
+    pub(in crate::node) fn equivalent_offer_decision(
+        &self,
+        file: ConversationId,
+    ) -> Result<Option<bool>, LogError> {
+        self.attachment_consent
             .lock()
-            .expect("consent lock not poisoned");
-        offers.into_iter().any(|(automatic, account, _, _)| {
-            automatic || consent.status_for_events(&events, &account) == ReceiveDecision::Accepted
+            .expect("consent lock")
+            .file_decision(file)
+    }
+    pub(in crate::node) fn consent_for_file_account(
+        &self,
+        explicit: Option<bool>,
+        account: &str,
+    ) -> Result<ReceiveDecision, LogError> {
+        Ok(match explicit {
+            Some(true) => ReceiveDecision::Accepted,
+            Some(false) => ReceiveDecision::Declined,
+            None if self
+                .attachment_consent
+                .lock()
+                .expect("consent lock")
+                .preference(account)? =>
+            {
+                ReceiveDecision::Accepted
+            }
+            None => ReceiveDecision::Pending,
         })
     }
 
-    fn equivalent_offer_events(&self, file: ConversationId) -> Vec<EventId> {
-        self.files
-            .lock()
-            .expect("files lock not poisoned")
-            .manifest_events(file)
-    }
-
     pub fn decide_attachment(&self, file: ConversationId, accept: bool) -> Result<(), NodeError> {
-        let offers: Vec<_> = self
-            .equivalent_offer_events(file)
-            .into_iter()
-            .filter_map(|id| self.incoming_offer(file, Some(id), None))
-            .collect();
-        let Some((_, _, event, _)) = offers.iter().find(|(automatic, _, _, _)| !automatic) else {
-            return Err(NodeError::InvalidInput(
-                "attachment does not require approval or is unknown".into(),
-            ));
-        };
+        let offers = self
+            .files
+            .lock()
+            .expect("files lock")
+            .offers(Some(file), None);
+        let mut selected = None;
+        for offer in offers {
+            if let Some((false, _, event, _)) =
+                self.incoming_offer(file, Some(offer?.event), None)?
+            {
+                selected = Some(event);
+                break;
+            }
+        }
+        let event = selected.ok_or_else(|| {
+            NodeError::InvalidInput("attachment does not require approval or is unknown".into())
+        })?;
         // One durable decision covers all identical signed offer events for this file.
         self.attachment_consent
             .lock()
             .expect("consent lock not poisoned")
-            .decide(*event, accept)
+            .decide(event, accept)
             .map_err(NodeError::Log)?;
-        if accept {
-            self.pending_files
-                .lock()
-                .expect("pending files lock not poisoned")
-                .insert(file);
-        } else {
-            self.pending_files
-                .lock()
-                .expect("pending files lock not poisoned")
-                .remove(&file);
-        }
+        self.files
+            .lock()
+            .expect("files lock")
+            .request_download(file)?;
         self.file_pull_notify.notify_one();
         self.note_file_change();
         Ok(())
     }
 
-    pub fn attachment_global_auto(&self) -> bool {
+    pub fn attachment_global_auto(&self) -> Result<bool, LogError> {
         self.attachment_consent
             .lock()
             .expect("consent lock not poisoned")
             .global_auto()
     }
 
-    pub fn attachment_contact_auto(&self, account: &str) -> Option<bool> {
+    pub fn attachment_contact_auto(&self, account: &str) -> Result<Option<bool>, LogError> {
         self.attachment_consent
             .lock()
             .expect("consent lock not poisoned")
@@ -443,6 +460,41 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_consent_warm_open_does_not_decode_retained_decisions() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("attachment-consent.log");
+        {
+            let mut consent = AttachmentConsent::open(&path, "pw").unwrap();
+            for sequence in 0u64..512 {
+                let mut event = [0; 32];
+                event[..8].copy_from_slice(&sequence.to_be_bytes());
+                consent
+                    .decide(EventId::new(event), sequence % 2 == 0)
+                    .unwrap();
+            }
+        }
+        let device = crate::identity::device::DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let profile = indexed::tests::profile(root.path(), &device, &account);
+        drop(IndexedAttachmentConsent::from_profile(profile.clone(), &path, "pw").unwrap());
+        drop(profile);
+        crate::storage::record_log::frame_observations::reset();
+        let profile = indexed::tests::profile(root.path(), &device, &account);
+        let consent = IndexedAttachmentConsent::from_profile(profile, &path, "pw").unwrap();
+        assert_eq!(
+            crate::storage::record_log::frame_observations::maximum_capacity(),
+            0,
+            "warm receive consent must read selected indexed facts, not replay every decision"
+        );
+        assert_eq!(
+            consent
+                .status(EventId::new([0; 32]), &"a".repeat(32))
+                .unwrap(),
+            ReceiveDecision::Accepted
+        );
+    }
 
     #[test]
     fn explicit_decline_survives_decision_limit_and_compaction() {

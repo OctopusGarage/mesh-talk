@@ -88,24 +88,59 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
         .send_channel_message(group, b"original custody target")
         .await
         .unwrap();
-    let event = source.channel_history(group, 10)[0].id;
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let event = source.channel_history(group, 10).unwrap()[0].id;
+    let bootstrapped = super::cold_account_setup(async {
         loop {
-            if sibling
-                .channel_history(group, 10)
-                .iter()
-                .any(|row| row.id == event && row.from_me)
-                && sibling.channel_custody_count(group, event) == Some(0)
-            {
-                break;
+            match sibling.channel_history(group, 10) {
+                Ok(rows)
+                    if rows.iter().any(|row| row.id == event && row.from_me)
+                        && sibling.channel_custody_count(group, event).unwrap() == Some(0) =>
+                {
+                    break;
+                }
+                Ok(_)
+                | Err(crate::node::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                Err(_) => panic!("cold custody history observation failed"),
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("the real outgoing copy, entitlement and own-sibling-only evidence must bootstrap");
-    assert_eq!(source.channel_custody_count(group, event), Some(0));
-    assert!(external.log.lock().unwrap().get(&event).is_none());
+    .await;
+    if let Err(error) = bootstrapped {
+        let custody_state = |node: &Node| {
+            let observations = node.channel_custody_observations(group, event);
+            let positive = observations.iter().filter(|meta| !meta.tombstone);
+            let readable = positive
+                .clone()
+                .filter(|meta| node.channel_custody_holder_binding(&meta.key).is_some())
+                .count();
+            let physical = node
+                .channels
+                .lock()
+                .unwrap()
+                .state(&group)
+                .is_some_and(|state| node.channel_identity_matches_account(state));
+            (observations.len(), positive.count(), readable, physical)
+        };
+        let source_evidence = custody_state(&source);
+        let sibling_evidence = custody_state(&sibling);
+        let sibling_outgoing_copy = sibling
+            .channel_history(group, 10)
+            .map(|rows| rows.iter().any(|row| row.id == event && row.from_me));
+        let source_custody = source.channel_custody_count(group, event);
+        let sibling_custody = sibling.channel_custody_count(group, event);
+        let external_has_original = external
+            .log
+            .lock()
+            .unwrap()
+            .get(&event)
+            .map(|event| event.is_some());
+        panic!(
+            "the real outgoing copy, entitlement and own-sibling-only evidence must bootstrap: {error:?}; sibling_outgoing_copy={sibling_outgoing_copy:?} source_custody={source_custody:?} sibling_custody={sibling_custody:?} external_has_original={external_has_original:?} evidence=(total,positive,readable,physical) source={source_evidence:?} sibling={sibling_evidence:?}"
+        );
+    }
+    assert_eq!(source.channel_custody_count(group, event).unwrap(), Some(0));
+    assert!(external.log.lock().unwrap().get(&event).unwrap().is_none());
 
     let release = Arc::new(Semaphore::new(0));
     let _release_on_drop = ReleaseHistoryOnDrop(release.clone());
@@ -161,8 +196,8 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     };
     let converged = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            if source.channel_custody_count(group, event) == Some(1)
-                && sibling.channel_custody_count(group, event) == Some(1)
+            if source.channel_custody_count(group, event).unwrap() == Some(1)
+                && sibling.channel_custody_count(group, event).unwrap() == Some(1)
                 && source.account_document_meta(&custody_key)
                     == sibling.account_document_meta(&custody_key)
             {
@@ -172,15 +207,15 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
         }
     })
     .await;
-    let source_count = source.channel_custody_count(group, event);
-    let external_has_original = external.log.lock().unwrap().get(&event).is_some();
+    let source_count = source.channel_custody_count(group, event).unwrap();
+    let external_has_original = external.log.lock().unwrap().get(&event).unwrap().is_some();
     let source_meta = source.account_document_meta(&custody_key);
     release.close();
     source.note_account_local_change();
     let resumed = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if history_requests.load(Ordering::SeqCst) >= 2
-                && sibling.channel_custody_count(group, event) == Some(1)
+                && sibling.channel_custody_count(group, event).unwrap() == Some(1)
                 && source.account_document_meta(&custody_key)
                     == sibling.account_document_meta(&custody_key)
             {
@@ -202,7 +237,8 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     }
     assert!(
         resumed.is_ok(),
-        "history and custody must resume after release"
+        "history and custody must resume after release: requests={}",
+        history_requests.load(Ordering::SeqCst),
     );
     assert_eq!(
         source_count,

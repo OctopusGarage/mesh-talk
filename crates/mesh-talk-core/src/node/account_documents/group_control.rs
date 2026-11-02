@@ -114,18 +114,25 @@ impl Node {
                 // repaired. An older public cache cannot guess its later role.
                 continue;
             }
-            if old
-                .as_ref()
-                .is_some_and(|head| !self.account_group_observation_known(*group, head))
-            {
-                // A restored public prefix cannot overwrite a newer statement
-                // signed by this same device. Reconcile its missing frontier.
-                continue;
+            if let Some(head) = &old {
+                match self.account_group_observation_known(*group, head) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        log::debug!("group access publication deferred: {error}");
+                        continue;
+                    }
+                }
             }
-            let Some(access) =
-                self.account_group_local_observation(*group, old.as_ref().map(|head| &head.access))
-            else {
-                continue;
+            let access = match self
+                .account_group_local_observation(*group, old.as_ref().map(|head| &head.access))
+            {
+                Ok(Some(access)) => access,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::debug!("group access publication deferred: {error}");
+                    continue;
+                }
             };
             if old.as_ref().is_some_and(|head| {
                 head.access.same_canonical_observation(&access)

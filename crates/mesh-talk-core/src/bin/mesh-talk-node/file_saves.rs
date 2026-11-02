@@ -1,13 +1,134 @@
 //! Bounded CLI autosaves: a durable file card can precede its immutable chunks.
+use mesh_talk_core::node::{Node, ParticipantWork, ReceiveDecision};
+#[cfg(test)]
 use mesh_talk_core::{
     eventlog::ConversationId,
-    node::{FileProgress, Node, ParticipantWork, ReceiveDecision, ReceivedFile},
+    node::{FileProgress, ReceivedFile},
 };
-use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+#[cfg(test)]
+use std::{collections::VecDeque, time::Duration};
+use std::{path::PathBuf, sync::Arc};
+#[cfg(test)]
 use tokio::{sync::mpsc, task::JoinSet};
 
+#[cfg(test)]
 const MAX_FILES: usize = 256;
 
+/// The durable receipt prefix remains unacknowledged until every admitted file
+/// is saved, declined, or no longer visible. Capacity and temporary save failure
+/// never discard the sole autosave schedule. Later pages remain on disk.
+pub(super) async fn run_bounded(
+    node: Arc<Node>,
+    directory: PathBuf,
+    mut cursor: mesh_talk_core::node::ReceptionCursor,
+    emit: impl Fn(&str) + Send + Sync + 'static,
+    work: ParticipantWork,
+) {
+    use mesh_talk_core::node::{HostReception, ReceptionConsumer, ReceptionLimit};
+    let mut changes = node.subscribe_ui_changes();
+    let mut through = None;
+    loop {
+        let reader = node.clone();
+        let Some(page) = super::reception::blocking(&work, move || {
+            reader.reception_page(
+                cursor,
+                through,
+                ReceptionLimit {
+                    rows: 32,
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        else {
+            return;
+        };
+        let page = match page {
+            Ok(page) => page,
+            Err(error) => {
+                emit(&format!(
+                    "file receipt page unavailable; will retry: {error}"
+                ));
+                super::reception::retry(&mut changes).await;
+                continue;
+            }
+        };
+        let mut pending = page
+            .receipts
+            .into_iter()
+            .filter_map(|receipt| match receipt {
+                HostReception::File(file) => Some(file),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut announced = std::collections::HashSet::new();
+        while !pending.is_empty() {
+            let reader = node.clone();
+            let destination = directory.clone();
+            let Some(result)=super::reception::blocking(&work,move ||{
+                let mut remaining=Vec::new();let mut observations=Vec::new();let mut saved=false;
+                for file in pending {
+                    let result=(||->Result<Option<PathBuf>,mesh_talk_core::node::NodeError>{
+                        match reader.attachment_consent_status(file.file_conv)? {
+                            Some(ReceiveDecision::Declined)=>return Ok(None),
+                            Some(ReceiveDecision::Pending)=>{observations.push((file.file_conv,format!("file offer from {}: {} ({} bytes) id {} — /receive {} or /decline {}",file.from,file.name,file.size,hex::encode(file.file_conv.as_bytes()),hex::encode(file.file_conv.as_bytes()),hex::encode(file.file_conv.as_bytes()))));remaining.push(file.clone());return Ok(None);},
+                            _=>{},
+                        }
+                        if reader.file_progress(file.file_conv)?.is_none() {return Ok(None);}
+                        if saved || !reader.file_ready_to_save(file.file_conv)? {remaining.push(file.clone());return Ok(None);}
+                        saved=true;
+                        reader.save_file_into_dir(file.file_conv,&destination).map(Some)
+                    })();
+                    match result {
+                        Ok(Some(path))=>observations.push((file.file_conv,format!("file from {}: {} ({} bytes) saved {}",file.from,file.name,file.size,path.display()))),
+                        Ok(None)=>{},
+                        Err(error)=>{observations.push((file.file_conv,format!("file from {}: {} ({} bytes) save failed; will retry: {error}",file.from,file.name,file.size)));remaining.push(file);},
+                    }
+                }
+                (remaining,observations)
+            }).await else{return};
+            pending = result.0;
+            for (file, message) in result.1 {
+                if announced.insert((file, message.clone())) {
+                    emit(&message);
+                }
+            }
+            // The page bounds all retained metadata; keep diagnostic evidence
+            // bounded too while a disk or consent failure persists.
+            if announced.len() > 64 {
+                announced.clear();
+            }
+            if !pending.is_empty() {
+                super::reception::retry(&mut changes).await;
+            }
+        }
+        let next = page.next;
+        let writer = node.clone();
+        let Some(result) = super::reception::blocking(&work, move || {
+            writer.acknowledge_reception(ReceptionConsumer::CliAutosave, cursor, next)
+        })
+        .await
+        else {
+            return;
+        };
+        if let Err(error) = result {
+            emit(&format!(
+                "file receipt acknowledgement failed; will retry: {error}"
+            ));
+            super::reception::retry(&mut changes).await;
+            continue;
+        }
+        cursor = next;
+        through = (!page.complete).then_some(page.through);
+        if page.complete {
+            super::reception::retry(&mut changes).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[cfg(test)]
 enum SaveWork {
     Readiness(Vec<(ConversationId, Option<FileProgress>)>),
     Saved(
@@ -16,12 +137,14 @@ enum SaveWork {
     ),
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct PendingSaves {
     pending: VecDeque<(ReceivedFile, bool)>,
     recent: VecDeque<ConversationId>,
 }
 
+#[cfg(test)]
 impl PendingSaves {
     fn enqueue(&mut self, file: ReceivedFile) -> Result<bool, ()> {
         if self.recent.contains(&file.file_conv)
@@ -66,6 +189,7 @@ impl PendingSaves {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn run(
     node: Arc<Node>,
     directory: PathBuf,
@@ -82,7 +206,7 @@ pub(super) async fn run(
                 let Some(file) = file else { break; };
                 if queue.enqueue(file.clone()).is_err() {
                     emit(&format!("file from {}: {} ({} bytes) save failed: pending save capacity exhausted", file.from, file.name, file.size));
-                } else if node.attachment_consent_status(file.file_conv) == Some(ReceiveDecision::Pending) {
+                } else if match node.attachment_consent_status(file.file_conv) { Ok(status) => status == Some(ReceiveDecision::Pending), Err(error) => { emit(&format!("file consent unavailable: {error}")); false } } {
                     emit(&format!("file offer from {}: {} ({} bytes) id {} — /receive {} or /decline {}", file.from, file.name, file.size, hex::encode(file.file_conv.as_bytes()), hex::encode(file.file_conv.as_bytes()), hex::encode(file.file_conv.as_bytes())));
                 }
             }
@@ -92,14 +216,19 @@ pub(super) async fn run(
                     let checking_node = node.clone();
                     if !work.spawn(&mut saves, move || {
                         let mut ready = false;
-                        let states = candidates.into_iter().map(|file| {
-                            let state = checking_node.file_progress(file).map(|mut progress| {
-                                if matches!(checking_node.attachment_consent_status(file), Some(ReceiveDecision::Pending | ReceiveDecision::Declined)) {
+                        let states = candidates.into_iter().filter_map(|file| {
+                            let progress = match checking_node.file_progress(file) {
+                                Ok(progress) => progress,
+                                Err(error) => { log::warn!("file progress unavailable; will retry: {error}"); return None; }
+                            };
+                            let state = progress.map(|mut progress| {
+                                let consent = match checking_node.attachment_consent_status(file) { Ok(consent) => consent, Err(error) => { log::warn!("file consent unavailable: {error}"); progress.done = 0; return progress; } };
+                                if matches!(consent, Some(ReceiveDecision::Pending | ReceiveDecision::Declined)) {
                                     progress.done = 0;
-                                } else if !ready && checking_node.file_ready_to_save(file) { progress.done = progress.total; ready = true; }
+                                } else if !ready && match checking_node.file_ready_to_save(file) { Ok(ready) => ready, Err(error) => { log::warn!("file readiness unavailable: {error}"); false } } { progress.done = progress.total; ready = true; }
                                 progress
                             });
-                            (file, state)
+                            Some((file, state))
                         }).collect();
                         SaveWork::Readiness(states)
                     }) { break; }
@@ -118,7 +247,11 @@ pub(super) async fn run(
                     }
                     Some(Ok(SaveWork::Saved(file, result))) => {
                         queue.finish(file.file_conv);
-                        if node.file_progress(file.file_conv).is_none() { continue; }
+                        match node.file_progress(file.file_conv) {
+                            Ok(None) => continue,
+                            Err(error) => emit(&format!("file progress unavailable: {error}")),
+                            Ok(Some(_)) => {},
+                        }
                         match result {
                             Ok(path) => emit(&format!("file from {}: {} ({} bytes) saved {}", file.from, file.name, file.size, path.display())),
                             Err(error) => emit(&format!("file from {}: {} ({} bytes) save failed: {error}", file.from, file.name, file.size)),
@@ -239,8 +372,32 @@ mod tests {
         let (a, _) = open(ad.path(), alice, aa, &bp);
         let (b, incoming) = open(bd.path(), bob, bob_account, &ap);
         let at = tokio::spawn(a.clone().run_accept_loop(al));
-        let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+        let owner = mesh_talk_core::node::PreparedParticipant::prepare(
+            b.clone(),
+            bl,
+            Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false)),
+            mesh_talk_core::node::ParticipantConfig {
+                discovery_port: 0,
+                candidate_source: None,
+            },
+        )
+        .unwrap()
+        .launch("Bob");
         let channel = a.create_channel("media", vec![bpublic]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !b
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|state| state.id == channel)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect(
+            "the participant worker must install the received channel before its policy changes",
+        );
         // This fixture exercises the non-sharing receiver's normal prune path.
         // Sharing members retain ciphertext under the channel replica budget.
         b.set_channel_replica_enabled(channel, false).await.unwrap();
@@ -268,13 +425,12 @@ mod tests {
         // Progress includes a verified managed copy after ciphertext pruning.
         // The chunk-only reader above proves that this late callback must export
         // from that copy rather than from the original transfer chunks.
-        let progress = b.file_progress(file).unwrap();
+        let progress = b.file_progress(file).unwrap().unwrap();
         assert!(progress.total > 0 && progress.done == progress.total);
-        assert!(b.file_ready_to_save(file));
+        assert!(b.file_ready_to_save(file).unwrap());
         let destination = bd.path().join("downloads");
         std::fs::create_dir(&destination).unwrap();
         let (output, mut printed) = mpsc::unbounded_channel();
-        let owner = participant(b.clone()).await;
         let work = owner.blocking_work();
         let runner = tokio::spawn(run(
             b.clone(),
@@ -300,7 +456,7 @@ mod tests {
         assert!(
             matches!(b.read_file(file), Err(mesh_talk_core::node::NodeError::File(error)) if error.starts_with("file incomplete: 0/"))
         );
-        let progress = b.file_progress(file).unwrap();
+        let progress = b.file_progress(file).unwrap().unwrap();
         assert!(progress.total > 0 && progress.done == progress.total);
         assert!(
             tokio::time::timeout(Duration::from_millis(250), printed.recv())
@@ -309,10 +465,8 @@ mod tests {
         );
         runner.abort();
         at.abort();
-        bt.abort();
         let _ = runner.await;
         let _ = at.await;
-        let _ = bt.await;
         owner.stop().await;
     }
 

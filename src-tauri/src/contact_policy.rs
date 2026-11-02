@@ -697,7 +697,29 @@ mod tests {
             false,
         ))
         .unwrap();
-        let before = node.account_reactions(A);
+        let summaries = || {
+            let mut cursor = None;
+            for _ in 0..128 {
+                let page = node
+                    .account_reaction_summaries(
+                        A,
+                        &[mesh_talk_core::eventlog::EventId::new([9; 32])],
+                        cursor.as_deref(),
+                    )
+                    .unwrap();
+                if !page.pending {
+                    assert!(
+                        page.next.is_none(),
+                        "one selected fixture target fits one page"
+                    );
+                    return page.items;
+                }
+                assert!(page.items.is_empty());
+                cursor = page.next;
+            }
+            panic!("selected fixture projection did not finish");
+        };
+        let before = summaries();
         assert_eq!(before.len(), 1);
         *node_state.0.blocking_write() = Some(runtime);
         let app = tauri::test::mock_builder()
@@ -740,7 +762,7 @@ mod tests {
                 "{cmd} must reject the replaced entry lease"
             );
             assert_eq!(
-                node.account_reactions(A),
+                summaries(),
                 before,
                 "replacement session's durable data survives"
             );

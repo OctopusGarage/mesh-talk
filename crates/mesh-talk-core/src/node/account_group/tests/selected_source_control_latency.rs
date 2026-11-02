@@ -237,9 +237,9 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
-        .cloned()
         .collect::<Vec<_>>();
     // Always release, verify directory recovery and drain owned work before the
     // held-period assertion can fail. No direct pull or result adoption is used.

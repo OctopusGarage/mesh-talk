@@ -495,8 +495,7 @@ impl DocumentSyncCursor {
             && self.personal_upgrade
             && self.scope.mask() & (1 << AccountDocumentDomain::GroupControl as usize) != 0)
             || self.requires_upgrade
-                && ((policy.history || policy.appearance) && !self.control_upgrade
-                    || policy.history && self.control_upgrade)
+                && (policy.history || policy.appearance && !self.control_upgrade)
             || self.custody_upgrade && policy.history && self.scope.mask() & 64 != 0
             || self.inventory_upgrade && self.scope.mask() & 128 != 0
             || self.group_upgrade
@@ -3314,7 +3313,10 @@ mod group_control_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot() {
-        let mut fixture = UpgradeFixture::new().await;
+        // This protocol experiment owns its source publication epochs. The
+        // runtime's separate legacy migration must not advance the warmup head
+        // after its completed response and before the controlled mutation.
+        let mut fixture = UpgradeFixture::inbound_only().await;
         let first = fixture
             .source
             .create_channel("first snapshot role", vec![])
@@ -3413,7 +3415,7 @@ mod group_control_tests {
             .unwrap()
             .unwrap();
         *fixture.source.account_session_test_hook.lock().unwrap() = None;
-        fixture.servers.shutdown().await;
+        fixture.stop_provider().await;
         assert!(
             completed_unsettled > 0,
             "the controlled publication must exercise a completed but unsettled scope before fresh repair"
@@ -5178,7 +5180,7 @@ mod group_control_tests {
                 .create_channel("bounded observed activity", vec![])
                 .await
                 .unwrap();
-            fixture.source.publish_group_inventory_for(group);
+            super::super::super::tests::group_inventory_source_document(&fixture.source, group);
             fixture.source.publish_group_activity_for(group);
             let key = AccountDocumentKey::GroupActivity {
                 channel: hex::encode(group.as_bytes()),

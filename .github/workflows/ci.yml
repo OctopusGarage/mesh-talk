@@ -86,13 +86,13 @@ jobs:
           node scripts/validation/standards.mjs
           node scripts/check-repository-hygiene.mjs
 
-      - name: Install cargo-llvm-cov
+      - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-llvm-cov@0.8.7
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.148
 
       - name: Verify coverage accumulation with the actual tool
-        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs
+        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
@@ -122,12 +122,19 @@ jobs:
         shell: bash
         env:
           RUST_TEST_THREADS: 4
+          NEXTEST_TEST_THREADS: 4
         run: |
-          set -o pipefail
+          set -e -o pipefail
+          run_coverage() {
+            cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate
+            # Preserve each failure even if another test prevents suite completion.
+            cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
+            cargo llvm-cov report --lcov --output-path lcov.info
+          }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+            run_coverage 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
           else
-            cargo llvm-cov --workspace --lcov --output-path lcov.info
+            run_coverage
           fi
           # llvm-cov runs unit/integration tests; stable Rust doctests keep their
           # original separate check without executing those suites twice.
@@ -138,11 +145,17 @@ jobs:
         working-directory: src-tauri
         shell: bash
         run: |
-          set -o pipefail
+          set -e -o pipefail
+          run_coverage() {
+            cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate
+            # Preserve each failure even if another test prevents suite completion.
+            cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
+            cargo llvm-cov report --lcov --output-path lcov.info
+          }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+            run_coverage 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
           else
-            cargo llvm-cov --workspace --lcov --output-path lcov.info
+            run_coverage
           fi
 
       - name: Workspace doctests (Linux)

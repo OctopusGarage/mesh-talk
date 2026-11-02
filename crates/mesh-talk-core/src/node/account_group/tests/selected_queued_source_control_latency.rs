@@ -187,6 +187,27 @@ impl Drop for ReleaseSetupCancellation {
     }
 }
 
+#[derive(Default, Debug)]
+struct EarlyPreparationFailure {
+    task: Option<tokio::task::Id>,
+    request_index: usize,
+    failed_page: Option<String>,
+    cancelled: Option<&'static str>,
+    completed_page: bool,
+    retired_after: Option<Duration>,
+    resumed_request_index: Option<usize>,
+}
+
+#[derive(Default)]
+struct ProtectedBPageProgress {
+    server_task: Option<tokio::task::Id>,
+    lifetime: std::sync::Weak<()>,
+    nonce: [u8; 32],
+    headers_attempted: usize,
+    complete_attempted: bool,
+    last_elapsed_ms: Option<u128>,
+}
+
 #[derive(Default)]
 struct PreparationReadState {
     open: bool,
@@ -740,7 +761,7 @@ async fn run_queued_source(
         reference.account_group_access(group_b).unwrap().role,
         AccountGroupRole::Owner
     );
-    assert!(!reference.channel_can_manage(group_b));
+    assert!(!reference.channel_can_manage(group_b).unwrap());
 
     let release = Arc::new(Semaphore::new(0));
     let _release = ReleaseQueuedReads(release.clone());
@@ -750,6 +771,8 @@ async fn run_queued_source(
     let resume_tx = Arc::new(Mutex::new(Some(resume_tx)));
     let resumed_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_partial = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let early_failure = Arc::new(Mutex::new(EarlyPreparationFailure::default()));
+    let b_page_progress = Arc::new(Mutex::new(ProtectedBPageProgress::default()));
     let delayed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let retired_request_rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (rejected_tx, rejected_rx) = oneshot::channel();
@@ -890,6 +913,7 @@ async fn run_queued_source(
         let delayed_once = delayed_once.clone();
         let origins = origins.clone();
         let b_partial = b_partial.clone();
+        let early_failure = early_failure.clone();
         let b_retired = b_retired.clone();
         let recovery_changed = recovery_changed.clone();
         let trace = trace.clone();
@@ -909,6 +933,28 @@ async fn run_queued_source(
         let first_held_task = first_held_task.clone();
         let setup_cancellation = setup_cancellation.clone();
         move |peer, phase| {
+            if peer == peer_a {
+                let mut failure = early_failure.lock().unwrap();
+                if let Some(task) = failure.task {
+                    if Some(task) == tokio::task::try_id()
+                        && phase.starts_with("page_end ")
+                        && let Some(outcome) = phase
+                            .split_ascii_whitespace()
+                            .find_map(|field| field.strip_prefix("outcome="))
+                    {
+                        if outcome == "ok" {
+                            failure.completed_page = true;
+                        } else {
+                            failure.failed_page = Some(outcome.to_owned());
+                        }
+                    }
+                    for reason in ["same_source", "selected", "wake"] {
+                        if phase == format!("control_cancel task={task:?} reason={reason}") {
+                            failure.cancelled = Some(reason);
+                        }
+                    }
+                }
+            }
             // Copy first, so the wait retains no diagnostic mutex guard.
             let held_task = *first_held_task.lock().unwrap();
             if peer == peer_a
@@ -1098,6 +1144,7 @@ async fn run_queued_source(
         let first_tx = first_tx.clone();
         let resume_tx = resume_tx.clone();
         let b_partial = b_partial.clone();
+        let early_failure = early_failure.clone();
         let a_requests = a_requests.clone();
         let pages = pages.clone();
         let b_readiness = b_readiness.clone();
@@ -1116,6 +1163,7 @@ async fn run_queued_source(
             let first_tx = first_tx.clone();
             let resume_tx = resume_tx.clone();
             let b_partial = b_partial.clone();
+            let early_failure = early_failure.clone();
             let a_requests = a_requests.clone();
             let pages = pages.clone();
             let b_readiness = b_readiness.clone();
@@ -1207,12 +1255,17 @@ async fn run_queued_source(
                 let Some(dispatch) = page.dispatch() else {
                     return;
                 };
-                a_requests.lock().unwrap().push((
-                    request.version,
-                    effective_after(&request),
-                    request.known_digest,
-                    request.operation.as_ref().map(|probe| probe.known_digest),
-                ));
+                let request_index = {
+                    let mut requests = a_requests.lock().unwrap();
+                    let index = requests.len();
+                    requests.push((
+                        request.version,
+                        effective_after(&request),
+                        request.known_digest,
+                        request.operation.as_ref().map(|probe| probe.known_digest),
+                    ));
+                    index
+                };
                 let first = first_tx.lock().unwrap().take();
                 if let Some(first) = first {
                     assert!(effective_after(&request).is_none());
@@ -1247,13 +1300,53 @@ async fn run_queued_source(
                 {
                     let resumed = resume_tx.lock().unwrap().take();
                     if let Some(resumed) = resumed {
+                        early_failure.lock().unwrap().resumed_request_index = Some(request_index);
                         *resumed_task.lock().unwrap() = Some(page.task);
                         let _ = resumed.send(());
                         let _ = release.acquire().await;
                     }
                 } else if dispatch.resumed && !dispatch.replacement && dispatch.protected {
-                    // The preceding capture condition rejected this eligible
-                    // resume because no B partial had yet been observed.
+                    // A successful early comparison would pay the only resume
+                    // credit before B's real partial page exists. Fail just this
+                    // one authenticated preparation read without a response;
+                    // its original read failure or observed owner cancellation
+                    // frees the single Control lane without paying the checkpoint.
+                    // Elapsed time is diagnostic, not the retirement classifier.
+                    let induce_failure = {
+                        let mut failure = early_failure.lock().unwrap();
+                        if failure.task.is_none() {
+                            failure.task = Some(page.task);
+                            failure.request_index = request_index;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if induce_failure {
+                        let lifetime = read_decision.lifetime.clone().unwrap();
+                        let started = std::time::Instant::now();
+                        read_decision.decide(false);
+                        while lifetime.strong_count() > 0 {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                                _ = release.acquire() => return,
+                            }
+                        }
+                        early_failure.lock().unwrap().retired_after = Some(started.elapsed());
+                        record_setup_milestone(
+                            &setup_trace,
+                            clock,
+                            "early_A_read_retired_without_response",
+                            format!(
+                                "task={:?} elapsed_ms={}",
+                                page.task,
+                                started.elapsed().as_millis()
+                            ),
+                        );
+                        // This callback belongs to the retired client and must
+                        // never establish the later live protected-read hold.
+                        return;
+                    }
                     record_setup_milestone(
                         &setup_trace,
                         clock,
@@ -1286,6 +1379,7 @@ async fn run_queued_source(
         let pages = pages.clone();
         let demand_dispatch = demand_dispatch.clone();
         let intent_entered = intent_entered.clone();
+        let b_page_progress = b_page_progress.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let admitted = admitted.clone();
@@ -1302,9 +1396,80 @@ async fn run_queued_source(
             let pages = pages.clone();
             let demand_dispatch = demand_dispatch.clone();
             let intent_entered = intent_entered.clone();
+            let b_page_progress = b_page_progress.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
+                }
+                if !admitted.load(std::sync::atomic::Ordering::Acquire) {
+                    // Headers carry no request nonce. Bind this one fixed-size
+                    // observer to the serving task at its exact protected request;
+                    // these are send attempts, not proof of received page bytes.
+                    let server_task = tokio::task::try_id();
+                    match &frame {
+                        AccountHistoryFrame::DocumentsRequest { body } => {
+                            let candidate = DocumentRequest::decode(body)
+                                .filter(|request| {
+                                    request.domain == AccountDocumentDomain::GroupControl
+                                })
+                                .and_then(|request| {
+                                    let observed = pages.lock().unwrap();
+                                    let page = observed.live_request(&request)?;
+                                    if !page.dispatch()?.protected {
+                                        return None;
+                                    }
+                                    Some((request.operation?.nonce, observed.lifetime(page.task)?))
+                                });
+                            let mut progress = b_page_progress.lock().unwrap();
+                            if let Some((nonce, lifetime)) = candidate {
+                                *progress = ProtectedBPageProgress {
+                                    server_task,
+                                    lifetime,
+                                    nonce,
+                                    last_elapsed_ms: Some(clock.elapsed().as_millis()),
+                                    ..Default::default()
+                                };
+                            } else if progress.server_task == server_task {
+                                progress.server_task = None;
+                            }
+                        }
+                        AccountHistoryFrame::DocumentHeader { body } => {
+                            if serde_json::from_slice::<crate::node::AccountDocumentMeta>(body)
+                                .is_ok_and(|meta| {
+                                    matches!(
+                                        meta.key,
+                                        crate::node::AccountDocumentKey::GroupLegacyOperation { .. }
+                                    )
+                                })
+                            {
+                                let mut progress = b_page_progress.lock().unwrap();
+                                if server_task.is_some() && progress.server_task == server_task {
+                                    progress.headers_attempted =
+                                        progress.headers_attempted.saturating_add(1);
+                                    progress.last_elapsed_ms = Some(clock.elapsed().as_millis());
+                                }
+                            }
+                        }
+                        AccountHistoryFrame::DocumentsComplete { body } => {
+                            let nonce = serde_json::from_slice::<serde_json::Value>(body)
+                                .ok()
+                                .and_then(|value| {
+                                    serde_json::from_value::<[u8; 32]>(
+                                        value["operation"]["nonce"].clone(),
+                                    )
+                                    .ok()
+                                });
+                            let mut progress = b_page_progress.lock().unwrap();
+                            if server_task.is_some()
+                                && progress.server_task == server_task
+                                && nonce == Some(progress.nonce)
+                            {
+                                progress.complete_attempted = true;
+                                progress.last_elapsed_ms = Some(clock.elapsed().as_millis());
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 record_control_frame(&trace, clock, "B_server", &frame, group_b, &writer);
                 if let AccountHistoryFrame::DocumentsRequest { body } = &frame
@@ -1402,7 +1567,11 @@ async fn run_queued_source(
         Ok::<_, oneshot::error::RecvError>(task)
     })
         .await
-        .unwrap_or_else(|error| panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={} B_partial={}; pages={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), pages.lock().unwrap().summary()))
+        .unwrap_or_else(|error| {
+            let ready = b_readiness.lock().unwrap().ready();
+            let observed = pages.lock().unwrap().summary();
+            panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={ready} B_partial={}; pages={observed:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+        })
         .unwrap();
     if delay_retired_request {
         assert!(
@@ -1452,7 +1621,19 @@ async fn run_queued_source(
         resume_rx.await.map(|()| keys)
     })
         .await
-        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; setup={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), setup_trace.lock().unwrap(), trace.lock().unwrap()))
+        .unwrap_or_else(|error| {
+            let ready = b_readiness.lock().unwrap().ready();
+            let roles = origins.lock().unwrap().clone();
+            let observed = pages.lock().unwrap().summary();
+            let setup = setup_trace.lock().unwrap().clone();
+            let phases = trace.lock().unwrap().clone();
+            let early_task_selected = early_failure.lock().unwrap().task.is_some();
+            let (headers_attempted, complete_attempted, last_elapsed_ms, current_task_alive) = {
+                let progress = b_page_progress.lock().unwrap();
+                (progress.headers_attempted, progress.complete_attempted, progress.last_elapsed_ms, progress.lifetime.strong_count() > 0)
+            };
+            panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={ready} B_partial={}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive} early_task_selected={early_task_selected}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+        })
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
     let saved = saved_after
@@ -1718,13 +1899,17 @@ async fn run_queued_source(
             trace.lock().unwrap()
         );
     }
-    let result=receipt.unwrap_or_else(|error|panic!("queued selected source must return its real private receipt within unchanged eight seconds: {error:?}; phases={:?}",trace.lock().unwrap()));
+    let result=receipt.unwrap_or_else(|error| {
+        let phases = trace.lock().unwrap().clone();
+        panic!("queued selected source must return its real private receipt within unchanged eight seconds: {error:?}; phases={phases:?}");
+    });
     assert_eq!(result.committed_events.len(), 1);
     let event = b
         .log
         .lock()
         .unwrap()
         .get(&result.committed_events[0])
+        .unwrap()
         .unwrap()
         .clone();
     assert!(event.verify_integrity() && event.verify_signature());
@@ -1743,4 +1928,30 @@ async fn run_queued_source(
         a_rows.len() >= 2 && a_rows[0] == a_rows[1],
         "A protected resume repays its exact checkpoint"
     );
+    let failure = early_failure.lock().unwrap();
+    if let Some(task) = failure.task {
+        assert!(
+            failure.retired_after.is_some(),
+            "the exact selected client must retire: {failure:?}"
+        );
+        assert!(
+            !failure.completed_page,
+            "the held read must not pay its page credit: {failure:?}"
+        );
+        assert!(
+            failure.failed_page.is_some() || failure.cancelled.is_some(),
+            "retirement requires an actual failed page or exact owner cancellation: {failure:?}"
+        );
+        assert_ne!(
+            Some(task),
+            *resumed_task.lock().unwrap(),
+            "a retired callback cannot establish the live hold"
+        );
+        assert_eq!(
+            a_rows.get(failure.request_index).unwrap(),
+            a_rows.get(failure.resumed_request_index.unwrap()).unwrap(),
+            "the later distinct live resume must retain the exact failed checkpoint"
+        );
+    }
+    eprintln!("queued early preparation failure witness: {failure:?}");
 }

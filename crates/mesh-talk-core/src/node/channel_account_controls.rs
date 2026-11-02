@@ -1,12 +1,21 @@
 //! Mutations of upgraded account-principal channel authority.
 
 use super::{Node, NodeError};
-use crate::{eventlog::event::ConversationId, identity::device::PublicIdentity};
+use crate::{
+    eventlog::event::{ConversationId, EventId},
+    identity::device::PublicIdentity,
+};
 
 pub(super) enum AccountChannelMutation {
     Legacy,
     Unchanged,
     Changed(Vec<PublicIdentity>),
+    /// Durable owner effect whose exact indexed admission must complete after
+    /// the caller releases its authorization and membership guards.
+    CommittedControl {
+        event: EventId,
+        recipients: Vec<PublicIdentity>,
+    },
 }
 impl Node {
     pub(super) fn try_account_channel_remove(
@@ -24,7 +33,7 @@ impl Node {
         channel: ConversationId,
         device_id: &str,
     ) -> Result<AccountChannelMutation, NodeError> {
-        let projection = self.account_group_projection(channel);
+        let projection = self.account_group_projection(channel)?;
         if projection.authority.current_event().is_none() {
             return Ok(AccountChannelMutation::Legacy);
         }
@@ -55,7 +64,7 @@ impl Node {
             InvitationInput, InvitationPreparation, InvitationWitness,
         };
         if self
-            .account_group_projection(channel)
+            .account_group_projection(channel)?
             .authority
             .current_event()
             .is_none()
@@ -72,8 +81,8 @@ impl Node {
                 NodeError::Authorization("verified invitation account required".into())
             })?,
         };
-        let policy = self.channel_history_policy(channel);
-        let selected = self.select_join_history(channel, policy, super::node::now_millis());
+        let policy = self.channel_history_policy(channel)?;
+        let selected = self.select_join_history(channel, policy, super::node::now_millis())?;
         let history = self.prepare_invitation_history(channel, new_member, selected, policy)?;
         let mut incarnation = [0; 16];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut incarnation);
@@ -88,7 +97,7 @@ impl Node {
                 .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
             let log = self.log.lock().expect("log mutex");
             let projection =
-                super::channel::ChannelBook::project_membership(channel, &log.events(&channel));
+                super::channel::ChannelBook::project_membership(channel, &log.events(&channel)?);
             let witness = InvitationWitness {
                 own,
                 target: verified_proof.clone(),
@@ -271,6 +280,7 @@ mod tests {
                 }
             }
             node.process_channel(channel);
+            crate::node::test_support::settle_group_metadata(&node, channel);
             Self {
                 _directory: directory,
                 node,
@@ -284,14 +294,14 @@ mod tests {
     #[tokio::test]
     async fn inherited_owner_removes_account_and_transfers_account_authority() {
         let f = Fixture::new();
-        assert!(f.node.channel_can_manage(f.channel));
+        assert!(f.node.channel_can_manage(f.channel).unwrap());
         f.node
             .remove_channel_account_members_if(f.channel, &f.accounts[2].account_id(), |commit| {
                 commit()
             })
             .await
             .unwrap();
-        let projection = f.node.account_group_projection(f.channel);
+        let projection = f.node.account_group_projection(f.channel).unwrap();
         assert!(
             projection
                 .authority
@@ -307,12 +317,13 @@ mod tests {
             f.node.channel_owner_account_id(f.channel),
             Some(f.accounts[1].account_id())
         );
-        assert!(!f.node.channel_can_manage(f.channel));
+        assert!(!f.node.channel_can_manage(f.channel).unwrap());
     }
 
     #[tokio::test]
     async fn inherited_owner_invitation_commits_pending_account_authority_with_invitation() {
         let f = Fixture::new();
+        let target_directory = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -327,8 +338,8 @@ mod tests {
             dm,
             channels,
             files,
-            &f._directory.path().join("invite-target.log"),
-            &f._directory.path().join("invite-target-sent.log"),
+            &target_directory.path().join("invite-target.log"),
+            &target_directory.path().join("invite-target-sent.log"),
             "pw",
         )
         .unwrap();
@@ -359,7 +370,7 @@ mod tests {
             .add_channel_member(f.channel, f.devices[3].public())
             .await
             .unwrap();
-        let projection = f.node.account_group_projection(f.channel);
+        let projection = f.node.account_group_projection(f.channel).unwrap();
         let grant = projection
             .authority
             .account_grant(&f.accounts[3].public().ed25519_pub)
@@ -377,15 +388,19 @@ mod tests {
                 .is_member(&f.devices[3].public(), &proof)
         );
         assert_eq!(projection.authority.key_epoch(), Some(0));
-        let log = f.node.log.lock().unwrap();
-        let event = log
-            .get(&projection.authority.current_event().unwrap())
-            .unwrap();
-        assert!(event.parents.contains(&grant.membership_event));
-        assert_eq!(
-            log.get(&grant.membership_event).unwrap().kind,
-            EventKind::MembershipChange
-        );
+        {
+            let log = f.node.log.lock().unwrap();
+            let event = log
+                .get(&projection.authority.current_event().unwrap())
+                .unwrap()
+                .unwrap();
+            assert!(event.parents.contains(&grant.membership_event));
+            assert_eq!(
+                log.get(&grant.membership_event).unwrap().unwrap().kind,
+                EventKind::MembershipChange
+            );
+        }
         server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 }

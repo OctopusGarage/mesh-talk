@@ -3,12 +3,20 @@
 //! delivery or read receipts; a peer can later delete its copy or lose its device.
 //! Revocations use a reserved `!` prefix so old records remain readable.
 
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::eventlog::event::EventId;
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+#[cfg(test)]
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::Path,
+};
+
+mod indexed;
+pub(in crate::node) use indexed::IndexedChannelCustodyStore;
 
 const MAGIC: &[u8; 6] = b"MTCUST";
 
@@ -18,12 +26,14 @@ struct CustodyRecord {
     peer: String,
 }
 
+#[cfg(test)]
 pub struct ChannelCustodyStore {
     file: EncryptedRecordLog<CustodyRecord>,
     confirmed: HashMap<EventId, HashSet<String>>,
     observations: BTreeMap<(EventId, String), bool>,
 }
 
+#[cfg(test)]
 impl ChannelCustodyStore {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::<CustodyRecord>::open(path, password, MAGIC)?;
@@ -107,6 +117,115 @@ impl ChannelCustodyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn participant_warm_open_does_not_replay_retained_custody() {
+        use crate::{discovery::Roster, identity::device::DeviceIdentity, node::Node};
+        use std::sync::{Arc, Mutex};
+        for count in [128_u64, 512] {
+            let dir = tempfile::tempdir().unwrap();
+            let secret = DeviceIdentity::generate().secret_bytes();
+            let open = || {
+                let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+                let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+                let (file, _) = tokio::sync::mpsc::unbounded_channel();
+                Node::open(
+                    DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+                    Arc::new(Mutex::new(Roster::default())),
+                    dm,
+                    channel,
+                    file,
+                    &dir.path().join("messages.log"),
+                    &dir.path().join("sent.log"),
+                    "pw",
+                )
+                .unwrap()
+            };
+            let id = |n: u64| {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&n.to_be_bytes());
+                EventId::new(bytes)
+            };
+            let node = open();
+            for n in 0..count {
+                node.channel_custody
+                    .lock()
+                    .unwrap()
+                    .confirm(id(n), "bob")
+                    .unwrap();
+            }
+            node.channel_custody
+                .lock()
+                .unwrap()
+                .revoke(id(0), "bob")
+                .unwrap();
+            node.close_profile().unwrap();
+            let node = open();
+            let custody = node.channel_custody.lock().unwrap();
+            assert_eq!(
+                custody.replayed_records, 0,
+                "warm participant open replayed {count} custody records"
+            );
+            assert!(custody.peers(id(0)).unwrap().is_empty());
+            assert!(custody.peers(id(count - 1)).unwrap().contains("bob"));
+            assert_eq!(custody.observations_after(None).unwrap().len(), 32);
+            let page = custody
+                .observations_after(Some(&(id(count - 34), "bob".into())))
+                .unwrap();
+            assert_eq!(page.len(), 32);
+            assert_eq!(page.first().unwrap().0.0, id(count - 33));
+            assert_eq!(page.last().unwrap().0.0, id(count - 2));
+        }
+    }
+
+    #[tokio::test]
+    async fn participant_import_keeps_latest_positive_and_negative_custody() {
+        use crate::{discovery::Roster, identity::device::DeviceIdentity, node::Node};
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let a = EventId::new([7; 32]);
+        let b = EventId::new([8; 32]);
+        {
+            let mut legacy =
+                ChannelCustodyStore::open(&dir.path().join("channel.custody"), "pw").unwrap();
+            legacy.confirm(a, "bob").unwrap();
+            legacy.revoke(a, "bob").unwrap();
+            legacy.confirm(a, "bob").unwrap();
+            legacy.confirm(b, "carol").unwrap();
+            legacy.revoke(b, "carol").unwrap();
+        }
+        let secret = DeviceIdentity::generate().secret_bytes();
+        let open = || {
+            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+            let (messages, _) = tokio::sync::mpsc::unbounded_channel();
+            let (files, _) = tokio::sync::mpsc::unbounded_channel();
+            Node::open(
+                DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                messages,
+                files,
+                &dir.path().join("messages.log"),
+                &dir.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap()
+        };
+        for warm in [false, true] {
+            let node = open();
+            {
+                let custody = node.channel_custody.lock().unwrap();
+                assert_eq!(custody.replayed_records, if warm { 0 } else { 5 });
+                assert_eq!(custody.peers(a).unwrap(), HashSet::from(["bob".to_owned()]));
+                assert!(custody.peers(b).unwrap().is_empty());
+                assert_eq!(
+                    custody.observations_after(None).unwrap(),
+                    vec![((a, "bob".into()), true), ((b, "carol".into()), false)]
+                );
+            }
+            node.close_profile().unwrap();
+        }
+    }
 
     #[test]
     fn confirmations_are_distinct_and_survive_restart() {

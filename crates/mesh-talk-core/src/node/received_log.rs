@@ -31,15 +31,12 @@ pub struct ReceivedEntry {
 /// indexed in memory by conversation.
 pub struct ReceivedLog {
     file: EncryptedRecordLog<ReceivedEntry>,
-    revision: u64,
-    rewrite_revision: u64,
     by_conversation: HashMap<ConversationId, Vec<ReceivedEntry>>,
+    #[cfg(test)]
     allow_aliases: bool,
     /// First host for each event ID. Message logs reject another host; file-card
     /// logs may append a matching alias under another host.
     seen: HashMap<EventId, (ConversationId, usize)>,
-    #[cfg(test)]
-    fail_once_after: Option<usize>,
 }
 
 #[cfg(test)]
@@ -60,10 +57,12 @@ pub(super) fn history_clone_bytes() -> usize {
 impl ReceivedLog {
     /// File cards can have a device-conversation row and an account-conversation
     /// row for the same signed manifest. Message logs keep event IDs unique.
+    #[cfg(test)]
     pub(crate) fn open_file_cards(path: &Path, password: &str) -> Result<Self, LogError> {
         Self::open_inner(path, password, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn record_file_alias_durable(
         &mut self,
         entry: &ReceivedEntry,
@@ -93,7 +92,6 @@ impl ReceivedLog {
             .entry(entry.event_id)
             .or_insert((entry.conversation, entries.len()));
         entries.push(entry.clone());
-        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -101,17 +99,10 @@ impl ReceivedLog {
         a.from == b.from && a.wall_clock == b.wall_clock && a.plaintext == b.plaintext
     }
     #[cfg(test)]
-    pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
-        self.file.fail_appends_for_test(enabled)
-    }
-    #[cfg(test)]
     pub(crate) fn fail_next_append_rollback_for_test(&mut self, bytes: usize) {
         self.file.fail_next_append_rollback_for_test(bytes);
     }
     #[cfg(test)]
-    pub(crate) fn fail_once_after_for_test(&mut self, successful: usize) {
-        self.fail_once_after = Some(successful);
-    }
     pub(crate) fn entry(&self, id: EventId) -> Option<&ReceivedEntry> {
         let (conversation, index) = self.seen.get(&id)?;
         self.by_conversation.get(conversation)?.get(*index)
@@ -135,7 +126,6 @@ impl ReceivedLog {
         self.seen
             .insert(entry.event_id, (entry.conversation, entries.len()));
         entries.push(entry.clone());
-        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
     /// Open (or create) the received log at `path`, replaying stored entries.
@@ -171,12 +161,9 @@ impl ReceivedLog {
         Ok(Self {
             file,
             by_conversation,
-            revision: 0,
-            rewrite_revision: 0,
             seen,
-            allow_aliases,
             #[cfg(test)]
-            fail_once_after: None,
+            allow_aliases,
         })
     }
 
@@ -189,16 +176,6 @@ impl ReceivedLog {
         plaintext: &[u8],
         event_id: crate::eventlog::event::EventId,
     ) -> Result<(), LogError> {
-        #[cfg(test)]
-        if let Some(remaining) = self.fail_once_after.as_mut() {
-            if *remaining == 0 {
-                self.fail_once_after = None;
-                return Err(LogError::Io(std::io::Error::other(
-                    "injected receive projection failure",
-                )));
-            }
-            *remaining -= 1;
-        }
         self.file.recover_failed_append()?;
         // Idempotent on event id: skip a duplicate (e.g. a re-imported account backfill) so it
         // can't durably double the conversation's history.
@@ -216,7 +193,6 @@ impl ReceivedLog {
         let entries = self.by_conversation.entry(conversation).or_default();
         self.seen.insert(event_id, (conversation, entries.len()));
         entries.push(entry);
-        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -255,8 +231,6 @@ impl ReceivedLog {
                 .or_insert((entry.conversation, entries.len()));
             entries.push(entry);
         }
-        self.revision = self.revision.wrapping_add(1);
-        self.rewrite_revision = self.rewrite_revision.wrapping_add(1);
         Ok(removed)
     }
 
@@ -281,14 +255,6 @@ impl ReceivedLog {
             .get(conversation)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// Process-local invalidation for archive selectors; wire/storage stay unchanged.
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
-    }
-    pub(crate) fn rewrite_revision(&self) -> u64 {
-        self.rewrite_revision
     }
 
     /// The conversation ids this log holds entries for.

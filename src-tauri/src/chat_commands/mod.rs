@@ -55,81 +55,9 @@ fn parse_event_id(hex_id: &str) -> Result<EventId, CommandError> {
     Ok(EventId::new(arr))
 }
 
-fn to_reaction_infos(
-    views: Vec<mesh_talk_core::node::ReactionView>,
-    own_account: Option<&str>,
-) -> Vec<ReactionInfo> {
-    views
-        .into_iter()
-        .map(|v| ReactionInfo {
-            from_me: own_account.map(|account| v.who.iter().any(|author| author == account)),
-            target: v.target,
-            emoji: v.emoji,
-            who: v.who,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn reaction_view(authors: &[&str]) -> mesh_talk_core::node::ReactionView {
-        mesh_talk_core::node::ReactionView {
-            target: "original-target".into(),
-            emoji: "👍".into(),
-            who: authors.iter().map(|author| (*author).to_owned()).collect(),
-        }
-    }
-
-    #[test]
-    fn reaction_infos_verified_account_ownership_preserves_public_principals() {
-        let infos = to_reaction_infos(
-            vec![reaction_view(&["external", "own-account"])],
-            Some("own-account"),
-        );
-        assert_eq!(infos[0].from_me, Some(true));
-        assert_eq!(infos[0].who, ["external", "own-account"]);
-        let value = serde_json::to_value(&infos[0]).expect("reaction serializes");
-        assert_eq!(value["from_me"], true);
-        assert_eq!(value["who"].as_array().expect("authors").len(), 2);
-    }
-
-    #[test]
-    fn reaction_infos_channel_external_ownership_is_explicitly_false() {
-        let infos = to_reaction_infos(vec![reaction_view(&["external"])], Some("own-account"));
-        assert_eq!(infos[0].from_me, Some(false));
-        let value = serde_json::to_value(&infos[0]).expect("reaction serializes");
-        assert_eq!(value["from_me"], false);
-    }
-
-    #[test]
-    fn reaction_infos_adopted_unbound_physical_author_is_not_owned_by_current_account() {
-        let current_account = "current-account";
-        let physical_author = "linked-device-with-unbound-history";
-        // A physical fallback is intentionally not an authenticated account claim.
-        let infos = to_reaction_infos(
-            vec![reaction_view(&[physical_author])],
-            Some(current_account),
-        );
-        assert_eq!(
-            infos[0].from_me,
-            Some(false),
-            "a current physical-device link cannot claim an old unbound reaction for the active account"
-        );
-        assert_eq!(infos[0].who, [physical_author]);
-    }
-
-    #[test]
-    fn reaction_infos_dm_omits_account_ownership_and_preserves_legacy_json() {
-        let infos = to_reaction_infos(vec![reaction_view(&["account-id"])], None);
-        assert_eq!(infos[0].from_me, None);
-        let value = serde_json::to_value(&infos[0]).expect("reaction serializes");
-        assert_eq!(
-            value,
-            serde_json::json!({ "target": "original-target", "emoji": "👍", "who": ["account-id"] }),
-        );
-    }
 
     #[test]
     fn temp_file_keeps_real_filename_and_extension() {

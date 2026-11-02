@@ -138,18 +138,21 @@ fn old_binary_gets_legacy_messages_but_never_kind_14() {
     assert!(
         old_events
             .events(&channel_id)
+            .unwrap()
             .iter()
             .any(|event| event.kind == EventKind::Message)
     );
     assert!(
         old_events
             .events(&channel_id)
+            .unwrap()
             .iter()
             .all(|event| event.kind != EventKind::ChannelReplica)
     );
     assert_eq!(
         old_events
             .events(&channel_id)
+            .unwrap()
             .iter()
             .filter(|event| event.kind == EventKind::Message)
             .count(),

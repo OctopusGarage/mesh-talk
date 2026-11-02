@@ -66,11 +66,16 @@ export interface HistoryItem {
 }
 
 export interface ReactionInfo {
-  /** Current certified account ownership for channel reactions; absent on older hosts and DMs. */
-  from_me?: boolean;
   target: string;
   emoji: string;
-  who: string[];
+  count: number;
+  from_me: boolean;
+}
+
+export interface ReactionSummaryPage {
+  items: ReactionInfo[];
+  next: string | null;
+  pending: boolean;
 }
 
 /** Owner-scoped invalidation; null requests a full repair after event-buffer lag. */
@@ -279,6 +284,8 @@ export interface ChannelMetadataValue {
   authored_at: number;
 }
 export interface ChannelMetadata {
+  /** The bounded authority/history query is incomplete; values are not yet available. */
+  query_pending?: boolean;
   /** A publication is known, but its authorized content key is still catching up. */
   cover_pending?: boolean;
   announcement_pending?: boolean;
@@ -499,6 +506,28 @@ export interface DmReceivedEvent {
   from_name: string;
   text: string;
   reply_to: string | null;
+}
+
+export interface ReceptionCursor {
+  epoch: string;
+  sequence: string;
+}
+
+export interface ReceptionScope {
+  owner: string;
+  account_id: string;
+  device_id: string;
+  runtime_id: string;
+}
+
+export interface ReceptionPage<Receipt> {
+  scope: ReceptionScope;
+  token: string;
+  after: ReceptionCursor;
+  next: ReceptionCursor;
+  through: ReceptionCursor;
+  complete: boolean;
+  receipts: Receipt[];
 }
 
 export type ArrivalKind = "live" | "catch_up" | "history_sync";

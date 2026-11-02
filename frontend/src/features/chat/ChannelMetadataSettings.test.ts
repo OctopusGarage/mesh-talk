@@ -188,3 +188,113 @@ it("does not apply a completed save to a replacement group", async () => {
   );
   expect(host.textContent).not.toContain("Wrong group");
 });
+
+it("keeps an incomplete history query loading and retries within its editor lifetime", async () => {
+  vi.useFakeTimers();
+  try {
+    mocks.api.channelMetadata
+      .mockResolvedValueOnce({ ...empty(), query_pending: true })
+      .mockResolvedValue({
+        ...empty(),
+        announcement: {
+          content: "Ready after indexing",
+          revision: "selected",
+          author: "account",
+          authored_at: 1,
+        },
+      });
+    await render();
+    expect(host.textContent).not.toContain("No group announcement");
+    expect(
+      [...host.querySelectorAll("button")].find(
+        (button) => button.textContent === "Write announcement",
+      )?.disabled,
+    ).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(host.textContent).toContain("Ready after indexing");
+    expect(mocks.api.channelMetadata).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(mocks.api.channelMetadata).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+it("retires a pending-query retry when its group is replaced", async () => {
+  vi.useFakeTimers();
+  try {
+    mocks.api.channelMetadata.mockResolvedValueOnce({
+      ...empty(),
+      query_pending: true,
+    });
+    await render("old");
+    await render("replacement");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(mocks.api.channelMetadata.mock.calls.map((call) => call[2])).toEqual(
+      ["old", "replacement"],
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("coalesces invalidations while the original metadata request is still running", async () => {
+  let finish!: (value: unknown) => void;
+  mocks.api.channelMetadata
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockResolvedValue({
+      ...empty(),
+      announcement: {
+        content: "Current notice",
+        revision: "current",
+        author: "account",
+        authored_at: 1,
+      },
+    });
+  await render();
+  for (let n = 0; n < 5; n++) {
+    mocks.state.channels = [
+      {
+        channel_id: "group",
+        name: "Group",
+        owner: "owner",
+        member_count: 1,
+        metadata: {
+          ...empty(),
+          announcement: {
+            content: "changed",
+            revision: String(n),
+            author: "account",
+            authored_at: n,
+          },
+        },
+      },
+    ];
+    await render();
+  }
+  expect(mocks.api.channelMetadata).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    finish({
+      ...empty(),
+      announcement: {
+        content: "Stale notice",
+        revision: "old",
+        author: "account",
+        authored_at: 0,
+      },
+    }),
+  );
+  expect(mocks.api.channelMetadata).toHaveBeenCalledTimes(2);
+  expect(host.textContent).toContain("Current notice");
+  expect(host.textContent).not.toContain("Stale notice");
+});

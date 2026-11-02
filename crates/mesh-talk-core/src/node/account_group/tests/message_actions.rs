@@ -18,6 +18,7 @@ async fn member_action(recall: bool) {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::Message)
         .unwrap()
@@ -50,7 +51,7 @@ async fn member_action(recall: bool) {
         .lock()
         .unwrap()
         .get(&status.primary_event.unwrap())
-        .cloned()
+        .unwrap()
         .unwrap();
     assert_eq!(
         event.kind,
@@ -99,6 +100,7 @@ async fn member_action(recall: bool) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind
                 == if recall {
@@ -149,6 +151,7 @@ async fn recall_original(source: &Node, group: ConversationId, deadline: Option<
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::Message)
         .unwrap()
@@ -175,6 +178,7 @@ fn submit_recall_request(
         .unwrap();
     source
         .operation_projection(original.conversation_id)
+        .unwrap()
         .requests
         .into_iter()
         .find(|request| request.reference.id == id)
@@ -188,6 +192,7 @@ fn assert_no_delete_or_pending_action(source: &Node, group: ConversationId) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .all(|event| event.kind != EventKind::Delete)
     );
@@ -295,7 +300,15 @@ async fn cancellation_and_terminal_duplicate_do_not_require_recall_target_metada
     .unwrap();
     missing_original.append_durable(genesis).unwrap();
     *source.log.lock().unwrap() = missing_original;
-    assert!(source.log.lock().unwrap().get(&original.id).is_none());
+    assert!(
+        source
+            .log
+            .lock()
+            .unwrap()
+            .get(&original.id)
+            .unwrap()
+            .is_none()
+    );
     source
         .cancel_account_group_operation(&account.account_id(), id)
         .unwrap();
@@ -340,7 +353,15 @@ async fn expired_pruned_original_cannot_become_a_nonexpiring_fresh_recall() {
     Arc::get_mut(&mut source).unwrap().expiry_clock_start =
         (std::time::Instant::now(), deadline + 1);
     assert!(source.prune_expired_received().unwrap() > 0);
-    assert!(source.log.lock().unwrap().get(&original.id).is_some());
+    assert!(
+        source
+            .log
+            .lock()
+            .unwrap()
+            .get(&original.id)
+            .unwrap()
+            .is_some()
+    );
     assert!(source.sentlog.lock().unwrap().entries(&group).is_empty());
     assert!(source.received.lock().unwrap().entries(&group).is_empty());
 
@@ -385,7 +406,7 @@ fn stage_action_wal(
     let target = match &sealed_input {
         crate::node::message_actions::MessageActionInput::Recall { target } => {
             Some(crate::node::message_actions::MessageActionTarget {
-                original: log.get(target).unwrap().clone(),
+                original: log.get(target).unwrap().unwrap().clone(),
                 expires_at_ms: None,
                 protected_file: false,
             })
@@ -393,7 +414,7 @@ fn stage_action_wal(
         crate::node::message_actions::MessageActionInput::React { .. } => None,
     };
     let projection =
-        crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+        crate::node::channel::ChannelBook::project_membership(group, &log.events(&group).unwrap());
     let prepared = source
         .prepare_channel_message_action_locked(
             group,
@@ -452,7 +473,7 @@ async fn startup_action_recovery_persists_recall_mark_before_terminal_result() {
         target: original.id,
     };
     let event_id = stage_action_wal(&source, &request, input.clone(), input);
-    assert!(source.log.lock().unwrap().get(&event_id).is_none());
+    assert!(source.log.lock().unwrap().get(&event_id).unwrap().is_none());
     assert!(
         !source
             .recalls
@@ -465,7 +486,15 @@ async fn startup_action_recovery_persists_recall_mark_before_terminal_result() {
     drop(source);
 
     let restarted = reopen_action_node(&source_path, &account, secrets);
-    assert!(restarted.log.lock().unwrap().get(&event_id).is_some());
+    assert!(
+        restarted
+            .log
+            .lock()
+            .unwrap()
+            .get(&event_id)
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
         restarted
             .account_group_operation_status(&account.account_id(), id)
@@ -533,6 +562,7 @@ async fn startup_rejects_signed_reaction_intent_with_stale_sealed_payload_before
         .unwrap();
     let request = source
         .operation_projection(group)
+        .unwrap()
         .requests
         .into_iter()
         .find(|request| request.reference.id == id)
@@ -557,7 +587,8 @@ async fn startup_rejects_signed_reaction_intent_with_stale_sealed_payload_before
             remove: true,
         },
     );
-    assert!(source.log.lock().unwrap().get(&event_id).is_none());
+    assert!(source.log.lock().unwrap().get(&event_id).unwrap().is_none());
+    let public = source.identity.public();
     let secrets = source.identity.secret_bytes();
     drop(source);
     let (dm, _) = mpsc::unbounded_channel();
@@ -576,11 +607,9 @@ async fn startup_rejects_signed_reaction_intent_with_stale_sealed_payload_before
     );
     let rejected = opened.is_err();
     drop(opened);
-    let log =
-        crate::eventlog::persist::PersistentEventLog::open(&source_path.join("events.log"), "pw")
-            .unwrap();
+    let log = reopen_events(&source_path, &public, &account.public());
     assert!(
-        log.get(&event_id).is_none(),
+        log.get(&event_id).unwrap().is_none(),
         "startup must authenticate the sealed action before appending its public event"
     );
     assert!(

@@ -8,7 +8,7 @@ use crate::{
 pub(in crate::node) fn persist_action_recall_completion(
     reference: &journal::OperationReference,
     mark: Option<&crate::node::recall::RecallMark>,
-    recalls: &mut crate::node::recall::RecallLog,
+    recalls: &mut crate::node::recall::IndexedRecallLog,
 ) -> Result<(), crate::eventlog::LogError> {
     match (reference.kind, mark) {
         (AccountGroupOperationKind::Recall, Some(mark))
@@ -44,13 +44,14 @@ impl Node {
         &self,
         group: ConversationId,
         target: EventId,
-    ) -> Option<Author> {
-        if let Some(event) = self.log.lock().expect("log mutex").get(&target).cloned() {
-            return (event.conversation_id == group
+    ) -> Result<Option<Author>, NodeError> {
+        if let Some(event) = self.log.lock().expect("log mutex").get(&target)? {
+            return Ok((event.conversation_id == group
                 && matches!(event.kind, EventKind::Message | EventKind::FileManifest))
-            .then_some(event.author);
+            .then_some(event.author));
         }
-        self.group_operations
+        Ok(self
+            .group_operations
             .lock()
             .expect("operation journal mutex")
             .entries
@@ -66,7 +67,7 @@ impl Node {
                             | AccountGroupOperationKind::File
                     )
             })
-            .map(|entry| Author::from_ed25519(entry.reference.executor.device.ed25519_pub))
+            .map(|entry| Author::from_ed25519(entry.reference.executor.device.ed25519_pub)))
     }
 
     /// Snapshot sidecars before the allocation log guard. The pure producer
@@ -83,8 +84,7 @@ impl Node {
             .log
             .lock()
             .expect("log mutex")
-            .get(target)
-            .cloned()
+            .get(target)?
             .ok_or_else(|| NodeError::Channel("recall original event is reconciling".into()))?;
         if original.conversation_id != group {
             return Err(NodeError::InvalidInput(
@@ -95,26 +95,17 @@ impl Node {
             .received_files
             .lock()
             .expect("received files mutex")
-            .entries_ref(&group)
-            .iter()
-            .find(|row| row.event_id == *target)
-            .cloned();
+            .entry_in(&group, *target)?;
         let sent = self
             .sentlog
             .lock()
             .expect("sent log mutex")
-            .entries_ref(&group)
-            .iter()
-            .find(|row| row.seq == original.seq)
-            .cloned();
+            .entry(&group, original.seq)?;
         let received = self
             .received
             .lock()
             .expect("received log mutex")
-            .entries_ref(&group)
-            .iter()
-            .find(|row| row.event_id == *target)
-            .cloned();
+            .entry_in(&group, *target)?;
         let plaintext = file
             .as_ref()
             .map(|row| row.plaintext.as_slice())

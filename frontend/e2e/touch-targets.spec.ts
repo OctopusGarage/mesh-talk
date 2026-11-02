@@ -134,8 +134,15 @@ test("form inputs and selects keep 44px touch targets", async ({ page }) => {
     link.getByRole("combobox", { name: "Device" }),
     link.getByRole("textbox", { name: "pairing code" }),
   ]) {
-    expect(
-      Math.round((await control.boundingBox())!.height),
-    ).toBeGreaterThanOrEqual(44);
+    // Observe the newly opened surface through the normal assertion budget.
+    await expect
+      .poll(
+        async () => {
+          const bounds = await control.boundingBox();
+          return bounds ? Math.round(bounds.height) : 0;
+        },
+        { message: `Touch target must reach 44px: ${control}` },
+      )
+      .toBeGreaterThanOrEqual(44);
   }
 });

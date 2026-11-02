@@ -62,16 +62,15 @@ pub async fn file_statuses(
         .map(|file_conv| parse_channel_id(&file_conv).map(|id| (file_conv, id)))
         .collect::<Result<Vec<_>, _>>()?;
     let node = state.node_handle().await?;
-    Ok(ids
-        .into_iter()
+    ids.into_iter()
         .map(|(file_conv, id)| {
-            let progress = node.file_progress(id);
-            let consent = node.attachment_consent_status(id);
-            FileStatus {
+            let progress = node.file_progress(id)?;
+            let consent = node.attachment_consent_status(id)?;
+            Ok(FileStatus {
                 file_conv,
                 done: progress.map_or(0, |p| p.done),
                 total: progress.map_or(0, |p| p.total),
-                ready: node.file_ready_to_save(id)
+                ready: node.file_ready_to_save(id)?
                     && !matches!(
                         consent,
                         Some(
@@ -84,9 +83,9 @@ pub async fn file_statuses(
                     mesh_talk_core::node::ReceiveDecision::Accepted => "accepted",
                     mesh_talk_core::node::ReceiveDecision::Declined => "declined",
                 }),
-            }
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, CommandError>>()
 }
 
 #[tauri::command]
@@ -109,10 +108,12 @@ pub async fn attachment_receive_policy(
 ) -> Result<AttachmentReceivePolicy, CommandError> {
     let node = state.node_handle().await?;
     Ok(AttachmentReceivePolicy {
-        global_auto: node.attachment_global_auto(),
+        global_auto: node.attachment_global_auto()?,
         contact_auto: account
             .as_deref()
-            .and_then(|id| node.attachment_contact_auto(id)),
+            .map(|id| node.attachment_contact_auto(id))
+            .transpose()?
+            .flatten(),
     })
 }
 
@@ -663,7 +664,7 @@ pub async fn read_media<R: tauri::Runtime>(
         .blocking(move |runtime, _| {
             runtime
                 .handle()
-                .read_media(id)
+                .read_media_checked(id)?
                 .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))
         })
         .await?;

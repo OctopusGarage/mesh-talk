@@ -1,15 +1,30 @@
 //! Ordinary account profiles; signing and replication are implementation details.
 
 use super::profile::MAX_AVATAR_BYTES;
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::identity::{
     account::{Account, AccountPublic},
     device::DeviceIdentity,
 };
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::{collections::HashMap, path::Path};
+
+mod indexed;
+#[cfg(test)]
+pub(crate) fn reset_indexed_body_reads() {
+    indexed::reset_body_reads();
+}
+#[cfg(test)]
+pub(crate) fn indexed_body_reads() -> usize {
+    indexed::body_reads()
+}
+
+pub(super) use indexed::IndexedAccountProfileStore;
 
 const MAGIC: &[u8; 6] = b"MTAPRF";
 const WIRE_MAGIC: &[u8; 4] = b"MTP3";
@@ -113,13 +128,26 @@ impl AccountProfile {
     }
 }
 
+fn profile_order(profile: &AccountProfile) -> (u64, bool, Option<&[u8]>, &[u8; 64]) {
+    // Keep avatar tie-breaking identical to the legacy avatar projection;
+    // signature ordering resolves metadata-only ties after that shared order.
+    (
+        profile.revision,
+        profile.avatar.is_none(),
+        profile.avatar.as_deref(),
+        &profile.signature,
+    )
+}
+
 /// One bounded current profile per account. Equal revisions converge by signature
 /// ordering; an established creation date cannot be replaced by another device.
+#[cfg(test)]
 pub(super) struct AccountProfileStore {
     file: EncryptedRecordLog<AccountProfile>,
     profiles: HashMap<String, AccountProfile>,
     records: usize,
 }
+#[cfg(test)]
 impl AccountProfileStore {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::open(path, password, MAGIC)?;
@@ -144,22 +172,7 @@ impl AccountProfileStore {
     pub fn all(&self) -> Vec<AccountProfile> {
         self.profiles.values().cloned().collect()
     }
-    /// Stable lightweight traversal for bounded sibling-publication repair.
-    pub(super) fn account_ids(&self) -> Vec<String> {
-        let mut ids = self.profiles.keys().cloned().collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids
-    }
-    fn order(profile: &AccountProfile) -> (u64, bool, Option<&[u8]>, &[u8; 64]) {
-        // Keep avatar tie-breaking identical to the legacy avatar projection;
-        // signature ordering resolves metadata-only ties after that shared order.
-        (
-            profile.revision,
-            profile.avatar.is_none(),
-            profile.avatar.as_deref(),
-            &profile.signature,
-        )
-    }
+
     pub(super) fn accepts(&self, profile: &AccountProfile) -> bool {
         if !profile.verify() {
             return false;
@@ -169,7 +182,7 @@ impl AccountProfileStore {
             if old.created_at_ms.is_some() && old.created_at_ms != profile.created_at_ms {
                 return false;
             }
-            if Self::order(profile) <= Self::order(old) {
+            if profile_order(profile) <= profile_order(old) {
                 return false;
             }
         } else if self.profiles.len() >= MAX_ACCOUNTS {
@@ -206,6 +219,62 @@ impl AccountProfileStore {
 
 #[cfg(test)]
 mod tests {
+    pub(super) fn profile(
+        root: &std::path::Path,
+        identity: &crate::identity::device::DeviceIdentity,
+        account: &Account,
+    ) -> std::sync::Arc<crate::storage::profile::context::ProfileStorage> {
+        let profile = crate::storage::profile::context::ProfileStorage::open_participant(
+            crate::storage::profile::ProfileStorageLease::acquire(root).unwrap(),
+            &identity.public(),
+            &account.public(),
+            &root.join("messages.log"),
+            &root.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        profile.complete_participant("pw", None).unwrap();
+        profile
+    }
+    #[test]
+    fn warm_open_reads_no_avatar_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profiles");
+        let mut store = AccountProfileStore::open(&path, "pw").unwrap();
+        for seed in 1..=32 {
+            let account = crate::identity::account::Account::from_secret_bytes([seed; 32]);
+            let profile = AccountProfile::new(
+                &account,
+                1,
+                "Person".into(),
+                String::new(),
+                Some(vec![7; 8192]),
+            );
+            assert!(store.record(profile).unwrap());
+        }
+        drop(store);
+        let identity = crate::identity::device::DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &identity, &account);
+        let imported =
+            IndexedAccountProfileStore::from_profile(owner.clone(), &path, "pw").unwrap();
+        drop(imported);
+        drop(owner);
+        indexed::reset_body_reads();
+        crate::storage::record_log::frame_observations::reset();
+        let owner = profile(root.path(), &identity, &account);
+        let store = IndexedAccountProfileStore::from_profile(owner, &path, "pw").unwrap();
+        assert_eq!(indexed::body_reads(), 0);
+        let page = store.page(None).unwrap();
+        assert_eq!(page.rows.len(), 16);
+        assert_eq!(indexed::body_reads(), 16);
+        assert_eq!(
+            crate::storage::record_log::frame_observations::maximum_capacity(),
+            0,
+            "warm signed-profile open must not decrypt every account payload"
+        );
+    }
+
     use super::*;
     use crate::identity::account::Account;
 

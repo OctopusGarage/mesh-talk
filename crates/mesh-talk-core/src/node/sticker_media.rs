@@ -46,7 +46,7 @@ impl Node {
         name: &str,
         bytes: &[u8],
         deadline: Option<u64>,
-    ) -> Option<FileManifestV3> {
+    ) -> Result<Option<FileManifestV3>, NodeError> {
         let checksum = file_checksum(bytes);
         let own = Author::from_ed25519(self.identity.public().ed25519_pub);
         // Canonical projection excludes recalled, locally erased and expired rows.
@@ -54,7 +54,7 @@ impl Node {
         let history = account.map_or_else(
             || self.history(host, 256),
             |account| self.account_history(account, 256),
-        );
+        )?;
         for row in history.into_iter().rev() {
             if !row.from_me || row.recalled || row.expires_at_ms != deadline {
                 continue;
@@ -64,10 +64,10 @@ impl Node {
             };
             let manifest = {
                 let book = self.files.lock().expect("files lock not poisoned");
-                if !book.has_author(file.file_conv, own) {
+                if !book.has_author(file.file_conv, own)? {
                     continue;
                 }
-                book.manifest(&file.file_conv).cloned()
+                book.manifest(file.file_conv)?
             };
             let Some(AnyManifest::V3(manifest)) = manifest else {
                 continue;
@@ -77,10 +77,10 @@ impl Node {
                 // Verify retained signed chunks, not only a stale cache index or path.
                 && self.read_file_internal(file.file_conv).ok().as_deref() == Some(bytes)
             {
-                return Some(manifest);
+                return Ok(Some(manifest));
             }
         }
-        None
+        Ok(None)
     }
 
     pub(super) fn stage_sticker_snapshot(
@@ -145,15 +145,15 @@ impl Node {
     }
 
     /// Transport only original-author metadata; never disclose candidate hashes.
-    pub(super) fn sticker_chunk_proof(&self, file: ConversationId) -> Option<Vec<Event>> {
-        let manifest = self
-            .files
-            .lock()
-            .expect("files lock")
-            .manifest(&file)?
-            .clone();
+    pub(super) fn sticker_chunk_proof(
+        &self,
+        file: ConversationId,
+    ) -> Result<Option<Vec<Event>>, crate::eventlog::LogError> {
+        let Some(manifest) = self.files.lock().expect("files lock").manifest(file)? else {
+            return Ok(None);
+        };
         let AnyManifest::V3(manifest) = manifest else {
-            return None;
+            return Ok(None);
         };
         if manifest.kind != FileKind::Media
             || !sticker::is_sticker_name(&manifest.v2.name)
@@ -161,12 +161,12 @@ impl Node {
             || manifest.v2.size > sticker::MAX_STICKER_BYTES as u64
             || manifest.v2.chunk_count > 64
         {
-            return None;
+            return Ok(None);
         }
         let log = self.log.lock().expect("log lock");
-        let chunks = log.events(&file);
+        let chunks = log.events(&file)?;
         if chunks.len() != manifest.v2.chunk_count as usize {
-            return None;
+            return Ok(None);
         }
         let own = self.identity.public();
         let mut headers = Vec::with_capacity(chunks.len());
@@ -183,23 +183,26 @@ impl Node {
                         vec![chunks[index - 1].id]
                     }
             {
-                return None;
+                return Ok(None);
             }
             let mut header = (*chunk).clone();
             header.ciphertext.clear();
             headers.push(header);
         }
-        Some(headers)
+        Ok(Some(headers))
     }
 
     pub(super) fn sticker_recovery_offer(
         &self,
         file: ConversationId,
         peer: &crate::identity::device::PublicIdentity,
-    ) -> Option<EventId> {
+    ) -> Result<Option<EventId>, crate::eventlog::LogError> {
         let (manifest, ids) = {
             let files = self.files.lock().expect("files lock");
-            (files.manifest(&file)?.clone(), files.manifest_events(file))
+            let Some(manifest) = files.manifest(file)? else {
+                return Ok(None);
+            };
+            (manifest, files.offers(Some(file), None))
         };
         if !matches!(&manifest, AnyManifest::V3(media) if media.kind == FileKind::Media)
             || !sticker::is_sticker_name(manifest.name())
@@ -213,10 +216,15 @@ impl Node {
                     *hash == manifest.checksum() && bytes.len() as u64 == manifest.size()
                 })
         {
-            return None;
+            return Ok(None);
         }
-        ids.into_iter()
-            .find(|id| self.incoming_offer(file, Some(*id), Some(peer)).is_some())
+        for offer in ids {
+            let id = offer?.event;
+            if self.incoming_offer(file, Some(id), Some(peer))?.is_some() {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
     }
 
     /// Verify a complete proof before exposing any reconstructed event to admission.
@@ -226,41 +234,48 @@ impl Node {
         offer: EventId,
         peer: &crate::identity::device::PublicIdentity,
         mut headers: Vec<Event>,
-    ) -> Option<Vec<Event>> {
+    ) -> Result<Option<Vec<Event>>, crate::eventlog::LogError> {
         if headers.is_empty()
             || headers.len() > 64
-            || self.expired_received_file(file)
+            || self.expired_received_file(file)?
             || self
                 .delivery_suspended
                 .load(std::sync::atomic::Ordering::Acquire)
             || !self.known_account_allowed(peer)
         {
-            return None;
+            return Ok(None);
         }
-        self.incoming_offer(file, Some(offer), Some(peer))?;
-        let manifest = self
-            .files
-            .lock()
-            .expect("files lock")
-            .manifest(&file)?
-            .clone();
+        if self
+            .incoming_offer(file, Some(offer), Some(peer))?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let Some(manifest) = self.files.lock().expect("files lock").manifest(file)? else {
+            return Ok(None);
+        };
         let AnyManifest::V3(ref media) = manifest else {
-            return None;
+            return Ok(None);
         };
         if media.kind != FileKind::Media
             || !sticker::is_sticker_name(manifest.name())
             || media.v2.chunk_size != crate::file::CHUNK_SIZE as u32
             || media.v2.chunk_count as usize != headers.len()
         {
-            return None;
+            return Ok(None);
         }
-        let card = self
+        let Some(card) = self
             .delivery
             .lock()
             .expect("delivery lock")
-            .file_card(offer)?
-            .clone();
-        let binding = card.completion_binding.as_ref()?;
+            .file_card(offer)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let Some(binding) = card.completion_binding.as_ref() else {
+            return Ok(None);
+        };
         if card.file_conversation != file
             || binding.source != *peer
             || binding.owner_account != self.account_id()
@@ -270,28 +285,34 @@ impl Node {
                 .expect("delivery lock")
                 .manifest_event_erased(offer)
         {
-            return None;
+            return Ok(None);
         }
-        let source = self.historical_author(&peer.ed25519_pub)?;
+        let Some(source) = self.historical_author(&peer.ed25519_pub) else {
+            return Ok(None);
+        };
         if source.public() != *peer || source.account_cert != binding.certificate {
-            return None;
+            return Ok(None);
         }
-        let row = self
+        let Some(row) = self
             .received_files
             .lock()
             .expect("received files lock")
             .entry(offer)?
-            .clone();
-        if super::files::validated_manifest(&row.plaintext)? != manifest
+        else {
+            return Ok(None);
+        };
+        if super::files::validated_manifest(&row.plaintext).as_ref() != Some(&manifest)
             || row.from != peer.user_id()
             || crate::expiry::deadline(&row.plaintext)
                 .is_some_and(|deadline| deadline <= super::node::now_millis())
         {
-            return None;
+            return Ok(None);
         }
         {
             let log = self.log.lock().expect("log lock");
-            let event = log.get(&offer)?;
+            let Some(event) = log.get(&offer)? else {
+                return Ok(None);
+            };
             if event.kind != EventKind::FileManifest
                 || event.author.ed25519_pub() != &peer.ed25519_pub
                 || event.conversation_id
@@ -300,10 +321,10 @@ impl Node {
                 || !event.verify_integrity()
                 || !event.verify_signature()
             {
-                return None;
+                return Ok(None);
             }
         }
-        let bytes = self
+        let Some(bytes) = self
             .sticker_sources
             .lock()
             .expect("sticker sources lock")
@@ -312,12 +333,17 @@ impl Node {
             .find(|(hash, bytes)| {
                 *hash == manifest.checksum() && bytes.len() as u64 == manifest.size()
             })
-            .map(|(_, bytes)| std::sync::Arc::clone(bytes))?;
-        sticker::validate_image(manifest.name(), manifest.mime(), &bytes).ok()?;
+            .map(|(_, bytes)| std::sync::Arc::clone(bytes))
+        else {
+            return Ok(None);
+        };
+        if sticker::validate_image(manifest.name(), manifest.mime(), &bytes).is_err() {
+            return Ok(None);
+        }
         if file_checksum(&bytes) != manifest.checksum()
             || crate::file::chunk_count_for(bytes.len() as u64) as usize != headers.len()
         {
-            return None;
+            return Ok(None);
         }
         let mut previous = None;
         for (index, (header, chunk)) in headers
@@ -332,28 +358,28 @@ impl Node {
                 || header.kind != EventKind::Message
                 || header.parents != previous.into_iter().collect::<Vec<_>>()
             {
-                return None;
+                return Ok(None);
             }
-            header.ciphertext = crate::file::seal_chunk_indexed(
+            let Ok(ciphertext) = crate::file::seal_chunk_indexed(
                 &media.v2.key(),
                 &media.v2.file_nonce,
                 index as u32,
                 chunk,
-            )
-            .ok()?;
+            ) else {
+                return Ok(None);
+            };
+            header.ciphertext = ciphertext;
             if !header.is_canonical()
                 || !header.verify_integrity()
                 || !header.verify_signature()
-                || crate::file::open_chunk_for(&manifest, index as u32, &header.ciphertext)
-                    .ok()?
-                    .as_slice()
-                    != chunk
+                || !crate::file::open_chunk_for(&manifest, index as u32, &header.ciphertext)
+                    .is_ok_and(|opened| opened.as_slice() == chunk)
             {
-                return None;
+                return Ok(None);
             }
             previous = Some(header.id);
         }
-        Some(headers)
+        Ok(Some(headers))
     }
 }
 

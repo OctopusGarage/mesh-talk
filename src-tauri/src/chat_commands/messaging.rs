@@ -1,6 +1,4 @@
-use super::{
-    HistoryItem, NodeState, ReactionInfo, parse_channel_id, parse_event_id, to_reaction_infos,
-};
+use super::{HistoryItem, NodeState, parse_channel_id, parse_event_id};
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
 use tauri::Manager;
@@ -74,7 +72,7 @@ pub async fn history<R: tauri::Runtime>(
         .peer_public(&peer)
         .ok_or_else(|| CommandError::Validation(format!("unknown peer: {peer}")))?;
     let history = rt
-        .history(&public, limit)
+        .history(&public, limit)?
         .into_iter()
         .map(HistoryItem::from)
         .collect();
@@ -169,7 +167,7 @@ pub async fn account_history<R: tauri::Runtime>(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let history = rt
-        .account_history(&account, limit)
+        .account_history(&account, limit)?
         .into_iter()
         .map(HistoryItem::from)
         .collect();
@@ -203,19 +201,6 @@ pub async fn react_dm(
 }
 
 #[tauri::command]
-pub async fn reactions(
-    state: tauri::State<'_, NodeState>,
-    peer: String,
-) -> Result<Vec<ReactionInfo>, CommandError> {
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    let public = rt
-        .peer_public(&peer)
-        .ok_or_else(|| CommandError::Validation(format!("unknown peer: {peer}")))?;
-    Ok(to_reaction_infos(rt.reactions_dm(&public), None))
-}
-
-#[tauri::command]
 pub async fn react_account(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
@@ -238,16 +223,6 @@ pub async fn react_account(
             })
         })
         .await
-}
-
-#[tauri::command]
-pub async fn account_reactions(
-    state: tauri::State<'_, NodeState>,
-    account: String,
-) -> Result<Vec<ReactionInfo>, CommandError> {
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(to_reaction_infos(rt.account_reactions(&account), None))
 }
 
 /// Delete one message from THIS device only (local; not propagated). `conv_id` is the
@@ -366,7 +341,7 @@ pub async fn search<R: tauri::Runtime>(
     let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
     let hits = admission
         .clone()
-        .blocking(move |runtime, _| Ok(runtime.handle().search(&query)))
+        .blocking(move |runtime, _| Ok(runtime.handle().search(&query)?))
         .await?;
     admission
         .with_runtime(move |_| {

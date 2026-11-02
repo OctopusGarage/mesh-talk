@@ -147,7 +147,13 @@ impl Node {
             .into_iter()
             .filter_map(|(account_allowed, peer)| {
                 (account_allowed
-                    || self.group_member(&peer.public)
+                    || match self.group_member(&peer.public) {
+                        Ok(member) => member,
+                        Err(error) => {
+                            log::warn!("routing candidate deferred after storage failure: {error}");
+                            return None;
+                        }
+                    }
                     || self.group_departure_peer(&peer.public))
                 .then_some(peer)
             })

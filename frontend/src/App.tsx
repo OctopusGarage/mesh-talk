@@ -150,9 +150,9 @@ export default function App() {
     runtimeIdentity,
   ]);
 
-  // On app start, attempt a "stay signed in" resume from the OS keychain BEFORE deciding
-  // whether to show the login screen. While it's in flight we show a brief unlocking
-  // splash so a remembered session never flashes the login form.
+  // Restore an existing unlocked native session after renderer reload first.
+  // Cold startup may use "Stay signed in" credentials from the OS keychain.
+  // Keep the unlocking splash until that decision avoids flashing the login form.
   useEffect(() => {
     void (async () => {
       try {

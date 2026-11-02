@@ -74,7 +74,7 @@ impl Node {
             });
         }
         if let Some(reply_to) = request.reply_to
-            && !self.integration_reply_retained(&request.destination, reply_to)
+            && !self.integration_reply_retained(&request.destination, reply_to)?
         {
             return Err(NodeError::InvalidInput(
                 "reply target is not retained within the most recent 500 records per destination history".into(),
@@ -116,7 +116,7 @@ impl Node {
         &self,
         destination: &MessageDestination,
         reply_to: EventId,
-    ) -> bool {
+    ) -> Result<bool, NodeError> {
         const RECENT_RECORDS: usize = 500;
         let conversation = match destination {
             MessageDestination::Account(account) => {
@@ -129,65 +129,79 @@ impl Node {
                 .log
                 .lock()
                 .expect("log lock")
-                .get(&reply_to)
+                .repository()?
+                .header(&reply_to)?
                 .filter(|event| {
-                    event.conversation_id == conversation
-                        && event.author.user_id() == self.user_id()
+                    event.conversation == conversation && event.author.user_id() == self.user_id()
                 })
                 .map(|event| event.seq),
             MessageDestination::Account(_) => None,
         };
-        let sent = self.sentlog.lock().expect("sent lock");
-        let own_retained = sent
-            .entries_ref(&conversation)
-            .iter()
-            .rev()
-            .take(RECENT_RECORDS)
-            .any(|entry| match destination {
-                MessageDestination::Account(_) => DmEnvelope::decode(&entry.plaintext)
-                    .is_some_and(|envelope| EventId::new(envelope.msg_id) == reply_to),
-                MessageDestination::Channel(_) => Some(entry.seq) == channel_seq,
-            });
-        drop(sent);
-        if own_retained {
-            return true;
+        for kind in [1, 2, 3] {
+            let mut before = None;
+            let mut remaining = RECENT_RECORDS;
+            while remaining > 0 {
+                let limit = super::transcript_repository::TranscriptPageLimit::new(
+                    remaining.min(128),
+                    8 * 1024 * 1024,
+                )?;
+                let page = match kind {
+                    1 => self
+                        .sentlog
+                        .lock()
+                        .expect("sent mutex")
+                        .header_reverse_scan_page(&conversation, before, limit)?,
+                    2 => self
+                        .received
+                        .lock()
+                        .expect("received mutex")
+                        .header_reverse_scan_page(&conversation, before, limit)?,
+                    _ => self
+                        .received_files
+                        .lock()
+                        .expect("files mutex")
+                        .header_reverse_scan_page(&conversation, before, limit)?,
+                };
+                remaining -= page.rows.len();
+                for header in page.rows {
+                    let matches = if kind == 1 {
+                        match destination {
+                            MessageDestination::Account(_) => header.logical_id == Some(reply_to),
+                            MessageDestination::Channel(_) => Some(header.sequence) == channel_seq,
+                        }
+                    } else {
+                        let original =
+                            EventId::new(header.key.as_slice().try_into().map_err(|_| {
+                                crate::eventlog::LogError::CorruptFile(
+                                    "invalid reply identity".into(),
+                                )
+                            })?);
+                        let id =
+                            if kind == 2 && matches!(destination, MessageDestination::Account(_)) {
+                                header.logical_id.unwrap_or(original)
+                            } else {
+                                original
+                            };
+                        id == reply_to
+                            && !header.deadline.is_some_and(|deadline| {
+                                self.recipient_metadata_expired(
+                                    deadline,
+                                    original,
+                                    header.wall_clock,
+                                )
+                            })
+                    };
+                    if matches {
+                        return Ok(true);
+                    }
+                }
+                let Some(next) = page.next else {
+                    break;
+                };
+                before = Some(next);
+            }
         }
-        let received = self.received.lock().expect("received lock");
-        let incoming_retained = received
-            .entries_ref(&conversation)
-            .iter()
-            .rev()
-            .take(RECENT_RECORDS)
-            .any(|entry| {
-                let envelope = matches!(destination, MessageDestination::Account(_))
-                    .then(|| DmEnvelope::decode(&entry.plaintext))
-                    .flatten();
-                let id = envelope
-                    .as_ref()
-                    .map_or(entry.event_id, |envelope| EventId::new(envelope.msg_id));
-                let plaintext = envelope
-                    .as_ref()
-                    .map_or(entry.plaintext.as_slice(), |envelope| {
-                        envelope.body.as_slice()
-                    });
-                id == reply_to
-                    && !self.recipient_expired(plaintext, entry.event_id, entry.wall_clock)
-            });
-        drop(received);
-        if incoming_retained {
-            return true;
-        }
-        self.received_files
-            .lock()
-            .expect("file history lock")
-            .entries_ref(&conversation)
-            .iter()
-            .rev()
-            .take(RECENT_RECORDS)
-            .any(|entry| {
-                entry.event_id == reply_to
-                    && !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
-            })
+        Ok(false)
     }
 
     pub fn message_request_status(
@@ -227,7 +241,13 @@ impl Node {
             MessageDestination::Channel(channel) => {
                 let ready = {
                     let mut store = self.delivery.lock().expect("delivery lock");
-                    self.recover_delivery(&mut store).is_ok()
+                    match self.recover_delivery(&mut store) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            log::warn!("accepted channel delivery recovery deferred: {error}");
+                            false
+                        }
+                    }
                 };
                 if !ready {
                     return;
@@ -347,11 +367,17 @@ impl Node {
         let mut result = None;
         let mut wrapped = Some(wrapped);
         let mut request = request;
+        let mut preparation = crate::eventlog::sync::network::PreparationBudget::default();
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
+            {
+                let mut store = self.delivery.lock().expect("delivery lock");
+                self.recover_delivery(&mut store).map_err(NodeError::Log)?;
+            }
+            self.prepare_channel_admission(channel, &mut preparation)?;
             // A signed account departure can reach this device before its public
             // control cut. It is a terminal negative, never a replacement for
             // the physical membership and full-identity checks below.
@@ -362,16 +388,15 @@ impl Node {
                 return Err(NodeError::Channel("not an active channel member".into()));
             }
             let mut store = self.delivery.lock().expect("delivery lock");
+            self.recover_delivery(&mut store).map_err(NodeError::Log)?;
             let wrapped = wrapped
                 .take()
                 .ok_or_else(|| NodeError::InvalidInput("accept is single-use".into()))?;
-            self.recover_delivery(&mut store).map_err(NodeError::Log)?;
-            self.process_channel(channel);
             let book = self.channels.lock().expect("channels lock");
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-            if !self.channel_identity_is_current(state)
+            if !self.channel_identity_is_current(state)?
                 || state.pending_invite()
                 || state.is_dissolved()
             {
@@ -398,9 +423,16 @@ impl Node {
             NodeError::Authorization("authorization did not execute acceptance".into())
         })?;
         let mut store = self.delivery.lock().expect("delivery lock");
-        if self.recover_delivery(&mut store).is_err() {
-            log::warn!("accepted channel message awaits local recovery");
+        if let Err(error) = self.recover_delivery(&mut store) {
+            log::warn!("accepted channel message awaits local recovery: {error}");
         }
+        drop(store);
+        // Acceptance already committed: preparation failure cannot turn its
+        // exact returned ID into a retryable send failure. The worker resumes it.
+        if let Err(error) = self.prepare_channel_admission(channel, &mut preparation) {
+            log::debug!("accepted channel metadata awaits preparation: {error}");
+        }
+        self.process_channel(channel);
         self.delivery_notify.notify_one();
         Ok(id)
     }
@@ -413,6 +445,128 @@ mod tests {
     use crate::discovery::Announce;
     use crate::eventlog::LogError;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn local_channel_admission_prepares_each_accepted_tail_without_a_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let channel = node
+            .create_channel("local admission", vec![])
+            .await
+            .unwrap();
+        for index in 0..4 {
+            let body = format!("accepted {index}");
+            let id = node
+                .enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    body.as_bytes(),
+                    None,
+                    None,
+                    |commit| {
+                        assert!(node.delivery.try_lock().is_ok());
+                        commit()
+                    },
+                )
+                .unwrap();
+            assert!(node.log.lock().unwrap().get(&id).unwrap().is_some());
+            assert!(
+                node.channel_checkpoints
+                    .current_state(channel)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert_eq!(node.channel_history(channel, 10).unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn local_channel_admission_leaves_a_large_backlog_pending_with_one_budget() {
+        use crate::eventlog::sync::network::PreparationBudget;
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let channel = node
+            .create_channel("pending admission", vec![])
+            .await
+            .unwrap();
+        {
+            let mut log = node.log.lock().unwrap();
+            for _ in 0..129 {
+                let (parents, lamport) = log.prepare(&channel).unwrap();
+                let event = Event::new(
+                    &node.identity,
+                    channel,
+                    log.next_sequence(
+                        &channel,
+                        &Author::from_ed25519(node.identity.public().ed25519_pub),
+                    )
+                    .unwrap(),
+                    parents,
+                    lamport,
+                    0,
+                    EventKind::Message,
+                    vec![0],
+                );
+                log.append(event).unwrap();
+            }
+        }
+        let count = || {
+            node.storage
+                .database()
+                .read(|c| {
+                    Ok(c.query_row(
+                        "SELECT count(*) FROM channel_event_authority WHERE channel=?1",
+                        [channel.as_bytes().as_slice()],
+                        |row| row.get::<_, i64>(0),
+                    )?)
+                })
+                .unwrap()
+        };
+        let before = count();
+        let mut budget = PreparationBudget::default();
+        assert!(matches!(
+            node.prepare_channel_admission(channel, &mut budget),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(budget.rows < PreparationBudget::default().rows);
+        assert!(usize::try_from(count() - before).unwrap() <= PreparationBudget::default().rows);
+        assert!(node.channel_checkpoints.current_state(channel).is_err());
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn two_event_rotation_clock_exhaustion_leaves_wal_and_sender_unchanged() {
@@ -453,7 +607,7 @@ mod tests {
             .unwrap()
             .append_durable(genesis.clone())
             .unwrap();
-        node.process_channel(channel);
+        node.await_channel_metadata(channel).await.unwrap();
         let before_senders = node
             .channels
             .lock()
@@ -514,8 +668,8 @@ mod tests {
             before_senders,
         );
         let log = node.log.lock().unwrap();
-        assert_eq!(log.heads(&channel), vec![genesis.id]);
-        assert_eq!(log.events(&channel).len(), 1);
+        assert_eq!(log.heads(&channel).unwrap(), vec![genesis.id]);
+        assert_eq!(log.events(&channel).unwrap().len(), 1);
         assert_eq!(log.prepare(&channel).unwrap().1, u64::MAX);
     }
 }

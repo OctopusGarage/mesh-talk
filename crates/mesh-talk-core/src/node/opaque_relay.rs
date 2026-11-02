@@ -69,8 +69,8 @@ impl WrapperCache {
 }
 
 /// `seen` avoids pulling the same retained blobs every three seconds. The
-/// signed inner event remains the durable truth; the cache is only an in-memory
-/// transfer hint and can be discarded without losing delivery.
+/// signed inner event remains the durable truth; restored hints are checked
+/// against retained inner events and can be discarded without losing delivery.
 struct OpaqueRoundStore<'a> {
     node: &'a Node,
     relay: PublicIdentity,
@@ -86,20 +86,38 @@ struct OpaqueRoundStore<'a> {
 }
 
 impl SyncStore for OpaqueRoundStore<'_> {
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+    fn requires_channel_v5(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    // Both legacy and federated mailboxes wrap every inner kind as Message.
+    // Capability checks must not materialize and seal an upload page merely
+    // to rediscover that invariant on every fingerprint probe and sync step.
+    fn requires_channel_v2(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+
+    fn requires_channel_v3(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+
+    fn requires_channel_v4(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
+
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
         let mut ids = self.seen.clone();
-        ids.extend(SyncStore::event_ids(&self.log, conversation));
+        ids.extend(SyncStore::event_ids(&self.log, conversation)?);
         ids.extend(self.outgoing.iter().map(|(_, outer)| *outer));
-        ids.into_iter().collect()
+        Ok(ids.into_iter().collect())
     }
 
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         if !self.node.relay_send_allowed(&self.relay) || !(self.authorize_upload)() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let wanted: HashSet<_> = self
             .outgoing
@@ -112,7 +130,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
                 .sync_store(self.recipient)
                 .lock()
                 .expect("projection lock not poisoned")
-                .authorized_event_page(&conv, &wanted, WRAPPER_PAGE_BYTES)
+                .authorized_event_page(&conv, &wanted, WRAPPER_PAGE_BYTES)?
         } else {
             Vec::new()
         };
@@ -143,7 +161,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
         // Incoming wrappers already belong to the remote peer. Only locally
         // projected wrappers need to be returned as reciprocal uploads.
         let _ = conversation;
-        page
+        Ok(page)
     }
 
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
@@ -174,10 +192,12 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     recipient: PublicIdentity,
     relay: PublicIdentity,
     identity_controls: Option<Vec<Event>>,
+    consent_offers: Option<Vec<(ConversationId, EventId)>>,
     conversation: Option<ConversationId>,
     sync: super::session::SyncProgress,
     uploaded: Vec<(EventId, EventId)>,
     deferred_events: HashSet<EventId>,
+    processed_events: HashMap<EventId, Option<EventId>>,
     wrapper_ids: HashMap<EventId, EventId>,
     wrappers: Mutex<WrapperCache>,
 }
@@ -194,10 +214,12 @@ impl OpaqueMailboxProgress {
             recipient: recipient.clone(),
             relay: relay.clone(),
             identity_controls: None,
+            consent_offers: None,
             conversation,
             sync: super::session::SyncProgress::default(),
             uploaded: Vec::new(),
             deferred_events: HashSet::new(),
+            processed_events: HashMap::new(),
             wrapper_ids: HashMap::new(),
             wrappers: Mutex::new(WrapperCache::default()),
         }
@@ -294,13 +316,28 @@ impl Node {
             return Err(super::session::SessionError::UnexpectedMessage);
         }
         let mut seen = self
-            .opaque_seen
+            .opaque_receive_cache
             .lock()
-            .expect("opaque seen lock not poisoned")
-            .get(&progress.mailbox.id())
-            .cloned()
-            .unwrap_or_default();
+            .expect("opaque cache lock not poisoned")
+            .seen(
+                progress.mailbox.id(),
+                &self.log.lock().expect("log lock not poisoned"),
+            )?;
         seen.extend(progress.deferred_events.iter().copied());
+        // Optional hint persistence may fail independently of admitted history.
+        // Keep only this active exchange's progress, under the existing HAVE
+        // identifier budget, so a disabled cache cannot pin the same page.
+        {
+            let log = self.log.lock().expect("log lock not poisoned");
+            for (outer, inner) in &progress.processed_events {
+                if match inner {
+                    Some(inner) => log.has(inner)?,
+                    None => true,
+                } {
+                    seen.insert(*outer);
+                }
+            }
+        }
         let mut controls = HashMap::new();
         let mut source_ids = Vec::new();
         if self.relay_send_allowed(&progress.relay) && authorize_upload() {
@@ -309,33 +346,45 @@ impl Node {
                     .sync_store(&progress.recipient)
                     .lock()
                     .expect("projection lock not poisoned")
-                    .authorized_event_ids(&conv);
+                    .authorized_event_ids(&conv)?;
             }
             if progress.identity_controls.is_none() {
                 progress.identity_controls =
-                    Some(self.file_message_identity_controls_for(&progress.recipient, false));
+                    Some(self.file_message_identity_controls_for(&progress.recipient, false)?);
             }
             if let Some(identities) = &progress.identity_controls {
                 let guarded = self.sync_store(&progress.recipient);
                 for bundle in identities {
-                    let authorized = super::file_message_identity::bundle_references(bundle)
-                        .into_iter()
-                        .any(|(file, manifest)| {
-                            guarded
-                                .lock()
-                                .expect("projection lock")
-                                .file_message_identity(&file, &manifest)
-                                .is_some_and(|current| current.id == bundle.id)
-                        });
+                    let mut authorized = false;
+                    for (file, manifest) in super::file_message_identity::bundle_references(bundle)
+                    {
+                        if guarded
+                            .lock()
+                            .expect("projection lock")
+                            .file_message_identity(&file, &manifest)?
+                            .is_some_and(|current| current.id == bundle.id)
+                        {
+                            authorized = true;
+                            break;
+                        }
+                    }
                     if authorized {
                         controls.insert(bundle.id, bundle.clone());
                     }
                 }
             }
-            match self.file_consent_events(&progress.recipient) {
-                Ok(events) => controls.extend(events.into_iter().map(|event| (event.id, event))),
-                Err(error) => log::debug!("file consent publication deferred: {error}"),
+            if progress.consent_offers.is_none() {
+                progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
             }
+            controls.extend(
+                self.file_consent_controls(
+                    &progress.recipient,
+                    progress.consent_offers.as_deref().unwrap_or(&[]),
+                    false,
+                )?
+                .into_iter()
+                .map(|event| (event.id, event)),
+            );
         }
         let requested: HashSet<_> = source_ids.iter().copied().collect();
         source_ids.extend(controls.keys().copied());
@@ -350,13 +399,14 @@ impl Node {
             let outer = if let Some(outer) = progress.wrapper_ids.get(&inner) {
                 *outer
             } else {
-                let event = controls.get(&inner).cloned().or_else(|| {
-                    self.log
+                let event = match controls.get(&inner) {
+                    Some(event) => Some(event.clone()),
+                    None => self
+                        .log
                         .lock()
                         .expect("log lock not poisoned")
-                        .get(&inner)
-                        .cloned()
-                });
+                        .get(&inner)?,
+                };
                 let Some(event) = event else {
                     continue;
                 };
@@ -410,6 +460,7 @@ impl Node {
         drop(outer_store);
         let mut inner: Vec<(EventId, Event)> = Vec::new();
         let mut processed = Vec::new();
+        let mut retained = Vec::new();
         for outer in wrappers {
             match progress.mailbox.open(&outer) {
                 Ok(event) => inner.push((outer.id, event)),
@@ -485,30 +536,36 @@ impl Node {
                 .log
                 .lock()
                 .expect("log mutex not poisoned")
-                .has(&event.id)
+                .has(&event.id)?
             {
                 processed.push(outer_id);
+                retained.push((outer_id, event.id));
                 continue;
             }
+            let inner_id = event.id;
             let conv = event.conversation_id;
             let admission = store
                 .lock()
                 .expect("projection lock not poisoned")
                 .ingest(event);
-            if matches!(admission, Err(LogError::MissingParents(_)))
-                || matches!(&admission, Err(LogError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
-            {
-                // Opaque IDs have no causal order. A child can fill a page
-                // before its parent; requesting it again would pin that page
-                // forever. Skip it for this operation only, fetch later pages,
-                // and retry admission in the next drain with its parents held.
-                // Encrypted custody may also precede local receive approval.
-                // Defer denied wrappers only within this operation so a later
-                // approval can retry them without a repeated-page busy loop.
-                // It is deliberately absent from the durable/global seen set.
+            if let Err(error) = admission {
+                // Valid wrappers are only transport progress: missing parents,
+                // receive policy or storage failure may reject their contents.
+                // Recreating the round store must not make the same rejected
+                // page appear newly applied forever. Defer only this operation,
+                // so later drains retry after dependencies or policy recover.
+                log::debug!("opaque event admission deferred: {error}");
                 progress.defer_event(outer_id)?;
-            } else if admission.is_ok() {
+            } else {
                 processed.push(outer_id);
+                if self
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .has(&inner_id)?
+                {
+                    retained.push((outer_id, inner_id));
+                }
                 self.emit_new_messages(conv);
                 self.process_channel_reception(conv, "catch_up");
                 self.process_file_events_reception(conv, "catch_up");
@@ -516,18 +573,31 @@ impl Node {
                 self.persist_media_if_complete(conv);
             }
         }
-        if !processed.is_empty() {
-            let mut cache = self
-                .opaque_seen
-                .lock()
-                .expect("opaque seen lock not poisoned");
-            if cache.values().map(HashSet::len).sum::<usize>() > 250_000 {
-                cache.clear();
+        let retained_by_outer: HashMap<_, _> = retained.iter().copied().collect();
+        for outer in &processed {
+            if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
+                && !progress.processed_events.contains_key(outer)
+            {
+                return Err(super::session::SessionError::NoProgress);
             }
-            cache
-                .entry(progress.mailbox.id())
-                .or_default()
-                .extend(processed);
+            progress
+                .processed_events
+                .insert(*outer, retained_by_outer.get(outer).copied());
+        }
+        if !retained.is_empty() {
+            self.opaque_receive_cache
+                .lock()
+                .expect("opaque cache lock not poisoned")
+                .remember(progress.mailbox.id(), &retained);
+        }
+        // Retained pairs stay dependent on exact main-log membership. Only
+        // wrappers without a retained inner event need session-only progress.
+        processed.retain(|outer| !retained_by_outer.contains_key(outer));
+        if !processed.is_empty() {
+            self.opaque_receive_cache
+                .lock()
+                .expect("opaque cache lock not poisoned")
+                .remember_session(progress.mailbox.id(), &processed);
         }
         if !self.relay_send_allowed(channel.peer_identity()) {
             progress.uploaded.clear();
@@ -581,6 +651,404 @@ mod permission_tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn opaque_receive_restart_skips_payload_and_recovers_missing_inner() {
+        struct ObservedRelay {
+            log: EventLog,
+            exported: std::cell::Cell<usize>,
+        }
+        impl SyncStore for ObservedRelay {
+            fn requires_channel_v2(&self, _: &ConversationId) -> Result<bool, LogError> {
+                Ok(false)
+            }
+            fn requires_channel_v3(&self, _: &ConversationId) -> Result<bool, LogError> {
+                Ok(false)
+            }
+            fn requires_channel_v4(&self, _: &ConversationId) -> Result<bool, LogError> {
+                Ok(false)
+            }
+            fn event_ids(&self, conv: &ConversationId) -> Result<Vec<EventId>, LogError> {
+                SyncStore::event_ids(&self.log, conv)
+            }
+            fn events_excluding(
+                &self,
+                conv: &ConversationId,
+                have: &HashSet<EventId>,
+            ) -> Result<Vec<Event>, LogError> {
+                self.log.events_excluding(conv, have)
+            }
+            fn events_excluding_bounded(
+                &self,
+                conv: &ConversationId,
+                have: &HashSet<EventId>,
+                bytes: usize,
+                frames: usize,
+            ) -> Result<Vec<Event>, LogError> {
+                let events = self
+                    .log
+                    .events_excluding_bounded(conv, have, bytes, frames)?;
+                self.exported.set(self.exported.get() + events.len());
+                Ok(events)
+            }
+            fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+                self.log.append(event)
+            }
+        }
+        for federated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let identity = DeviceIdentity::generate();
+            let keys = identity.secret_bytes();
+            let account = Account::generate();
+            let account_key = account.secret_bytes();
+            let remote = DeviceIdentity::generate();
+            let proof = crate::discovery::Announce::new_with_account(
+                &remote,
+                &Account::generate(),
+                "Remote",
+                47475,
+            );
+            let relay = DeviceIdentity::generate();
+            let relay_public = relay.public();
+            let mailbox = if federated {
+                RelayMailbox::federated(&identity, &remote.public())
+            } else {
+                RelayMailbox::new(&identity, &remote.public(), &relay_public)
+            }
+            .unwrap();
+            let conv = super::super::conversation::dm_conversation_id(
+                &identity.public(),
+                &remote.public(),
+            );
+            let inner = Event::new(
+                &remote,
+                conv,
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![7; 32000],
+            );
+            let outer = mailbox.wrap(&inner).unwrap();
+            let mut relay_log = EventLog::default();
+            relay_log.append(outer.clone()).unwrap();
+            let relay_log = Arc::new(Mutex::new(ObservedRelay {
+                log: relay_log,
+                exported: std::cell::Cell::new(0),
+            }));
+            let newer = Event::new(
+                &remote,
+                conv,
+                2,
+                vec![inner.id],
+                2,
+                0,
+                EventKind::Message,
+                vec![8; 32000],
+            );
+            for pass in 0..6 {
+                if pass == 2 {
+                    relay_log
+                        .lock()
+                        .unwrap()
+                        .log
+                        .append(mailbox.wrap(&newer).unwrap())
+                        .unwrap();
+                }
+                if pass == 4 {
+                    // Corruption disables the optional cache, without preventing login or receive.
+                    std::fs::write(root.path().join("events.log.opaque-receive"), b"corrupt")
+                        .unwrap();
+                }
+                let (node, _, _) = super::super::test_support::node_with_files(
+                    root.path(),
+                    DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                    Account::from_secret_bytes(account_key),
+                    &proof,
+                );
+                node.cached_peer_snapshot_async().await.unwrap();
+                if pass == 3 {
+                    // Retained history may disappear independently of optional
+                    // hints. Preserve the published source barrier and use the
+                    // actual repository maintenance boundary.
+                    node.log.lock().unwrap().drop_conversation(&conv).unwrap();
+                }
+                let before = relay_log.lock().unwrap().exported.get();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let store = relay_log.clone();
+                let relay_keys = relay.secret_bytes();
+                let task = tokio::spawn(async move {
+                    let (server, _) = listener.accept().await.unwrap();
+                    let relay = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
+                    let mut channel = crate::transport::SecureChannel::accept(server, &relay)
+                        .await
+                        .unwrap();
+                    while matches!(
+                        super::super::session::serve_one(&mut channel, &store).await,
+                        Ok(super::super::session::Served::Handled(_))
+                    ) {}
+                });
+                let client = tokio::net::TcpStream::connect(address).await.unwrap();
+                let mut channel = crate::transport::SecureChannel::connect(
+                    client,
+                    &node.identity,
+                    Some(&relay_public),
+                )
+                .await
+                .unwrap();
+                let receiving_mailbox = if federated {
+                    RelayMailbox::federated(&node.identity, &remote.public())
+                } else {
+                    RelayMailbox::new(&node.identity, &remote.public(), &relay_public)
+                }
+                .unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    node.opaque_mailbox_round(
+                        &mut channel,
+                        &remote.public(),
+                        None,
+                        receiving_mailbox,
+                    ),
+                )
+                .await
+                .expect("optional hint failure cannot pin an active mailbox round")
+                .unwrap();
+                if pass >= 2 && !node.log.lock().unwrap().has(&newer.id).unwrap() {
+                    // Outer IDs do not encode the inner DAG. If a child arrives
+                    // on an earlier page, a fresh operation retries it after its
+                    // parent has been admitted; rejected hints never persist.
+                    let mailbox = if federated {
+                        RelayMailbox::federated(&node.identity, &remote.public())
+                    } else {
+                        RelayMailbox::new(&node.identity, &remote.public(), &relay_public)
+                    }
+                    .unwrap();
+                    node.opaque_mailbox_round(&mut channel, &remote.public(), None, mailbox)
+                        .await
+                        .unwrap();
+                }
+                drop(channel);
+                task.await.unwrap();
+                let after = relay_log.lock().unwrap().exported.get();
+                assert!(node.log.lock().unwrap().has(&inner.id).unwrap());
+                if pass >= 2 {
+                    assert!(node.log.lock().unwrap().has(&newer.id).unwrap());
+                }
+                let transferred = after - before;
+                if pass <= 2 {
+                    assert_eq!(
+                        transferred,
+                        usize::from(pass != 1),
+                        "exact wrapper count for pass {pass}, federated={federated}"
+                    );
+                } else {
+                    assert!(
+                        (2..=3).contains(&transferred),
+                        "missing-inner/corrupt-cache fallback transfers both wrappers, retrying a child-first page if necessary"
+                    );
+                }
+                if pass == 4 {
+                    // Even unavailable optional SQL hints cannot pin receiving.
+                    // The next open must fall back to active-exchange progress.
+                    node.storage
+                        .database()
+                        .transaction(|c| {
+                            c.execute_batch("DROP INDEX opaque_session_epochs")?;
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_capability_probe_does_not_wrap_inner_controls() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = crate::discovery::Announce::new_with_account(
+            &remote,
+            &Account::generate(),
+            "Remote",
+            47475,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            root.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let relay = DeviceIdentity::generate().public();
+        let mailbox = RelayMailbox::new(&node.identity, &remote.public(), &relay).unwrap();
+        let inner = Event::new(
+            &node.identity,
+            ConversationId::new([8; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::ChannelAccountAuthority,
+            vec![7; 32_000],
+        );
+        let outer = mailbox.wrap(&inner).unwrap();
+        assert_eq!(outer.kind, EventKind::Message);
+        let controls = HashMap::from([(inner.id, inner.clone())]);
+        let outgoing = [(inner.id, outer.id)];
+        let wrappers = Mutex::new(WrapperCache::default());
+        let store = OpaqueRoundStore {
+            node: &node,
+            relay,
+            log: EventLog::default(),
+            seen: HashSet::new(),
+            authorize_upload: &|| true,
+            mailbox: &mailbox,
+            recipient: &remote.public(),
+            conversation: None,
+            outgoing: &outgoing,
+            controls: &controls,
+            wrappers: &wrappers,
+        };
+        assert!(!store.requires_channel_v2(&mailbox.id()).unwrap());
+        assert!(!store.requires_channel_v3(&mailbox.id()).unwrap());
+        assert!(!store.requires_channel_v4(&mailbox.id()).unwrap());
+        assert!(!store.requires_channel_v5(&mailbox.id()).unwrap());
+        assert_eq!(
+            wrappers.lock().unwrap().generated,
+            0,
+            "opaque capability checks must not seal or clone upload pages"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_inner_event_does_not_pin_relay_pages_and_is_retried_next_operation() {
+        use crate::discovery::Announce;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let root = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&remote, &account, "Remote", 47475);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            root.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let rejected = Event::new(
+            &remote,
+            ConversationId::new([42; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![1; 32_000],
+        );
+        let conv = super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &remote.public(),
+        );
+        let accepted = Event::new(
+            &remote,
+            conv,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![2; 32_000],
+        );
+        // A valid opaque wrapper can contain an inner event which current
+        // attachment policy rejects. Put it before the next page's admissible DM.
+        let (relay, mailbox, rejected_outer, accepted_outer) = (0..64)
+            .find_map(|_| {
+                let relay = DeviceIdentity::generate();
+                let mailbox =
+                    RelayMailbox::new(&node.identity, &remote.public(), &relay.public()).unwrap();
+                let first = mailbox.wrap(&rejected).unwrap();
+                let second = mailbox.wrap(&accepted).unwrap();
+                (first.id < second.id).then_some((relay, mailbox, first, second))
+            })
+            .expect("find a mailbox whose rejected event precedes the accepted event");
+        assert!(
+            rejected_outer.ciphertext.len() + accepted_outer.ciphertext.len()
+                > crate::transport::MAX_PLAINTEXT
+        );
+        let rejected_id = rejected_outer.id;
+        let relay_public = relay.public();
+        let mut relay_store = EventLog::default();
+        relay_store.append(rejected_outer).unwrap();
+        relay_store.append(accepted_outer).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = crate::transport::SecureChannel::accept(stream, &relay)
+                .await
+                .unwrap();
+            let store = Mutex::new(relay_store);
+            while matches!(
+                super::super::session::serve_one(&mut channel, &store).await,
+                Ok(super::super::session::Served::Handled(_))
+            ) {}
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut channel =
+            crate::transport::SecureChannel::connect(stream, &node.identity, Some(&relay_public))
+                .await
+                .unwrap();
+        let mut progress =
+            OpaqueMailboxProgress::new(&relay_public, &remote.public(), None, mailbox);
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for _ in 0..6 {
+                if node
+                    .advance_opaque_mailbox(&mut channel, &mut progress)
+                    .await
+                    .unwrap()
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("bounded relay steps must not stall");
+        assert!(
+            completed,
+            "a rejected inner event must not be downloaded every round"
+        );
+        assert!(node.log.lock().unwrap().has(&accepted.id).unwrap());
+        assert!(!node.log.lock().unwrap().has(&rejected.id).unwrap());
+        assert!(
+            !node
+                .opaque_receive_cache
+                .lock()
+                .unwrap()
+                .seen(progress.mailbox.id(), &node.log.lock().unwrap())
+                .unwrap()
+                .contains(&rejected_id),
+            "rejected data must remain retryable after policy or storage recovery"
+        );
+        // A fresh operation really receives and retries the rejected wrapper;
+        // the old operation's transfer hint must not become durable admission.
+        let mailbox = RelayMailbox::new(&node.identity, &remote.public(), &relay_public).unwrap();
+        let mut next = OpaqueMailboxProgress::new(&relay_public, &remote.public(), None, mailbox);
+        for _ in 0..2 {
+            assert!(
+                !node
+                    .advance_opaque_mailbox(&mut channel, &mut next)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(next.deferred_events.contains(&rejected_id));
+        drop(channel);
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn relay_direction_matrix_preserves_pending_local_events() {
@@ -682,20 +1150,21 @@ mod permission_tests {
                     send
                 );
                 assert!(
-                    node.log.lock().unwrap().has(&outgoing.id),
+                    node.log.lock().unwrap().has(&outgoing.id).unwrap(),
                     "disabling upload retains accepted local work"
                 );
                 assert_eq!(
-                    node.log.lock().unwrap().has(&incoming.id),
+                    node.log.lock().unwrap().has(&incoming.id).unwrap(),
                     receive,
                     "receive permission gates durable inner-event admission"
                 );
                 assert_eq!(
-                    node.opaque_seen
+                    node.opaque_receive_cache
                         .lock()
                         .unwrap()
-                        .get(&mailbox.id())
-                        .is_some_and(|seen| seen.contains(&incoming_outer.id)),
+                        .seen(mailbox.id(), &node.log.lock().unwrap())
+                        .unwrap()
+                        .contains(&incoming_outer.id),
                     receive
                 );
                 drop(channel);

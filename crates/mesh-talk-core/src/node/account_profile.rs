@@ -4,34 +4,39 @@
 use super::{
     NodeError,
     profile::{MAX_AVATAR_BYTES, ProfilePayload},
-    profile_store::ProfileStore,
+    profile_store::IndexedProfileStore,
 };
 use crate::{eventlog::LogError, identity::account::Account};
-use std::{
-    collections::HashMap,
-    sync::{Mutex, MutexGuard},
-};
+use std::sync::{Mutex, MutexGuard};
 
 pub(super) struct AccountProfiles {
     account: Account,
     state: Mutex<State>,
 }
 struct State {
-    avatars: ProfileStore,
+    avatars: IndexedProfileStore,
     current: Option<ProfilePayload>,
 }
 impl AccountProfiles {
-    pub fn new(account: &Account, avatars: ProfileStore) -> Self {
-        let current = Self::reconstruct(account, &avatars);
-        Self {
+    pub fn new(account: &Account, avatars: IndexedProfileStore) -> Result<Self, LogError> {
+        let current = Self::reconstruct(account, &avatars)?;
+        Ok(Self {
             account: Account::from_secret_bytes(account.secret_bytes()),
             state: Mutex::new(State { avatars, current }),
-        }
-    }
-    fn reconstruct(account: &Account, avatars: &ProfileStore) -> Option<ProfilePayload> {
-        avatars.updated_at(&account.account_id()).map(|revision| {
-            ProfilePayload::new(account, avatars.avatar(&account.account_id()), revision)
         })
+    }
+    fn reconstruct(
+        account: &Account,
+        avatars: &IndexedProfileStore,
+    ) -> Result<Option<ProfilePayload>, LogError> {
+        let Some(revision) = avatars.updated_at(&account.account_id())? else {
+            return Ok(None);
+        };
+        Ok(Some(ProfilePayload::new(
+            account,
+            avatars.avatar(&account.account_id())?,
+            revision,
+        )))
     }
     fn state(&self) -> MutexGuard<'_, State> {
         self.state
@@ -45,17 +50,35 @@ impl AccountProfiles {
     pub fn current(&self) -> Option<ProfilePayload> {
         self.state().current.clone()
     }
-    pub fn avatar(&self, account: &str) -> Option<Vec<u8>> {
+    pub fn avatar(&self, account: &str) -> Result<Option<Vec<u8>>, LogError> {
         self.state().avatars.avatar(account)
     }
-    pub fn avatars(&self) -> HashMap<String, Vec<u8>> {
-        self.state().avatars.all()
+    pub fn selected(&self, account: &str) -> Result<Option<super::ReceivedProfile>, LogError> {
+        Ok(self
+            .state()
+            .avatars
+            .selected(account)?
+            .map(|entry| super::ReceivedProfile {
+                account_id: entry.account_id,
+                avatar: entry.avatar,
+            }))
     }
-    pub fn avatar_states(&self) -> HashMap<String, Option<Vec<u8>>> {
-        self.snapshot()
-            .into_iter()
-            .map(|(id, _, avatar)| (id, avatar))
-            .collect()
+    pub(super) fn page(
+        &self,
+        revision: Option<u64>,
+        after: Option<&str>,
+    ) -> Result<super::profile_store::AvatarPage, LogError> {
+        let state = self.state();
+        state
+            .avatars
+            .page(if revision == Some(state.avatars.revision()?) {
+                after
+            } else {
+                None
+            })
+    }
+    pub(super) fn revision(&self) -> Result<u64, LogError> {
+        self.state().avatars.revision()
     }
     /// An identical avatar is a no-op, including an existing clear tombstone.
     pub fn set_avatar(&self, avatar: Option<Vec<u8>>) -> Result<Option<ProfilePayload>, NodeError> {
@@ -93,7 +116,7 @@ impl AccountProfiles {
     fn next_avatar_revision(&self, state: &State) -> Result<u64, NodeError> {
         let next = state
             .avatars
-            .updated_at(&self.account.account_id())
+            .updated_at(&self.account.account_id())?
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| NodeError::InvalidInput("account profile revision exhausted".into()))?;
@@ -111,7 +134,7 @@ impl AccountProfiles {
             .avatars
             .record(&account, payload.updated_at, payload.avatar.clone())?;
         if account == self.account.account_id() {
-            state.current = Self::reconstruct(&self.account, &state.avatars);
+            state.current = Self::reconstruct(&self.account, &state.avatars)?;
         }
         Ok(applied)
     }
@@ -125,7 +148,7 @@ impl AccountProfiles {
             .avatars
             .record(&account, card.revision, card.avatar.clone())?;
         if account == self.account.account_id() {
-            state.current = Self::reconstruct(&self.account, &state.avatars);
+            state.current = Self::reconstruct(&self.account, &state.avatars)?;
         }
         Ok(applied)
     }
@@ -142,12 +165,15 @@ impl AccountProfiles {
             .avatars
             .record(&account, profile.revision, profile.avatar.clone())?;
         if account == self.account.account_id() {
-            state.current = Self::reconstruct(&self.account, &state.avatars);
+            state.current = Self::reconstruct(&self.account, &state.avatars)?;
         }
         Ok(applied)
     }
-    pub fn snapshot(&self) -> Vec<(String, u64, Option<Vec<u8>>)> {
-        self.state().avatars.snapshot_entries()
+    pub fn visit(
+        &self,
+        visit: impl FnMut(String, u64, Option<Vec<u8>>) -> Result<(), LogError>,
+    ) -> Result<(), LogError> {
+        self.state().avatars.visit(visit)
     }
     /// Trusted snapshot installation preserves revisions and clear tombstones;
     /// reopening reconstructs publication after installation completes.
@@ -164,10 +190,25 @@ impl AccountProfiles {
 mod tests {
     use super::*;
     fn open(dir: &std::path::Path, account: &Account) -> AccountProfiles {
+        std::fs::create_dir_all(dir).unwrap();
+        let identity =
+            crate::identity::keystore::load_or_create(&dir.join("identity.keystore"), "pw")
+                .unwrap();
+        let profile = crate::storage::profile::context::ProfileStorage::open_participant(
+            crate::storage::profile::ProfileStorageLease::acquire(dir).unwrap(),
+            &identity.public(),
+            &account.public(),
+            &dir.join("messages.log"),
+            &dir.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        profile.complete_participant("pw", None).unwrap();
         AccountProfiles::new(
             account,
-            ProfileStore::open(&dir.join("profiles.log"), "pw").unwrap(),
+            IndexedProfileStore::from_profile(profile, &dir.join("profiles.log"), "pw").unwrap(),
         )
+        .unwrap()
     }
     #[test]
     fn local_edits_and_clear_survive_restart_without_retired_preferences() {
@@ -185,8 +226,8 @@ mod tests {
         drop(profiles);
         let reopened = open(dir.path(), &account);
         assert_eq!(reopened.current(), Some(clear));
-        assert!(reopened.avatar_states().contains_key(&account.account_id()));
-        assert!(reopened.avatars().is_empty());
+        let page = reopened.page(None, None).unwrap();
+        assert_eq!(page.rows, vec![(account.account_id(), None)]);
     }
     #[test]
     fn older_signed_metadata_does_not_return_in_own_publication() {
@@ -281,7 +322,7 @@ mod tests {
                 "a tied revision cannot be acknowledged as a saved edit"
             );
             assert_eq!(profiles.current(), Some(exhausted.clone()));
-            assert_eq!(profiles.avatar(&account.account_id()), avatar);
+            assert_eq!(profiles.avatar(&account.account_id()).unwrap(), avatar);
             assert_eq!(std::fs::read(&path).unwrap(), before);
             drop(profiles);
             assert_eq!(open(dir.path(), &account).current(), Some(exhausted));

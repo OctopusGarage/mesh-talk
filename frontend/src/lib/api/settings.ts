@@ -7,6 +7,11 @@ import {
 import type { AppSettings } from "../types";
 import { invokeSensitive } from "./sensitiveInvoke";
 
+export interface HistoryStorageUsage {
+  bytes: number;
+  complete: boolean;
+}
+
 const readFor = (owner: string | null, expectedAccount: string | null) =>
   invoke<AppSettings>("get_app_settings", { owner, expectedAccount });
 const writeFor = (
@@ -44,6 +49,11 @@ export function createSettingsApi(
   return {
     /** Owner-scoped desktop preferences; the host normalizes compound privacy presets. */
     get: () => readFor(currentOwner(), currentAccount()),
+    historyUsage: () =>
+      invoke<HistoryStorageUsage>("history_storage_usage", {
+        owner: currentOwner(),
+        expectedAccount: currentAccount(),
+      }),
     set: (value: AppSettings) =>
       writeFor(currentOwner(), currentAccount(), value),
     update: (patch: Partial<AppSettings>): Promise<void> => {

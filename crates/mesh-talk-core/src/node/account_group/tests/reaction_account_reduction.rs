@@ -91,16 +91,57 @@ fn append(f: &Fixture, identity: &DeviceIdentity, wall: u64, remove: bool) -> Ev
     );
     let id = event.id;
     log.append_durable(event).unwrap();
+    drop(log);
+    settle_group_metadata(&f.observer, f.group);
     id
 }
 
 fn assert_originals(f: &Fixture, originals: &[(EventId, &DeviceIdentity)]) {
     let log = f.observer.log.lock().unwrap();
     for (id, identity) in originals {
-        let event = log.get(id).unwrap();
+        let event = log.get(id).unwrap().unwrap();
         assert_eq!(event.author.ed25519_pub(), &identity.public().ed25519_pub);
         assert!(event.verify_integrity() && event.verify_signature());
     }
+    drop(log);
+    assert_selected_summary(f);
+}
+
+fn assert_selected_summary(f: &Fixture) {
+    let expected = f
+        .observer
+        .reactions(f.group)
+        .unwrap()
+        .into_iter()
+        .map(|view| crate::node::ReactionSummary {
+            target: view.target,
+            emoji: view.emoji,
+            count: view.who.len() as u64,
+            from_me: view
+                .who
+                .iter()
+                .any(|id| id == &f.observer.account_id() || id == &f.observer.user_id()),
+        })
+        .collect::<Vec<_>>();
+    let mut cursor = None;
+    for _ in 0..512 {
+        let page = f
+            .observer
+            .reaction_summaries(f.group, &[f.target], cursor.as_deref())
+            .unwrap();
+        if !page.pending {
+            assert_eq!(
+                page.items, expected,
+                "selected summaries preserve the existing authenticated account reduction"
+            );
+            assert!(page.next.is_none());
+            return;
+        }
+        assert!(page.items.is_empty());
+        cursor = page.next;
+        assert!(cursor.is_some());
+    }
+    panic!("selected channel reaction projection did not settle");
 }
 
 #[test]
@@ -111,7 +152,7 @@ fn two_certified_physical_adds_reduce_to_one_account_without_rewriting_events() 
     bind(&f, &f.second, &account);
     let first = append(&f, &f.first, 10, false);
     let second = append(&f, &f.second, 11, false);
-    let views = f.observer.reactions(f.group);
+    let views = f.observer.reactions(f.group).unwrap();
     assert_eq!(views.len(), 1);
     assert_eq!(
         views[0].who,
@@ -130,7 +171,7 @@ fn certified_sibling_remove_clears_another_devices_account_add() {
     let first = append(&f, &f.first, 10, false);
     let second = append(&f, &f.second, 11, true);
     assert!(
-        f.observer.reactions(f.group).is_empty(),
+        f.observer.reactions(f.group).unwrap().is_empty(),
         "D-remove must clear A-add for the same certified account"
     );
     assert_originals(&f, &[(first, &f.first), (second, &f.second)]);
@@ -145,7 +186,7 @@ fn certified_account_remove_wins_equal_clock_across_physical_authors() {
     let remove = append(&f, &f.second, 10, true);
     let add = append(&f, &f.first, 10, false);
     assert!(
-        f.observer.reactions(f.group).is_empty(),
+        f.observer.reactions(f.group).unwrap().is_empty(),
         "the existing remove-wins tie rule applies across certified account devices"
     );
     assert_originals(&f, &[(add, &f.first), (remove, &f.second)]);
@@ -158,12 +199,12 @@ fn unknown_physical_authors_remain_distinct_until_verified_bindings_repair_old_r
     let second = append(&f, &f.second, 11, false);
     let mut unknown = vec![f.first.user_id(), f.second.user_id()];
     unknown.sort();
-    assert_eq!(f.observer.reactions(f.group)[0].who, unknown);
+    assert_eq!(f.observer.reactions(f.group).unwrap()[0].who, unknown);
     let account = Account::generate();
     bind(&f, &f.first, &account);
     bind(&f, &f.second, &account);
     assert_eq!(
-        f.observer.reactions(f.group)[0].who,
+        f.observer.reactions(f.group).unwrap()[0].who,
         vec![account.account_id()],
         "existing stored events must repair on read after exact verified certificates arrive"
     );
@@ -182,7 +223,7 @@ fn different_verified_accounts_with_the_same_name_remain_distinct() {
     let mut accounts = vec![first_account.account_id(), second_account.account_id()];
     accounts.sort();
     assert_eq!(
-        f.observer.reactions(f.group)[0].who,
+        f.observer.reactions(f.group).unwrap()[0].who,
         accounts,
         "display names cannot combine unrelated authenticated principals"
     );
@@ -202,6 +243,7 @@ async fn modern_reaction_keeps_its_causal_account_after_device_adoption() {
         .lock()
         .unwrap()
         .events(&f.group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::MembershipChange)
         .unwrap()
@@ -246,9 +288,11 @@ async fn modern_reaction_keeps_its_causal_account_after_device_adoption() {
         )
         .unwrap();
     f.observer.process_channel(f.group);
+    settle_group_metadata(&f.observer, f.group);
     assert_eq!(
         f.observer
             .account_group_projection(f.group)
+            .unwrap()
             .authority
             .current_event(),
         Some(authority)
@@ -274,7 +318,7 @@ async fn modern_reaction_keeps_its_causal_account_after_device_adoption() {
         Some(adopted_account.account_id()),
         "the fixture must really expose a different current device account"
     );
-    let views = f.observer.reactions(f.group);
+    let views = f.observer.reactions(f.group).unwrap();
     assert_eq!(
         views[0].who,
         vec![original_account.account_id()],
@@ -289,9 +333,24 @@ fn bound_private_reactions_keep_both_account_lifetimes_after_adoption_and_reopen
     let old_account = Account::generate();
     let new_account = Account::generate();
     bind(&f, &f.first, &old_account);
-    let path = f._directory.path().join("bound-reactions.log");
-    *f.observer.my_dm_reactions.lock().unwrap() =
-        crate::node::reaction_store::ReactionStore::open(&path, "pw").unwrap();
+    // Reopen the account-scoped source already published by Node, preserving
+    // the same profile authority instead of swapping in a fresh legacy log.
+    let path = f
+        ._directory
+        .path()
+        .join("observer")
+        .join("events.log")
+        .with_extension(format!("{}-reactions.log", f.observer.account_id()));
+    let reopen = || {
+        crate::node::reaction_store::IndexedReactionStore::from_profile(
+            f.observer.storage.clone(),
+            &path,
+            "pw",
+            f.observer.account.public().ed25519_pub,
+        )
+        .unwrap()
+    };
+    *f.observer.my_dm_reactions.lock().unwrap() = reopen();
     let add = append(&f, &f.first, 10, false);
     let payload = ReactionPayload {
         target: f.target,
@@ -349,18 +408,19 @@ fn bound_private_reactions_keep_both_account_lifetimes_after_adoption_and_reopen
         )
         .unwrap();
     assert_eq!(
-        f.observer.reactions(f.group)[0].who,
+        f.observer.reactions(f.group).unwrap()[0].who,
         vec![old_account.account_id()],
         "the adopted account's remove cannot erase the old account's independent add"
     );
-    *f.observer.my_dm_reactions.lock().unwrap() =
-        crate::node::reaction_store::ReactionStore::open(&path, "pw").unwrap();
+    *f.observer.my_dm_reactions.lock().unwrap() = reopen();
     let rows = f
         .observer
         .my_dm_reactions
         .lock()
         .unwrap()
-        .channel_entries_with_account(f.group);
+        .channel_page(f.group, None, 3, 8 * 1024)
+        .unwrap()
+        .rows;
     assert_eq!(rows.len(), 2);
     assert!(
         rows.iter()
@@ -375,7 +435,7 @@ fn bound_private_reactions_keep_both_account_lifetimes_after_adoption_and_reopen
                 && *root == Some(new_account.public().ed25519_pub))
     );
     assert_eq!(
-        f.observer.reactions(f.group)[0].who,
+        f.observer.reactions(f.group).unwrap()[0].who,
         vec![old_account.account_id()]
     );
     assert_originals(&f, &[(add, &f.first), (remove, &f.first)]);
@@ -434,7 +494,7 @@ fn exact_unbound_effect_can_gain_verified_proof_but_cannot_change_its_bound_acco
     );
     drop(store);
     assert_eq!(
-        f.observer.reactions(f.group)[0].who,
+        f.observer.reactions(f.group).unwrap()[0].who,
         vec![account.account_id()],
         "old and upgraded copies of the same effect must reduce once under the verified binding"
     );
@@ -449,7 +509,7 @@ fn legacy_long_history_reactions_do_not_replay_causal_membership_per_effect() {
         append(&f, &f.first, wall, false);
     }
     crate::node::reactions::take_reaction_projection_work_for_test();
-    let views = f.observer.reactions(f.group);
+    let views = f.observer.reactions(f.group).unwrap();
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].who, vec![account.account_id()]);
     let (ancestry_visits, projections) =
@@ -468,7 +528,7 @@ fn legacy_explicit_rehome_keeps_old_unbound_effect_conservative(reopen: bool) {
     bind(&f, &f.first, &previous);
     let effect = append(&f, &f.first, 10, false);
     assert_eq!(
-        f.observer.reactions(f.group)[0].who,
+        f.observer.reactions(f.group).unwrap()[0].who,
         vec![previous.account_id()]
     );
     f.observer
@@ -507,7 +567,7 @@ fn legacy_explicit_rehome_keeps_old_unbound_effect_conservative(reopen: bool) {
         "current identity/admission must still expose the explicitly accepted account"
     );
     assert_eq!(
-        f.observer.reactions(f.group)[0].who,
+        f.observer.reactions(f.group).unwrap()[0].who,
         vec![f.first.user_id()],
         "an old legacy effect without immutable account evidence must not follow the device's accepted rehome, including after reopen"
     );
