@@ -30,6 +30,14 @@ async fn cold_account_setup<T>(
     tokio::time::timeout(std::time::Duration::from_secs(30), future).await
 }
 
+// Functional provenance/convergence watchdog shared with explicit message
+// actions. Dedicated operation receipt and held-progress latency stay separate.
+async fn functional_account_convergence<T>(
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, tokio::time::error::Elapsed> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), future).await
+}
+
 fn has_account_group_operation_support(
     node: &Node,
     peer: &Node,

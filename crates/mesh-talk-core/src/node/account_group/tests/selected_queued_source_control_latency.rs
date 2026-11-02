@@ -369,6 +369,74 @@ async fn preparation_decision_inventory_prunes_retired_witnesses_and_rejects_liv
     assert!(refused.unwrap_err().is_panic());
 }
 
+#[tokio::test(start_paused = true)]
+async fn queued_functional_recovery_keeps_all_predicates_after_the_receipt_budget() {
+    let changed = Notify::new();
+    let state = std::cell::Cell::new(QueuedRecoverySnapshot {
+        rows_complete: false,
+        public_receipt: false,
+        pair_retired: false,
+    });
+    let started = tokio::time::Instant::now();
+    let mut recovery = Box::pin(super::functional_account_convergence(
+        observe_queued_recovery(&changed, || state.get()),
+    ));
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(8_001)).await;
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    for incomplete in [
+        QueuedRecoverySnapshot {
+            rows_complete: false,
+            public_receipt: true,
+            pair_retired: true,
+        },
+        QueuedRecoverySnapshot {
+            rows_complete: true,
+            public_receipt: false,
+            pair_retired: true,
+        },
+        QueuedRecoverySnapshot {
+            rows_complete: true,
+            public_receipt: true,
+            pair_retired: false,
+        },
+    ] {
+        state.set(incomplete);
+        changed.notify_one();
+        assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    }
+    tokio::time::advance(Duration::from_millis(20_999)).await;
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    state.set(QueuedRecoverySnapshot {
+        pair_retired: true,
+        ..state.get()
+    });
+    changed.notify_one();
+    assert!(recovery.await.is_ok());
+    assert_eq!(started.elapsed(), Duration::from_secs(29));
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_functional_recovery_fails_without_actual_pair_retirement() {
+    let changed = Notify::new();
+    let mut recovery = Box::pin(super::functional_account_convergence(
+        observe_queued_recovery(&changed, || QueuedRecoverySnapshot {
+            rows_complete: true,
+            public_receipt: true,
+            pair_retired: false,
+        }),
+    ));
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(8_001)).await;
+    changed.notify_one();
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(21_999)).await;
+    assert!(
+        recovery.await.is_err(),
+        "functional convergence still requires the real pair to retire before its watchdog"
+    );
+}
+
 struct ReleaseQueuedReads(Arc<Semaphore>);
 impl Drop for ReleaseQueuedReads {
     fn drop(&mut self) {
@@ -1578,15 +1646,16 @@ async fn run_queued_source(
     };
     let recovery_started = clock.elapsed();
     let mut last_recovery_observation = None;
-    let recovered = tokio::time::timeout(
-        Duration::from_secs(8),
-        observe_queued_recovery(&recovery_changed, || {
+    // The private receipt above retains its measured eight-second bound.
+    // After releasing A, full corpus replay and retirement of both independent
+    // comparisons are functional convergence under ordinary cross-peer fairness.
+    let recovered =
+        super::functional_account_convergence(observe_queued_recovery(&recovery_changed, || {
             let snapshot = recovery_snapshot();
             last_recovery_observation = Some((clock.elapsed(), snapshot));
             snapshot
-        }),
-    )
-    .await;
+        }))
+        .await;
     let recovery_at_completion = (clock.elapsed(), recovery_snapshot());
     *a.account_session_test_hook.lock().unwrap() = None;
     *b.account_session_test_hook.lock().unwrap() = None;

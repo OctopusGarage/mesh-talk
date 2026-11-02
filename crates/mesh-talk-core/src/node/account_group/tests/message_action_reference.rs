@@ -45,7 +45,7 @@ async fn wait_action_fixture_diagnosed(
     diagnosis: impl Fn() -> &'static str,
 ) {
     // Functional provenance/convergence watchdog; dedicated latency fixtures retain 8s.
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    super::functional_account_convergence(async {
         while !ready() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

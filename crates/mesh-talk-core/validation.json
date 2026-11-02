@@ -142,7 +142,9 @@
             "new_account_group_preflight_has_one_deadline_and_creates_no_partial_group",
             "new_group_invites_one_account_and_starts_with_account_owner_authority",
             "new_account_group_rejects_a_route_whose_authenticated_account_changed",
-            "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks"
+            "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks",
+            "queued_functional_recovery_keeps_all_predicates_after_the_receipt_budget",
+            "queued_functional_recovery_fails_without_actual_pair_retirement"
           ]
         }
       ],
@@ -150,6 +152,10 @@
         "summary": "Apply one account group role across certified devices while preserving public signer authority and explicit execution availability.",
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
+          {
+            "name": "Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
+          },
           {
             "name": "Inbound-only role fixtures establish actual exact-source access and operation capabilities under cold setup before the unchanged warm signed-role and admitted-operation deadlines; already-proven capabilities add no RPC.",
             "reference": "docs/testing-feedback-loop.md#windows-workspace-archives-and-slow-fixtures"

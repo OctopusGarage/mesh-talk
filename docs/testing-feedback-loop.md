@@ -681,6 +681,21 @@ fixture retains its separate eight-second operation, receipt and recovery proofs
 Both fault controllers belong to their fixture task sets, with drop guards that
 release held responses and cleanup that joins tasks and drains admitted writers.
 
+Queued-source fixtures retain the independent eight-second private operation
+receipt assertion. After that receipt and release of A, replay of all 66 signed
+rows, real public receipt and actual B comparison-pair retirement use the shared
+thirty-second functional convergence watchdog from the message-action fixture
+owner. This is an explicit correction of the original queued fixture's auxiliary
+eight-second recovery bound, not a product latency relaxation: after paid
+prefix/resume credit and terminal operation, the two retained comparisons follow
+ordinary cross-peer fairness. The product requires both scans to finish without
+combining checkpoints; it does not promise full-corpus convergence in eight
+seconds. Keep every recovery predicate, signature, continuation and lifetime
+check. The original selected-source recovery, other checkpoint/archive progress,
+Wake deadlines and production read clocks retain their existing bounds. Paused
+time controls require all recovery observations, allow convergence after eight
+seconds, and fail when pair retirement is absent at thirty seconds.
+
 Capture account document health before closing runtime admission or stopping
 peers. The test-local `capture_account_sync_before_cleanup` owns that observation
 boundary while still awaiting all caller-owned cleanup before the assertion.
@@ -724,8 +739,9 @@ still live when the canonical partial-page corpus is published. These observatio
 stay within the existing cold budget and issue no extra requests; preserve the
 real signed exchange, protected-resume checks and operation/recovery deadlines.
 
-Once the original operation is admitted, or the external possession proof starts,
-the existing eight-second progress assertions remain unchanged. The same applies
+Except for the explicitly classified queued post-receipt functional convergence
+phase above, once the original operation is admitted, or the external possession
+proof starts, the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
 Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
 work drains. The overall nextest per-test 60-second and mutation 360-second
