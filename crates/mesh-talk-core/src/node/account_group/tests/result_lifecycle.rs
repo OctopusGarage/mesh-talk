@@ -280,12 +280,12 @@ async fn erased_file_result_publishes_only_terminal_status_to_fresh_sibling() {
 /// A fresh authenticated wake must not wait behind an older failed Noise dial.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operation_budget() {
-    modern_leave_timeout_recovery(false).await;
+    Box::pin(modern_leave_timeout_recovery(false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn modern_leave_wake_during_real_noise_timeout_recovers_within_operation_budget() {
-    modern_leave_timeout_recovery(true).await;
+    Box::pin(modern_leave_timeout_recovery(true)).await;
 }
 
 #[derive(Default)]
@@ -339,6 +339,193 @@ fn during_attempt_wake_uses_exact_reception_order_not_ack_return() {
             "missing, stale and late wake evidence must fail"
         );
     }
+}
+
+#[derive(Default)]
+struct NoiseFault {
+    state: Mutex<NoiseFaultState>,
+    changed: tokio::sync::Notify,
+}
+#[derive(Default)]
+struct NoiseFaultState {
+    armed: bool,
+    closed: bool,
+    roles: std::collections::HashMap<tokio::task::Id, bool>,
+    ports: std::collections::HashMap<u16, tokio::task::Id>,
+    latest_ports: std::collections::HashMap<tokio::task::Id, u16>,
+    claimed: Option<(tokio::task::Id, u16)>,
+}
+impl NoiseFault {
+    fn arm(&self) {
+        *self.state.lock().unwrap() = NoiseFaultState {
+            armed: true,
+            ..Default::default()
+        };
+        self.changed.notify_waiters();
+    }
+    fn observe(&self, task: tokio::task::Id, event: &str) {
+        let mut state = self.state.lock().unwrap();
+        if event.starts_with("negotiation_begin") {
+            state
+                .roles
+                .insert(task, event == "negotiation_begin domain=Some(GroupControl)");
+        }
+        if let Some(port) = event
+            .strip_prefix("dial_socket_ports=(Some(")
+            .and_then(|ports| ports.split(')').next())
+            .and_then(|port| port.parse::<u16>().ok())
+        {
+            state.ports.insert(port, task);
+            state.latest_ports.insert(task, port);
+        }
+        if event == "dial_noise_begin"
+            && state.armed
+            && state.claimed.is_none()
+            && state.roles.get(&task) == Some(&true)
+            && let Some(port) = state.latest_ports.get(&task).copied()
+        {
+            state.claimed = Some((task, port));
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+    fn is_fault_task(&self, task: tokio::task::Id) -> bool {
+        let state = self.state.lock().unwrap();
+        state.claimed.is_some_and(|(owner, port)| {
+            owner == task
+                && state.latest_ports.get(&task) == Some(&port)
+                && state.roles.get(&task) == Some(&true)
+        })
+    }
+    async fn classify(&self, port: u16) -> Option<bool> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let state = self.state.lock().unwrap();
+                if state.closed {
+                    return None;
+                }
+                if !state.armed {
+                    return Some(false);
+                }
+                if let Some(task) = state.ports.get(&port) {
+                    if state.roles.get(task) == Some(&false) {
+                        return Some(false);
+                    }
+                    if let Some(claimed) = state.claimed {
+                        return Some(claimed == (*task, port));
+                    }
+                }
+            }
+            changed.await;
+        }
+    }
+    fn close(&self) {
+        self.state.lock().unwrap().closed = true;
+        self.changed.notify_waiters();
+    }
+}
+struct ReleaseNoiseFault(Arc<NoiseFault>, Arc<tokio::sync::Semaphore>);
+impl Drop for ReleaseNoiseFault {
+    fn drop(&mut self) {
+        self.0.close();
+        self.1.close();
+    }
+}
+fn noise_fixture_provider(
+    node: Arc<Node>,
+    listener: TcpListener,
+    fault: Option<Arc<NoiseFault>>,
+    release: Arc<tokio::sync::Semaphore>,
+    held: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let node = node.clone();
+                    let Some(permit) = node.runtime_work.admit() else { return; };
+                    let fault = fault.clone(); let release = release.clone(); let held = held.clone();
+                    connections.spawn(permit.track(Box::pin(async move {
+                        if let Some(fault) = fault {
+                            match fault.classify(stream.peer_addr().unwrap().port()).await {
+                                None => return,
+                                Some(true) => {
+                                    held.store(true, std::sync::atomic::Ordering::Release);
+                                    let _ = release.acquire().await;
+                                    return;
+                                }
+                                Some(false) => {}
+                            }
+                        }
+                        if let Ok(channel) = node.privacy_accept(stream).await { node.serve_connection(channel).await; }
+                    })));
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    })
+}
+#[tokio::test]
+async fn noise_fault_requires_a_fresh_control_socket_and_retires_unclassified_waits() {
+    let fault = NoiseFault::default();
+    fault.arm();
+    let directory = tokio::spawn(async { tokio::task::id() }).await.unwrap();
+    let control = tokio::spawn(async { tokio::task::id() }).await.unwrap();
+    let retry = tokio::spawn(async { tokio::task::id() }).await.unwrap();
+    fault.observe(directory, "negotiation_begin domain=Some(GroupInventory)");
+    fault.observe(directory, "dial_socket_ports=(Some(41), Some(90))");
+    fault.observe(directory, "dial_noise_begin");
+    assert!(!fault.is_fault_task(directory));
+    assert_eq!(fault.classify(41).await, Some(false));
+    fault.observe(control, "negotiation_begin domain=Some(GroupControl)");
+    fault.observe(control, "session_checkout_end reused=true");
+    assert!(
+        !fault.is_fault_task(control),
+        "a reused channel cannot prove a Noise fault"
+    );
+    fault.observe(control, "dial_socket_ports=(Some(42), Some(90))");
+    assert!(
+        !fault.is_fault_task(control),
+        "TCP classification alone is not Noise start"
+    );
+    fault.observe(control, "dial_noise_begin");
+    assert_eq!(fault.classify(42).await, Some(true));
+    assert!(fault.is_fault_task(control));
+    fault.observe(control, "dial_socket_ports=(Some(45), Some(90))");
+    fault.observe(control, "dial_noise_begin");
+    assert!(
+        !fault.is_fault_task(control),
+        "a second socket in the same task cannot qualify the original failure"
+    );
+    assert_eq!(fault.classify(45).await, Some(false));
+    fault.observe(control, "dial_socket_ports=(Some(42), Some(90))");
+    fault.observe(control, "negotiation_begin domain=Some(GroupInventory)");
+    assert!(
+        !fault.is_fault_task(control),
+        "another domain in the original task cannot qualify the Control failure"
+    );
+    fault.observe(retry, "negotiation_begin domain=Some(GroupControl)");
+    fault.observe(retry, "dial_socket_ports=(Some(43), Some(90))");
+    fault.observe(retry, "dial_noise_begin");
+    assert_eq!(
+        fault.classify(43).await,
+        Some(false),
+        "only the original exact socket is held"
+    );
+    let waiting = fault.classify(44);
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    fault.close();
+    assert_eq!(
+        waiting.await,
+        None,
+        "cleanup retires classification without a synthetic transport timeout"
+    );
 }
 
 async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
@@ -406,256 +593,203 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
             &current.user_id(),
         );
     }
-    let stalled = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(tokio::sync::Notify::new());
+    use super::selected_same_source_control_latency::{BTrace, record_b_trace};
+    use crate::node::account_documents::sync::DocumentSyncCursor;
+    let fault = Arc::new(NoiseFault::default());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let _release_fault = ReleaseNoiseFault(fault.clone(), release.clone());
     let held_control = Arc::new(AtomicBool::new(false));
-    // Existing body-free client traces identify the actual Control TCP port;
-    // other lanes retain their real endpoint admission and serving behavior.
-    let connection_roles = Arc::new(Mutex::new((
-        std::collections::HashMap::<tokio::task::Id, bool>::new(),
-        std::collections::HashMap::<u16, bool>::new(),
-    )));
-    let server_roles = connection_roles.clone();
-    let serving = source.clone();
-    let server_stalled = stalled.clone();
-    let server_release = release.clone();
-    let server_held_control = held_control.clone();
-    let source_server = tokio::spawn(async move {
-        let mut connections = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                accepted = source_listener.accept() => {
-                    let (stream, _) = accepted.unwrap();
-                    let serving = serving.clone();
-                    let armed = server_stalled.load(Ordering::Acquire);
-                    let roles = server_roles.clone();
-                    let release = server_release.clone();
-                    let held_control = server_held_control.clone();
-                    connections.spawn(Box::pin(async move {
-                        let held = if armed {
-                            let port = stream.peer_addr().unwrap().port();
-                            tokio::time::timeout(Duration::from_secs(1), async {
-                                loop {
-                                    if let Some(control) = roles.lock().unwrap().1.get(&port).copied() {
-                                        break control;
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(1)).await;
-                                }
-                            }).await.expect("the real dial must publish its socket classification")
-                        } else { false };
-                        if held {
-                            held_control.store(true, Ordering::Release);
-                            // A real accepted TCP socket receives no Noise reply.
-                            // Releasing it closes this failed attempt; it cannot
-                            // manufacture a successful protocol exchange.
-                            release.notified().await;
-                            drop(stream);
-                        } else if let Ok(channel) = serving.privacy_accept(stream).await {
-                            serving.serve_connection(channel).await;
-                        }
-                    }));
-                }
-                _ = connections.join_next(), if !connections.is_empty() => {}
-            }
-        }
-    });
-    let reference_server = inbound_server(reference.clone(), reference_listener);
-    source.publish_account_group_access_for(group);
-    pull_group_control(&reference, &source, source_address, group).await;
-    source
-        .pull_account_documents_page(
-            &source.routing_peer(&reference.user_id()).unwrap(),
-            &mut crate::node::account_documents::sync::DocumentSyncCursor::control(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        reference.account_group_access(group).unwrap().role,
-        AccountGroupRole::Member
-    );
-    assert!(reference.channel_members(group).is_empty());
-    let trace = Arc::new(Mutex::new(Vec::new()));
-    let timeout_seen = Arc::new(AtomicBool::new(false));
     let dispatch = Arc::new(PublicationGate::default());
-    let _release_dispatch = ReleasePublications([dispatch.clone()]);
+    let directory = Arc::new(PublicationGate::default());
+    let _release_dispatch = ReleasePublications([dispatch.clone(), directory.clone()]);
+    let pause_directory = Arc::new(AtomicBool::new(false));
     let first_dispatch = Arc::new(AtomicBool::new(true));
+    let noise_timeout_seen = Arc::new(AtomicBool::new(false));
+    let timeout_seen = Arc::new(AtomicBool::new(false));
     let during = Arc::new(Mutex::new(DuringAttemptWake::default()));
-    let client_during = during.clone();
-    let client_dispatch = dispatch.clone();
-    let expected = source.identity.public();
-    let client_trace = trace.clone();
-    let client_timeout = timeout_seen.clone();
-    *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, event| {
-        if peer == expected {
-            let mut roles = connection_roles.lock().unwrap();
-            if event.starts_with("negotiation_begin") {
-                roles.0.insert(
-                    tokio::task::id(),
-                    event.contains("domain=Some(GroupControl)"),
-                );
+    let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let clock = Instant::now();
+    *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let expected = source.identity.public();
+        let fault = fault.clone();
+        let noise_timeout_seen = noise_timeout_seen.clone();
+        let timeout_seen = timeout_seen.clone();
+        let during = during.clone();
+        let dispatch = dispatch.clone();
+        let directory = directory.clone();
+        let pause_directory = pause_directory.clone();
+        let trace = trace.clone();
+        move |peer, event| {
+            if peer != expected {
+                return;
             }
-            if let Some(port) = event
-                .strip_prefix("dial_socket_ports=(Some(")
-                .and_then(|ports| ports.split(')').next())
-                .and_then(|port| port.parse::<u16>().ok())
-            {
-                let control = roles.0.get(&tokio::task::id()).copied().unwrap_or(false);
-                roles.1.insert(port, control);
-            }
-            let control = roles.0.get(&tokio::task::id()).copied().unwrap_or(false);
-            drop(roles);
+            let original = tokio::task::try_id().is_some_and(|task| {
+                fault.observe(task, &event);
+                fault.is_fault_task(task)
+            });
             if event.starts_with("wake_received")
-                || (control && event.starts_with("dial_noise_end"))
+                || (original && event.starts_with("dial_noise_end"))
             {
-                client_during.lock().unwrap().observe(&event);
+                during.lock().unwrap().observe(&event);
+            }
+            if original
+                && event.starts_with("dial_noise_end")
+                && event.contains("outcome=NoiseTimeout")
+            {
+                noise_timeout_seen.store(true, Ordering::Release);
+            }
+            // The terminal-wake case starts only after the failed original
+            // Control page has returned and installed its retry state.
+            if original
+                && noise_timeout_seen.load(Ordering::Acquire)
+                && event.starts_with("page_end ")
+                && event
+                    .split_whitespace()
+                    .any(|field| field == "outcome=noise_timeout")
+            {
+                timeout_seen.store(true, Ordering::Release);
+            }
+            if event.starts_with("negotiation_")
+                || event.starts_with("session_checkout")
+                || event.starts_with("dial_")
+                || event.starts_with("page_end")
+                || event.starts_with("wake_")
+                || event.starts_with("control_dispatch")
+                || event.starts_with("control_timeout_wake_refresh")
+            {
+                record_b_trace(&trace, clock, "requester_to_source", event.clone());
+            }
+            // This fixture isolates Control Noise recovery. Its unrelated
+            // Directory pass completed in cold setup; pause the next child
+            // before negotiation/authentication clocks or authority guards.
+            if pause_directory.load(Ordering::Acquire)
+                && (event == "negotiation_begin domain=Some(GroupInventory)"
+                    || event == "negotiation_begin domain=Some(DeviceHostname)")
+            {
+                directory.hold();
             }
             if wake_during_attempt
                 && event.starts_with("control_dispatch")
                 && first_dispatch.swap(false, Ordering::AcqRel)
             {
-                // Before child spawn and both negotiation/Noise clocks. No
-                // authority, roster, trace or document guard spans this wait.
-                client_dispatch.hold();
-            }
-            if event.starts_with("page_end")
-                && event.contains("outcome=noise_timeout")
-                && event.contains("domain=GroupControl")
-            {
-                client_timeout.store(true, Ordering::Release);
-            }
-            if event.starts_with("page_end")
-                || event.starts_with("wake_received")
-                || event.starts_with("control_dispatch")
-                || event.starts_with("control_timeout_wake_refresh")
-                || event.starts_with("dial_noise_end")
-            {
-                let mut rows = client_trace.lock().unwrap();
-                if rows.len() < 128 {
-                    rows.push(event);
-                }
+                dispatch.hold();
             }
         }
     }));
-    source.sessions.clear();
-    reference.sessions.clear();
-    stalled.store(true, Ordering::Release);
-    let id = reference
-        .new_account_group_operation_id(&account.account_id())
-        .unwrap();
-    let started = Instant::now();
-    reference
-        .submit_account_group_operation(
-            &account.account_id(),
-            id,
-            group,
-            AccountGroupOperation::LeaveAccount,
-        )
-        .unwrap();
-    let reference_worker = tokio::spawn(reference.clone().run_account_history_loop());
-    let mut source_worker =
-        (!wake_during_attempt).then(|| tokio::spawn(source.clone().run_account_history_loop()));
-    let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(8), async {
-        if wake_during_attempt {
-            let key = crate::node::AccountDocumentKey::GroupOperation {
-                channel: hex::encode(group.as_bytes()), source_device: source.user_id(),
-            };
-            dispatch.entered.notified().await;
-            let intent_key = crate::node::AccountDocumentKey::GroupOperation {
-                channel: hex::encode(group.as_bytes()), source_device: reference.user_id(),
-            };
-            // The independently admitted local publisher can finish while its
-            // parent dispatch waits. Start the source's first fresh pull only
-            // after the real signed intent exists, without needing a blocked
-            // parent to send a later notification about an initially empty page.
+    let source_server = noise_fixture_provider(
+        source.clone(),
+        source_listener,
+        Some(fault.clone()),
+        release.clone(),
+        held_control.clone(),
+    );
+    let reference_server = noise_fixture_provider(
+        reference.clone(),
+        reference_listener,
+        None,
+        release.clone(),
+        held_control.clone(),
+    );
+    let mut reference_worker = None;
+    let mut source_worker = None;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        source.publish_account_group_access_for(group);
+        pull_group_control(&reference, &source, source_address, group).await;
+        source.pull_account_documents_page(&source.routing_peer(&reference.user_id()).unwrap(), &mut DocumentSyncCursor::control()).await.unwrap();
+        // Finish both genuine cold mandatory Directory passes before admitting
+        // the measured operation. Preserve cursors, policy checks and retries.
+        super::cold_account_setup(async {
+            for (node, other) in [(&reference, &source), (&source, &reference)] {
+                let mut cursor = DocumentSyncCursor::directory();
+                loop {
+                    node.pull_account_documents_page(&node.routing_peer(&other.user_id()).unwrap(), &mut cursor).await.unwrap();
+                    assert!(cursor.error.is_none() && !cursor.requires_upgrade, "cold Directory preparation cannot hide protocol rejection");
+                    if !cursor.pending && !cursor.admission_deferred() && cursor.retry_at.is_none() { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }).await.expect("unrelated mandatory Directory preparation must precede Control fault admission");
+        record_b_trace(&trace, clock, "fixture", "cold_directory_prepared".into());
+        assert_eq!(reference.account_group_access(group).unwrap().role, AccountGroupRole::Member);
+        assert!(reference.channel_members(group).is_empty());
+        source.sessions.clear(); reference.sessions.clear();
+        pause_directory.store(true, Ordering::Release);
+        fault.arm();
+        let id = reference.new_account_group_operation_id(&account.account_id()).unwrap();
+        let started = Instant::now();
+        reference.submit_account_group_operation(&account.account_id(), id, group, AccountGroupOperation::LeaveAccount).unwrap();
+        record_b_trace(&trace, clock, "fixture", "original_operation_admitted".into());
+        reference_worker = Some(tokio::spawn(reference.clone().run_account_history_loop()));
+        if !wake_during_attempt { source_worker = Some(tokio::spawn(source.clone().run_account_history_loop())); }
+        let receipt = tokio::time::timeout(Duration::from_secs(8), async {
+            if wake_during_attempt {
+                dispatch.entered.notified().await;
+                let intent_key = crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device: reference.user_id() };
+                loop {
+                    let published = reference.account_document(&intent_key).unwrap()
+                        .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
+                        .is_some_and(|frame| frame.projection.requests.iter().any(|row| row.reference.id == id));
+                    if published { break; }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                record_b_trace(&trace, clock, "fixture", "original_signed_intent_published".into());
+                source_worker = Some(tokio::spawn(source.clone().run_account_history_loop()));
+                let key = crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device: source.user_id() };
+                loop {
+                    let published = source.account_document(&key).unwrap()
+                        .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
+                        .is_some_and(|frame| frame.projection.results.iter().any(|row| row.reference.id == id && row.status.phase == AccountGroupOperationPhase::Committed));
+                    if published { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                record_b_trace(&trace, clock, "fixture", "source_signed_terminal_published".into());
+                source_worker.as_ref().unwrap().abort();
+                while !source_worker.as_ref().unwrap().is_finished() { tokio::time::sleep(Duration::from_millis(1)).await; }
+                dispatch.release();
+                while !held_control.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(1)).await; }
+                record_b_trace(&trace, clock, "fixture", "exact_control_noise_socket_held".into());
+            } else {
+                while !timeout_seen.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(10)).await; }
+            }
+            source.set_device_hostname(Some(if wake_during_attempt { "Published during failed control attempt" } else { "Published after failed control attempt" })).unwrap();
+            let (epoch, revision) = source.account_wake_token_for_test();
+            during.lock().unwrap().revision = Some(revision);
+            use crate::node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
+            let mut wake = source.begin_account_exchange(&source.routing_peer(&reference.user_id()).unwrap(), AccountSyncVersion::V2,
+                AccountHistoryFrame::Wake { account_id: account.account_id(), epoch, revision }).await.unwrap();
+            let ack = wake.recv().await.unwrap();
+            assert!(matches!(AccountHistoryFrame::decode_versioned(&ack), Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: observed_epoch, revision: observed_revision })) if observed_epoch == epoch && observed_revision == revision));
+            wake.recycle(&source);
+            if wake_during_attempt {
+                let received_during = during.lock().unwrap().received_before_failure;
+                let phases = trace.lock().unwrap().clone();
+                assert!(received_during, "the exact authenticated wake reception must precede the original attempt failure; phases={phases:?}");
+                while !timeout_seen.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(10)).await; }
+            }
+            release.close();
             loop {
-                let published_intent = reference.account_document(&intent_key).unwrap()
-                    .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
-                    .is_some_and(|frame| frame.projection.requests.iter().any(|request| request.reference.id == id));
-                if published_intent { break; }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            source_worker = Some(tokio::spawn(source.clone().run_account_history_loop()));
-            loop {
-                let published_terminal = source.account_document(&key).unwrap()
-                    .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
-                    .is_some_and(|frame| frame.projection.results.iter().any(|result|
-                        result.reference.id == id && result.status.phase == AccountGroupOperationPhase::Committed));
-                if published_terminal { break; }
+                let status = reference.list_account_group_operations(&account.account_id(), AccountGroupOperationQuery { group: Some(group), pending_only: false, after: None, limit: 64 }).unwrap()
+                    .into_iter().find(|row| row.id == id).unwrap();
+                if status.phase == AccountGroupOperationPhase::Committed { assert_eq!(status.committed_events.len(), 1); break; }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            // Retain the real endpoint and signed terminal head, but prevent a
-            // later automatic publication from masking this one during-attempt wake.
-            source_worker.as_ref().unwrap().abort();
-            while !source_worker.as_ref().unwrap().is_finished() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            dispatch.release();
-            while !held_control.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        } else {
-            while !timeout_seen.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-        // New connections can recover; the exact original socket stays held
-        // until its genuine Noise deadline below, never a synthetic cursor error.
-        stalled.store(false, Ordering::Release);
-        source.set_device_hostname(Some(if wake_during_attempt {
-            "Published during failed control attempt"
-        } else { "Published after failed control attempt" })).unwrap();
-        let (epoch, revision) = source.account_wake_token_for_test();
-        during.lock().unwrap().revision = Some(revision);
-        let peer = source.routing_peer(&reference.user_id()).unwrap();
-        use crate::node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
-        let mut wake = source.begin_account_exchange(&peer, AccountSyncVersion::V2,
-            AccountHistoryFrame::Wake { account_id: account.account_id(), epoch, revision })
-            .await.unwrap();
-        let ack = wake.recv().await.unwrap();
-        assert!(matches!(AccountHistoryFrame::decode_versioned(&ack),
-            Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: observed_epoch, revision: observed_revision }))
-                if observed_epoch == epoch && observed_revision == revision));
-        wake.recycle(&source);
-        if wake_during_attempt {
-            let received_during = during.lock().unwrap().received_before_failure;
-            let phases = trace.lock().unwrap().clone();
-            assert!(received_during, "the exact authenticated wake reception must precede the original attempt's failure; phases={phases:?}");
-            while !timeout_seen.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-        release.notify_waiters();
-        loop {
-            let status = reference.list_account_group_operations(&account.account_id(),
-                AccountGroupOperationQuery { group: Some(group), pending_only: false, after: None, limit: 64 })
-                .unwrap().into_iter().find(|status| status.id == id).unwrap();
-            if status.phase == AccountGroupOperationPhase::Committed {
-                assert_eq!(status.committed_events.len(), 1);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })).catch_unwind().await;
+        }).await;
+        let source_phase = source.list_account_group_operations(&account.account_id(), AccountGroupOperationQuery { group: Some(group), pending_only: false, after: None, limit: 64 }).unwrap()
+            .into_iter().find(|row| row.id == id).map(|row| row.phase);
+        (receipt, source_phase, started.elapsed())
+    }).catch_unwind().await;
+    // Open every fixture wait before cancellation; tracked children retain the
+    // nodes through actual retirement, including admitted blocking work.
     dispatch.release();
-    let source_phase = source
-        .list_account_group_operations(
-            &account.account_id(),
-            AccountGroupOperationQuery {
-                group: Some(group),
-                pending_only: false,
-                after: None,
-                limit: 64,
-            },
-        )
-        .unwrap()
-        .into_iter()
-        .find(|status| status.id == id)
-        .map(|status| status.phase);
-    let elapsed = started.elapsed();
+    directory.release();
+    fault.close();
+    release.close();
+    source.runtime_work.close();
+    reference.runtime_work.close();
     for task in [
         Some(source_server),
         Some(reference_server),
-        Some(reference_worker),
+        reference_worker,
         source_worker,
     ]
     .into_iter()
@@ -664,31 +798,40 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
         task.abort();
         let _ = task.await;
     }
-    release.notify_waiters();
-    source.runtime_work.close();
-    reference.runtime_work.close();
-    source.runtime_work.drain().await;
-    reference.runtime_work.drain().await;
+    let mut drained = true;
+    for node in [&source, &reference] {
+        if tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+            .await
+            .is_err()
+        {
+            drained = false;
+        }
+    }
     *reference.account_client_test_hook.lock().unwrap() = None;
-    let outcome = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    if !drained {
+        let retained = dir.keep();
+        panic!("Noise fixture work did not retire; retaining {retained:?}");
+    }
+    let (receipt, source_phase, elapsed) =
+        outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let phases = trace.lock().unwrap().clone();
+    let claimed = fault.state.lock().unwrap().claimed;
     assert!(
-        timeout_seen.load(Ordering::Acquire),
-        "a real Control Noise timeout must precede recovery: {:?}",
-        trace.lock().unwrap()
+        timeout_seen.load(Ordering::Acquire)
+            && held_control.load(Ordering::Acquire)
+            && claimed.is_some(),
+        "a real exact Control Noise timeout must precede recovery; claimed={claimed:?}; phases={phases:?}"
     );
     assert!(
-        trace
-            .lock()
-            .unwrap()
+        phases
             .iter()
-            .any(|row| row.starts_with("wake_received")),
+            .any(|(_, _, _, event)| event.starts_with("wake_received")),
         "a real newer authenticated wake must arrive"
     );
     assert_eq!(source_phase, Some(AccountGroupOperationPhase::Committed));
     assert!(
-        outcome.is_ok(),
-        "original Leave receipt must recover within 8s after real Noise timeout; elapsed={elapsed:?}, trace={:?}",
-        trace.lock().unwrap()
+        receipt.is_ok(),
+        "original Leave receipt must recover within unchanged 8s from admission; elapsed={elapsed:?}; phases={phases:?}"
     );
     assert_eq!(
         reference.account_group_access(group).unwrap().role,

@@ -655,6 +655,27 @@ establish the fixture's real connection state; they are not an eight-second
 operation or custody latency assertion, and they do not drive extra RPCs, warm
 session pools, retry submissions or suppress background workers.
 
+The modern Leave Noise-fault fixture has an explicit preparation boundary: finish
+both genuine mandatory Directory passes inside cold setup before admitting its
+original intent. Park the requester's next unrelated Directory child before
+negotiation clocks and authority admission while testing Control fault recovery;
+the source runtime and authenticated inbound providers remain live. Separate
+contention fixtures own concurrent Directory interference coverage. Bind the
+injected fault to the first actual GroupControl task, its current local TCP port
+and observed native Noise start. A reused channel, another domain or a retry
+cannot certify that original failed socket. Socket classification waits on its
+owned notification or cleanup, rather than manufacturing a transport failure
+after a fixed delay.
+
+The during-attempt case observes the exact authenticated Wake before the original
+Noise failure. The after-failure case waits for that same Control page's terminal
+Noise-timeout result before sending its Wake, preserving the backoff-recovery
+boundary. Both retain the original eight seconds from operation admission,
+including signed intent publication, source execution and the authenticated
+receipt; production route timing remains adaptive. Open fixture gates, close
+admission, abort and join providers, then drain their tracked children before
+removing stores. Retain storage when actual retirement cannot be established.
+
 Account-group setup uses the shared test-local `cold_account_control_setup` to
 finish cold capability observation before invoking the three-second signed-role
 page helpers. Each caller retains its exact full peer identities, directional

@@ -166,6 +166,10 @@
             "reference": "docs/testing-feedback-loop.md#windows-workspace-archives-and-slow-fixtures"
           },
           {
+            "name": "Modern Leave Noise-fault fixtures prepare genuine mandatory Directory state before admission, pause unrelated requester Directory work before its clocks, and bind failure to the original GroupControl task, current TCP port and actual Noise start. During-attempt Wake reception and after-terminal-page recovery remain distinct; original admission-to-receipt eight-second bounds and actual tracked-provider retirement remain required.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
+          },
+          {
             "name": "A legacy leave with a committed physical leg preserves roll-forward after another leg acknowledges cancellation; owner preparation requires each original physical lifetime, acceptance state and certified proof to match as one complete witness.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
@@ -530,6 +534,8 @@
             "unchanged_local_operation_publication_does_not_repeat_signature_verification",
             "modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operation_budget",
             "modern_leave_wake_during_real_noise_timeout_recovers_within_operation_budget",
+            "noise_fault_requires_a_fresh_control_socket_and_retires_unclassified_waits",
+            "during_attempt_wake_uses_exact_reception_order_not_ack_return",
             "timed_out_control_refresh_requires_newer_wake_and_preserves_partial_failures",
             "timed_out_control_demand_requires_original_request_and_same_full_peer",
             "timed_out_control_accepts_one_new_wake_received_during_the_failed_attempt",
