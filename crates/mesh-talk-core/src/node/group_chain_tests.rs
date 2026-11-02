@@ -1358,14 +1358,26 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         );
     }
     if received.is_err() {
+        // Preserve already-collected route evidence before any fallible read.
+        let phases = route_trace.try_lock().ok().map(|trace| trace.clone());
+        eprintln!("bounded recovery phases={phases:?}");
         // These additional snapshot reads occur only after the deadline;
         // do not consume Notify permits or invoke recovery here.
-        let original = chain.nodes[0]
-            .channel_history(group, 10)
-            .unwrap()
-            .into_iter()
-            .find(|row| row.text == b"notification-driven background gossip")
-            .map(|row| row.id);
+        let (sender_original, sender_history_state, sender_history_count) =
+            match chain.nodes[0].channel_history(group, 10) {
+                Ok(rows) => (
+                    rows.iter()
+                        .find(|row| row.text == b"notification-driven background gossip")
+                        .map(|row| row.id),
+                    "ready",
+                    Some(rows.len()),
+                ),
+                Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                    (None, "pending", None)
+                }
+                Err(_) => (None, "error", None),
+            };
+        let original = original.or(sender_original);
         let observations: Vec<_> = chain
             .nodes
             .iter()
@@ -1378,12 +1390,18 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                         original.is_some_and(|id| log.get(&id).unwrap().is_some()),
                     )
                 };
-                let surfaced = original.is_some_and(|id| {
-                    node.channel_history(group, 10)
-                        .unwrap()
-                        .iter()
-                        .any(|row| row.id == id)
-                });
+                let (history_state, history_count, surfaced) = match node.channel_history(group, 10)
+                {
+                    Ok(rows) => (
+                        "ready",
+                        Some(rows.len()),
+                        original.map(|id| rows.iter().any(|row| row.id == id)),
+                    ),
+                    Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                        ("pending", None, None)
+                    }
+                    Err(_) => ("error", None, None),
+                };
                 let queued = node
                     .channel_recovery_pending
                     .lock()
@@ -1394,6 +1412,8 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                     index,
                     events,
                     present,
+                    history_state,
+                    history_count,
                     surfaced,
                     queued,
                     recovery,
@@ -1402,11 +1422,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             })
             .collect();
         eprintln!(
-            "background group gossip metadata original={original:?} observations={observations:?}"
-        );
-        eprintln!(
-            "bounded recovery phases={:?}",
-            route_trace.try_lock().ok().as_deref()
+            "background group gossip metadata original={original:?} sender_history_state={sender_history_state} sender_history_count={sender_history_count:?} observations={observations:?}"
         );
     }
     assert_eq!(

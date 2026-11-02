@@ -236,90 +236,226 @@ impl ColdControlScope {
     }
 }
 
-// Preparation proves one immutable corpus, not simultaneous idle workers.
-// The next phase separately captures a genuine unpaired request/live child.
-#[derive(Default)]
-struct FixedPrefixReadiness {
-    control: ColdControlScope,
-    prefix_verified: bool,
+// Current metadata and the normal validator's processed-input index prove the
+// immutable prefix locally; reverse transfers cannot certify canonical rows.
+fn verified_prefix_counts(
+    node: &Node,
+    expected: &[crate::node::AccountDocumentMeta],
+) -> (usize, usize) {
+    expected.iter().fold((0, 0), |(present, consumed), meta| {
+        if node.account_document_meta(&meta.key).as_ref() == Some(meta) {
+            (
+                present + 1,
+                consumed + usize::from(node.operation_input_consumed_for_test(meta)),
+            )
+        } else {
+            (present, consumed)
+        }
+    })
 }
-impl FixedPrefixReadiness {
-    fn observe_prefix(&mut self, event: &str, corpus_present: bool) {
-        if event.starts_with("control_task paired=true ")
-            || (event.starts_with("control_cancel ") && event.ends_with("reason=same_source"))
+
+#[tokio::test]
+async fn canonical_prefix_preparation_uses_verified_inputs_after_an_early_empty_comparison() {
+    use crate::node::account_documents::sync::{
+        DocumentSyncCursor, seed_legacy_control_page_for_test,
+        seed_legacy_control_page_revision_for_test,
+    };
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let replica = node(&dir.path().join("replica"), &account);
+    link(&owner, &replica);
+    link(&replica, &owner);
+    let mut expected: Vec<_> = (1..=65u8)
+        .map(|value| {
+            let key = seed_legacy_control_page_for_test(&owner, ConversationId::new([value; 32]));
+            owner.account_document_meta(&key).unwrap()
+        })
+        .collect();
+    let mut servers = Vec::new();
+    for (label, current, peer) in [("owner", &owner, &replica), ("replica", &replica, &owner)] {
+        current
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        configure(current, &dir.path().join(label), address.port());
+        peer.roster.lock().unwrap().update(
+            &current.signed_announce("Canonical prefix", address.port()),
+            address.ip(),
+            &peer.user_id(),
+        );
+        let serving = current.clone();
+        servers.push(tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let node = serving.clone();
+                        let Some(permit) = node.runtime_work.admit() else { return; };
+                        connections.spawn(permit.track(Box::pin(async move {
+                            if let Ok(channel) = node.privacy_accept(stream).await {
+                                node.serve_connection(channel).await;
+                            }
+                        })));
+                    }
+                    _ = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+        }));
+    }
+    let scope = Arc::new(Mutex::new(ColdControlScope::default()));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let scope = scope.clone();
+        let exact = replica.identity.public();
+        let owner = Arc::downgrade(&owner);
+        let replica = Arc::downgrade(&replica);
+        let expected = expected.clone();
+        move |peer, event| {
+            if peer == exact {
+                let corpus_present =
+                    owner
+                        .upgrade()
+                        .zip(replica.upgrade())
+                        .is_some_and(|(owner, replica)| {
+                            expected.iter().all(|meta| {
+                                owner.account_document_meta(&meta.key).as_ref() == Some(meta)
+                                    && replica.account_document_meta(&meta.key).as_ref()
+                                        == Some(meta)
+                            })
+                        });
+                scope.lock().unwrap().observe(&event, corpus_present);
+            }
+        }
+    }));
+    let outcome = std::panic::AssertUnwindSafe(async {
+        assert_eq!(
+            verified_prefix_counts(&owner, &expected),
+            (65, 0),
+            "present rows are not yet processed proof"
+        );
+        assert_eq!(verified_prefix_counts(&replica, &expected), (0, 0));
+        let mut original = DocumentSyncCursor::control();
+        super::cold_account_setup(async {
+            loop {
+                owner
+                    .pull_account_documents_page(
+                        &owner.routing_peer(&replica.user_id()).unwrap(),
+                        &mut original,
+                    )
+                    .await
+                    .unwrap();
+                if original.control_comparison_complete() {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            original.control_comparison_complete()
+                && !original.pending
+                && original.error.is_none()
+                && !original.up_to_date,
+            "a valid completed empty comparison cannot match the canonical owner's full digest"
+        );
+        let mut incoming = DocumentSyncCursor::control();
+        super::cold_account_setup(async {
+            loop {
+                replica
+                    .pull_account_documents_page(
+                        &replica.routing_peer(&owner.user_id()).unwrap(),
+                        &mut incoming,
+                    )
+                    .await
+                    .unwrap();
+                if incoming.up_to_date {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            verified_prefix_counts(&replica, &expected),
+            (65, 0),
+            "real import still requires normal consumption"
+        );
+        owner.maintain_account_group_operation_effects();
+        replica.maintain_account_group_operation_effects();
+        assert_eq!(verified_prefix_counts(&owner, &expected), (65, 65));
+        assert_eq!(verified_prefix_counts(&replica, &expected), (65, 65));
+        assert!(super::has_account_group_operation_support(
+            &owner,
+            &replica,
+            Some(AccountGroupOperationKind::Rename)
+        ));
+        assert!(super::has_account_group_operation_support(
+            &replica,
+            &owner,
+            Some(AccountGroupOperationKind::Rename)
+        ));
+        assert!(
+            !scope.lock().unwrap().ready(),
+            "the old full-scope predicate still fails without a redundant reverse transfer"
+        );
         {
-            self.prefix_verified = false;
-        } else if event == "document_scope_settled scope=Control" {
-            self.prefix_verified = corpus_present;
+            let mut scope = scope.lock().unwrap();
+            assert!(!scope.paired);
+            scope.observe("control_task paired=true protected=true", false);
+            assert!(scope.paired, "verified inputs cannot pay real pair debt");
+            scope.observe("control_pair_retired", false);
+            assert!(!scope.paired);
+        }
+        let key =
+            seed_legacy_control_page_revision_for_test(&owner, ConversationId::new([1; 32]), 2);
+        assert_eq!(
+            verified_prefix_counts(&owner, &expected),
+            (64, 64),
+            "changed current metadata rejects an old proof"
+        );
+        expected[0] = owner.account_document_meta(&key).unwrap();
+        assert_eq!(
+            verified_prefix_counts(&owner, &expected),
+            (65, 64),
+            "stale processed hashes cannot certify a replacement"
+        );
+        owner.maintain_account_group_operation_effects();
+        assert_eq!(verified_prefix_counts(&owner, &expected), (65, 65));
+        assert_eq!(verified_prefix_counts(&replica, &expected), (64, 64));
+    })
+    .catch_unwind()
+    .await;
+    for node in [&owner, &replica] {
+        node.runtime_work.close();
+    }
+    for server in servers {
+        server.abort();
+        let _ = server.await;
+    }
+    let mut drained = true;
+    for node in [&owner, &replica] {
+        if tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+            .await
+            .is_err()
+        {
+            drained = false;
         }
     }
-    fn observe(&mut self, event: &str, corpus_present: bool) {
-        self.observe_prefix(event, corpus_present);
-        self.control.observe(event, corpus_present);
+    *owner.account_client_test_hook.lock().unwrap() = None;
+    if !drained {
+        let retained = dir.keep();
+        panic!("canonical prefix fixture did not retire; retained {retained:?}");
     }
-    fn observe_corpus(&mut self, event: &str, corpus: Option<ColdControlCorpus>) {
-        self.observe_prefix(event, corpus.is_some());
-        self.control.observe_corpus(event, corpus);
-    }
-    fn ready(&mut self, current_corpus_present: bool) -> bool {
-        if !current_corpus_present {
-            self.prefix_verified = false;
-        }
-        self.prefix_verified && !self.control.paired
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
     }
 }
 
 #[test]
-fn fixed_prefix_preparation_does_not_require_simultaneous_six_direction_idle() {
-    let mut directions: Vec<_> = (0..6).map(|_| FixedPrefixReadiness::default()).collect();
-    for index in 0..directions.len() {
-        directions[index].observe("document_scope_settled scope=Control", true);
-        assert!(!directions.iter().all(|scope| scope.control.ready()));
-        // A legitimate next natural comparison starts before another direction
-        // finishes: the old all-idle predicate can remain false indefinitely.
-        directions[index].observe("control_task paired=false protected=false", true);
-        assert!(!directions.iter().all(|scope| scope.control.ready()));
-    }
-    assert!(directions.iter_mut().all(|scope| scope.ready(true)));
-}
-
-#[test]
-fn fixed_prefix_preparation_rejects_pair_debt_and_changed_or_unverified_corpus() {
-    let mut scope = FixedPrefixReadiness::default();
-    assert!(!scope.ready(true));
-    scope.observe("document_scope_settled scope=Control", true);
-    scope.observe("control_task paired=false protected=false", true);
-    assert!(scope.ready(true));
-    assert!(
-        !scope.control.ready(),
-        "strict queued readiness is unchanged"
-    );
-    scope.observe("control_task paired=true protected=true", true);
-    scope.observe("document_scope_settled scope=Control", true);
-    assert!(
-        !scope.ready(true),
-        "a prefix cannot pay the parked comparison"
-    );
-    scope.observe("control_pair_retired", true);
-    assert!(scope.ready(true));
-    assert!(!scope.ready(false), "current exact metadata is mandatory");
-    assert!(
-        !scope.ready(true),
-        "restoring metadata cannot invent a new completed scope"
-    );
-    scope.observe("document_scope_settled scope=Control", false);
-    assert!(!scope.ready(true));
-    scope.observe("document_scope_settled scope=Control", true);
-    scope.observe("control_cancel task=Id(1) reason=same_source", true);
-    scope.observe("control_pair_retired", true);
-    assert!(
-        !scope.ready(true),
-        "announced pair debt invalidates the prefix proof"
-    );
-}
-
-#[test]
-fn fixed_prefix_corpus_observer_preserves_strict_tail_across_natural_reads_and_pair_debt() {
+fn cold_control_corpus_observer_preserves_strict_tail_across_natural_reads_and_pair_debt() {
     let old = ColdControlCorpus {
         rows: 65,
         tail: Some((1, [1; 32])),
@@ -328,31 +464,26 @@ fn fixed_prefix_corpus_observer_preserves_strict_tail_across_natural_reads_and_p
         rows: 66,
         tail: Some((2, [2; 32])),
     };
-    let mut scope = FixedPrefixReadiness::default();
+    let mut scope = ColdControlScope::default();
     scope.observe_corpus("document_scope_settled scope=Control", Some(old));
-    assert!(scope.ready(true) && scope.control.ready_for(old));
+    assert!(scope.ready_for(old));
     scope.observe_corpus("control_task paired=false protected=false", Some(old));
     assert!(
-        scope.ready(true),
-        "an ordinary natural read keeps the fixed-prefix proof"
-    );
-    assert!(
-        !scope.control.ready_for(old),
-        "strict current settlement is still owed"
+        !scope.ready_for(old),
+        "strict current settlement is still owed after a natural read"
     );
     scope.observe_corpus("document_scope_settled scope=Control", Some(new));
-    assert!(scope.ready(true) && scope.control.ready_for(new));
+    assert!(scope.ready_for(new));
     assert!(
-        !scope.control.ready_for(old),
+        !scope.ready_for(old),
         "the old tail cannot certify the new corpus"
     );
     scope.observe_corpus("control_task paired=true protected=true", Some(new));
     scope.observe_corpus("document_scope_settled scope=Control", Some(new));
     assert!(
-        !scope.ready(true),
+        !scope.ready_for(new),
         "completed rows do not pay the live pair debt"
     );
-    assert!(!scope.control.ready_for(new));
 }
 
 #[test]
@@ -1654,7 +1785,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             if peer.user_id() == target.user_id() {
                 continue;
             }
-            let scope = Arc::new(Mutex::new(FixedPrefixReadiness::default()));
+            let scope = Arc::new(Mutex::new(ColdControlScope::default()));
             cold_scopes.push((
                 target_index,
                 peer_index,
@@ -1747,12 +1878,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     let current_prefix_counts = || {
         siblings
             .iter()
-            .map(|node| {
-                prefix_metadata
-                    .iter()
-                    .filter(|meta| node.account_document_meta(&meta.key).as_ref() == Some(*meta))
-                    .count()
-            })
+            .map(|node| verified_prefix_counts(node, &prefix_metadata))
             .collect::<Vec<_>>()
     };
     let cold = super::cold_account_setup(super::observe_account_fixture_condition(|| {
@@ -1760,9 +1886,10 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         cold_scopes.iter().fold(
             true,
             |all_ready, (target_index, peer_index, node, peer, scope)| {
-                let corpus_present = counts[*target_index] == prefix_metadata.len()
-                    && counts[*peer_index] == prefix_metadata.len();
-                let prepared = scope.lock().unwrap().ready(corpus_present);
+                let required = (prefix_metadata.len(), prefix_metadata.len());
+                let prepared = counts[*target_index] == required
+                    && counts[*peer_index] == required
+                    && !scope.lock().unwrap().paired;
                 let capable = super::has_account_group_operation_support(
                     node,
                     peer,
@@ -1785,11 +1912,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 );
                 let state = {
                     let scope = scope.lock().unwrap();
-                    (
-                        scope.prefix_verified,
-                        scope.control.settled,
-                        scope.control.paired,
-                    )
+                    (scope.settled, scope.paired)
                 };
                 (
                     *target,
@@ -1821,7 +1944,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             );
         }
         panic!(
-            "real capabilities and required cold state must precede role-page bootstrap: {error:?}; expected_prefix={} siblings=(owner,reference,other) directions=(target,peer,capability,target_prefix,peer_prefix,(verified,settled,paired)) {directions:?}",
+            "real capabilities and required cold state must precede role-page bootstrap: {error:?}; expected_prefix={} siblings=(owner,reference,other) directions=(target,peer,capability,target_(present,consumed),peer_(present,consumed),(settled,paired)) {directions:?}",
             prefix_metadata.len()
         );
     }
@@ -2587,7 +2710,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     .unwrap()
                     .4;
                 super::cold_account_setup(async {
-                    while !scope.lock().unwrap().control.ready_for(expected)
+                    while !scope.lock().unwrap().ready_for(expected)
                         || other.account_document_meta(&tail.key).as_ref() != Some(&tail)
                     {
                         tokio::time::sleep(Duration::from_millis(10)).await;

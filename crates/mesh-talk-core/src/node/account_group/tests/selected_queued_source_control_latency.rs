@@ -199,6 +199,16 @@ struct EarlyPreparationFailure {
 }
 
 #[derive(Default)]
+struct ProtectedBPageProgress {
+    server_task: Option<tokio::task::Id>,
+    lifetime: std::sync::Weak<()>,
+    nonce: [u8; 32],
+    headers_attempted: usize,
+    complete_attempted: bool,
+    last_elapsed_ms: Option<u128>,
+}
+
+#[derive(Default)]
 struct PreparationReadState {
     open: bool,
     overflow: bool,
@@ -762,6 +772,7 @@ async fn run_queued_source(
     let resumed_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_partial = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let early_failure = Arc::new(Mutex::new(EarlyPreparationFailure::default()));
+    let b_page_progress = Arc::new(Mutex::new(ProtectedBPageProgress::default()));
     let delayed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let retired_request_rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (rejected_tx, rejected_rx) = oneshot::channel();
@@ -1368,6 +1379,7 @@ async fn run_queued_source(
         let pages = pages.clone();
         let demand_dispatch = demand_dispatch.clone();
         let intent_entered = intent_entered.clone();
+        let b_page_progress = b_page_progress.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let admitted = admitted.clone();
@@ -1384,9 +1396,80 @@ async fn run_queued_source(
             let pages = pages.clone();
             let demand_dispatch = demand_dispatch.clone();
             let intent_entered = intent_entered.clone();
+            let b_page_progress = b_page_progress.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
+                }
+                if !admitted.load(std::sync::atomic::Ordering::Acquire) {
+                    // Headers carry no request nonce. Bind this one fixed-size
+                    // observer to the serving task at its exact protected request;
+                    // these are send attempts, not proof of received page bytes.
+                    let server_task = tokio::task::try_id();
+                    match &frame {
+                        AccountHistoryFrame::DocumentsRequest { body } => {
+                            let candidate = DocumentRequest::decode(body)
+                                .filter(|request| {
+                                    request.domain == AccountDocumentDomain::GroupControl
+                                })
+                                .and_then(|request| {
+                                    let observed = pages.lock().unwrap();
+                                    let page = observed.live_request(&request)?;
+                                    if !page.dispatch()?.protected {
+                                        return None;
+                                    }
+                                    Some((request.operation?.nonce, observed.lifetime(page.task)?))
+                                });
+                            let mut progress = b_page_progress.lock().unwrap();
+                            if let Some((nonce, lifetime)) = candidate {
+                                *progress = ProtectedBPageProgress {
+                                    server_task,
+                                    lifetime,
+                                    nonce,
+                                    last_elapsed_ms: Some(clock.elapsed().as_millis()),
+                                    ..Default::default()
+                                };
+                            } else if progress.server_task == server_task {
+                                progress.server_task = None;
+                            }
+                        }
+                        AccountHistoryFrame::DocumentHeader { body } => {
+                            if serde_json::from_slice::<crate::node::AccountDocumentMeta>(body)
+                                .is_ok_and(|meta| {
+                                    matches!(
+                                        meta.key,
+                                        crate::node::AccountDocumentKey::GroupLegacyOperation { .. }
+                                    )
+                                })
+                            {
+                                let mut progress = b_page_progress.lock().unwrap();
+                                if server_task.is_some() && progress.server_task == server_task {
+                                    progress.headers_attempted =
+                                        progress.headers_attempted.saturating_add(1);
+                                    progress.last_elapsed_ms = Some(clock.elapsed().as_millis());
+                                }
+                            }
+                        }
+                        AccountHistoryFrame::DocumentsComplete { body } => {
+                            let nonce = serde_json::from_slice::<serde_json::Value>(body)
+                                .ok()
+                                .and_then(|value| {
+                                    serde_json::from_value::<[u8; 32]>(
+                                        value["operation"]["nonce"].clone(),
+                                    )
+                                    .ok()
+                                });
+                            let mut progress = b_page_progress.lock().unwrap();
+                            if server_task.is_some()
+                                && progress.server_task == server_task
+                                && nonce == Some(progress.nonce)
+                            {
+                                progress.complete_attempted = true;
+                                progress.last_elapsed_ms = Some(clock.elapsed().as_millis());
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 record_control_frame(&trace, clock, "B_server", &frame, group_b, &writer);
                 if let AccountHistoryFrame::DocumentsRequest { body } = &frame
@@ -1484,7 +1567,11 @@ async fn run_queued_source(
         Ok::<_, oneshot::error::RecvError>(task)
     })
         .await
-        .unwrap_or_else(|error| panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={} B_partial={}; pages={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), pages.lock().unwrap().summary()))
+        .unwrap_or_else(|error| {
+            let ready = b_readiness.lock().unwrap().ready();
+            let observed = pages.lock().unwrap().summary();
+            panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={ready} B_partial={}; pages={observed:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+        })
         .unwrap();
     if delay_retired_request {
         assert!(
@@ -1534,7 +1621,19 @@ async fn run_queued_source(
         resume_rx.await.map(|()| keys)
     })
         .await
-        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; setup={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), setup_trace.lock().unwrap(), trace.lock().unwrap()))
+        .unwrap_or_else(|error| {
+            let ready = b_readiness.lock().unwrap().ready();
+            let roles = origins.lock().unwrap().clone();
+            let observed = pages.lock().unwrap().summary();
+            let setup = setup_trace.lock().unwrap().clone();
+            let phases = trace.lock().unwrap().clone();
+            let early_task_selected = early_failure.lock().unwrap().task.is_some();
+            let (headers_attempted, complete_attempted, last_elapsed_ms, current_task_alive) = {
+                let progress = b_page_progress.lock().unwrap();
+                (progress.headers_attempted, progress.complete_attempted, progress.last_elapsed_ms, progress.lifetime.strong_count() > 0)
+            };
+            panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={ready} B_partial={}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive} early_task_selected={early_task_selected}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+        })
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
     let saved = saved_after
@@ -1800,7 +1899,10 @@ async fn run_queued_source(
             trace.lock().unwrap()
         );
     }
-    let result=receipt.unwrap_or_else(|error|panic!("queued selected source must return its real private receipt within unchanged eight seconds: {error:?}; phases={:?}",trace.lock().unwrap()));
+    let result=receipt.unwrap_or_else(|error| {
+        let phases = trace.lock().unwrap().clone();
+        panic!("queued selected source must return its real private receipt within unchanged eight seconds: {error:?}; phases={phases:?}");
+    });
     assert_eq!(result.committed_events.len(), 1);
     let event = b
         .log
