@@ -106,6 +106,7 @@
             "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
             "selected_source_cold_capability_setup_precedes_role_page_budget",
+            "canonical_prefix_preparation_uses_verified_inputs_after_an_early_empty_comparison",
             "cold_inbound_control_proves_capabilities_before_the_warm_role_clock",
             "account_fixture_health_snapshot_precedes_real_peer_shutdown",
             "recovered_group_beyond_publication_slice_refreshes_before_exact_network_fanout",
@@ -157,7 +158,7 @@
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
-            "name": "Same-source immutable-prefix preparation requires genuine completed scopes, current exact signed metadata and capabilities, and retired comparison-pair debt in every direction; later unpaired natural reads preserve unchanged prefix proof while paired work or corpus changes invalidate it. Queued publication retirement still requires current settlement.",
+            "name": "Same-source prefix preparation requires exact current signed metadata and normally verified consumed-input hashes on every node, current directional capabilities and retired comparison-pair debt; it must not depend on redundant reverse full-scope digest equality, synthetic completions or cache marks. Queued publication retirement still requires current settlement.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
