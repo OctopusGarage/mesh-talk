@@ -318,6 +318,7 @@ export const useCalls = create<CallState>((set, get) => {
         },
       });
       let captured = false;
+      let preparation: AbortSignal | null = null;
       try {
         const { stream, hasVideo } = await getLocalMedia(video);
         captured = true;
@@ -336,12 +337,13 @@ export const useCalls = create<CallState>((set, get) => {
         // Use a local handle for negotiation so a concurrent cleanup() (which nulls the
         // module `pc`) can't turn these awaits into a null deref.
         const { conn, signal } = newPc();
+        preparation = signal;
         pc = conn;
         for (const t of stream.getTracks()) conn.addTrack(t, stream);
         const offer = await conn.createOffer();
         await conn.setLocalDescription(offer);
         const sdp = await gatherComplete(conn, signal);
-        if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
+        if (signal.aborted || get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
           end("failed", "failed");
           return;
@@ -349,7 +351,7 @@ export const useCalls = create<CallState>((set, get) => {
         // Only an explicit outgoing call grants permission. Answer/ICE/bye and
         // background signals never reach this path. Persist before any offer.
         await privacy.initiateContact(owner, target.accountId);
-        if (get().callId !== callId) return;
+        if (signal.aborted || get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
           end("failed", "failed");
           return;
@@ -371,7 +373,7 @@ export const useCalls = create<CallState>((set, get) => {
         const results = await Promise.allSettled(
           target.deviceIds.map((d) => calls.signal(d, payload)),
         );
-        if (get().callId !== callId) return;
+        if (signal.aborted || get().callId !== callId) return;
         if (results.every((r) => r.status === "rejected")) {
           end("failed", "failed");
           return;
@@ -379,7 +381,7 @@ export const useCalls = create<CallState>((set, get) => {
       } catch (e) {
         // A cancelled operation can fail after another call owns the shared
         // media/connection. Never tear down that newer call with a stale error.
-        if (get().callId !== callId) return;
+        if (preparation?.aborted || get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
           end("failed", "failed");
           return;
@@ -395,6 +397,7 @@ export const useCalls = create<CallState>((set, get) => {
       const offer = pendingOffer;
       pendingOffer = null;
       let captured = false;
+      let preparation: AbortSignal | null = null;
       try {
         // Mirror the caller's media kind so the answer's m-lines match the offer
         // (non-trickle, single-shot — a mismatched track would need renegotiation).
@@ -413,13 +416,14 @@ export const useCalls = create<CallState>((set, get) => {
           phase: "connecting",
         });
         const { conn, signal } = newPc();
+        preparation = signal;
         pc = conn;
         for (const t of stream.getTracks()) conn.addTrack(t, stream);
         await conn.setRemoteDescription({ type: "offer", sdp: offer.sdp });
         const answer = await conn.createAnswer();
         await conn.setLocalDescription(answer);
         const sdp = await gatherComplete(conn, signal);
-        if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
+        if (signal.aborted || get().callId !== callId) return;
         await calls.signal(
           peerId,
           JSON.stringify({
@@ -428,10 +432,10 @@ export const useCalls = create<CallState>((set, get) => {
             sdp,
           }),
         );
-        if (get().callId !== callId) return;
+        if (signal.aborted || get().callId !== callId) return;
         armConnectTimeout();
       } catch (e) {
-        if (get().callId !== callId) return;
+        if (preparation?.aborted || get().callId !== callId) return;
         set({ error: errorMessage(e) });
         end("failed", "failed", captured ? "connection" : "capture");
       }

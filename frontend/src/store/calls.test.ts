@@ -869,24 +869,29 @@ describe("non-trickle ICE preparation ownership", () => {
       expect(signals(kind)).toHaveLength(0);
     });
 
-    it(`settles cancelled ${kind} preparation without affecting a replacement call`, async () => {
-      const pending = begin(kind);
-      await vi.advanceTimersByTimeAsync(0);
-      const old = peers[0];
-      useCalls.getState().hangup();
-      useCalls.getState().onSignal(offer("carol", "replacement"));
-      await pending;
-      old.complete();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(useCalls.getState()).toMatchObject({
-        phase: "incoming",
-        callId: "replacement",
-        peerId: "carol",
+    for (const reuseId of [false, true]) {
+      it(`settles cancelled ${kind} preparation without affecting a replacement call${reuseId ? " with the same wire id" : ""}`, async () => {
+        const pending = begin(kind);
+        await vi.advanceTimersByTimeAsync(0);
+        const old = peers[0];
+        const replacementId = reuseId
+          ? useCalls.getState().callId!
+          : "replacement";
+        useCalls.getState().hangup();
+        useCalls.getState().onSignal(offer("carol", replacementId));
+        await pending;
+        old.complete();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(useCalls.getState()).toMatchObject({
+          phase: "incoming",
+          callId: replacementId,
+          peerId: "carol",
+        });
+        expect(old.close).toHaveBeenCalledOnce();
+        expect(signals(kind)).toHaveLength(0);
+        expect(vi.getTimerCount()).toBe(1); // Only the replacement call's deadline.
       });
-      expect(old.close).toHaveBeenCalledOnce();
-      expect(signals(kind)).toHaveLength(0);
-      expect(vi.getTimerCount()).toBe(1); // Only the replacement call's deadline.
-    });
+    }
 
     it(`rejects a completed ${kind} without any candidate instead of sending empty SDP`, async () => {
       const pending = begin(kind);
