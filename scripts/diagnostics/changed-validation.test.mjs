@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -442,6 +443,7 @@ function configureCLI(f, body) {
     "configure CLI",
   ]);
 }
+
 const cli = fileURLToPath(
   new URL("../validation/changed.mjs", import.meta.url),
 );
@@ -673,11 +675,11 @@ test(
     );
     const child = spawn(process.execPath, [cli, "--run"], {
       cwd: f.root,
-      env: {
+      env: toolVersionFixture(f.root, {
         ...isolatedEnv,
         NODE_TEST_CONTEXT: undefined,
         MESH_VALIDATION_AFFECTED_CHILD: undefined,
-      },
+      }).env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -687,13 +689,16 @@ test(
       child.once("exit", (code) => resolve(code)),
     );
     t.after(() => child.kill("SIGKILL"));
-    for (
-      let attempts = 0;
-      attempts < 150 &&
-      !output.includes("waiting for another validation stage");
-      attempts++
-    )
-      await delay(50);
+    // Observe the actual queued owner under this test's existing watchdog.
+    while (!output.includes("waiting for another validation stage")) {
+      t.signal.throwIfAborted();
+      await Promise.race([
+        delay(50, undefined, { signal: t.signal }),
+        exited.then(code => { throw Error(`validation exited before queue readiness (${code}): ${output}`); }),
+      ]);
+    }
+    assert.equal(child.exitCode, null, output);
+    assert.equal(child.signalCode, null, output);
     assert.match(output, /waiting for another validation stage/);
     const manifest = "scripts/validation/validation.json";
     const { readFile } = await import("node:fs/promises");
@@ -740,10 +745,12 @@ test("real preview unions mandatory boundary evidence with semantic additions wi
 for (const failing of [false, true]) test(`real run reports ${failing ? "failing" : "passing"} development tests while candidate acceptance remains pending`, async t => {
   const f = repository(t);
   configureCLI(f, `import test from 'node:test'; test('observed assertion', () => { ${failing ? "console.log('private output sentinel'); throw Error('assertion failed');" : ""} });`);
+  const fixture = toolVersionFixture(f.root, { ...isolatedEnv, NODE_TEST_CONTEXT: undefined });
   const reportPath = path.join(f.root, "target/validation/feedback/result.json");
-  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "report fixture", "--report", reportPath], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
-  assert.equal(result.status, failing ? 1 : 0, result.stdout + result.stderr);
+  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "report fixture", "--report", reportPath], { cwd: f.root, encoding: "utf8", env: fixture.env, timeout: 15000 });
+  assert.equal(result.status, failing ? 1 : 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   const { readFile } = await import("node:fs/promises");
+  assert.deepEqual([...new Set((await readFile(fixture.probes, "utf8")).trim().split("\n"))].sort(), ["cargo", "npm", "rustc"]);
   const report = JSON.parse(await readFile(reportPath, "utf8"));
   assert.equal(report.status, failing ? "failed" : "passed");
   assert.equal(report.timingOrigin, "invocation");
@@ -771,10 +778,11 @@ for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"}
 test("clean receipt reuse survives changing only the report destination and invents no commands", async t => {
   const f = repository(t);
   configureCLI(f, "import test from 'node:test'; test('reusable assertion', () => {});");
+  const fixture = toolVersionFixture(f.root, { ...isolatedEnv, CI: "", NODE_TEST_CONTEXT: undefined });
   const { readFile } = await import("node:fs/promises");
   for (const name of ["first", "second"]) {
-    const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "reuse", "--report", `target/validation/feedback/${name}.json`], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, CI: "", NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "reuse", "--report", `target/validation/feedback/${name}.json`], { cwd: f.root, encoding: "utf8", env: fixture.env, timeout: 15000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   }
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/second.json"), "utf8"));
   assert.equal(report.status, "passed");
@@ -797,9 +805,10 @@ test("report destinations cannot overwrite source or keep the supervisor alive a
 test("dirty edits during a test-only run invalidate its report even after assertions pass", async t => {
   const f = repository(t);
   configureCLI(f, "import test from 'node:test'; import {writeFileSync} from 'node:fs'; test('changing input', async () => { await new Promise(resolve => setTimeout(resolve, 50)); writeFileSync('dirty','changed during validation'); });");
+  const fixture = toolVersionFixture(f.root, { ...isolatedEnv, NODE_TEST_CONTEXT: undefined });
   f.write("dirty", "dirty before validation");
-  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "dirty source identity", "--report", "target/validation/feedback/dirty.json"], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
-  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "dirty source identity", "--report", "target/validation/feedback/dirty.json"], { cwd: f.root, encoding: "utf8", env: fixture.env, timeout: 15000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   const { readFile } = await import("node:fs/promises");
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/dirty.json"), "utf8"));
   assert.equal(report.status, "invalidated");

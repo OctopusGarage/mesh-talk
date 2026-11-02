@@ -94,6 +94,18 @@ Verify these fixtures beneath a real managed supervisor as well as directly;
 require positive executed-case counts, since a nested test-driver context can
 otherwise suppress execution while returning success.
 
+Report, receipt and lifecycle-control fixtures control only external Cargo, Rust
+and npm version queries, using stable fixture identities rather than benchmarking
+host startup.
+Their selected tests, process owners, retirement receipts, source invalidation
+and report assertions still execute normally under the original watchdogs.
+The shared tool-version fixture retains the same environment across receipt-reuse
+invocations. Queued resource tests observe their actual waiting owner under the
+existing whole-test watchdog rather than a separate startup cutoff.
+Production version checks and their owning stage-identity regressions remain
+independently required. Failed outer invocations must retain the launch error
+and termination signal as well as stdout/stderr; a null status is not a cause.
+
 Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
 state polling, termination grace periods and tests of time-dependent behavior.
 Their expiry signals failure or triggers escalation; elapsed time alone never

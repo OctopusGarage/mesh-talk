@@ -202,6 +202,7 @@
         "CONTRIBUTING.md",
         "scripts/diagnostics/affected-plan.test.mjs",
         "scripts/diagnostics/changed-validation.test.mjs",
+        "scripts/diagnostics/test-fixtures/tool-versions.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
         "frontend/validation.json",

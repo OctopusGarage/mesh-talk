@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
+import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 
 const signalReadyWorker = "process.on('SIGTERM',()=>{});const fs=require('node:fs');const ready=process.argv[1];fs.writeFileSync(ready+'.pending',String(process.pid));fs.renameSync(ready+'.pending',ready);setInterval(()=>{},1000)";
 
@@ -399,16 +400,18 @@ test("stage distinguishes an unavailable executable from an executed failing com
 test("stage CLI publishes structured launch and reused results outside receipt identity", async t => {
   const f = await fixture(t);
   const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
-  const env = { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined };
+  const { env, probes } = toolVersionFixture(f.root, { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined });
   const output = path.join(f.root, "target/result.json");
   for (const count of [1, 2]) {
     const result = spawnSync(process.execPath, [cli, "result-cli", "--result", output, "--", process.execPath, "-e", "process.exit(0)"], { cwd: f.root, env, encoding: "utf8", timeout: 10000 });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.status, 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
     assert.equal(JSON.parse(await readFile(output, "utf8")).reused, count === 2);
   }
   const result = spawnSync(process.execPath, [cli, "result-unavailable", "--result", output, "--", path.join(f.root, "missing-executable")], { cwd: f.root, env, encoding: "utf8", timeout: 10000 });
   assert.notEqual(result.status, 0);
+  assert.equal(result.error, undefined, result.stdout + result.stderr);
   assert.equal(JSON.parse(await readFile(output, "utf8")).failureKind, "unavailable");
+  assert.deepEqual([...new Set((await readFile(probes, "utf8")).trim().split("\n"))].sort(), ["cargo", "npm", "rustc"]);
 });
 
 test("successful command with changed source is invalidated rather than reported as a test failure", async t => {
