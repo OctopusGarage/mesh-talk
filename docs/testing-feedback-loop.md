@@ -753,6 +753,25 @@ current content hash. Require current directional operation capabilities and no
 outstanding comparison pair as separate facts. Possessing rows alone cannot pay
 comparison debt or certify their processing.
 
+When a prepared independent executor B must overtake the requester's held A
+comparison, A's private completion on the requester is only one prerequisite.
+Before creating B's intent, observe B's exact current A request/result metadata,
+its normal consumed-input hashes, and retirement of B's unrelated requester-side
+comparison pair. Keep the requester's exact held A child live through B admission;
+ordinary unpaired B work may continue. Preparation imports no B intent and issues
+no extra RPC. The separate paid-boundary scenario deliberately retains its B pair
+and keeps that workload unchanged.
+
+The real-protocol preparation control holds an authenticated B ingestion pair:
+requester-side A completion alone accepts while independent-executor readiness
+still rejects. Releasing the original pair must permit real import, processing
+and retirement before B's original eight-second admission-to-receipt assertion.
+Keep public status polling inside that assertion: its one-second query nonces
+are intentional request-publication load. Compose frame hooks with prior hooks,
+publish a captured child descriptor before announcing readiness, and defer setup
+panics until gates are open and admitted work has drained. Preserve the original
+failure and retain private storage if actual retirement cannot be established.
+
 Do not require full Control digest equality in every direction to establish this
 local preparation. The canonical owner can already hold all prefix rows while a
 replica is still empty; that valid comparison cannot make the whole views equal.

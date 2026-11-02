@@ -121,6 +121,7 @@
             "selected_source_receipt_overtakes_its_own_preoperation_background_control_read",
             "selected_source_lower_key_receipt_preserves_both_partial_control_comparisons",
             "another_selected_executor_overtakes_a_completed_operations_paired_background_page",
+            "selected_executor_preparation_waits_for_real_a_inputs_and_pair_retirement",
             "incoming_operation_wake_runs_after_paid_pair_pages_before_unrelated_continuation",
             "paid_pair_credit_is_spent_after_prefix_and_original_resume_without_followup_renewal",
             "completed_parked_control_needs_no_resume_credit",
@@ -167,6 +168,10 @@
           },
           {
             "name": "Modern Leave Noise-fault fixtures prepare genuine mandatory Directory state before admission, pause unrelated requester Directory work before its clocks, and bind failure to the original GroupControl task, current TCP port and actual Noise start. During-attempt Wake reception and after-terminal-page recovery remain distinct; original admission-to-receipt eight-second bounds and actual tracked-provider retirement remain required.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
+          },
+          {
+            "name": "Independent-executor overtaking prepares B's exact current and normally consumed A request/result heads and retires its unrelated requester comparison pair before B intent exists, while the requester's exact held A child stays live. Real held-pair controls reject A-terminal-only readiness; original eight-second B receipt, status-query nonce load and separate deliberate paid-boundary coverage remain unchanged.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
