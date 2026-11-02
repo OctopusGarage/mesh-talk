@@ -127,11 +127,8 @@ jobs:
           set -e -o pipefail
           run_coverage() {
             cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate
-            if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-              cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
-            else
-              cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk
-            fi
+            # Preserve each failure even if another test prevents suite completion.
+            cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
             cargo llvm-cov report --lcov --output-path lcov.info
           }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
@@ -151,11 +148,8 @@ jobs:
           set -e -o pipefail
           run_coverage() {
             cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate
-            if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-              cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
-            else
-              cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk
-            fi
+            # Preserve each failure even if another test prevents suite completion.
+            cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
             cargo llvm-cov report --lcov --output-path lcov.info
           }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then

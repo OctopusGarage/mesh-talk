@@ -54,6 +54,8 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     "--workspace",
     "--exclude",
     "mesh-talk",
+    "--",
+    "--nocapture",
   ];
   assert.equal(
     commands.filter((line) => line === `cargo ${rest.join(" ")}`).length,
@@ -79,6 +81,14 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     /slow-timeout = \{ period = "15s", terminate-after = 4, grace-period = "5s" \}/u,
   );
   mkdirSync(join(root, ".config"));
+  assert.match(
+    config,
+    /package\(=mesh-talk-core\) & test\(=node::node::tests::linked_device_catches_up_incoming_dm_after_reconnect\)/u,
+  );
+  assert.match(
+    config,
+    /slow-timeout = \{ period = "30s", terminate-after = 10, grace-period = "5s" \}/u,
+  );
   writeFileSync(join(root, ".config/nextest.toml"), config);
   writeFileSync(
     join(root, "Cargo.toml"),

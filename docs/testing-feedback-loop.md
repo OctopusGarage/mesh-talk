@@ -1277,8 +1277,10 @@ See [Cargo debug profiles](https://doc.rust-lang.org/cargo/reference/profiles.ht
 
 Linux/macOS coverage runs the desktop Host package with pinned Nextest in separate
 case processes, retaining the exact metadata IPC watchdog. The remaining default
-workspace targets run with Cargo; both passes accumulate into one workspace report,
-with doctests checked separately. This bounds case failure and improves diagnostics;
+workspace targets run with Cargo and expose test output immediately, so one stuck
+case cannot hide another case's panic until suite completion. Both passes accumulate
+into one workspace report, with doctests checked separately. This bounds case failure
+and improves diagnostics;
 it does not establish the cause of a previously observed Host hang. The real-tool
 `scripts/ci/native-host-coverage.test.mjs` checks both partitions and failure propagation.
 
@@ -1297,7 +1299,10 @@ The registered channel-metadata IPC regression has a sixty-second isolated
 watchdog and command/lifecycle phase diagnostics. A stuck command fails that
 case instead of consuming the complete serial shard; it does not produce a
 successful or complete execution receipt. Longer existing core fixtures retain
-their own budgets.
+their own budgets. The incoming-DM reconnect regression has a separate five-minute
+process watchdog and static lifecycle phases after a prior case remained unfinished
+for fifty minutes; its observed successful Windows duration was 32.47 seconds.
+This supervision does not extend its internal observation deadlines.
 The producer retains the former Windows workspace cache namespace through an
 explicit shared key. Only the cache step normalizes the inherited color/thread
 environment to its previous key inputs; actual tests keep serial execution and

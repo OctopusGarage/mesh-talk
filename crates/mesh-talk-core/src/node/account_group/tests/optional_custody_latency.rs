@@ -91,14 +91,16 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     let event = source.channel_history(group, 10).unwrap()[0].id;
     let bootstrapped = super::cold_account_setup(async {
         loop {
-            if sibling
-                .channel_history(group, 10)
-                .unwrap()
-                .iter()
-                .any(|row| row.id == event && row.from_me)
-                && sibling.channel_custody_count(group, event).unwrap() == Some(0)
-            {
-                break;
+            match sibling.channel_history(group, 10) {
+                Ok(rows)
+                    if rows.iter().any(|row| row.id == event && row.from_me)
+                        && sibling.channel_custody_count(group, event).unwrap() == Some(0) =>
+                {
+                    break;
+                }
+                Ok(_)
+                | Err(crate::node::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                Err(_) => panic!("cold custody history observation failed"),
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

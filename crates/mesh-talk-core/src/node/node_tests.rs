@@ -9327,6 +9327,15 @@ async fn send_to_account_self_syncs_to_own_other_device() {
 async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     use crate::identity::account::Account;
 
+    let fixture_started = std::time::Instant::now();
+    let phase = |name: &'static str| {
+        eprintln!(
+            "linked reconnect phase={name} elapsed_ms={}",
+            fixture_started.elapsed().as_millis()
+        );
+    };
+    phase("setup_begin");
+
     let a1 = DeviceIdentity::generate();
     let a2 = DeviceIdentity::generate();
     let alice_account = Account::generate();
@@ -9463,15 +9472,18 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .set_device_sync_category(crate::node::SyncCategory::History, false)
         .unwrap();
 
+    phase("setup_ready");
     let channel = a1_node.create_channel("old channel", vec![]).await.unwrap();
     a1_node
         .send_channel_message(channel, b"before sibling joined")
         .await
         .unwrap();
+    phase("old_channel_send_finished");
     let old_channel_id = a1_node.channel_history(channel, 10).unwrap()[0].id;
     let channel_attachment_bytes = vec![0x35u8; 24_000];
     let channel_attachment_path = dir.path().join("old-channel.bin");
     std::fs::write(&channel_attachment_path, &channel_attachment_bytes).unwrap();
+    phase("channel_file_send_begin");
     let channel_attachment_file = a1_node
         .send_file_channel(
             channel,
@@ -9480,6 +9492,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         )
         .await
         .unwrap();
+    phase("channel_file_send_finished");
     let channel_attachment_id = a1_node
         .channel_history(channel, 10)
         .unwrap()
@@ -9495,6 +9508,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let attachment_bytes = vec![0x42u8; 90_000];
     let attachment_path = dir.path().join("before-link.bin");
     std::fs::write(&attachment_path, &attachment_bytes).unwrap();
+    phase("account_file_enqueue_begin");
     let (attachment_id, attachment_file) = a1_node
         .enqueue_file_to_account(
             &bob_account.account_id(),
@@ -9503,6 +9517,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         )
         .await
         .unwrap();
+    phase("account_file_enqueue_finished");
     let dm_texts = |node: &Arc<Node>| {
         node.account_history(&bob_account.account_id(), 10)
             .map(|history| {
@@ -9522,10 +9537,12 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     };
 
     let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
+    phase("incoming_dm_send_begin");
     bob_node
         .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
         .await
         .unwrap();
+    phase("incoming_dm_send_finished");
     let mut incoming_source_history = Vec::new();
     for _ in 0..50 {
         if let Some(history) = ready_history(dm_texts(&a1_node)) {
@@ -9539,7 +9556,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     assert_eq!(incoming_source_history.len(), 1);
     assert!(dm_texts(&a2_node).unwrap().is_empty());
 
+    phase("incoming_source_observation_finished");
     let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
+    phase("sibling_join_observation_begin");
     let join_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     tokio::time::timeout_at(join_deadline, async {
         loop {
@@ -9558,6 +9577,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     })
     .await
     .expect("certified sibling joins the existing channel");
+    phase("sibling_join_observation_finished");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     // Keep the original 15-second join plus 300-millisecond observation window.
     // Pending is not empty history: assert against the first readable snapshot.
@@ -9592,9 +9612,11 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         disabled_dm_history.is_empty(),
         "disabled history sync must not import sibling messages"
     );
+    phase("history_enable_begin");
     a2_node
         .set_device_sync_category(crate::node::SyncCategory::History, true)
         .unwrap();
+    phase("history_enable_finished_archive_begin");
     let archived = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             match channel_texts(&a2_node) {
@@ -9609,16 +9631,19 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     })
     .await
     .expect("old channel plaintext reaches the linked device");
+    phase("archive_observation_finished");
     assert_eq!(archived.len(), 1);
     assert_eq!(archived[0].id, old_channel_id);
     assert_eq!(archived[0].text, b"before sibling joined");
     assert!(archived[0].from_me, "another own device is still 'you'");
+    phase("local_erase_begin");
     assert_eq!(
         a2_node
             .delete_message(channel, old_channel_id, false)
             .unwrap(),
         1
     );
+    phase("local_erase_finished");
     // Probe only generated fixture metadata; never attempt decryption or recovery.
     let linked_plaintext_metadata = |current: &Arc<Node>, id: EventId| {
         let authorized = current.log.try_lock().ok().map(|log| {
@@ -9748,16 +9773,19 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                 ));
             }));
     }
+    phase("new_channel_send_begin");
     a1_node
         .send_channel_message(channel, b"after sibling joined")
         .await
         .unwrap();
+    phase("new_channel_send_finished_source_history_begin");
     let original_new = channel_texts(&a1_node)
         .unwrap()
         .into_iter()
         .find(|row| row.text == b"after sibling joined")
         .unwrap()
         .id;
+    phase("source_history_finished_delivery_observation_begin");
     let mut first_public_arrival = None;
     let new_delivery_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let new_channel_delivery = tokio::time::timeout_at(new_delivery_deadline, async {
@@ -9788,6 +9816,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         }
     })
     .await;
+    phase("new_channel_delivery_observation_returned");
     if new_channel_delivery.is_err() {
         eprintln!(
             "linked plaintext branch before_new_send={before_new_send} first_public_arrival={first_public_arrival:?} finish={}",
@@ -9874,6 +9903,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         );
     }
     new_channel_delivery.expect("new channel messages still arrive");
+    phase("erase_recheck_begin");
     tokio::time::sleep(Duration::from_secs(11)).await;
     let history = tokio::time::timeout_at(new_delivery_deadline + Duration::from_secs(11), async {
         loop {
@@ -9893,6 +9923,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         "sibling history must not resurrect a local erase"
     );
     assert_eq!(history[0].text, b"after sibling joined");
+    phase("erase_recheck_finished_sibling_dm_begin");
     let mut incoming_sibling_history = Vec::new();
     for _ in 0..50 {
         if let Some(history) = ready_history(dm_texts(&a2_node)) {
@@ -9915,10 +9946,12 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         "A2 must learn A3's certified key through A1"
     );
 
+    phase("outgoing_dm_send_begin");
     a1_node
         .send_to_account(&bob_account.account_id(), b"from A1 to Bob", None)
         .await
         .unwrap();
+    phase("outgoing_dm_send_finished_sibling_observation_begin");
     let mut outgoing_sibling_history = Vec::new();
     for _ in 0..50 {
         if let Some(history) = ready_history(dm_texts(&a2_node)) {
@@ -9934,6 +9967,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     assert_eq!(history[1].text, b"from A1 to Bob");
     assert!(history[1].from_me);
 
+    phase("outgoing_sibling_dm_finished_appearance_enable_begin");
     a1_node
         .set_device_sync_category(crate::node::SyncCategory::Appearance, true)
         .unwrap();
@@ -9947,6 +9981,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             Some("light".into()),
         )
         .unwrap();
+    phase("appearance_delivery_observation_begin");
     let appearance_delivery = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if a2_node
@@ -9960,6 +9995,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         }
     })
     .await;
+    phase("appearance_delivery_observation_returned");
     if appearance_delivery.is_err() {
         let observations: Vec<_> = [("source", &a1_node), ("sibling", &a2_node)]
             .into_iter()
@@ -9983,6 +10019,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         *current.account_client_test_hook.lock().unwrap() = None;
     }
     appearance_delivery.expect("appearance preference reaches certified sibling");
+    phase("appearance_disable_and_reenable_begin");
     a2_node
         .set_device_sync_category(crate::node::SyncCategory::Appearance, false)
         .unwrap();
@@ -10018,6 +10055,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .await
     .expect("re-enabling appearance catches up");
 
+    phase("appearance_reenable_finished_contacts_begin");
     a1_node
         .set_device_sync_category(crate::node::SyncCategory::Contacts, true)
         .unwrap();
@@ -10053,6 +10091,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .await
     .expect("contact preference reaches certified sibling");
 
+    phase("contacts_finished_attachments_begin");
     a1_node
         .set_device_sync_category(crate::node::SyncCategory::Attachments, true)
         .unwrap();
@@ -10108,6 +10147,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             .unwrap()
             .is_some()
     );
+    phase("attachments_observation_finished_save_begin");
     let saved = dir.path().join("sibling-copy.bin");
     a2_node.save_file(attachment_file, &saved).unwrap();
     assert_eq!(std::fs::read(saved).unwrap(), attachment_bytes);
@@ -10123,6 +10163,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let (ed25519_secret, x25519_secret) = a2_node.identity.secret_bytes();
     // Cancelling the accept loop does not cancel admitted blocking storage work.
     // Retire it before the same exclusive profile is opened again.
+    phase("sibling_retirement_begin");
     a2_node.runtime_work.close();
     a2_node.clear_delivery_observations();
     a2_task.abort();
@@ -10132,9 +10173,11 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .await
         .expect("the old sibling's admitted storage work must retire");
     a2_node.close_profile().unwrap();
+    phase("sibling_retirement_finished");
     let (reopen_dm, _reopen_dm_rx) = mpsc::unbounded_channel();
     let (reopen_ch, _reopen_ch_rx) = mpsc::unbounded_channel();
     let (reopen_file, _reopen_file_rx) = mpsc::unbounded_channel();
+    phase("sibling_reopen_begin");
     let reopened = Node::open_with_account(
         DeviceIdentity::from_secret_bytes(ed25519_secret, x25519_secret),
         Account::from_secret_bytes(alice_account.secret_bytes()),
@@ -10147,6 +10190,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         "pw",
     )
     .unwrap();
+    phase("sibling_reopen_finished");
     assert!(
         reopened
             .account_history(&bob_account.account_id(), 20)
@@ -10199,7 +10243,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         std::fs::read(reopened_channel_copy).unwrap(),
         channel_attachment_bytes
     );
+    phase("source_abort_begin");
     a1_task.abort();
+    phase("body_finished_runtime_drop_next");
 }
 
 #[test]

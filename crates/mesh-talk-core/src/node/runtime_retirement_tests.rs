@@ -22,8 +22,136 @@ async fn retire(runtime: NodeRuntime) {
     runtime.stop().await;
 }
 
+struct RewriteRelease(Option<std::sync::mpsc::Sender<()>>);
+impl Drop for RewriteRelease {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+struct RewriteObservation {
+    initialized_early: bool,
+    blocked_workers: usize,
+    // Keep the sender valid when normal retirement finishes after observation.
+    _initialized: std::sync::mpsc::Receiver<()>,
+}
+
+struct RewriteObserver {
+    arm: Option<std::sync::mpsc::Sender<()>>,
+    retirement_started: tokio::sync::oneshot::Receiver<()>,
+    observed: tokio::sync::oneshot::Receiver<Result<RewriteObservation, &'static str>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl RewriteObserver {
+    fn new(
+        release: std::sync::mpsc::Sender<()>,
+        initialized: std::sync::mpsc::Receiver<()>,
+        work: Arc<crate::node::runtime_work::RuntimeWork>,
+        blocked: Arc<std::sync::atomic::AtomicUsize>,
+        required_blocked: usize,
+    ) -> Self {
+        let (arm, armed) = std::sync::mpsc::channel();
+        let (ready, retirement_started) = tokio::sync::oneshot::channel();
+        let (done, observed) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            let release = RewriteRelease(Some(release));
+            let observation = (|| {
+                // This independent safety uses the existing setup bound. A
+                // stalled reactor cannot leave the artificial gate held forever.
+                let setup_deadline = std::time::Instant::now() + Duration::from_secs(6);
+                armed
+                    .recv_timeout(
+                        setup_deadline.saturating_duration_since(std::time::Instant::now()),
+                    )
+                    .map_err(|_| "rewrite observer was not armed within setup")?;
+                while !work.is_closed()
+                    || blocked.load(std::sync::atomic::Ordering::SeqCst) < required_blocked
+                {
+                    if std::time::Instant::now() >= setup_deadline {
+                        return Err("retirement or controlled blockers did not enter within setup");
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                ready
+                    .send(())
+                    .map_err(|_| "rewrite observer caller retired")?;
+                let initialized_early = match initialized.recv_timeout(Duration::from_millis(150)) {
+                    Ok(()) => true,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("retirement ended without reporting initialization");
+                    }
+                };
+                Ok(RewriteObservation {
+                    initialized_early,
+                    blocked_workers: blocked.load(std::sync::atomic::Ordering::SeqCst),
+                    _initialized: initialized,
+                })
+            })();
+            // Release before asking the async caller to make any progress.
+            drop(release);
+            let _ = done.send(observation);
+        });
+        Self {
+            arm: Some(arm),
+            retirement_started,
+            observed,
+            worker: Some(worker),
+        }
+    }
+    fn arm(&mut self) {
+        self.arm.take().unwrap().send(()).unwrap();
+    }
+    async fn finish(&mut self) -> RewriteObservation {
+        let result = (&mut self.observed).await;
+        self.worker.take().unwrap().join().unwrap();
+        result
+            .unwrap()
+            .expect("independent rewrite observation must qualify")
+    }
+}
+impl Drop for RewriteObserver {
+    fn drop(&mut self) {
+        // Disconnect an unarmed observer on every panic/cancellation path; its
+        // independent thread releases the writer and is always joined here.
+        self.arm.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct JoinedBlockers(Option<std::thread::JoinHandle<()>>);
+impl JoinedBlockers {
+    fn join(&mut self) {
+        if let Some(worker) = self.0.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+impl Drop for JoinedBlockers {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
+    profile_rewrite_retirement_case(false).await;
+}
+
+// This companion qualifies only the observer's independent gate release. The
+// unforced test above remains the primary retirement/initializer timing oracle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_rewrite_observer_releases_gate_with_both_runtime_workers_blocked() {
+    profile_rewrite_retirement_case(true).await;
+}
+
+async fn profile_rewrite_retirement_case(starve_workers: bool) {
     let dir = tempfile::tempdir().unwrap();
     let runtime = start(dir.path()).await;
     let node = runtime.node.clone();
@@ -31,6 +159,11 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
     let (selected_tx, selected_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Mutex::new(release_rx);
+    let (initialized_tx, initialized_rx) = std::sync::mpsc::channel();
+    let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Reverse drop order releases the gate before joining controlled children.
+    let mut blocked_executor = JoinedBlockers(None);
+    let mut observer;
     {
         let mut log = node.log.lock().unwrap();
         for seq in 1..=10 {
@@ -46,9 +179,17 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
             ))
             .unwrap();
         }
+        // Own the independent release before the hook can hold log/SQL locks.
+        observer = RewriteObserver::new(
+            release_tx,
+            initialized_rx,
+            node.runtime_work.clone(),
+            blocked.clone(),
+            if starve_workers { 2 } else { 0 },
+        );
         log.before_rewrite_rename(Box::new(move || {
-            selected_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv().unwrap();
+            let _ = selected_tx.send(());
+            let _ = release_rx.lock().unwrap().recv();
         }));
         log.request_profile_compaction(conv).unwrap();
     }
@@ -56,21 +197,76 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
         .await
         .unwrap()
         .unwrap();
+    let blockers = if starve_workers {
+        (0..2)
+            .map(|_| (node.clone(), node.runtime_work.admit().unwrap()))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     drop(node);
-    let (initialized_tx, mut initialized_rx) = tokio::sync::oneshot::channel();
+    if starve_workers {
+        let blocked = blocked.clone();
+        blocked_executor.0 = Some(std::thread::spawn(move || {
+            // These two admitted async children use an isolated executor. Its
+            // saturation qualifies gate liveness, not production stop latency.
+            let executor = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .build()
+                .unwrap();
+            executor.block_on(async move {
+                let mut tasks = Vec::new();
+                for (node, permit) in blockers {
+                    let blocked = blocked.clone();
+                    tasks.push(tokio::spawn(permit.track(async move {
+                        assert!(matches!(
+                            node.log.try_lock(),
+                            Err(std::sync::TryLockError::WouldBlock)
+                        ));
+                        blocked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let _log = node.log.lock().unwrap();
+                    })));
+                }
+                for task in tasks {
+                    task.await.unwrap();
+                }
+            });
+        }));
+    }
+    observer.arm();
+    let mut retirement = Box::pin(retire(runtime));
+    // Enter real stop admission before queueing the remainder. This first poll
+    // cannot depend on a background task being scheduled to begin retirement.
+    let first = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(retirement.as_mut(), cx))
+    })
+    .await;
+    let mut initialized_tx = Some(initialized_tx);
+    if first.is_ready() {
+        initialized_tx.take().unwrap().send(()).unwrap();
+    }
     let base = dir.path().to_path_buf();
     let replacement = tokio::spawn(async move {
-        retire(runtime).await;
-        initialized_tx.send(()).unwrap();
+        if first.is_pending() {
+            retirement.await;
+            initialized_tx.take().unwrap().send(()).unwrap();
+        }
         start(&base).await
     });
-    let initialized_early = tokio::time::timeout(Duration::from_millis(150), &mut initialized_rx)
+    (&mut observer.retirement_started)
         .await
-        .is_ok();
-    release_tx.send(()).unwrap();
+        .expect("actual retirement and controlled blockers must enter before observation");
+    let observation = observer.finish().await;
+    blocked_executor.join();
+    if starve_workers {
+        assert_eq!(
+            observation.blocked_workers, 2,
+            "both admitted runtime workers must encounter the actual held log before OS release"
+        );
+    }
     let replacement = replacement.await.unwrap();
     assert!(
-        !initialized_early,
+        !observation.initialized_early,
         "replacement initializer ran while old rewrite was paused"
     );
     let event = Event::new(
