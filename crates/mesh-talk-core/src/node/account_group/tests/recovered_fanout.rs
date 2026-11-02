@@ -414,6 +414,15 @@ async fn closing_account_loop_cancels_stalled_fanout_and_drains_runtime_admissio
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
+    assert_source_invalidation_keeps_fanout_pending(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_source_invalidation_keeps_the_original_account_fanout_pending() {
+    assert_source_invalidation_keeps_fanout_pending(true).await;
+}
+
+async fn assert_source_invalidation_keeps_fanout_pending(remote: bool) {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let dir = tempfile::tempdir().unwrap();
@@ -442,11 +451,16 @@ async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
     source
         .set_device_sync_category(SyncCategory::Profile, true)
         .unwrap();
+    external
+        .set_device_sync_category(SyncCategory::Profile, true)
+        .unwrap();
     source.prepare_account_group_fanout(group).await.unwrap();
 
     let injected = Arc::new(AtomicBool::new(false));
     let captured_views = Arc::new(AtomicUsize::new(0));
     let stale_rounds = Arc::new(AtomicUsize::new(0));
+    let failed_rounds = Arc::new(AtomicUsize::new(0));
+    let recoverable_rounds = Arc::new(AtomicUsize::new(0));
     let successful_rounds = Arc::new(AtomicUsize::new(0));
     let weak_source = Arc::downgrade(&source);
     let expected_peer = external.identity.public();
@@ -454,6 +468,8 @@ async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
         let injected = injected.clone();
         let captured_views = captured_views.clone();
         let stale_rounds = stale_rounds.clone();
+        let failed_rounds = failed_rounds.clone();
+        let recoverable_rounds = recoverable_rounds.clone();
         let successful_rounds = successful_rounds.clone();
         move |peer, phase| {
             if peer != expected_peer {
@@ -462,7 +478,7 @@ async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
             match phase.as_str() {
                 "network_view_captured" => {
                     captured_views.fetch_add(1, Ordering::SeqCst);
-                    if !injected.swap(true, Ordering::SeqCst) {
+                    if !remote && !injected.swap(true, Ordering::SeqCst) {
                         // Change a real public policy after its source stamp was
                         // captured, before the selected round validates it.
                         // No synthetic transport error or event import is used.
@@ -476,6 +492,12 @@ async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
                 "control_fanout_round_stale" => {
                     stale_rounds.fetch_add(1, Ordering::SeqCst);
                 }
+                phase if phase.starts_with("control_fanout_round_failed") => {
+                    failed_rounds.fetch_add(1, Ordering::SeqCst);
+                    if phase == "control_fanout_round_failed kind=transport_closed" {
+                        recoverable_rounds.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 "control_fanout_round_ok" => {
                     successful_rounds.fetch_add(1, Ordering::SeqCst);
                 }
@@ -483,6 +505,27 @@ async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
             }
         }
     }));
+
+    if remote {
+        let weak_external = Arc::downgrade(&external);
+        let injected = injected.clone();
+        let expected_peer = source.identity.public();
+        *external.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if peer == expected_peer
+                && phase == "network_view_captured"
+                && !injected.swap(true, Ordering::SeqCst)
+            {
+                // Invalidate the responder's actual view. Its StaleCursor closes
+                // the real Noise exchange, so the requester observes transport
+                // failure rather than a local Store(StaleCursor).
+                weak_external
+                    .upgrade()
+                    .unwrap()
+                    .set_device_sync_category(SyncCategory::Profile, false)
+                    .unwrap();
+            }
+        }));
+    }
 
     // Only the real account producer can originate a public exchange. Keep
     // the advertised source listener owned but unserved: external background
@@ -541,6 +584,7 @@ async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
     })
     .await;
     source.account_client_test_hook.lock().unwrap().take();
+    external.account_client_test_hook.lock().unwrap().take();
     for node in [&source, &external] {
         node.runtime_work.close();
     }
@@ -562,7 +606,20 @@ async fn local_source_invalidation_keeps_the_original_account_fanout_pending() {
     drop(source_listener);
     assert!(panics.is_empty(), "background task failed: {panics:?}");
     assert!(injected.load(Ordering::SeqCst));
-    assert_eq!(stale_rounds.load(Ordering::SeqCst), 1);
-    observed.expect("local source invalidation must retain the original account fanout ticket");
+    assert_eq!(stale_rounds.load(Ordering::SeqCst), usize::from(!remote));
+    assert_eq!(failed_rounds.load(Ordering::SeqCst), usize::from(remote));
+    assert_eq!(
+        recoverable_rounds.load(Ordering::SeqCst),
+        usize::from(remote)
+    );
+    eprintln!(
+        "fanout invalidation remote={remote} injected={} stale_rounds={} failed_rounds={} recoverable_rounds={} successful_rounds={}",
+        injected.load(Ordering::SeqCst),
+        stale_rounds.load(Ordering::SeqCst),
+        failed_rounds.load(Ordering::SeqCst),
+        recoverable_rounds.load(Ordering::SeqCst),
+        successful_rounds.load(Ordering::SeqCst),
+    );
+    observed.expect("source invalidation must retain the original account fanout ticket");
     assert!(captured_views.load(Ordering::SeqCst) >= 2);
 }

@@ -2523,12 +2523,15 @@ limits are unchanged.
 
 Account group fanout retains the same committed journal revision after local
 admission backpressure on direct or eligible relay paths. Direct control rounds
-also retain that revision when a local source change returns `StaleCursor`: an
-invalidated finite view cannot acknowledge completed fanout. The existing bounded
+also retain that revision after a local `StaleCursor` or a retryable closed-session
+transport error. A responder whose finite view becomes invalid can close Noise
+before sending an application error; that failed round cannot acknowledge completed
+fanout. The shared session classifier keeps policy and protocol rejections outside
+this transport retry. The existing bounded
 queue retries after one second without blocking other ready groups; queue
 overflow returns the revision to its durable journal cursor. Successful rounds
 remain deduplicated, and retry never invents custody or recipient confirmation.
-Other transport failures keep their existing recovery policy. This local
+Other transport failures keep their existing recovery policy. This
 continuation preserves the original operation, effect and journal sequence; it
 does not replace the independent ten-second departure retry or change peer and
 foreground-operation deadlines.

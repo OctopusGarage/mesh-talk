@@ -2878,18 +2878,43 @@ impl Node {
                                         Err(super::session::SessionError::Store(
                                             LogError::StaleCursor,
                                         )) => "control_fanout_round_stale",
-                                        Err(_) => "control_fanout_round_failed",
+                                        Err(error)
+                                            if super::session_pool::retryable_sync_error(error) =>
+                                        {
+                                            "control_fanout_round_failed kind=transport_closed"
+                                        }
+                                        Err(super::session::SessionError::Transport(_)) => {
+                                            "control_fanout_round_failed kind=transport"
+                                        }
+                                        Err(super::session::SessionError::Store(_)) => {
+                                            "control_fanout_round_failed kind=store"
+                                        }
+                                        Err(super::session::SessionError::Serialization(_)) => {
+                                            "control_fanout_round_failed kind=serialization"
+                                        }
+                                        Err(super::session::SessionError::UnexpectedMessage) => {
+                                            "control_fanout_round_failed kind=unexpected_message"
+                                        }
+                                        Err(super::session::SessionError::NoProgress) => {
+                                            "control_fanout_round_failed kind=no_progress"
+                                        }
+                                        Err(super::session::SessionError::ResourceUnavailable) => {
+                                            "control_fanout_round_failed kind=resource_unavailable"
+                                        }
                                     }
                                     .into()
                                 });
                                 if round.is_ok() {
                                     self.recycle_sync_channel(ch);
-                                } else if matches!(
-                                    round,
-                                    Err(super::session::SessionError::Store(LogError::StaleCursor))
-                                ) {
-                                    // A changed local source did not finish this round.
-                                    // Keep its existing journal ticket for a fresh view.
+                                } else if round.as_ref().is_err_and(|error| {
+                                    matches!(
+                                        error,
+                                        super::session::SessionError::Store(LogError::StaleCursor)
+                                    ) || super::session_pool::retryable_sync_error(error)
+                                }) {
+                                    // A changed local view or closed remote session did
+                                    // not finish this round. Keep the journal ticket
+                                    // for a fresh view through the existing backoff.
                                     deferred.store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
                                 Ok(())
