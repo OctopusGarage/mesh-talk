@@ -157,6 +157,10 @@
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
+            "name": "Same-source immutable-prefix preparation requires genuine completed scopes, current exact signed metadata and capabilities, and retired comparison-pair debt in every direction; later unpaired natural reads preserve unchanged prefix proof while paired work or corpus changes invalidate it. Queued publication retirement still requires current settlement.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
+          },
+          {
             "name": "Inbound-only role fixtures establish actual exact-source access and operation capabilities under cold setup before the unchanged warm signed-role and admitted-operation deadlines; already-proven capabilities add no RPC.",
             "reference": "docs/testing-feedback-loop.md#windows-workspace-archives-and-slow-fixtures"
           },
