@@ -1,0 +1,128 @@
+[
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/node/ratchet_sessions.rs",
+    "fingerprint": "d5384bcc1cfa5e9e:1",
+    "flow": "1f37b0a2bafc5c6169e0fd65db0ea693ac2e5110c7fbeebad6665f5ef73c64af",
+    "alert": 464,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/464",
+    "reason": "main 2a5ab70: test assertions format only usize record counts and HashMap::len(), never passwords, key bytes or ratchet state. from_password taint reaches the aggregate store but these cardinalities are not key material. Keep compaction diagnostics."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/node/ratchet_sessions.rs",
+    "fingerprint": "8767d653a383944c:1",
+    "flow": "c35211a4a6c29bb2c91c3beae9973c767f64496fae8291b9bb84bd7aee48d66f",
+    "alert": 465,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/465",
+    "reason": "main 2a5ab70: test assertions format only usize record counts and HashMap::len(), never passwords, key bytes or ratchet state. from_password taint reaches the aggregate store but these cardinalities are not key material. Keep compaction diagnostics."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/tests/channel_and_file_cli.rs",
+    "fingerprint": "e2b62b53d50f234c:1",
+    "flow": "cb4a1b218a7f754d3bd8c0345ee3048b50970f10d22cca8c677af904662154bf",
+    "alert": 466,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/466",
+    "reason": "main 2a5ab70: test-only timeout panic logs a fresh temporary device ID. identity/device.rs derives it solely from the PUBLIC Ed25519 key; discovery and /peers already expose it. No password, private key or session token reaches this sink. Keep peer diagnostics."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/tests/persistent_history.rs",
+    "fingerprint": "5592d64cd2c0c4f3:1",
+    "flow": "60193f3d50988526152d5291ddd4cb3f3d22bb6b7a60b64855a8a7a28383e784",
+    "alert": 467,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/467",
+    "reason": "main 2a5ab70: test-only timeout panic logs a fresh temporary device ID. identity/device.rs derives it solely from the PUBLIC Ed25519 key; discovery and /peers already expose it. No password, private key or session token reaches this sink. Keep peer diagnostics."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/tests/post_office_offline.rs",
+    "fingerprint": "8a42149e2a2c7fd8:1",
+    "flow": "46abe64d9683b6936ad32857e5c54ee8abbb6806fe15c40e953b03e4e8080a04",
+    "alert": 468,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/468",
+    "reason": "main 2a5ab70: test-only timeout panic logs a fresh temporary device ID. identity/device.rs derives it solely from the PUBLIC Ed25519 key; discovery and /peers already expose it. No password, private key or session token reaches this sink. Keep peer diagnostics."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/tests/two_node_cli.rs",
+    "fingerprint": "baf9cbeb516a39c9:1",
+    "flow": "c0a8fa7e80a1e8c1e898aa5dbd380dd03675d514a4fabe632c8312b49d4c7535",
+    "alert": 469,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/469",
+    "reason": "main 2a5ab70: test-only timeout panic logs a fresh temporary device ID. identity/device.rs derives it solely from the PUBLIC Ed25519 key; discovery and /peers already expose it. No password, private key or session token reaches this sink. Keep peer diagnostics."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/node/delivery_receipt_tests.rs",
+    "fingerprint": "db682805036f8f7:1",
+    "flow": "8908cd092881b065aec35d008baa910b7e225f5c5de1df1449866a943b9db84f",
+    "alert": 474,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/474",
+    "reason": "SARIF sink is cfg(test) Vec::insert(0), an in-memory operation with no output. Index 0 is always valid. Pinned CodeQL rust.model.yml:8758-8759 incorrectly models the receiver as logging. Two independent reviews; full evidence/links in PR #152. Rules unchanged."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/node/delivery_store.rs",
+    "fingerprint": "aa6478bdb3ca79d7:1",
+    "flow": "cfec3e601f42bba174d416081f998173dd8211787cf8bd22b343d5b4a445c0a7",
+    "alert": 475,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/475",
+    "reason": "SARIF sink is Vec::remove(0), not logging. Nonempty queue is proven; removal follows successful AES-GCM journal rewrite. Key remains in its encrypted writer. Pinned CodeQL model:8766-8767 over-models receiver. Independently reviewed; evidence in PR #152."
+  },
+  {
+    "rule": "js/bad-code-sanitization",
+    "path": "scripts/diagnostics/validation-stage.test.mjs",
+    "fingerprint": "c87c1a6243dec344:1",
+    "flow": "e62a48fdb34f33a648b165429467836ec612a76d243b218516abb307599f7f0d",
+    "alert": 483,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/483",
+    "reason": "Node CLI fixtures use JSON.stringify for JS string literals passed via spawn argv; no shell/HTML parser. Fixture-controlled code. Node 22 direct/nested hostile-string probes preserved the exact filename and executed no payload. Evidence: PR #246."
+  },
+  {
+    "rule": "js/bad-code-sanitization",
+    "path": "scripts/diagnostics/validation-stage.test.mjs",
+    "fingerprint": "abb7774bf37cb311:1",
+    "flow": "cc890c509eae5c77144544b23065f3da69e18285c9e36d969df752d5eb0fdaef",
+    "alert": 484,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/484",
+    "reason": "Node CLI fixtures use JSON.stringify for JS string literals passed via spawn argv; no shell/HTML parser. Fixture-controlled code. Node 22 direct/nested hostile-string probes preserved the exact filename and executed no payload. Evidence: PR #246."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/bin/mesh-talk-node/network_config.rs",
+    "fingerprint": "bfd73ae5c7a798de:1",
+    "flow": "7e1db3da21b645283cb48e0798cff286a3717a8bbd083f2abf01f76acab211f0",
+    "alert": 488,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/488",
+    "reason": "PR #253: explicit membership-issue CLI prints only the requested public device identifier and expires_at() Unix timestamp. Signed certificate bytes and authority private key are not printed. This is intended public operator metadata."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/node/session_pool.rs",
+    "fingerprint": "217c8726173e2c70:1",
+    "flow": "668cec6798c1e52ff315088410a2087fabc55baf0ef880d0438189971f5c149d",
+    "alert": 489,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/489",
+    "reason": "PR #253: sink is VecDeque::push_back in an in-memory capability cooldown cache, not logging. PeerEndpointKey holds public device identity, socket address and privacy generation. No private keys or message contents reach a log or persistent sink."
+  },
+  {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/node/runtime_privacy_tests.rs",
+    "fingerprint": "64891a8a5d2db5d3:1",
+    "flow": "79614940a41908e3e971baa40c8d95221ce2dff71e9c4c58d412a696d272a31c",
+    "alert": 490,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/490",
+    "reason": "PR #253: failed assertion logs randomly generated isolated-test public account/device IDs and temporary listener addresses. No production profile, passphrase or private key is read or printed. Account IDs are public protocol identifiers, not secret bytes."
+  },
+  {
+    "rule": "js/xss-through-dom",
+    "path": "frontend/src/features/chat/AvatarCropDialog.tsx",
+    "fingerprint": "9f3379282ce71ebb:1",
+    "flow": "a085038fefec47062df2a216c5499c9a74e89eba103892941a46bc517784bd71",
+    "alert": 505,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/505",
+    "reason": "Source is input.files[0], a File. srcUrl comes only from URL.createObjectURL(file), with revocation on cleanup. React img src assigns this browser-generated blob URL; it never parses file contents or DOM strings as HTML. No HTML interpretation or arbitrary URL is possible."
+  }
+]

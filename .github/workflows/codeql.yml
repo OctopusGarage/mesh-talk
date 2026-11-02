@@ -25,6 +25,10 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    # Apply the same reviewed-finding gate before merge and on main.
+    # https://github.com/github/codeql-action/blob/main/.github/workflows/codescanning-config-cli.yml
+    env:
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"
     permissions:
       security-events: write
       actions: read
