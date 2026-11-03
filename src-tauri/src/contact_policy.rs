@@ -772,7 +772,6 @@ mod tests {
 
     #[test]
     fn registered_ipc_commands_authorize_persist_and_restore_offline() {
-        use tauri::Manager;
         let dir = tempfile::tempdir().unwrap();
         let auth = crate::services::auth_service::AuthService::new(std::sync::Arc::new(
             mesh_talk_core::identity::manager::IdentityManager::new(
@@ -869,49 +868,51 @@ mod tests {
         .unwrap();
         let own = runtime.account_id().to_owned();
         *node_state.0.blocking_write() = Some(runtime);
-        assert!(invoke(
+        let mut retired = false;
+        let original = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(invoke(
             "set_contact_hidden",
             serde_json::json!({ "owner": "alice", "account": own, "hidden": true, "name": "self" })
         )
         .is_err());
-        let hidden = invoke("set_contact_hidden", serde_json::json!({ "owner": "alice", "account": A, "hidden": true, "name": "\nAlice\t" })).unwrap();
-        assert_eq!(
-            hidden.contacts,
-            vec![HiddenContact {
-                account_id: A.into(),
-                name: "Alice".into()
-            }]
-        );
-        let persisted: HiddenContactsSnapshot = serde_json::from_slice(
-            &std::fs::read(dir.path().join("accounts/alice/hidden-contacts.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(persisted.contacts, hidden.contacts);
-        assert_eq!(
-            invoke(
-                "get_hidden_contacts",
-                serde_json::json!({ "owner": "alice" })
+            let hidden = invoke("set_contact_hidden", serde_json::json!({ "owner": "alice", "account": A, "hidden": true, "name": "\nAlice\t" })).unwrap();
+            assert_eq!(
+                hidden.contacts,
+                vec![HiddenContact {
+                    account_id: A.into(),
+                    name: "Alice".into()
+                }]
+            );
+            let persisted: HiddenContactsSnapshot = serde_json::from_slice(
+                &std::fs::read(dir.path().join("accounts/alice/hidden-contacts.json")).unwrap(),
             )
-            .unwrap()
-            .contacts,
-            hidden.contacts
-        );
-        assert!(
-            invoke(
-                "delete_contact",
-                serde_json::json!({ "owner": "bob", "expectedAccount": own, "account": A })
-            )
-            .is_err()
-        );
-        assert!(
-            invoke(
-                "delete_contact",
-                serde_json::json!({"owner":"alice", "account":A})
-            )
-            .is_err(),
-            "destructive IPC requires a captured cryptographic account root"
-        );
-        assert!(
+            .unwrap();
+            assert_eq!(persisted.contacts, hidden.contacts);
+            assert_eq!(
+                invoke(
+                    "get_hidden_contacts",
+                    serde_json::json!({ "owner": "alice" })
+                )
+                .unwrap()
+                .contacts,
+                hidden.contacts
+            );
+            assert!(
+                invoke(
+                    "delete_contact",
+                    serde_json::json!({ "owner": "bob", "expectedAccount": own, "account": A })
+                )
+                .is_err()
+            );
+            assert!(
+                invoke(
+                    "delete_contact",
+                    serde_json::json!({"owner":"alice", "account":A})
+                )
+                .is_err(),
+                "destructive IPC requires a captured cryptographic account root"
+            );
+            assert!(
             invoke(
                 "delete_contact",
                 serde_json::json!({"owner":"alice", "expectedAccount":"00".repeat(16), "account":A})
@@ -919,44 +920,45 @@ mod tests {
             .is_err(),
             "a delayed old-root intent must not delete in the current root"
         );
-        assert!(
-            !node_state
-                .0
-                .blocking_read()
-                .as_ref()
-                .unwrap()
-                .handle()
-                .conversation_personal_state(&mesh_talk_core::node::DocumentConversation::Account(
-                    A.into()
-                ))
-                .known
-        );
-        let deleted = invoke(
-            "delete_contact",
-            serde_json::json!({ "owner": "alice", "expectedAccount": own, "account": A }),
-        )
-        .unwrap();
-        assert_eq!(deleted.deleted, vec![A.to_owned()]);
-        assert!(deleted.contacts.is_empty());
-        assert!(
-            invoke(
+            assert!(
+                !node_state
+                    .0
+                    .blocking_read()
+                    .as_ref()
+                    .unwrap()
+                    .handle()
+                    .conversation_personal_state(
+                        &mesh_talk_core::node::DocumentConversation::Account(A.into())
+                    )
+                    .known
+            );
+            let deleted = invoke(
                 "delete_contact",
-                serde_json::json!({ "owner": "alice", "expectedAccount": own, "account": own })
+                serde_json::json!({ "owner": "alice", "expectedAccount": own, "account": A }),
             )
-            .is_err()
-        );
-        // Preserve the original offline restore coverage by hiding the contact again.
-        invoke(
+            .unwrap();
+            assert_eq!(deleted.deleted, vec![A.to_owned()]);
+            assert!(deleted.contacts.is_empty());
+            assert!(
+                invoke(
+                    "delete_contact",
+                    serde_json::json!({ "owner": "alice", "expectedAccount": own, "account": own })
+                )
+                .is_err()
+            );
+            // Preserve the original offline restore coverage by hiding the contact again.
+            invoke(
             "set_contact_hidden",
             serde_json::json!({ "owner": "alice", "account": A, "hidden": true, "name": "Alice" }),
         )
         .unwrap();
-        // Stop the node: restoration remains a local authenticated operation.
-        app.state::<crate::chat_commands::NodeState>()
-            .0
-            .blocking_write()
-            .take();
-        assert!(
+            // Stop the node: restoration remains a local authenticated operation.
+            tauri::async_runtime::block_on(async {
+                let runtime = { node_state.0.write().await.take().unwrap() };
+                runtime.stop().await;
+            });
+            retired = true;
+            assert!(
             invoke(
                 "set_contact_hidden",
                 serde_json::json!({ "owner": "alice", "account": A, "hidden": false, "name": "" })
@@ -965,14 +967,41 @@ mod tests {
             .contacts
             .is_empty()
         );
-        app_state.session().clear();
-        assert!(
+            app_state.session().clear();
+            assert!(
             invoke(
                 "set_contact_hidden",
                 serde_json::json!({ "owner": "alice", "account": A, "hidden": false, "name": "" })
             )
             .is_err()
         );
+        }));
+        let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tauri::async_runtime::block_on(async {
+                let runtime = { node_state.0.write().await.take() };
+                if let Some(runtime) = runtime {
+                    runtime.stop().await;
+                    retired = true;
+                }
+            });
+        }));
+        if cleanup.is_err() || !retired {
+            let retained = dir.keep();
+            eprintln!(
+                "unverified contact runtime cleanup retained {}",
+                retained.display()
+            );
+            if let Err(panic) = original {
+                std::panic::resume_unwind(panic);
+            }
+            if let Err(panic) = cleanup {
+                std::panic::resume_unwind(panic);
+            }
+            panic!("contact runtime retirement could not be verified");
+        }
+        if let Err(panic) = original {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
 use serde::{Deserialize, Serialize};

@@ -800,7 +800,7 @@
         ]
       },
       "escalation": [
-        "Contact deletion/admission changes require session-authority, persistence and native mesh acceptance evidence."
+        "Contact deletion/admission changes require session-authority, persistence and native mesh acceptance evidence. Registered real-runtime fixtures require joined retirement before offline persistence reads and mock-app/store destruction, including assertion failures; follow docs/testing-feedback-loop.md#completion-and-retirement-evidence."
       ]
     },
     {
@@ -932,7 +932,7 @@
       ],
       "consumers": ["desktop-session"],
       "escalation": [
-        "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks."
+        "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks. Registered real-runtime fixtures require joined retirement before offline persistence reads and mock-app/store destruction, including assertion failures; follow docs/testing-feedback-loop.md#completion-and-retirement-evidence."
       ],
       "capability": {
         "summary": "Expose scoped account privacy and explicit recipient review of authenticated device account changes.",

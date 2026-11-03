@@ -39,6 +39,18 @@ scenario with a component test that captures the real handler or effect task;
 select both through the owning validation contract. Preserve browser interaction,
 current-operation success, native-bridge identity, visual and strict error checks.
 
+Registered IPC fixtures that install a real `NodeRuntime` must take it under the
+runtime slot lock, release that lock and await `stop()` before offline persistence
+reads, mock-app destruction or temporary-store removal. `Drop` requests
+best-effort cancellation; it does not join producers or drain admitted blocking
+work. A controlled admitted-work probe retains its real participant permit and
+SDK handle through entry, release and join, and rejects cleanup that returns
+while that work remains held. Keep business assertions inside owned cleanup:
+release held work, await retirement and then propagate the original panic.
+Retain stores whenever retirement is unverified. A Rust assertion summary alone
+cannot certify process success while native connection teardown remains active;
+require the complete test process exit status as well.
+
 Favorites navigation, initial App presentation and ConversationView attachment
 acquisition follow this paired contract. Hold consumer progress independently of
 transport completion, retire its owner, then release and await that exact task.
