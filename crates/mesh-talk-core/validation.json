@@ -2567,7 +2567,8 @@
         "crates/mesh-talk-core/src/node/filebook/",
         "crates/mesh-talk-core/src/node/attachment_consent.rs",
         "crates/mesh-talk-core/src/node/attachment_consent/",
-        "crates/mesh-talk-core/src/node/account_suppression.rs"
+        "crates/mesh-talk-core/src/node/account_suppression.rs",
+        "crates/mesh-talk-core/src/node/participant_storage_tests.rs"
       ],
       "rust": [
         {
@@ -2590,7 +2591,10 @@
             "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
             "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
             "failed_media_",
-            "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work"
+            "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work",
+            "node::node::participant_storage_tests::public_account_history_rejects_incomplete_ready_selector_without_hanging",
+            "node::node::tests::linked_device_catches_up_incoming_dm_after_reconnect",
+            "eventlog::repository::order::tests::history_selectors_reject_retired_unready_and_incomplete_derived_ranges"
           ]
         }
       ],
@@ -2631,7 +2635,8 @@
       },
       "escalation": [
         "Leaf repository tests do not certify participant runtime integration, native publication behavior or production-KDF startup budgets. Node integration must retain validate_participant_request before constructors and the existing delivery journal, use pure removal predicates under the SQL lock, and continue deadline pagination until an empty page rather than a short page.",
-        "Actual consumer cutover requires affected history/search, delivery recovery, exact local deletion, snapshot export/restore and loopback/restart evidence; bounded repository APIs alone do not establish bounded startup memory."
+        "Actual consumer cutover requires affected history/search, delivery recovery, exact local deletion, snapshot export/restore and loopback/restart evidence; bounded repository APIs alone do not establish bounded startup memory.",
+        "Derived history selectors must reject stale jobs and incomplete requested rank ranges rather than spin or silently omit rows. The owned-subprocess fault control warms real public history, removes only a derived selector candidate and requires typed failure with the authoritative transcript retained; kill and reap any failed child before removing its store. This defensive control does not establish the historical reconnect cause. Reconnect timeout diagnostics must preserve the last observed predicate bits without synchronous post-timeout queries."
       ]
     },
     {

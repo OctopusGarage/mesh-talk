@@ -1,6 +1,141 @@
 use super::*;
 
 #[test]
+fn public_account_history_rejects_incomplete_ready_selector_without_hanging() {
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+    const CHILD_PROFILE: &str = "MESH_TEST_INCOMPLETE_HISTORY_SELECTOR";
+    if let Some(root) = std::env::var_os(CHILD_PROFILE) {
+        let root = Path::new(&root);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (dm, _) = mpsc::unbounded_channel();
+                let (channel, _) = mpsc::unbounded_channel();
+                let (file, _) = mpsc::unbounded_channel();
+                let node = Node::open(
+                    DeviceIdentity::generate(),
+                    Arc::new(Mutex::new(Roster::default())),
+                    dm,
+                    channel,
+                    file,
+                    &root.join("messages.log"),
+                    &root.join("sent.log"),
+                    "pw",
+                )
+                .unwrap();
+                let account = node.account_id();
+                let id = node
+                    .enqueue_to_account(&account, b"retained selector source", None)
+                    .await
+                    .unwrap();
+                let history = node.account_history(&account, 10).unwrap();
+                assert!(
+                    history.len() == 1
+                        && history[0].id == id
+                        && history[0].text == b"retained selector source"
+                );
+                let conversation =
+                    crate::node::conversation::account_conversation_id(&account, &account);
+                let retained = node.sentlog.lock().unwrap().entries(&conversation);
+                assert_eq!(retained.len(), 1);
+                // Fault only disposable derived metadata. The real transcript,
+                // ready job and rank remain exactly as the public query built them.
+                node.storage
+                    .database()
+                    .transaction(|connection| {
+                        let (job, ready, count): (Vec<u8>, bool, i64) = connection.query_row(
+                        "SELECT job,ready,next_rank FROM history_order_jobs WHERE conversation=?1",
+                        [conversation.as_bytes().as_slice()],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?;
+                        assert!(ready && count == 1);
+                        let ranks: i64 = connection.query_row(
+                            "SELECT count(*) FROM history_order_rows WHERE job=?1",
+                            [job.as_slice()],
+                            |row| row.get(0),
+                        )?;
+                        assert_eq!(ranks, 1);
+                        let removed = connection.execute(
+                            "DELETE FROM history_order_candidates WHERE job=?1 AND id=?2",
+                            rusqlite::params![job, id.as_bytes().as_slice()],
+                        )?;
+                        assert_eq!(removed, 1);
+                        Ok(())
+                    })
+                    .unwrap();
+                std::fs::write(root.join("query-entered"), b"ready").unwrap();
+                let result = node.account_history(&account, 10);
+                assert!(
+                    matches!(result, Err(NodeError::Log(LogError::CorruptFile(_)))),
+                    "an incomplete current ready selector must fail closed"
+                );
+                assert!(
+                    node.sentlog.lock().unwrap().entries(&conversation) == retained,
+                    "a derived selector failure must preserve authoritative history"
+                );
+                node.runtime_work.close();
+                tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+                    .await
+                    .unwrap();
+                node.close_profile().unwrap();
+            });
+        return;
+    }
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            self.0
+                .wait()
+                .expect("owned history child must be reaped before its profile");
+        }
+    }
+    // The parent owns the profile, output files and child. Even the old infinite
+    // synchronous query is killed and reaped before this directory can be deleted.
+    let directory = tempfile::tempdir().unwrap();
+    let stdout = std::fs::File::create(directory.path().join("stdout.log")).unwrap();
+    let stderr = std::fs::File::create(directory.path().join("stderr.log")).unwrap();
+    let mut child = OwnedChild(Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "node::node::participant_storage_tests::public_account_history_rejects_incomplete_ready_selector_without_hanging", "--nocapture"])
+        .env(CHILD_PROFILE, directory.path())
+        .stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr))
+        .spawn().unwrap());
+    let setup_deadline = Instant::now() + Duration::from_secs(30);
+    while !directory.path().join("query-entered").exists() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "history child failed before the real fault boundary"
+        );
+        assert!(
+            Instant::now() < setup_deadline,
+            "history child did not reach the real fault boundary"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let fault_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "history child rejected the typed-error or source-preservation contract"
+            );
+            break;
+        }
+        if Instant::now() >= fault_deadline {
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            panic!(
+                "public account_history did not return after the real ready-selector fault; owned child reaped"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn participant_constructor_retains_exclusive_profile_ownership() {
     fn open(root: &Path) -> Result<Arc<Node>, LogError> {
         let (dm, _) = mpsc::unbounded_channel();

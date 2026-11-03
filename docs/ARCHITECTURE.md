@@ -1398,6 +1398,14 @@ queries. SQLCipher passphrases are domain-separated so user input cannot select
 the raw-key syntax. Production key derivation retains a 600,000-iteration
 password work factor; only existing test configurations reduce it.
 
+A ready transcript generation certifies the exact requested selector ranks, not
+just a cached row count. Nonempty reads from retired or unfinished generations return a stale-cursor
+error. A missing rank or derived-candidate join in a ready range is a typed
+corruption error; it must not produce an empty successful page, silently omit a
+requested message or leave a synchronous query spinning without progress.
+Authoritative signed events and plaintext sidecars remain untouched by this
+derived-index failure boundary.
+
 Event repository schema v2 admits the signed `ChannelMetadata` event added by
 channel protocol v5. The only v1 schema change relaxes the event-kind constraint
 from 18 to 19. Upgrade validates the exact owned v1 tables and indexes, then

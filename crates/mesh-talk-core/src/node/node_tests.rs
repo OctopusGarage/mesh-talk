@@ -10179,26 +10179,67 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .expect("contact preference reaches certified sibling");
 
     phase("contacts_finished_attachments_begin");
+    phase("attachments_source_enable_begin");
     a1_node
         .set_device_sync_category(crate::node::SyncCategory::Attachments, true)
         .unwrap();
+    phase("attachments_source_enable_finished");
+    phase("attachments_sibling_enable_begin");
     a2_node
         .set_device_sync_category(crate::node::SyncCategory::Attachments, true)
         .unwrap();
+    phase("attachments_sibling_enable_finished");
+    // Preserve short-circuit evaluation: None means this poll never reached
+    // that query. Timeout diagnostics use only these already observed bits.
+    let mut attachment_predicates = [None; 6];
     tokio::time::timeout(Duration::from_secs(35), async {
         loop {
-            if a2_node
+            attachment_predicates.fill(None);
+            phase("attachments_account_card_begin");
+            let account_card = a2_node
                 .account_history(&bob_account.account_id(), 20).unwrap()
                 .iter()
-                .any(|entry| entry.id == attachment_id && entry.file.is_some())
-                && a2_node.file_ready_to_save(attachment_file).unwrap()
-                && a2_node.media.contains(attachment_file)
-                && a2_node
-                    .channel_history(channel, 20).unwrap()
-                    .iter()
-                    .any(|entry| entry.id == channel_attachment_id && entry.file.is_some())
-                && a2_node.file_ready_to_save(channel_attachment_file).unwrap()
-                && a2_node.media.contains(channel_attachment_file)
+                .any(|entry| entry.id == attachment_id && entry.file.is_some());
+            attachment_predicates[0] = Some(account_card);
+            phase("attachments_account_card_finished");
+            if account_card
+                && {
+                    phase("attachments_account_ready_begin");
+                    let ready = a2_node.file_ready_to_save(attachment_file).unwrap();
+                    attachment_predicates[1] = Some(ready);
+                    phase("attachments_account_ready_finished");
+                    ready
+                }
+                && {
+                    phase("attachments_account_media_begin");
+                    let present = a2_node.media.contains(attachment_file);
+                    attachment_predicates[2] = Some(present);
+                    phase("attachments_account_media_finished");
+                    present
+                }
+                && {
+                    phase("attachments_channel_card_begin");
+                    let present = a2_node.channel_history(channel, 20).unwrap()
+                        .iter()
+                        .any(|entry| entry.id == channel_attachment_id && entry.file.is_some());
+                    attachment_predicates[3] = Some(present);
+                    phase("attachments_channel_card_finished");
+                    present
+                }
+                && {
+                    phase("attachments_channel_ready_begin");
+                    let ready = a2_node.file_ready_to_save(channel_attachment_file).unwrap();
+                    attachment_predicates[4] = Some(ready);
+                    phase("attachments_channel_ready_finished");
+                    ready
+                }
+                && {
+                    phase("attachments_channel_media_begin");
+                    let present = a2_node.media.contains(channel_attachment_file);
+                    attachment_predicates[5] = Some(present);
+                    phase("attachments_channel_media_finished");
+                    present
+                }
             {
                 break;
             }
@@ -10207,13 +10248,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     })
     .await
     .unwrap_or_else(|_| {
+        phase("attachments_observation_timeout");
         panic!(
-            "old attachment card and bytes reach certified sibling: status={:?}, account_card={}, channel_card={}, account_ready={}, channel_ready={}",
-            a2_node.device_sync_status(),
-            a2_node.account_history(&bob_account.account_id(), 20).unwrap().iter().any(|entry| entry.id == attachment_id && entry.file.is_some()),
-            a2_node.channel_history(channel, 20).unwrap().iter().any(|entry| entry.id == channel_attachment_id && entry.file.is_some()),
-            a2_node.file_ready_to_save(attachment_file).unwrap(),
-            a2_node.file_ready_to_save(channel_attachment_file).unwrap(),
+            "old attachment card and bytes reach certified sibling: cached(account_card,account_ready,account_media,channel_card,channel_ready,channel_media)={attachment_predicates:?}"
         )
     });
     assert!(
