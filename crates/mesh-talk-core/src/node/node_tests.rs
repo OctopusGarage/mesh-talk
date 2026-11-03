@@ -4832,7 +4832,24 @@ async fn channel_member_recovers_missed_message_from_peer() {
     for node in [&bob_node, &carol_node] {
         node.account_client_test_hook.lock().unwrap().take();
     }
-    let recovery = carol_node.channel_recovery(channel).unwrap();
+    // A local batch terminal does not join the independent peer-round owner.
+    // Observe its actual status within the same content/history deadline.
+    let recovery = tokio::time::timeout_at(recovery_deadline, async {
+        loop {
+            if let Some(recovery) = carol_node.channel_recovery(channel)
+                && recovery.checked_at.is_some()
+            {
+                assert!(
+                    tokio::time::Instant::now() <= recovery_deadline,
+                    "peer recovery status completed after the shared recovery deadline"
+                );
+                return recovery;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("peer recovery status completes within the shared recovery window");
     assert!(matches!(recovery.phase, "peer_checked" | "catching_up"));
     assert!(recovery.checked_at.is_some());
     let recovered_history = tokio::time::timeout_at(recovery_deadline, async {

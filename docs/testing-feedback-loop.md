@@ -652,6 +652,13 @@ Release gates, join owners and drain hosts before propagating a primary failure;
 an unexpected owner panic cannot qualify a successful receipt. These controls
 prove a scheduling mechanism, not the sole cause of an earlier delayed hop.
 
+A local recovery content/batch terminal does not certify that the independently
+scheduled peer-round owner has joined its children and recorded `checked_at`.
+Fixtures must observe that exact channel's completed recovery status separately,
+within the original shared content/history deadline, retaining all batch, event
+identity, phase and history assertions. Reject a status first observed after that
+deadline; do not add a new window or substitute a delay for the state predicate.
+
 Modern self-control fixtures allow thirty seconds for cold, bidirectional
 capability and role readiness before admission, matching the existing owner-rename
 setup boundary. This is a bounded setup watchdog, not an operation latency claim:

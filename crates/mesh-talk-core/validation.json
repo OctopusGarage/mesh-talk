@@ -360,6 +360,7 @@
             "node::media_store::",
             "node::node::tests::channel_custody_inherited_holder_requires_signed_account_authority",
             "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
+            "node::node::tests::channel_member_recovers_missed_message_from_peer",
             "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
             "custody_retry_classes_each_rotate_through_all_competing_peers",
             "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers",
