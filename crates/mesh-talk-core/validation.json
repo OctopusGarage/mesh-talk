@@ -297,7 +297,8 @@
         "crates/mesh-talk-core/src/node/account_sync.rs",
         "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
-        "crates/mesh-talk-core/src/node/channels.rs"
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/account_group/access/view/directory.rs"
       ],
       "rust": [
         {
@@ -335,7 +336,8 @@
       },
       "consumers": ["desktop-account-group-inventory"],
       "escalation": [
-        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. In mandatory-wake acceptance, retain the first signed source floor and first receiver-head times plus bounded actual inventory Header/Complete evidence; negative coverage first establishes actual Owner access and an equal signed inventory baseline inside the existing cold setup watchdog, then holds a strictly newer exact-source header outside storage locks until the original five-second cutoff. Require the first fresh signed floor and changed member label, exact held-header version, live hook task, retained old receiver baseline and absent fresh inventory; keep the positive creation window unchanged. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores."
+        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. In mandatory-wake acceptance, retain the first signed source floor and first receiver-head times plus bounded actual inventory Header/Complete evidence; negative coverage first establishes actual Owner access and an equal signed inventory baseline inside the existing cold setup watchdog, then holds a strictly newer exact-source header outside storage locks until the original five-second cutoff. Require the first fresh signed floor and changed member label, exact held-header version, live hook task, retained old receiver baseline and absent fresh inventory; keep the positive creation window unchanged. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores.",
+        "Require typed cold directory preparation without a generic remote refresh before signed publication, actual owner-driven local continuation across cursor wrap, progress for later groups on a pending page, source invalidation and abandoned-selector isolation. Keep the sixteen-group page and per-directory 128-row/512-edge/8-MiB work limits; local continuation must not enqueue every remote document lane. Actual signed publication retains its normal network Wake; the original mandatory-wake five-second windows remain unchanged."
       ]
     },
     {
@@ -1307,7 +1309,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {

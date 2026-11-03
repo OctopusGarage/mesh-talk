@@ -1165,6 +1165,15 @@ libraries/photos. Shared settings retain the existing per-key preference owner.
 The native account adapter rejects stale owner/runtime/account admissions, releases
 blob bytes only for the requested current version, and uses compare-and-set writes.
 
+Bounded local group-directory preparation returns a local continuation. It must
+not announce a document change or requeue every remote document lane. The serial
+local-maintenance owner retains pending work across inventory pages and cursor
+wraps, while later groups and other local work keep their ordinary turns. Each
+inventory page remains limited to sixteen groups; each directory step retains
+its 128-row, 512-edge and 8 MiB work limits. Source changes invalidate partial
+selectors through their existing owner. Actual signed inventory publication
+retains the normal document-change notification and network Wake.
+
 Device hostnames are private account-directory metadata, separate from public
 nicknames, discovery announcements, certificates and ordinary peer profiles.
 The desktop reads its OS hostname at startup and publishes a bounded (255-byte,

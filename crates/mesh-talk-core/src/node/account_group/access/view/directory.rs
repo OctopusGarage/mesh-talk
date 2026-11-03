@@ -218,7 +218,6 @@ pub(in crate::node::account_group) fn read(
                     return Err(error);
                 }
             }
-            node.account_sync_notify.notify_one();
             return Err(pending());
         }
         let mut digest = Sha256::new();
@@ -243,7 +242,6 @@ pub(in crate::node::account_group) fn read(
         Ok(true) => cached(node, repository, group, &source)?.ok_or_else(invalid),
         Ok(false) => {
             cache.active.push_back(preparation);
-            node.account_sync_notify.notify_one();
             Err(pending())
         }
         Err(crate::eventlog::LogError::StaleCursor) => Err(crate::eventlog::LogError::StaleCursor),

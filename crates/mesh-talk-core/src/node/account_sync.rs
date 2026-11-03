@@ -3371,6 +3371,7 @@ impl Node {
                 result = local_tasks.join_next(), if !local_tasks.is_empty() => {
                     match result {
                         Some(Ok(turn)) => {
+                            maintenance_requested |= turn.more_inventory;
                             local_maintenance = Some(turn.state);
                             #[cfg(test)]
                             self.trace_account_client(&self.identity.public(), ||

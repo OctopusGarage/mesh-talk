@@ -597,6 +597,16 @@ Release and join before asserting. Keep bounded local-publication and actual
 header/completion timing; executor alignment alone does not prove a historical
 timeout mechanism.
 
+A cold directory-publication control consumes the creation trigger's legitimate
+network notification, then requires actual typed local preparation pending with
+no signed inventory head and no new generic network refresh. Drive the retained
+local-maintenance continuation through real publication, without periodic repair
+or synthetic cache readiness. Pending work must survive inventory cursor wraps;
+a deferred group must not prevent other groups on its bounded page from making
+progress. Keep source-change invalidation, abandoned-selector isolation and
+ordinary local-work fairness. The mandatory-wake fixture retains its original
+setup and both five-second publication/policy windows.
+
 Custody recovery must progress independently of unrelated history and fallback
 network waits. Hold an actual unrelated Noise exchange, bind its accepted port
 to the identified recovery parent task and verify that its channel has no
