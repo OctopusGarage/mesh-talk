@@ -928,7 +928,7 @@ async fn reference_message_action(recall: bool) {
     let mut reference_launch = None;
     for (target, listener) in nodes.into_iter().zip(listeners) {
         if target.user_id() != reference.user_id() {
-            let runtime = ActionPeerRuntime::start(target.clone(), listener).await;
+            let runtime = ActionPeerRuntime::start_multithreaded(target.clone(), listener).await;
             if target.user_id() == external.user_id() {
                 external_runtime = Some(runtime.runtime_handle());
             }

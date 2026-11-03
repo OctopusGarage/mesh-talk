@@ -1058,6 +1058,208 @@ pub(in crate::node) mod tests {
         }
     }
 
+    async fn observe_self_control_by_deadline<T>(
+        deadline: tokio::time::Instant,
+        observation: impl std::future::Future<Output = T>,
+    ) -> Result<T, tokio::time::error::Elapsed> {
+        tokio::time::timeout_at(deadline, async {
+            let value = observation.await;
+            // timeout polls its inner future first. A synchronous observation
+            // completing late must not certify timely completion.
+            if tokio::time::Instant::now() > deadline {
+                std::future::pending::<()>().await;
+            }
+            value
+        })
+        .await
+    }
+
+    async fn complete_self_control_phases<T>(
+        action_deadline: tokio::time::Instant,
+        private_receipt: impl std::future::Future<Output = ()>,
+        public_tail: impl std::future::Future<Output = T>,
+        hold_request: bool,
+    ) -> Result<T, tokio::time::error::Elapsed> {
+        observe_self_control_by_deadline(action_deadline, private_receipt).await?;
+        if hold_request {
+            observe_self_control_by_deadline(action_deadline, public_tail).await
+        } else {
+            crate::node::account_group::functional_account_convergence(public_tail).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn functional_self_control_tail_can_follow_private_receipt_beyond_action_deadline() {
+        use futures_util::FutureExt;
+        let (private_entered, private_entered_rx) = tokio::sync::oneshot::channel();
+        let (private_release, private_released) = tokio::sync::oneshot::channel();
+        let (tail_entered, tail_entered_rx) = tokio::sync::oneshot::channel();
+        let (tail_release, tail_released) = tokio::sync::oneshot::channel();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let completion = complete_self_control_phases(
+            deadline,
+            async move {
+                private_entered.send(()).unwrap();
+                private_released.await.unwrap();
+            },
+            async move {
+                tail_entered.send(()).unwrap();
+                tail_released.await.unwrap();
+                "all public predicates observed"
+            },
+            false,
+        );
+        tokio::pin!(completion);
+        let mut completed = None;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::select! {
+                entered = private_entered_rx => entered.unwrap(),
+                result = completion.as_mut() => {
+                    completed = Some(result);
+                    panic!("completion cannot precede the actual private phase entry");
+                }
+            }
+            private_release.send(()).unwrap();
+            tokio::select! {
+                entered = tail_entered_rx => entered.unwrap(),
+                result = completion.as_mut() => {
+                    completed = Some(result);
+                    panic!("completion cannot precede the actual public phase entry");
+                }
+            }
+            tokio::time::advance(std::time::Duration::from_secs(9)).await;
+            completed = completion.as_mut().now_or_never();
+            assert!(
+                completed.is_none(),
+                "a completed private receipt must leave the functional public tail live beyond the action deadline"
+            );
+        })
+        .catch_unwind()
+        .await;
+        // Release and drive the original pinned owner even when the causal
+        // assertion fails; never poll a future whose result was already taken.
+        let _ = tail_release.send(());
+        let result = match completed {
+            Some(result) => result,
+            None => completion.await,
+        };
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        assert_eq!(result.unwrap(), "all public predicates observed");
+    }
+
+    async fn assert_self_control_phase_expiry(
+        hold_request: bool,
+        private_release_before_poll: Option<bool>,
+        release_tail_before_poll: bool,
+    ) {
+        use futures_util::FutureExt;
+        let (private_entered, private_entered_rx) = tokio::sync::oneshot::channel();
+        let (private_release, private_released) = tokio::sync::oneshot::channel();
+        let (tail_entered, mut tail_entered_rx) = tokio::sync::oneshot::channel();
+        let (tail_release, tail_released) = tokio::sync::oneshot::channel();
+        let mut private_release = Some(private_release);
+        let mut tail_release = Some(tail_release);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let completion = complete_self_control_phases(
+            deadline,
+            async move {
+                private_entered.send(()).unwrap();
+                let _ = private_released.await;
+            },
+            async move {
+                let _ = tail_entered.send(());
+                let _ = tail_released.await;
+            },
+            hold_request,
+        );
+        tokio::pin!(completion);
+        let mut completed = None;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::select! {
+                entered = private_entered_rx => entered.unwrap(),
+                result = completion.as_mut() => {
+                    completed = Some(result);
+                    panic!("completion cannot precede actual private entry");
+                }
+            }
+            if let Some(release_before_poll) = private_release_before_poll {
+                tokio::time::advance(std::time::Duration::from_secs(if release_before_poll { 9 } else { 8 })).await;
+                if release_before_poll {
+                    private_release.take().unwrap().send(()).unwrap();
+                }
+                completed = completion.as_mut().now_or_never();
+                assert!(
+                    matches!(completed.as_ref(), Some(Err(_))),
+                    "a held or late-observed private receipt must fail at the original action deadline"
+                );
+                assert!(matches!(tail_entered_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)),
+                    "late private evidence cannot enter the public phase");
+            } else {
+                tokio::time::advance(std::time::Duration::from_secs(3)).await;
+                private_release.take().unwrap().send(()).unwrap();
+                tokio::select! {
+                    entered = &mut tail_entered_rx => entered.unwrap(),
+                    result = completion.as_mut() => {
+                        completed = Some(result);
+                        panic!("completion cannot precede actual public entry");
+                    }
+                }
+                if hold_request {
+                    tokio::time::advance(std::time::Duration::from_secs(if release_tail_before_poll { 6 } else { 5 })).await;
+                    if release_tail_before_poll {
+                        tail_release.take().unwrap().send(()).unwrap();
+                    }
+                } else {
+                    tokio::time::advance(std::time::Duration::from_secs(29)).await;
+                    completed = completion.as_mut().now_or_never();
+                    assert!(completed.is_none(), "the functional budget starts after the actual private receipt");
+                    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+                }
+                completed = completion.as_mut().now_or_never();
+                assert!(matches!(completed.as_ref(), Some(Err(_))),
+                    "the original held-action or functional-convergence deadline must reject missing public completion");
+            }
+        })
+        .catch_unwind()
+        .await;
+        drop(private_release);
+        if let Some(release) = tail_release {
+            let _ = release.send(());
+        }
+        let result = match completed {
+            Some(result) => result,
+            None => completion.await,
+        };
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn self_control_private_receipt_rejects_held_and_late_observation_at_original_deadline() {
+        for hold_request in [false, true] {
+            for release_before_poll in [false, true] {
+                assert_self_control_phase_expiry(hold_request, Some(release_before_poll), false)
+                    .await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_self_control_public_tail_keeps_original_action_deadline() {
+        for release_tail_before_poll in [false, true] {
+            assert_self_control_phase_expiry(true, None, release_tail_before_poll).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn functional_self_control_public_tail_requires_completion_by_convergence_deadline() {
+        assert_self_control_phase_expiry(false, None, false).await;
+    }
+
     type SelfControlPredicate = (bool, Option<usize>, Option<bool>, [Option<bool>; 2]);
     type SelfControlPhaseTrace =
         std::sync::Mutex<std::collections::VecDeque<(u128, &'static str, String)>>;
@@ -1076,6 +1278,7 @@ pub(in crate::node) mod tests {
             &self,
             nodes: &[(&str, std::sync::Arc<Node>)],
             last_predicate: Option<SelfControlPredicate>,
+            phase: &str,
             trace: &SelfControlPhaseTrace,
             operation_trace: &std::sync::Mutex<SelfControlOperationTrace>,
             external_trace: &SelfControlPhaseTrace,
@@ -1095,7 +1298,7 @@ pub(in crate::node) mod tests {
                 .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
                 .map_err(|_| "external trace mutex poisoned");
             let original = format!(
-                "self control original deadline expired: predicates={last_predicate:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?}"
+                "self control phase deadline expired: phase={phase} predicates={last_predicate:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?}"
             );
             eprintln!("{original}");
             let group = self.group;
@@ -1249,8 +1452,9 @@ pub(in crate::node) mod tests {
                 "owner",
                 effect_marker.clone(),
             )]));
-            let original_prefix =
-                format!("self control original deadline expired: predicates=Some({predicate:?})");
+            let original_prefix = format!(
+                "self control phase deadline expired: phase=public_convergence predicates=Some({predicate:?})"
+            );
             let diagnostics = SelfControlFailureDiagnostics {
                 owner: &owner,
                 executor: &executor,
@@ -1262,6 +1466,7 @@ pub(in crate::node) mod tests {
             .report(
                 &[("ready", executor.clone()), ("pending", owner.clone())],
                 Some(predicate),
+                "public_convergence",
                 &trace,
                 &operation_trace,
                 &external_trace,
@@ -1305,6 +1510,7 @@ pub(in crate::node) mod tests {
             .report(
                 &[("ready", executor.clone()), ("pending", owner.clone())],
                 Some(predicate),
+                "public_convergence",
                 &trace,
                 &operation_trace,
                 &external_trace,
@@ -2259,9 +2465,46 @@ pub(in crate::node) mod tests {
             }
         );
         let event_kind = input.event_kind();
-        let remaining = operation_budget.saturating_sub(admission_started.elapsed());
+        let action_deadline = admission_started + operation_budget;
+        let mut last_private_predicate = None;
+        let mut private_committed_at = None;
+        let private_receipt = async {
+            loop {
+                let status = reference
+                    .account_group_operation_status(&shared.account_id(), id)
+                    .unwrap();
+                let predicate = (
+                    status.as_ref().is_some_and(|status| {
+                        status.phase == AccountGroupOperationPhase::Committed
+                    }),
+                    status.as_ref().map(|status| status.committed_events.len()),
+                    None,
+                    [None, None],
+                );
+                if last_private_predicate != Some(predicate) {
+                    operation_trace.lock().unwrap().record(
+                        "reference",
+                        format!("private_receipt_predicates={predicate:?}"),
+                    );
+                    last_private_predicate = Some(predicate);
+                }
+                if predicate.0 && predicate.1 == Some(1) {
+                    private_committed_at = Some(std::time::Instant::now());
+                    operation_trace
+                        .lock()
+                        .unwrap()
+                        .record("reference", "private_committed".to_owned());
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
         let mut last_predicate = None;
-        let convergence = tokio::time::timeout(remaining, async {
+        let public_tail = async {
+            operation_trace
+                .lock()
+                .unwrap()
+                .record("reference", "public_convergence_started".to_owned());
             let mut previous_phase = None;
             loop {
                 let phase = executor
@@ -2293,33 +2536,43 @@ pub(in crate::node) mod tests {
                     .is_some_and(|status| {
                         requester_committed = status.phase == AccountGroupOperationPhase::Committed;
                         committed_count = Some(status.committed_events.len());
-                        requester_committed
-                            && status.committed_events.len() == 1
-                            && {
-                                let present = status.committed_events.iter().all(|event| {
-                                    owner.log.lock().unwrap().get(event).unwrap().is_some()
-                                });
-                                external_present = Some(present);
-                                present
-                            }
+                        requester_committed && status.committed_events.len() == 1 && {
+                            let present = status.committed_events.iter().all(|event| {
+                                owner.log.lock().unwrap().get(event).unwrap().is_some()
+                            });
+                            external_present = Some(present);
+                            present
+                        }
                     })
-                    && [&reference, &executor].into_iter().enumerate().all(|(index, node)| {
-                        let matches = match node.account_group_access(group) {
-                            Ok(access) => {
-                                access.role
-                                    == if accepted_after {
-                                        AccountGroupRole::Member
-                                    } else {
-                                        AccountGroupRole::Left
-                                    }
-                            }
-                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
-                            Err(error) => panic!("self-control role observation failed: {error}"),
-                        };
-                        role_ready[index] = Some(matches);
-                        matches
-                    });
-                let predicate = (requester_committed, committed_count, external_present, role_ready);
+                    && [&reference, &executor]
+                        .into_iter()
+                        .enumerate()
+                        .all(|(index, node)| {
+                            let matches = match node.account_group_access(group) {
+                                Ok(access) => {
+                                    access.role
+                                        == if accepted_after {
+                                            AccountGroupRole::Member
+                                        } else {
+                                            AccountGroupRole::Left
+                                        }
+                                }
+                                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                                    false
+                                }
+                                Err(error) => {
+                                    panic!("self-control role observation failed: {error}")
+                                }
+                            };
+                            role_ready[index] = Some(matches);
+                            matches
+                        });
+                let predicate = (
+                    requester_committed,
+                    committed_count,
+                    external_present,
+                    role_ready,
+                );
                 if last_predicate != Some(predicate) {
                     operation_trace.lock().unwrap().record("reference", format!(
                         "convergence_predicates requester_committed={} committed_count={:?} external_present={:?} roles_reference_executor={:?}",
@@ -2357,8 +2610,23 @@ pub(in crate::node) mod tests {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        })
+        };
+        let convergence = complete_self_control_phases(
+            tokio::time::Instant::from_std(action_deadline),
+            private_receipt,
+            public_tail,
+            hold_request,
+        )
         .await;
+        let last_predicate = last_predicate.or(last_private_predicate);
+        let failed_phase = if private_committed_at.is_none_or(|observed| observed > action_deadline)
+        {
+            "private_receipt"
+        } else if hold_request {
+            "held_action"
+        } else {
+            "public_convergence"
+        };
         let held_request_flags = request_hold.as_ref().map(|hold| hold.flags());
         if convergence.is_err() {
             let listeners_finished: Vec<_> = handles
@@ -2376,6 +2644,7 @@ pub(in crate::node) mod tests {
             .report(
                 &nodes,
                 last_predicate,
+                failed_phase,
                 &trace,
                 &operation_trace,
                 &external_trace,

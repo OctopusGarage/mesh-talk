@@ -33,7 +33,7 @@ async fn cold_account_setup<T>(
 
 // Functional provenance/convergence watchdog shared with explicit message
 // actions. Dedicated operation receipt and held-progress latency stay separate.
-async fn functional_account_convergence<T>(
+pub(in crate::node) async fn functional_account_convergence<T>(
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, tokio::time::error::Elapsed> {
     tokio::time::timeout(std::time::Duration::from_secs(30), future).await
@@ -1570,8 +1570,11 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         .zip(listeners)
     {
         if target.user_id() != reference.user_id() {
-            let runtime =
-                message_action_reference::ActionPeerRuntime::start(target.clone(), listener).await;
+            let runtime = message_action_reference::ActionPeerRuntime::start_multithreaded(
+                target.clone(),
+                listener,
+            )
+            .await;
             if target.user_id() == external.user_id() {
                 external_runtime = Some(runtime.runtime_handle());
             }

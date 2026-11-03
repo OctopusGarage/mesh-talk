@@ -618,8 +618,20 @@ capability and role readiness before admission, matching the existing owner-rena
 setup boundary. This is a bounded setup watchdog, not an operation latency claim:
 retain every full-identity capability and signed-provenance predicate, record
 setup duration and complete/capacity diagnostics, and keep the independent
-admitted-action deadline at eight seconds. The archive-marker setup and dedicated
-held-traffic latency assertions also retain their existing eight-second bounds.
+private admitted-action deadline at eight seconds, including a validated Committed
+receipt with exactly one original effect. The three ordinary Accept/Decline/Leave
+functional rigs then observe the external owner's exact effect, both canonical
+roles and the first ready history through the existing post-receipt
+`functional_account_convergence` owner. This is an explicit phase-contract
+correction: those public convergence and reopen assertions are functional
+acceptance, not an eight-second end-to-end latency SLA. The dedicated held-request
+rig keeps its complete compound public/history predicate inside the original
+absolute eight seconds. Paused controls must reject a late private receipt and a
+late held tail, keep a functional tail pending beyond the action cutoff only after
+its private receipt, and fail an uncompleted functional tail at its owner bound.
+Use actual phase-entry and completion gates; advancing time cannot certify any
+business predicate. The archive-marker setup, real Noise-fault operation cases
+and dedicated held-traffic latency assertions retain their existing bounds.
 Cold authentication and control exchanges keep their production network limits.
 
 Reference self-control fixtures hold requester-side public membership recovery
@@ -878,8 +890,11 @@ assertion. A failed cold connection must not silently remove the fixture's only
 remaining preparation path.
 The six simulated gossip hosts use the shared independent-peer runtime owner's
 explicit two-worker Tokio mode, matching the real CLI's multi-thread host.
-Account-action fixtures retain that owner's single-thread mode where scheduling
-is part of their controlled boundary. Bind every listener before launching owners.
+Ordinary React/Recall and Rename remote hosts use the same two-worker mode,
+including the external node's post-commit authenticated public receipt. Their
+reference coordinator retains its current-thread synchronous capability-override
+boundary. Deliberate held-reactor and negative scheduler controls retain the
+owner's single-thread mode. Bind every listener before launching owners.
 Require real exact-peer Noise authentication while one worker of the same
 multi-thread host remains synchronously held. The corresponding single-thread
 control must keep that actual authentication pending until release; a task
@@ -1054,8 +1069,8 @@ still live when the canonical partial-page corpus is published. These observatio
 stay within the existing cold budget and issue no extra requests; preserve the
 real signed exchange, protected-resume checks and operation/recovery deadlines.
 
-Except for the explicitly classified queued post-receipt functional convergence
-phase above, once the original operation is admitted, or the external possession
+Except for the explicitly classified queued and ordinary self-control post-receipt
+functional convergence phases above, once the original operation is admitted, or the external possession
 proof starts, the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
 Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
