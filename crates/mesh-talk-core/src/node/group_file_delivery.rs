@@ -466,21 +466,31 @@ impl Node {
                                                 return;
                                             }
                                         }
-                                        let chunks = match self
-                                            .log
-                                            .lock()
-                                            .expect("log lock")
-                                            .events(&job.file) { Ok(chunks) => chunks, Err(error) => { log::warn!("Group file completion deferred after storage failure: {error}"); return; } };
-                                        let final_chunk = chunks.last().map(|event| event.id);
-                                        if let Some((_, outer)) = progress
-                                            .uploaded()
-                                            .iter()
-                                            .find(|(inner, _)| Some(*inner) == final_chunk)
+                                        // Chunk sequences are one-based and this job is
+                                        // restricted to our original signed file. Resolve
+                                        // its final header without hydrating every chunk.
+                                        let final_chunk = (|| -> Result<Option<EventId>, LogError> {
+                                            let Some(retention) = self.files.lock().expect("files lock")
+                                                .retention_for(job.file)? else { return Ok(None); };
+                                            Ok(self.log.lock().expect("log lock").repository()?
+                                                .authored_header(
+                                                    &job.file,
+                                                    crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                                                    u64::from(retention.chunks),
+                                                )?
+                                                .filter(|header| header.kind == EventKind::Message)
+                                                .map(|header| header.id))
+                                        })();
+                                        let final_chunk = match final_chunk {
+                                            Ok(chunk) => chunk,
+                                            Err(error) => { log::warn!("Group file completion deferred after storage failure: {error}"); return; }
+                                        };
+                                        if let Some(outer) = final_chunk.and_then(|inner| self.opaque_confirmed_wrapper(&progress, inner).ok().flatten())
                                             && matches!(
                                                 super::session::request_durable_have(
                                                     &mut channel,
                                                     mailbox_id,
-                                                    *outer
+                                                    outer
                                                 )
                                                 .await,
                                                 Ok(true)

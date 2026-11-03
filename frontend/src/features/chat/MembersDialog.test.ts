@@ -765,33 +765,77 @@ it("does not carry a dissolution confirmation into another channel", async () =>
   }
 });
 
-it("does not show the previous channel's activity while the new channel loads", async () => {
+it("does not show the previous channel's activity while the new channel loads", async ({
+  onTestFailed,
+}) => {
+  let finishPrevious!: (items: ChannelActivityInfo[]) => void;
+  let finishCurrent!: (items: ChannelActivityInfo[]) => void;
+  const previous = new Promise<ChannelActivityInfo[]>((resolve) => {
+    finishPrevious = resolve;
+  });
+  const current = new Promise<ChannelActivityInfo[]>((resolve) => {
+    finishCurrent = resolve;
+  });
   channelApi.channelActivity.mockImplementation((channelId: string) =>
-    channelId === "channel"
-      ? Promise.resolve([
-          {
-            kind: "created" as const,
-            actor: "owner-device",
-            target: null,
-            wall_clock: 1,
-          },
-        ])
-      : new Promise(() => {}),
+    channelId === "channel" ? previous : current,
   );
+  let stage = "render previous channel";
+  onTestFailed(() => {
+    console.error("members activity fixture", {
+      stage,
+      channel: chatState.active.id,
+      previousRequests: channelApi.channelActivity.mock.calls.filter(
+        ([id]) => id === "channel",
+      ).length,
+      currentRequests: channelApi.channelActivity.mock.calls.filter(
+        ([id]) => id === "other",
+      ).length,
+    });
+  });
   const container = document.createElement("div");
   const root = createRoot(container);
+  const openSettings = () => {
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="group-settings-trigger"]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => trigger!.click());
+  };
   try {
-    await act(async () => root.render(createElement(MembersDialog)));
-    await act(async () => dialog.onOpenChange?.(true));
-    await openGroupSettings(container);
+    act(() => root.render(createElement(MembersDialog)));
+    act(() => dialog.onOpenChange?.(true));
+    openSettings();
+    expect(channelApi.channelActivity).toHaveBeenCalledWith("channel");
+    stage = "deliver previous channel activity";
+    await act(async () => {
+      finishPrevious([
+        { kind: "created", actor: "owner-device", target: null, wall_clock: 1 },
+      ]);
+      await previous;
+    });
     expect(container.textContent).toContain("Me created this channel");
 
+    stage = "switch to pending current channel";
     chatState.active = { kind: "channel", id: "other", name: "Other" };
-    await act(async () => root.render(createElement(MembersDialog)));
-    await openGroupSettings(container);
+    act(() => root.render(createElement(MembersDialog)));
+    openSettings();
+    expect(channelApi.channelActivity).toHaveBeenCalledWith("other");
+    expect(container.textContent).not.toContain("Me created this channel");
+
+    stage = "deliver current channel activity";
+    await act(async () => {
+      finishCurrent([
+        { kind: "created", actor: "peer-device", target: null, wall_clock: 2 },
+      ]);
+      await current;
+    });
+    expect(container.textContent).toContain("Alice created this channel");
     expect(container.textContent).not.toContain("Me created this channel");
   } finally {
-    await act(async () => root.unmount());
+    act(() => root.unmount());
+    finishPrevious([]);
+    finishCurrent([]);
+    await Promise.all([previous, current]);
   }
 });
 

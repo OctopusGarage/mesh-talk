@@ -2479,3 +2479,59 @@ fn runtime_completion_hands_off_only_removed_work_with_a_remaining_lane() {
     assert!(fixture.store.next_runtime(None).unwrap().is_none());
     assert!(!fixture.store.finish_runtime(second, None).unwrap());
 }
+
+#[test]
+fn channel_legacy_scan_rejects_cursor_beyond_actual_source_before_body_reads() {
+    use crate::eventlog::{
+        repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
+        sync::network::PreparationBudget,
+    };
+    let fixture = Fixture::new(2);
+    let repository = fixture.log.repository().unwrap();
+    for _ in 0..128 {
+        if repository
+            .order_step(
+                &fixture.channel,
+                CausalOrder::Logical,
+                OrderWorkBudget::default(),
+            )
+            .unwrap()
+            .readiness
+            == OrderReadiness::Ready
+        {
+            break;
+        }
+    }
+    let generation = repository
+        .order_generation(&fixture.channel, CausalOrder::Logical)
+        .unwrap()
+        .expect("fixture order must be ready before cursor corruption");
+    let next = i64::try_from(generation.count).unwrap() + 1;
+    fixture
+        .store
+        .profile
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "INSERT INTO channel_legacy_scan VALUES(?1,?2,?3,0)",
+                params![
+                    generation.job.as_slice(),
+                    fixture.channel.as_bytes().as_slice(),
+                    next
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let before = repository.body_read_counts();
+    assert!(matches!(
+        fixture.store.project_step_with_budget(
+            repository,
+            &fixture.me,
+            fixture.channel,
+            PreparationBudget::default(),
+        ),
+        Err(LogError::StaleCursor)
+    ));
+    assert_eq!(repository.body_read_counts(), before);
+}

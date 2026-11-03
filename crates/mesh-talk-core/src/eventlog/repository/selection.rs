@@ -199,6 +199,140 @@ impl EventRepository {
             self.network_export_selected_on(c, view, have, after, budget, Some(&selection.id))
         })
     }
+
+    /// Read only the finite selected rank suffix after the existing export
+    /// closure worker has committed its outgoing flags. Gaps and rejected rows
+    /// advance the cursor without loading bodies or replaying the old prefix.
+    pub(crate) fn selected_upload_id_rank_page(
+        &self,
+        selection: &Selection,
+        view: &NetworkView,
+        after_rank: i64,
+        upper: u64,
+        budget: IdPageBudget,
+    ) -> Result<(Vec<EventId>, i64, bool), LogError> {
+        budget.validate()?;
+        let upper = i64::try_from(upper).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        if after_rank < -1 || after_rank >= upper.max(0) {
+            return Err(LogError::StaleCursor);
+        }
+        self.database.read(|c| {
+            self.require_selection_on(c,selection)?;
+            self.validate_network_on(c,view)?;
+            let mut stmt=c.prepare_cached("SELECT id,rank,outgoing FROM participant_sync_rows WHERE view=?1 AND rank>?2 AND rank<?3 ORDER BY rank LIMIT ?4")?;
+            let mut rows=stmt.query(params![selection.id.as_slice(),after_rank,upper,crate::eventlog::sync::network::scan_limit(budget.examined)?])?;
+            let mut ids=Vec::new();let mut examined=0;let mut cursor=after_rank;
+            while let Some(row)=rows.next()? {
+                if examined==budget.examined || ids.len()==budget.ids { return Ok((ids,cursor,false)); }
+                if row.get::<_,bool>(2)? {ids.push(EventId::new(blob(row,0)?));}
+                cursor=nonnegative(row.get(1)?)?;examined+=1;
+            }
+            Ok((ids,upper-1,true))
+        })
+    }
+
+    pub(crate) fn selected_upload_contains(
+        &self,
+        selection: &Selection,
+        view: &NetworkView,
+        id: EventId,
+        upper: u64,
+    ) -> Result<bool, LogError> {
+        let upper = i64::try_from(upper).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        self.database.read(|c| {
+            self.require_selection_on(c,selection)?;
+            self.validate_network_on(c,view)?;
+            c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2 AND rank<?3 AND outgoing=1)",params![selection.id.as_slice(),id.as_bytes().as_slice(),upper],|r|r.get(0)).map_err(Into::into)
+        })
+    }
+
+    pub(crate) fn selected_upload_event(
+        &self,
+        selection: &Selection,
+        view: &NetworkView,
+        id: EventId,
+        upper: u64,
+        max_bytes: usize,
+    ) -> Result<Option<Event>, LogError> {
+        if max_bytes == 0 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        let upper = i64::try_from(upper).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        self.database.read(|c| {
+            self.require_selection_on(c,selection)?;
+            self.validate_network_on(c,view)?;
+            let allowed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2 AND rank<?3 AND outgoing=1)",params![selection.id.as_slice(),id.as_bytes().as_slice(),upper],|r|r.get(0))?;
+            if !allowed {return Ok(None);}
+            let header=self.network_header_on(c,&id)?;
+            if header.conversation!=view.binding.conversation {return Err(corrupt("selected upload conversation differs"));}
+            if header.encoded_bytes>max_bytes {return Err(LogError::PageBudgetTooSmall{required:header.encoded_bytes});}
+            self.get_on(c,&id)?.map(Some).ok_or_else(||corrupt("selected upload body disappeared"))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_upload_rank_page(
+        &self,
+        selection: &Selection,
+        view: &NetworkView,
+        after_rank: i64,
+        upper: u64,
+        budget: ExportPageBudget,
+    ) -> Result<(Vec<Event>, i64, bool), LogError> {
+        budget.validate()?;
+        let upper = i64::try_from(upper).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        if after_rank < -1 || after_rank >= upper.max(0) {
+            return Err(LogError::StaleCursor);
+        }
+        self.database.read(|c| {
+            self.require_selection_on(c, selection)?;
+            self.validate_network_on(c, view)?;
+            let mut stmt = c.prepare_cached("SELECT id,rank,outgoing FROM participant_sync_rows WHERE view=?1 AND rank>?2 AND rank<?3 ORDER BY rank LIMIT ?4")?;
+            let mut rows = stmt.query(params![selection.id.as_slice(),after_rank,upper,crate::eventlog::sync::network::scan_limit(budget.examined)?])?;
+            let mut events = Vec::new();
+            let mut examined = 0;
+            let mut cursor = after_rank;
+            let mut encoded_bytes = 0usize;
+            let mut allocated_bytes = 0usize;
+            while let Some(row) = rows.next()? {
+                if examined == budget.examined || events.len() == budget.events {
+                    return Ok((events, cursor, false));
+                }
+                let id = EventId::new(blob(row, 0)?);
+                let rank = nonnegative(row.get(1)?)?;
+                if row.get::<_, bool>(2)? {
+                    let header = self.network_header_on(c, &id)?;
+                    if header.conversation != view.binding.conversation {
+                        return Err(corrupt("selected upload conversation differs"));
+                    }
+                    let allocation = header.stored_bytes.checked_mul(3)
+                        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Event>()))
+                        .ok_or(LogError::RepositoryCounterExhausted)?;
+                    let encoded = encoded_bytes.checked_add(header.encoded_bytes)
+                        .ok_or(LogError::RepositoryCounterExhausted)?;
+                    let allocated = allocated_bytes.checked_add(allocation)
+                        .ok_or(LogError::RepositoryCounterExhausted)?;
+                    if encoded > budget.encoded_bytes || allocated > budget.allocated_bytes {
+                        if events.is_empty() {
+                            return Err(LogError::PageBudgetTooSmall { required:
+                                if encoded > budget.encoded_bytes { header.encoded_bytes } else { allocation }
+                            });
+                        }
+                        return Ok((events, cursor, false));
+                    }
+                    let event = self.get_on(c, &id)?
+                        .ok_or_else(|| corrupt("selected upload body disappeared"))?;
+                    events.reserve_exact(1);
+                    events.push(event);
+                    encoded_bytes = encoded;
+                    allocated_bytes = allocated;
+                }
+                examined += 1;
+                cursor = rank;
+            }
+            Ok((events, upper - 1, true))
+        })
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ use crate::eventlog::sync::{
 use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
 mod backend;
 mod have_budget;
+pub(crate) mod mailbox;
 use backend::*;
 use bincode::Options;
 pub use have_budget::RemoteHaveBudget;

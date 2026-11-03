@@ -120,6 +120,45 @@ impl ChannelCheckpointStore {
         })?;
         Ok(Some(reducer.finish()))
     }
+
+    /// A network-only prepared prefix is not a published current channel.
+    /// Its owner validates unchanged raw controls/destructive state each turn.
+    pub(in crate::node) fn network_prefix_projection(
+        &self,
+        channel: ConversationId,
+        target: crate::eventlog::repository::order::OrderGeneration,
+    ) -> Result<Option<super::super::ChannelMembershipProjection>, LogError> {
+        let count =
+            i64::try_from(target.count).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        let covered:bool=self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            super::super::graph::require_source_prefix_on(c,channel,target.job,target.source_revision)?;
+            c.query_row("SELECT COALESCE((SELECT next_rank FROM channel_projection_work WHERE job=?1 AND channel=?2),0)>=?3",params![target.job.as_slice(),channel.as_bytes().as_slice(),count],|r|r.get(0)).map_err(Into::into)
+        })?;
+        if !covered {
+            return Ok(None);
+        }
+        let (reducer, next) = super::super::projection_facts::ProjectionFacts::load(
+            self.profile.clone(),
+            target.job,
+            channel,
+        )?;
+        if next < count {
+            return Err(LogError::StaleCursor);
+        }
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            super::super::graph::require_source_prefix_on(
+                c,
+                channel,
+                target.job,
+                target.source_revision,
+            )
+        })?;
+        let mut projection = reducer.finish();
+        projection.allow_network_prefix();
+        Ok(Some(projection))
+    }
     /// Per-source work remains on disk; only one current conversation is held
     /// while the scheduler advances its canonical reducer.
     #[cfg(test)]

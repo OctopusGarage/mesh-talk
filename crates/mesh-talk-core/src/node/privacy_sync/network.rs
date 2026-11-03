@@ -14,7 +14,38 @@ use crate::eventlog::{
 };
 use std::sync::{Mutex, atomic::Ordering};
 
-#[derive(Clone, PartialEq, Eq)]
+/// Exact local history and authorization observation, not mailbox completion.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(in crate::node) struct HistorySyncStamp {
+    fingerprint: [u8; 32],
+}
+
+/// One bounded runtime cache entry. Its existing SQL selection and profile
+/// lease stay owned until this entry is evicted; no guard crosses an await.
+pub(in crate::node) struct HistoryUpload {
+    view: ParticipantView,
+    binding: crate::eventlog::repository::network::HistorySyncBinding,
+    peer: PublicIdentity,
+    inbound: bool,
+    pull_only: bool,
+    export_initialized: Mutex<bool>,
+    export_ready: Mutex<bool>,
+}
+
+#[cfg(test)]
+pub(in crate::node) struct HistoryUploadPage {
+    pub(in crate::node) events: Vec<Event>,
+    pub(in crate::node) next_rank: i64,
+    pub(in crate::node) complete: bool,
+}
+
+pub(in crate::node) struct HistoryUploadIdPage {
+    pub(in crate::node) ids: Vec<EventId>,
+    pub(in crate::node) next_rank: i64,
+    pub(in crate::node) complete: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
 pub(super) struct Policy {
     privacy_generation: u64,
     pending: [u8; 32],
@@ -22,7 +53,7 @@ pub(super) struct Policy {
     pub(super) sibling: bool,
     device_policy: u64,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
 struct Observation {
     source: i64,
     destructive_policy: i64,
@@ -72,6 +103,404 @@ pub(in crate::node) struct ParticipantExportCursor {
     have: [u8; 32],
 }
 impl GuardedSyncStore<'_> {
+    pub(in crate::node) fn history_upload_id_page(
+        &self,
+        upload: &HistoryUpload,
+        after_rank: i64,
+        budget: IdPageBudget,
+    ) -> Result<HistoryUploadIdPage, LogError> {
+        budget.validate()?;
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let (ids, next_rank, complete) = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_id_rank_page(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    after_rank,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                    budget,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(HistoryUploadIdPage {
+            ids,
+            next_rank,
+            complete,
+        })
+    }
+
+    pub(in crate::node) fn history_upload_event(
+        &self,
+        upload: &HistoryUpload,
+        id: EventId,
+        max_bytes: usize,
+    ) -> Result<Option<Event>, LogError> {
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let event = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_event(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    id,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                    max_bytes,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(event)
+    }
+
+    pub(in crate::node) fn history_upload_contains(
+        &self,
+        upload: &HistoryUpload,
+        id: EventId,
+    ) -> Result<bool, LogError> {
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let contains = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_contains(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    id,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(contains)
+    }
+
+    pub(in crate::node) fn open_history_upload(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<HistoryUpload, LogError> {
+        let view = NetworkSyncStore::open_view(self, conversation)?;
+        // Connection-staged invitation ancestry belongs to that connection's
+        // bounded exchange, not a reusable retained-history upload.
+        if !view.pending.is_empty() {
+            return Err(LogError::StaleCursor);
+        }
+        let binding = view.repository.history_binding.clone();
+        view.preparation
+            .lock()
+            .expect("view preparation lock")
+            .enable_history_upload();
+        let upload = HistoryUpload {
+            view,
+            binding,
+            peer: self.peer.clone(),
+            inbound: self.inbound,
+            pull_only: self.pull_only,
+            export_initialized: Mutex::new(false),
+            export_ready: Mutex::new(false),
+        };
+        self.validate_history_upload(&upload)?;
+        Ok(upload)
+    }
+
+    pub(in crate::node) fn validate_history_upload(
+        &self,
+        upload: &HistoryUpload,
+    ) -> Result<(), LogError> {
+        if upload.peer != self.peer
+            || upload.inbound != self.inbound
+            || upload.pull_only != self.pull_only
+        {
+            return Err(LogError::StaleCursor);
+        }
+        self.validate_view(&upload.view)?;
+        let captured = upload
+            .view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .history_generation();
+        if let Some(captured) = captured {
+            let current = self
+                .node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .order_generation(
+                    &upload.view.conversation,
+                    crate::eventlog::repository::order::CausalOrder::Logical,
+                )?;
+            if !current.is_some_and(|current| {
+                current.job == captured.job && current.count >= captured.count
+            }) {
+                return Err(LogError::StaleCursor);
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::node) fn prepare_history_upload_step(
+        &self,
+        upload: &HistoryUpload,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_history_upload(upload)?;
+        let view = &upload.view;
+        let ready = view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready();
+        let export_initialized = *upload
+            .export_initialized
+            .lock()
+            .expect("upload export lock");
+        let mut step = if !ready {
+            let mut step = NetworkSyncStore::prepare_view_step(self, view, budget)?;
+            // The outgoing parent closure is a separate bounded phase. Never
+            // hand off partially computed sibling/share-off flags.
+            step.ready = false;
+            step
+        } else if !export_initialized {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            let mut step = self
+                .node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .reset_selected_export_step(preparation.selection()?, &view.repository, budget)?;
+            if step.ready {
+                *upload
+                    .export_initialized
+                    .lock()
+                    .expect("upload export lock") = true;
+            }
+            step.ready = false;
+            step
+        } else {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_export_step(
+                    preparation.selection()?,
+                    &view.repository,
+                    view.sibling_closure,
+                    !self.inbound && !preparation.replica_shared,
+                    budget,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        if step.ready {
+            *upload.export_ready.lock().expect("upload export lock") = true;
+        }
+        // Reading an already ready entry spends no extra rows.
+        step.ready |= *upload.export_ready.lock().expect("upload export lock");
+        Ok(step)
+    }
+
+    pub(in crate::node) fn resume_history_upload(
+        &self,
+        upload: &mut HistoryUpload,
+    ) -> Result<bool, LogError> {
+        if upload.peer != self.peer
+            || upload.inbound != self.inbound
+            || upload.pull_only != self.pull_only
+            || !*upload.export_ready.lock().expect("upload export lock")
+        {
+            return Ok(false);
+        }
+        match self.validate_history_upload(upload) {
+            Ok(()) => {}
+            Err(LogError::StaleCursor | LogError::ConversationRetiring) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let conversation = upload.view.conversation;
+        let (repository, binding, generation) = {
+            let log = self.node.log.lock().expect("log lock");
+            let source = log.repository()?;
+            (
+                NetworkSyncStore::open_view(source, &conversation)?,
+                source.history_sync_binding(&conversation)?,
+                source.order_generation(
+                    &conversation,
+                    crate::eventlog::repository::order::CausalOrder::Logical,
+                )?,
+            )
+        };
+        if binding == upload.binding {
+            return Ok(true);
+        }
+        {
+            let mut preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.resume_history(generation) {
+                return Ok(false);
+            }
+        }
+        upload.view.repository = repository;
+        upload.binding = binding;
+        *upload.export_ready.lock().expect("upload export lock") = false;
+        self.validate_history_upload(upload)?;
+        upload
+            .view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .save_history_progress(self, &upload.view)?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn history_upload_page(
+        &self,
+        upload: &HistoryUpload,
+        after_rank: i64,
+        budget: ExportPageBudget,
+    ) -> Result<HistoryUploadPage, LogError> {
+        budget.validate()?;
+        self.validate_history_upload(upload)?;
+        if !*upload.export_ready.lock().expect("upload export lock") {
+            return Err(LogError::StaleCursor);
+        }
+        let (events, next_rank, complete) = {
+            let preparation = upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_upload_rank_page(
+                    preparation.selection()?,
+                    &upload.view.repository,
+                    after_rank,
+                    preparation
+                        .history_generation()
+                        .map_or(0, |generation| generation.count),
+                    budget,
+                )?
+        };
+        self.validate_history_upload(upload)?;
+        Ok(HistoryUploadPage {
+            events,
+            next_rank,
+            complete,
+        })
+    }
+
+    pub(in crate::node) fn history_sync_stamp(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Option<HistorySyncStamp>, LogError> {
+        use sha2::{Digest, Sha256};
+        let policy = self.network_policy(conversation)?;
+        let mut observation = self.network_observation(conversation)?;
+        if observation.controls.is_none() {
+            // Backfill belongs to bounded session preparation; a cold index
+            // never supplies evidence that policy history is unchanged.
+            return Ok(None);
+        }
+        let binding = self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .history_sync_binding(conversation)?;
+        // Ordinary appends in another conversation do not affect this source.
+        // Global raw controls and destructive dependencies remain exact fences.
+        observation.source = 0;
+        let mut after = self.network_observation(conversation)?;
+        after.source = 0;
+        let current_binding = self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .history_sync_binding(conversation)?;
+        if observation != after
+            || binding != current_binding
+            || !self.policy_unchanged(conversation, &policy)
+        {
+            return Ok(None);
+        }
+        let bytes = bincode::serialize(&(
+            binding,
+            &self.peer,
+            self.node.identity.public(),
+            self.node.account_id(),
+            policy,
+            observation,
+            self.pull_only,
+            self.inbound,
+        ))
+        .map_err(|error| LogError::Serialization(error.to_string()))?;
+        Ok(Some(HistorySyncStamp {
+            fingerprint: Sha256::digest(bytes).into(),
+        }))
+    }
+
     fn network_policy(&self, conversation: &ConversationId) -> Result<Policy, LogError> {
         Ok(Policy {
             privacy_generation: self.node.privacy.generation.load(Ordering::SeqCst),
@@ -557,6 +986,9 @@ fn open_prepared(store: &GuardedSyncStore<'_>, conversation: &ConversationId) ->
 }
 
 #[cfg(test)]
+mod incremental_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -564,6 +996,37 @@ mod tests {
         discovery::Announce,
         identity::{account::Account, device::DeviceIdentity},
     };
+
+    pub(super) fn prepare_upload(store: &GuardedSyncStore<'_>, upload: &HistoryUpload) -> usize {
+        let mut rows = 0;
+        for _ in 0..10_000 {
+            let budget = PreparationBudget {
+                rows: 8,
+                edges: 16,
+                bytes: 65536,
+            };
+            let step = store.prepare_history_upload_step(upload, budget).unwrap();
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes
+            );
+            rows += step.rows;
+            if step.ready {
+                return rows;
+            }
+        }
+        panic!("history upload preparation failed to progress");
+    }
+
+    pub(super) fn upload_page_budget() -> ExportPageBudget {
+        ExportPageBudget {
+            examined: 16,
+            events: 16,
+            encoded_bytes: 65536,
+            allocated_bytes: 262144,
+        }
+    }
 
     fn prepare_export(
         store: &GuardedSyncStore<'_>,
@@ -589,7 +1052,7 @@ mod tests {
         {}
     }
 
-    fn collect(
+    pub(super) fn collect(
         store: &GuardedSyncStore<'_>,
         view: &ParticipantView,
         have: &HashSet<EventId>,
@@ -1443,6 +1906,15 @@ mod tests {
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
         let view = open_prepared(&store, &conversation);
+        let mut upload = store.open_history_upload(&conversation).unwrap();
+        prepare_upload(&store, &upload);
+        let initial_upload = store
+            .history_upload_page(&upload, -1, upload_page_budget())
+            .unwrap();
+        assert!(
+            initial_upload.events.is_empty() && initial_upload.complete,
+            "sibling upload must retain the missing history-parent fence"
+        );
         for (have, expected) in [
             (HashSet::new(), vec![]),
             (HashSet::from([a.id]), vec![b.id, c.id]),
@@ -1500,6 +1972,29 @@ mod tests {
             ),
             Err(LogError::StaleCursor)
         ));
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(Event::new(
+                &node.identity,
+                conversation,
+                4,
+                vec![c.id],
+                101,
+                0,
+                EventKind::FileManifest,
+                vec![4],
+            ))
+            .unwrap();
+        assert!(store.resume_history_upload(&mut upload).unwrap());
+        prepare_upload(&store, &upload);
+        let blocked = store
+            .history_upload_page(&upload, initial_upload.next_rank, upload_page_budget())
+            .unwrap();
+        assert!(
+            blocked.events.is_empty() && blocked.complete,
+            "resumed sibling closure must not release a tail with an excluded ancestor"
+        );
         node.set_device_sync_category(crate::node::SyncCategory::Attachments, false)
             .unwrap();
         assert!(matches!(
@@ -1750,6 +2245,20 @@ mod tests {
         assert_eq!(
             collect(&store, &view, &HashSet::new()),
             vec![genesis.id, share_off.id]
+        );
+        let upload = store.open_history_upload(&conversation).unwrap();
+        prepare_upload(&store, &upload);
+        let upload_page = store
+            .history_upload_page(&upload, -1, upload_page_budget())
+            .unwrap();
+        assert_eq!(
+            upload_page
+                .events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![genesis.id, share_off.id],
+            "upload retains the existing share-off parent closure"
         );
         assert_eq!(
             collect(

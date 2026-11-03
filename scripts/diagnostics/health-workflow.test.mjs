@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { versions } from "../ci/windows-coverage.mjs";
 
 test("full health builds frontend before Tauri compilation on a fresh checkout", () => {
   const script = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
@@ -57,7 +58,7 @@ test("native workspace test passes collect and upload their own platform coverag
   const upload = steps.find(value => value.startsWith("name: Upload coverage to Codecov\n"));
   assert.ok(install && native && upload);
   assert.doesNotMatch(install, /if:/, "every native test platform needs the coverage tool");
-  assert.match(install, /cargo-llvm-cov@0\.8\.7,cargo-nextest@0\.9\.148/);
+  assert.ok(install.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
   for (const platform of ["macOS", "Linux"]) {
     const pass = steps.find(value => value.startsWith(`name: Test + coverage (${platform})\n`));
     assert.ok(pass);

@@ -25,6 +25,8 @@ struct Progress {
     policy_local_channel: bool,
     policy_started: bool,
     policy_examined: usize,
+    history_only: bool,
+    history_refresh: bool,
 }
 impl Preparation {
     fn encode_progress(&self) -> Result<Vec<u8>, LogError> {
@@ -86,6 +88,8 @@ impl Preparation {
             policy_local_channel: self.policy_local_channel,
             policy_started: self.policy_started,
             policy_examined: self.policy_examined,
+            history_only: self.history_only,
+            history_refresh: self.history_refresh,
         };
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
@@ -143,6 +147,8 @@ impl Preparation {
         self.policy_local_channel = progress.policy_local_channel;
         self.policy_started = progress.policy_started;
         self.policy_examined = progress.policy_examined;
+        self.history_only = progress.history_only;
+        self.history_refresh = progress.history_refresh;
         self.policy_skip = if self.phase == Phase::Policy {
             progress.policy_examined
         } else {
@@ -154,10 +160,19 @@ impl Preparation {
             None
         };
         self.principal = if progress.classified {
-            Some(store.principal(view.conversation, self.replica_shared)?)
+            Some(store.principal_with_prefix(
+                view.conversation,
+                self.replica_shared,
+                self.generation.filter(|_| self.history_only),
+            )?)
         } else {
             None
         };
+        if self.history_only
+            && let Some(Principal::Modern { projection, .. }) = self.principal.as_mut()
+        {
+            projection.allow_network_prefix();
+        }
         match (
             &mut self.principal,
             progress.legacy,
@@ -284,6 +299,24 @@ impl Preparation {
         })();
         if result.is_err() {
             self.reload = self.selection.is_some();
+        }
+        result
+    }
+    pub(in crate::node::privacy_sync) fn save_history_progress(
+        &mut self,
+        store: &GuardedSyncStore<'_>,
+        view: &ParticipantView,
+    ) -> Result<(), LogError> {
+        let bytes = self.encode_progress()?;
+        let result = store
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .save_selection_progress(self.selection()?, &view.repository, &bytes);
+        if result.is_err() {
+            self.reload = true;
         }
         result
     }

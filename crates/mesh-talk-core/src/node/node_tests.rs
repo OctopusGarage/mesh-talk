@@ -4394,10 +4394,13 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
         .await
         .unwrap();
 
-    let got = tokio::time::timeout(std::time::Duration::from_secs(5), bob_ch_rx.recv())
-        .await
-        .expect("bob received a channel message within 5s")
-        .expect("channel stream open");
+    let got = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        next_channel_content(&mut bob_ch_rx, channel),
+    )
+    .await
+    .expect("bob received a channel message within 5s")
+    .expect("channel stream open");
     assert_eq!(got.text, b"hello channel");
     assert_eq!(got.from, alice_node.user_id());
     assert_eq!(got.channel_name, "general");
@@ -4431,10 +4434,13 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     alice_node
         .flush_accepted_message(&request.destination, accepted.message_id)
         .await;
-    let alert = tokio::time::timeout(std::time::Duration::from_secs(5), bob_ch_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let alert = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        next_channel_content(&mut bob_ch_rx, channel),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(alert.text, b"bot alert");
     assert_eq!(alert.from, alice_node.user_id());
     assert!(
@@ -5468,6 +5474,60 @@ async fn two_nodes_exchange_channel_messages_both_directions_over_loopback_tcp()
     );
 }
 
+// The legacy channel stream also carries metadata-only batch terminals. Wait
+// for content by its explicit type; empty plaintext is still content.
+async fn next_channel_content(
+    receiver: &mut mpsc::UnboundedReceiver<crate::node::channel::ReceivedChannelMessage>,
+    channel: ConversationId,
+) -> Option<crate::node::channel::ReceivedChannelMessage> {
+    loop {
+        let event = receiver.recv().await?;
+        assert_eq!(event.channel_id, channel);
+        if !event.reception_only {
+            return Some(event);
+        }
+        assert!(event.batch_complete);
+        assert!(event.text.is_empty() && event.wrapped.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn channel_content_receiver_distinguishes_terminal_from_empty_message() {
+    let channel = ConversationId::new([91; 32]);
+    let content = crate::node::channel::ReceivedChannelMessage {
+        channel_id: channel,
+        channel_name: "general".into(),
+        from: "sender".into(),
+        text: Vec::new(),
+        protection: None,
+        reply_to: None,
+        event_id: EventId::new([92; 32]),
+        wall_clock: 1,
+        wrapped: MessageBody::new(Vec::new(), None).encode(),
+        received_at: 1,
+        arrival_kind: "live",
+        own_device: false,
+        batch_id: None,
+        batch_complete: true,
+        batch_size: 1,
+        reception_only: false,
+    };
+    let mut terminal = content.clone();
+    terminal.event_id = EventId::new([93; 32]);
+    terminal.wrapped.clear();
+    terminal.batch_id = Some("completed-batch".into());
+    terminal.reception_only = true;
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    sender.send(terminal).unwrap();
+    sender.send(content.clone()).unwrap();
+    drop(sender);
+    assert_eq!(
+        next_channel_content(&mut receiver, channel).await,
+        Some(content)
+    );
+    assert!(next_channel_content(&mut receiver, channel).await.is_none());
+}
+
 /// Restart rig: Alice creates a {Alice, Bob} channel and sends a message Bob
 /// decrypts. Alice's `Node` is then DROPPED and REOPENED from the SAME dir (same
 /// log + derived stores + password). Alice sends ANOTHER message in the SAME epoch;
@@ -5544,10 +5604,13 @@ async fn channel_sending_survives_restart() {
         .send_channel_message(channel, b"before restart")
         .await
         .unwrap();
-    let got = tokio::time::timeout(Duration::from_secs(5), b_ch_r.recv())
-        .await
-        .expect("bob received the pre-restart message within 5s")
-        .expect("channel stream open");
+    let got = tokio::time::timeout(
+        Duration::from_secs(5),
+        next_channel_content(&mut b_ch_r, channel),
+    )
+    .await
+    .expect("bob received the pre-restart message within 5s")
+    .expect("channel stream open");
     assert_eq!(got.text, b"before restart");
 
     // RESTART Alice: retire every owner, reopen from the SAME paths/password. Her
@@ -5583,10 +5646,13 @@ async fn channel_sending_survives_restart() {
         .send_channel_message(channel, b"after restart")
         .await
         .unwrap();
-    let after = tokio::time::timeout(Duration::from_secs(5), b_ch_r.recv())
-        .await
-        .expect("bob received the post-restart message within 5s (broken without persist)")
-        .expect("channel stream open");
+    let after = tokio::time::timeout(
+        Duration::from_secs(5),
+        next_channel_content(&mut b_ch_r, channel),
+    )
+    .await
+    .expect("bob received the post-restart message within 5s (broken without persist)")
+    .expect("channel stream open");
     assert_eq!(after.text, b"after restart");
     assert_eq!(after.from, alice_node2.user_id());
     bob_node.runtime_work.close();
@@ -5609,16 +5675,6 @@ async fn channel_sending_survives_restart() {
 /// (late-join isolation / forward secrecy).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adding_a_channel_member_lets_them_receive_new_messages() {
-    async fn next_message(
-        receiver: &mut mpsc::UnboundedReceiver<crate::node::channel::ReceivedChannelMessage>,
-    ) -> Option<crate::node::channel::ReceivedChannelMessage> {
-        loop {
-            let event = receiver.recv().await?;
-            if !event.reception_only {
-                return Some(event);
-            }
-        }
-    }
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let carol = DeviceIdentity::generate();
@@ -5728,10 +5784,13 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .send_channel_message(channel, b"epoch0 msg")
         .await
         .unwrap();
-    let got0 = tokio::time::timeout(Duration::from_secs(5), next_message(&mut b_ch_r))
-        .await
-        .expect("bob received the epoch-0 message within 5s")
-        .expect("channel stream open");
+    let got0 = tokio::time::timeout(
+        Duration::from_secs(5),
+        next_channel_content(&mut b_ch_r, channel),
+    )
+    .await
+    .expect("bob received the epoch-0 message within 5s")
+    .expect("channel stream open");
     assert_eq!(got0.text, b"epoch0 msg");
 
     // Add Carol (epoch 1). She gets the MembershipChange via Alice's distribution.
@@ -5755,10 +5814,13 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .await
         .unwrap();
 
-    let got_carol = tokio::time::timeout(Duration::from_secs(5), next_message(&mut c_ch_r))
-        .await
-        .expect("carol received the epoch-1 message within 5s")
-        .expect("channel stream open");
+    let got_carol = tokio::time::timeout(
+        Duration::from_secs(5),
+        next_channel_content(&mut c_ch_r, channel),
+    )
+    .await
+    .expect("carol received the epoch-1 message within 5s")
+    .expect("channel stream open");
     assert_eq!(got_carol.text, b"epoch1 msg");
     assert_eq!(got_carol.from, alice_node.user_id());
     add_peer(
@@ -5772,11 +5834,13 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .send_channel_message(channel, b"bob after invite")
         .await
         .unwrap();
-    let from_existing_member =
-        tokio::time::timeout(Duration::from_secs(5), next_message(&mut c_ch_r))
-            .await
-            .expect("new member receives an established member after accepting")
-            .expect("channel stream open");
+    let from_existing_member = tokio::time::timeout(
+        Duration::from_secs(5),
+        next_channel_content(&mut c_ch_r, channel),
+    )
+    .await
+    .expect("new member receives an established member after accepting")
+    .expect("channel stream open");
     assert_eq!(from_existing_member.text, b"bob after invite");
 
     // Late-join isolation: Carol never receives the epoch-0 message (she joined at
@@ -6318,10 +6382,13 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
         .send_channel_message(channel, b"before rename")
         .await
         .unwrap();
-    let first = tokio::time::timeout(std::time::Duration::from_secs(5), bob_ch_rx.recv())
-        .await
-        .expect("bob received the pre-rename message within 5s")
-        .expect("channel stream open");
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        next_channel_content(&mut bob_ch_rx, channel),
+    )
+    .await
+    .expect("bob received the pre-rename message within 5s")
+    .expect("channel stream open");
     assert_eq!(first.channel_name, "general");
 
     // A non-owner cannot rename — refused locally, with no epoch bump.
@@ -6352,10 +6419,13 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
         .send_channel_message(channel, b"after rename")
         .await
         .unwrap();
-    let second = tokio::time::timeout(std::time::Duration::from_secs(5), bob_ch_rx.recv())
-        .await
-        .expect("bob received the post-rename message within 5s")
-        .expect("channel stream open");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        next_channel_content(&mut bob_ch_rx, channel),
+    )
+    .await
+    .expect("bob received the post-rename message within 5s")
+    .expect("channel stream open");
     assert_eq!(second.text, b"after rename");
     assert_eq!(second.channel_name, "renamed");
 

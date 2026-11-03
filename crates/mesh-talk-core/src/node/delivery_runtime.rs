@@ -1827,10 +1827,11 @@ impl Node {
                             }
                             let exchange = async {
                                 let uploaded = self
-                                    .opaque_relay_round(
+                                    .opaque_relay_round_for(
                                         &mut channel,
                                         &destination.device,
                                         Some(destination.event.conversation_id),
+                                        Some(destination.event.id),
                                     )
                                     .await?;
                                 let Some((_, outer_id)) = uploaded
@@ -3292,11 +3293,8 @@ impl Node {
         if complete {
             if chunks {
                 let final_chunk = file.final_chunk.ok_or(SessionError::UnexpectedMessage)?;
-                let outer = opaque
-                    .uploaded()
-                    .iter()
-                    .find(|(inner, _)| *inner == final_chunk)
-                    .map(|(_, outer)| *outer)
+                let outer = self
+                    .opaque_confirmed_wrapper(opaque, final_chunk)?
                     .ok_or(SessionError::NoProgress)?;
                 let mailbox = if federated {
                     RelayMailbox::federated(&self.identity, &binding.device)

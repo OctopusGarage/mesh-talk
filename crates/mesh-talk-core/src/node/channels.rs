@@ -550,16 +550,18 @@ impl Node {
         }
     }
 
-    /// One parent owns both futures; cancellation drops both without detached work.
+    /// One parent owns all three futures; cancellation drops them without detached work.
     pub(super) async fn run_channel_recovery_with_maintenance(
         self: Arc<Self>,
         changes: Arc<Notify>,
         periodic: bool,
         maintenance: impl std::future::Future<Output = ()>,
     ) {
+        let custody = Arc::clone(&self).run_channel_custody_recovery_loop(periodic);
         tokio::select! {
             _ = self.run_local_channel_recovery_loop(changes, periodic) => {}
             _ = maintenance => {}
+            _ = custody => {}
         }
     }
 
@@ -638,6 +640,52 @@ impl Node {
         }
     }
 
+    // Keep the existing custody clock and single turn independent of remote history.
+    async fn run_channel_custody_recovery_loop(self: Arc<Self>, periodic: bool) {
+        let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut custody_cursor = 0usize;
+        let mut retry_after = HashMap::new();
+        let mut retry_cycle = HashMap::new();
+        let mut recheck_after = HashMap::new();
+        let mut recheck_cycle = HashMap::new();
+        loop {
+            tick.tick().await;
+            // The policy can change while the selected tick is pending. Awaiting
+            // the interval first also permits a disabled test worker to resume.
+            if !self.channel_recovery_periodic_enabled(periodic) {
+                continue;
+            }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_custody_begin".into()
+            });
+            if let Some((channel, event, peer)) = self
+                .retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
+                .await
+            {
+                // No replication exchange used this turn. Repair only the
+                // missing report with the existing exact durable-have query.
+                self.recheck_channel_custody_peer(channel, event, &peer)
+                    .await;
+            }
+            if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
+                self.recheck_one_channel_custody(
+                    custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
+                    &mut recheck_after,
+                    &mut recheck_cycle,
+                )
+                .await;
+            }
+            custody_cursor = custody_cursor.wrapping_add(1);
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_custody_done".into()
+            });
+            tokio::task::yield_now().await;
+        }
+    }
+
     async fn run_local_channel_recovery_loop(
         self: Arc<Self>,
         changes: Arc<Notify>,
@@ -646,11 +694,6 @@ impl Node {
         let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
-        let mut custody_cursor = 0usize;
-        let mut retry_after = HashMap::new();
-        let mut retry_cycle = HashMap::new();
-        let mut recheck_after = HashMap::new();
-        let mut recheck_cycle = HashMap::new();
         let node = self.as_ref();
         let mut metadata = self.subscribe_channel_changes();
         let mut network = self.network_changes.subscribe();
@@ -658,7 +701,6 @@ impl Node {
         let mut fallback_at = tokio::time::Instant::now();
         loop {
             let mut discovered = false;
-            let mut custody_tick = false;
             tokio::select! {
                 _ = changes.notified() => { discovered = true; },
                 _ = network.changed() => { discovered = true; },
@@ -668,7 +710,7 @@ impl Node {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => discovered = true,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
-                _ = tick.tick(), if self.channel_recovery_periodic_enabled(periodic) => { custody_tick = true; },
+                _ = tick.tick(), if self.channel_recovery_periodic_enabled(periodic) => {},
                 _ = tokio::time::sleep_until(fallback_at), if self.channel_recovery_periodic_enabled(periodic) => {},
             }
             loop {
@@ -782,44 +824,11 @@ impl Node {
                 self.trace_account_client(&self.identity.public(), || {
                     "channel_recovery_fallback_done".into()
                 });
-                // Custody and failed plaintext retain their existing retry clock.
-                if custody_tick && self.channel_recovery_periodic_enabled(periodic) {
-                    #[cfg(test)]
-                    self.trace_account_client(&self.identity.public(), || {
-                        "channel_recovery_custody_begin".into()
-                    });
-                    if let Some((channel, event, peer)) = self
-                        .retry_one_channel_custody(
-                            custody_cursor,
-                            &mut retry_after,
-                            &mut retry_cycle,
-                        )
-                        .await
-                    {
-                        // No replication exchange used this turn. Repair only the
-                        // missing report with the existing exact durable-have query.
-                        self.recheck_channel_custody_peer(channel, event, &peer)
-                            .await;
-                    }
-                    if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
-                        self.recheck_one_channel_custody(
-                            custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
-                            &mut recheck_after,
-                            &mut recheck_cycle,
-                        )
-                        .await;
-                    }
-                    custody_cursor = custody_cursor.wrapping_add(1);
-                    #[cfg(test)]
-                    self.trace_account_client(&self.identity.public(), || {
-                        "channel_recovery_custody_done".into()
-                    });
-                }
             };
             tokio::pin!(remote);
             self.complete_channel_recovery_turn(remote.as_mut()).await;
             // Notify can remain immediately ready after bounded local work.
-            // Yield so the sibling maintenance future can always be polled.
+            // Yield so the other owned recovery futures can always be polled.
             tokio::task::yield_now().await;
         }
     }

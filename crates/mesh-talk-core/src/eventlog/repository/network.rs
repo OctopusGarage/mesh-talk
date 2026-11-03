@@ -19,6 +19,7 @@ pub(super) struct Binding {
 /// Retains the profile lease even while the owning store is unlocked/dropped.
 pub(crate) struct NetworkView {
     pub(super) binding: Binding,
+    pub(crate) history_binding: HistorySyncBinding,
     metadata: SyncMetadata,
     _lease: RepositoryOwner,
 }
@@ -37,7 +38,44 @@ pub(crate) struct ExportCursor {
 // Index shape is part of this owner: no ID-order postfilter, sorting or temp keyset.
 const SELECT_COMMIT_IDS: &str = "SELECT commit_ordinal,id FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 AND commit_ordinal>=?3 AND commit_ordinal<?4 AND (commit_ordinal,id)>(?5,?6) ORDER BY commit_ordinal,id LIMIT ?7";
 
+/// Exact scalar source identity for a local history observation. Absence is
+/// distinct from an existing empty or retiring conversation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HistorySyncBinding {
+    store_uuid: [u8; 16],
+    domain: [u8; 16],
+    conversation: ConversationId,
+    scope: Option<(i64, i64, i64)>,
+}
+
 impl EventRepository {
+    pub(crate) fn history_sync_binding(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<HistorySyncBinding, LogError> {
+        self.database
+            .read(|c| self.history_sync_binding_on(c, conversation))
+    }
+
+    fn history_sync_binding_on(
+        &self,
+        c: &Connection,
+        conversation: &ConversationId,
+    ) -> Result<HistorySyncBinding, LogError> {
+        // Validate retirement metadata through its owning contract before
+        // exposing a binding. All reads share the same connection guard.
+        self.scope_on(c, conversation)?;
+        let scope: Option<(i64, i64, i64)> = c.prepare_cached(
+                "SELECT revision,destructive_epoch,lifecycle FROM event_conversations WHERE domain=?1 AND conversation=?2"
+            )?.query_row(params![self.domain.0.as_slice(),conversation.as_bytes().as_slice()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        Ok(HistorySyncBinding {
+            store_uuid: self.store_uuid,
+            domain: self.domain.0,
+            conversation: *conversation,
+            scope,
+        })
+    }
+
     pub(super) fn network_epoch_on(
         &self,
         c: &Connection,
@@ -82,7 +120,11 @@ impl EventRepository {
         }
         Ok(())
     }
-    fn network_header_on(&self, c: &Connection, id: &EventId) -> Result<EventHeader, LogError> {
+    pub(super) fn network_header_on(
+        &self,
+        c: &Connection,
+        id: &EventId,
+    ) -> Result<EventHeader, LogError> {
         #[cfg(test)]
         self.network_header_fetches
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -146,6 +188,7 @@ impl EventRepository {
             };
         }
         Ok(NetworkView {
+            history_binding: self.history_sync_binding_on(c, conv)?,
             binding: Binding {
                 store_uuid: self.store_uuid,
                 domain: self.domain,

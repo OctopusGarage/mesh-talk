@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 // The staging area is scoped to one authenticated sync connection. An unrelated
 // group can consume at most this much memory and is forgotten when it disconnects.
 mod network;
+pub(in crate::node) use network::{HistorySyncStamp, HistoryUpload};
 mod principal;
 
 const MAX_PENDING_CHANNEL_BYTES: usize = 8 * 1024 * 1024;
@@ -22,6 +23,23 @@ struct PendingChannel {
     log: EventLog,
     events: Vec<Event>,
     bytes: usize,
+}
+
+/// Bounded uninvited ancestry owned by one authenticated operation. It has
+/// no durable or node-wide authority and cannot move to another relay identity.
+pub(in crate::node) struct UninvitedChannelStaging {
+    peer: PublicIdentity,
+    channels: HashMap<ConversationId, PendingChannel>,
+    bytes: usize,
+}
+impl UninvitedChannelStaging {
+    pub(in crate::node) fn new(peer: &PublicIdentity) -> Self {
+        Self {
+            peer: peer.clone(),
+            channels: HashMap::new(),
+            bytes: 0,
+        }
+    }
 }
 
 pub(in crate::node) struct GuardedSyncStore<'a> {
@@ -341,6 +359,32 @@ impl Node {
     }
 }
 impl GuardedSyncStore<'_> {
+    /// Transfer only the existing bounded uninvited-channel staging area.
+    /// The caller restores it before dropping a short-lived admission store.
+    pub(in crate::node) fn swap_uninvited_channel_staging(
+        &mut self,
+        staging: &mut UninvitedChannelStaging,
+    ) -> Result<(), LogError> {
+        if staging.peer != self.peer {
+            return Err(LogError::AdmissionRejected(
+                "uninvited channel staging peer changed".into(),
+            ));
+        }
+        std::mem::swap(&mut self.pending_channels, &mut staging.channels);
+        std::mem::swap(&mut self.pending_bytes, &mut staging.bytes);
+        Ok(())
+    }
+
+    pub(in crate::node) fn uninvited_channel_staged(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> bool {
+        self.pending_channels
+            .get(&conversation)
+            .is_some_and(|pending| pending.log.has(&id))
+    }
+
     /// Hold an unknown channel's ancestry off disk until a signed, causally
     /// valid membership snapshot explicitly invites this device. The ordinary
     /// append gate is used only after the complete proof has been projected.

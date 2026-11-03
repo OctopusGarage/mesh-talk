@@ -1,4 +1,5 @@
 //! Dedicated relay facade. All history access is bounded and policy qualified.
+pub(crate) use super::storage::role::delta::{MailboxCursor, MailboxDeltaPage};
 pub use super::storage::role::network::{
     IndexedRelayExportCursor, IndexedRelayHaveCursor, IndexedRelayView,
 };
@@ -41,6 +42,25 @@ impl IndexedPostOffice {
     }
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.state.subscribe_changes()
+    }
+    pub(crate) fn mailbox_delta_page(
+        &self,
+        conv: &ConversationId,
+        prior: Option<&MailboxCursor>,
+        limit: usize,
+    ) -> Result<MailboxDeltaPage, LogError> {
+        self.state
+            .mailbox_delta_page_at(conv, prior, limit, super::network::unix_now())
+    }
+    pub(crate) fn mailbox_delta_events(
+        &self,
+        conv: &ConversationId,
+        cursor: &MailboxCursor,
+        ids: &[EventId],
+        max_bytes: usize,
+    ) -> Result<Vec<Event>, LogError> {
+        self.state
+            .mailbox_delta_events_at(conv, cursor, ids, max_bytes, super::network::unix_now())
     }
 }
 impl NetworkSyncStore for IndexedPostOffice {

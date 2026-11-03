@@ -144,14 +144,22 @@ impl EventRepository {
         view: &NetworkView,
         job: [u8; 16],
         rank: i64,
+        require_finite_prefix: bool,
     ) -> Result<Option<EventHeader>, LogError> {
         self.database.read(|c| {
             self.validate_network_on(c,view)?;
             self.require_selection_order_on(c,view,job)?;
             let columns=HEADER_COLUMNS.split(',').map(|name|format!("e.{name}")).collect::<Vec<_>>().join(",");
-            let mut stmt=c.prepare(&format!("SELECT {columns} FROM event_order_rows r JOIN retained_events e ON e.domain=?1 AND e.id=r.id WHERE r.job=?2 AND r.rank=?3"))?;
+            let mut stmt=c.prepare(&format!("SELECT {columns},e.commit_ordinal FROM event_order_rows r JOIN retained_events e ON e.domain=?1 AND e.id=r.id WHERE r.job=?2 AND r.rank=?3"))?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),job.as_slice(),rank])?;
-            rows.next()?.map(read_header).transpose()
+            rows.next()?.map(|row| {
+                // A newly built order can include a lower-priority append made
+                // after capture. Such a row cannot displace the finite prefix.
+                if require_finite_prefix && nonnegative(row.get(12)?)? >= view.binding.cutoff {
+                    return Err(LogError::StaleCursor);
+                }
+                read_header(row)
+            }).transpose()
         })
     }
     fn require_selection_order_on(

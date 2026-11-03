@@ -302,6 +302,7 @@ pub struct Node {
     pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
     /// Optional disk hints, checked against retained history during mailbox sync.
+    pub(in crate::node) opaque_upload_cache: Mutex<super::opaque_relay::incremental::UploadCache>,
     pub(in crate::node) opaque_receive_cache:
         Mutex<super::opaque_receive_cache::OpaqueReceiveCache>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
@@ -1348,6 +1349,7 @@ impl Node {
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
             opaque_receive_cache: Mutex::new(opaque_receive_cache),
+            opaque_upload_cache: Mutex::new(Default::default()),
             preferred_routes: Mutex::new(super::route_timing::PreferredRoutes::default()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),

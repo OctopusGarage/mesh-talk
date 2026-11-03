@@ -7,7 +7,9 @@ use crate::{
         event::EventKind,
         repository::{
             EventRepository,
-            order::{CausalOrder, OrderReadState, OrderReadiness, OrderWorkBudget},
+            order::{
+                CausalOrder, OrderGeneration, OrderReadState, OrderReadiness, OrderWorkBudget,
+            },
             pages::PageBudget,
         },
     },
@@ -91,6 +93,30 @@ impl ChannelCheckpointStore {
         channel: ConversationId,
         budget: PreparationBudget,
     ) -> Result<PreparationStep, LogError> {
+        self.project_step_for_target(repository, me, channel, budget, None)
+    }
+
+    /// Reuse the ordinary reducer, stopping at an immutable network prefix.
+    /// The caller retains exact raw-control and destructive-policy fences.
+    pub(in crate::node) fn project_network_prefix_step(
+        &self,
+        repository: &EventRepository,
+        me: &DeviceIdentity,
+        channel: ConversationId,
+        target: OrderGeneration,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.project_step_for_target(repository, me, channel, budget, Some(target))
+    }
+
+    fn project_step_for_target(
+        &self,
+        repository: &EventRepository,
+        me: &DeviceIdentity,
+        channel: ConversationId,
+        budget: PreparationBudget,
+        target: Option<OrderGeneration>,
+    ) -> Result<PreparationStep, LogError> {
         budget.validate()?;
         let order = repository.order_step(
             &channel,
@@ -111,13 +137,36 @@ impl ChannelCheckpointStore {
             return Ok(work);
         }
         let Some(generation) = repository.order_generation(&channel, CausalOrder::Logical)? else {
+            if target.is_some() {
+                return Err(LogError::StaleCursor);
+            }
             return Ok(PreparationStep {
                 ready: true,
                 ..work
             });
         };
-        let count =
-            i64::try_from(generation.count).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        if target.is_some_and(|target| {
+            target.job != generation.job
+                || target.count > generation.count
+                || target.source_revision > generation.source_revision
+        }) {
+            return Err(LogError::StaleCursor);
+        }
+        let count = i64::try_from(target.map_or(generation.count, |target| target.count))
+            .map_err(|_| LogError::RepositoryCounterExhausted)?;
+        if target.is_some() {
+            let covered:bool=self.profile.database().read(|c| {
+                self.check_account_on(c)?;
+                require_source_on(c,channel,generation.job,generation.source_revision)?;
+                c.query_row("SELECT COALESCE((SELECT next_rank FROM channel_projection_work WHERE job=?1 AND channel=?2),0)>=?3",params![generation.job.as_slice(),channel.as_bytes().as_slice(),count],|r|r.get(0)).map_err(Into::into)
+            })?;
+            if covered {
+                return Ok(PreparationStep {
+                    ready: true,
+                    ..work
+                });
+            }
+        }
         let already:bool=self.profile.database().read(|c| {
             self.check_account_on(c)?;
             c.query_row("SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1 AND source_job=?2 AND source_revision=?3 AND next_rank=?4 AND owner_account=?5)",
@@ -205,11 +254,17 @@ impl ChannelCheckpointStore {
                 let binding = crate::node::channel::graph::preparing::DecisionBinding {
                     job: generation.job,
                     source_job: generation.job,
-                    revision: generation.source_revision,
+                    revision: target
+                        .map_or(generation.source_revision, |target| target.source_revision),
                     channel,
                     event: header.id,
                 };
-                let graph = PreparingGraph::open(
+                let open_graph = if target.is_some() {
+                    PreparingGraph::open_network_prefix
+                } else {
+                    PreparingGraph::open
+                };
+                let graph = open_graph(
                     self.profile.clone(),
                     repository,
                     binding,
@@ -234,7 +289,7 @@ impl ChannelCheckpointStore {
                     return Err(LogError::StaleCursor);
                 }
                 work.bytes += snapshot;
-                let graph = PreparingGraph::open(
+                let graph = open_graph(
                     self.profile.clone(),
                     repository,
                     binding,
@@ -380,6 +435,14 @@ impl ChannelCheckpointStore {
         if actual != next {
             return Err(LogError::StaleCursor);
         }
+        if target.is_some() {
+            // Prefix readiness never certifies the current whole source and
+            // therefore cannot replace channel_current or clear dirty work.
+            return Ok(PreparationStep {
+                ready: true,
+                ..work
+            });
+        }
         work.bytes = snapshot;
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
@@ -498,7 +561,12 @@ impl ChannelCheckpointStore {
             let removed=self.profile.database().transaction(|c| {
                 self.check_account_on(c)?;
                 require_source_on(c,channel,job,revision)?;
+                // A newly discovered legacy future cut changes reducer facts
+                // even when the canonical job survives. Retire its scratch
+                // together with those facts before replaying the same event.
+                crate::node::channel::graph::preparing::retire_selection_on(c,job.as_slice(),channel.as_bytes().as_slice())?;
                 for (table,key) in [
+                    ("channel_decision_answers","key"),("channel_decision_work","channel"),
                     ("channel_event_authority","event"),("channel_departure_facts","member,event"),
                     ("channel_membership_snapshots","rank"),("channel_causal_states","event"),
                     ("channel_activities","event"),("channel_replica_preferences","member"),
@@ -522,7 +590,18 @@ impl ChannelCheckpointStore {
                 ..Default::default()
             });
         }
-        if next == count {
+        if next >= count {
+            if next > count {
+                // Another projector may have covered a later ordinary prefix.
+                // A cursor beyond the actual source still fails closed.
+                let actual = repository
+                    .order_generation(&channel, CausalOrder::Logical)?
+                    .ok_or(LogError::StaleCursor)?;
+                if actual.job != job || !u64::try_from(next).is_ok_and(|next| next <= actual.count)
+                {
+                    return Err(LogError::StaleCursor);
+                }
+            }
             return Ok(PreparationStep {
                 ready: true,
                 ..Default::default()

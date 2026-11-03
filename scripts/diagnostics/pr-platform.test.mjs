@@ -7,6 +7,7 @@ import { collectPlatforms, createArchive, validateGuestReport, windowsBootstrap 
 
 const sha = "a".repeat(40);
 const capturedOutput = (stdout, stderr = "") => ({ stdout, stderr, output: stdout + stderr, outputTruncated: false });
+const signalReadyLeaf = "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});const fs=require('node:fs');const ready=process.argv[1];const pending=ready+'.pending';fs.writeFileSync(pending,String(process.pid));fs.renameSync(pending,ready);setInterval(()=>{},1000)";
 
 test("one explicit test plan preserves selectors as argv data on both platforms", async () => {
   const flags = parseFlags(["--core-filter", "name;$(touch sentinel)", "--host-filter", "owner_commands", "e2e/privacy.spec.ts"]);
@@ -340,6 +341,33 @@ test("the shared classifier exposes the same selection requirement to the local 
   assert.equal(unneeded.code, 1);
 });
 
+test("guest signal readiness publishes a complete PID before exposing its marker", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { spawn } = await import("node:child_process");
+  const { once } = await import("node:events");
+  const { createInterface } = await import("node:readline");
+  const { mkdtemp, readFile, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-guest-ready-"));
+  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
+  const preload = join(directory, "hold-write.cjs");
+  // Pause the real write after open/truncate, exposing the former readiness race.
+  // A private staging file may exist here; the public marker must not.
+  await writeFile(preload, "const fs=require('node:fs');const write=fs.writeFileSync;const rename=fs.renameSync;fs.writeFileSync=(path,data)=>{const fd=fs.openSync(path,'w');fs.writeSync(1,'opened\\n');fs.readSync(0,Buffer.alloc(1),0,1,null);write(fd,data);fs.closeSync(fd);};fs.renameSync=(from,to)=>{rename(from,to);fs.writeSync(1,'published\\n');};");
+  const child = spawn(process.execPath, ["--require", preload, "-e", signalReadyLeaf, marker], { stdio: ["pipe", "pipe", "pipe"] });
+  const closed = once(child, "close");
+  const output = createInterface({ input: child.stdout });
+  const messages = output[Symbol.asyncIterator]();
+  t.after(async () => { child.kill("SIGKILL"); await closed; output.close(); await rm(directory, { recursive: true, force: true }); });
+  const opened = await Promise.race([messages.next(), closed.then(() => { throw Error("readiness producer exited before its write boundary"); })]);
+  assert.equal(opened.value, "opened");
+  await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" }, "an incomplete write must not expose a ready marker");
+  const published = messages.next();
+  child.stdin.end("release");
+  assert.equal((await published).value, "published");
+  assert.equal(await readFile(marker, "utf8"), String(child.pid));
+});
+
 for (const signal of ["SIGTERM", "SIGINT"]) test(`guest cancellation ${signal} retires an ignored-stdio descendant`, { skip: process.platform === "win32", timeout: 15000 }, async t => {
   const { spawn, spawnSync } = await import("node:child_process");
   const { mkdtemp, readFile, rm } = await import("node:fs/promises");
@@ -348,14 +376,14 @@ for (const signal of ["SIGTERM", "SIGINT"]) test(`guest cancellation ${signal} r
   const { setTimeout: pause } = await import("node:timers/promises");
   const directory = await mkdtemp(join(tmpdir(), "mesh-guest-cancel-"));
   const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
-  const leaf = "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)";
+  const leaf = signalReadyLeaf;
   const leader = "process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:'ignore'});setInterval(()=>{},1000)";
   const module = new URL("../pr-platform/guest.mjs", import.meta.url).href;
   const program = "const {runCommand}=await import(process.argv[1]);const result=await runCommand(process.execPath,['-e',process.argv[2],process.argv[3],process.argv[4]]);process.exitCode=result.code;";
   const supervisor = spawn(process.execPath, ["--input-type=module", "-e", program, module, leader, leaf, marker], { stdio: "ignore", env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   let pid;
   t.after(async () => { supervisor.kill("SIGKILL"); if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } await rm(directory, { recursive: true, force: true }); });
-  for (let i = 0; i < 300; i++) { try { pid = Number(await readFile(marker, "utf8")); break; } catch {} await pause(10); }
+  for (let i = 0; i < 300; i++) { try { const candidate = Number(await readFile(marker, "utf8")); if (Number.isSafeInteger(candidate) && candidate > 1) { pid = candidate; break; } } catch {} await pause(10); }
   assert.ok(pid, "descendant must acknowledge installed signal handlers");
   const closed = new Promise(resolve => supervisor.once("close", resolve));
   supervisor.kill(signal);
@@ -372,7 +400,7 @@ test("a nested guest timeout notifies its existing stage owner and retires the g
   const { setTimeout: pause } = await import("node:timers/promises");
   const directory = await mkdtemp(join(tmpdir(), "mesh-nested-guest-"));
   const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
-  const leaf = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)";
+  const leaf = signalReadyLeaf;
   const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
   const stage = new URL("../validation/stage.mjs", import.meta.url).href;
   const inner = "const {runCommand}=await import(process.argv[1]);console.log('GROUP='+process.pid);await runCommand(process.execPath,['-e',process.argv[2],process.argv[3]],{timeoutMs:1500});";
@@ -382,7 +410,7 @@ test("a nested guest timeout notifies its existing stage owner and retires the g
   supervisor.stdout.on("data", chunk => { const match = chunk.toString().match(/GROUP=(\d+)/); if (match) group = Number(match[1]); });
   t.after(async () => { supervisor.kill("SIGKILL"); if (group) try { process.kill(-group, "SIGKILL"); } catch {} if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
   const closed = new Promise(resolve => supervisor.once("close", resolve));
-  for (let i = 0; i < 300; i++) { try { pid = Number(await readFile(marker, "utf8")); break; } catch {} await pause(10); }
+  for (let i = 0; i < 300; i++) { try { const candidate = Number(await readFile(marker, "utf8")); if (Number.isSafeInteger(candidate) && candidate > 1) { pid = candidate; break; } } catch {} await pause(10); }
   assert.ok(pid && group, "real nested child must acknowledge startup");
   const code = await Promise.race([closed, pause(6000).then(() => "still running")]);
   assert.equal(code, 130, "nested timeout must reach the process-group owner");

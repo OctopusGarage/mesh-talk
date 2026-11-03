@@ -2,7 +2,7 @@
 //! Every edge is real authenticated loopback TCP; roster adjacency is the
 //! simulated reachability boundary. No discovery task, relay, or all-to-all route
 //! is installed. Explicit production recovery ticks make each boundary observable.
-use super::Node;
+use super::{Node, test_support::IndependentPeerRuntime};
 use crate::{
     discovery::{Announce, Roster},
     eventlog::{ConversationId, EventLog},
@@ -1213,9 +1213,9 @@ async fn gossip_history_receipts_distinguish_read_completion_from_delayed_delive
     );
 }
 
-// These independent hosts use synchronous durable storage. Match the production
-// multithread executor. Excluding periodic repair proves notification causality
-// directly; elapsed propagation remains observable under a functional watchdog.
+// These independent hosts use synchronous durable storage on separate reactors.
+// Match the production host boundary. Excluding periodic repair proves
+// notification causality directly; elapsed propagation remains observable under a functional watchdog.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes() {
     let mut chain = Chain::new().await;
@@ -1307,10 +1307,14 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     }
     // Bind all endpoints before spawning any recovery owner. An authenticated
     // completion from the new worker is proof even within the same clock tick.
+    let mut hosts = Vec::with_capacity(6);
     for (index, listener) in listeners.into_iter().enumerate() {
-        chain.servers[index] = Some(tokio::spawn(
-            chain.nodes[index].clone().run_accept_loop(listener),
+        hosts.push(Some(
+            IndependentPeerRuntime::start(chain.nodes[index].clone(), listener).await,
         ));
+    }
+    for host in hosts.iter_mut().flatten() {
+        host.launch();
     }
     // Cold setup uses normal recovery, then drains already-started maintenance.
     // The unchanged post-send window starts with periodic work disabled on all nodes.
@@ -1389,14 +1393,13 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         .send_channel_message(group, b"notification-driven background gossip")
         .await
         .unwrap();
-    let send_returned_ms = route_started.elapsed().as_millis();
-    let sender = chain.servers[0].take().unwrap();
-    sender.abort();
-    let _ = sender.await;
-    let deadline_start_ms = route_started.elapsed().as_millis();
     let deadline_started = std::time::Instant::now();
+    let send_returned_ms = route_started.elapsed().as_millis();
+    let deadline_start_ms = send_returned_ms;
     let deadline = Duration::from_secs(8);
     let cutoff = deadline_started + deadline;
+    // Sender retirement must not grant other hosts unmeasured propagation.
+    hosts[0].take().unwrap().stop().await;
     let mut receipts = GossipReadReceipts::default();
     let mut history_reads = [0_u64; 5];
     let mut stale_reads = [0_u64; 5];
@@ -1615,6 +1618,9 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         eprintln!(
             "background group gossip metadata original={original:?} sender_history_state={sender_history_state} sender_history_count={sender_history_count:?} observations={observations:?}"
         );
+    }
+    for host in hosts.into_iter().flatten() {
+        host.stop().await;
     }
     assert_eq!(
         periodic_work.load(std::sync::atomic::Ordering::Relaxed),

@@ -343,6 +343,7 @@ pub(super) fn fault_cut(_c: &Connection, _point: &str) -> Result<(), LogError> {
 }
 
 mod capacity;
+pub(crate) mod delta;
 pub(crate) mod maintenance;
 pub(crate) mod network;
 mod policy;

@@ -645,49 +645,156 @@ test("one logical DM remains one unread badge across duplicate live events and h
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
 });
 
-test("channel mention indicator survives later traffic and clears when the mention is viewed", async ({
-  page,
-}) => {
-  await enterChat(page);
-  const row = page.getByTestId(`conversation-row-${CHANNEL.id}`);
-  await page.evaluate(
-    ({ channel, device }) => {
-      const w = window as unknown as {
-        __mockInject: (
-          conv: string,
-          text: string,
-          who: string,
-          metadata: { id: string },
-        ) => void;
-        __mockEmit: (event: string, payload: unknown) => void;
-      };
-      for (const [id, text] of [
-        ["sidebar-mention", "@tester please check"],
-        ["sidebar-ordinary", "A later ordinary message"],
-      ]) {
-        w.__mockInject(`ch:${channel}`, text, "bob", { id });
-        w.__mockEmit("channel-message", {
-          channel_id: channel,
-          channel_name: "team",
-          from: device,
-          text,
-          event_id: id,
-          reply_to: null,
+for (const heldFrames of [false, true]) {
+  test(`channel mention indicator survives later traffic and clears when the mention is viewed${heldFrames ? " after deferred initial presentation" : ""}`, async ({
+    page,
+  }) => {
+    await enterChat(page);
+    const row = page.getByTestId(`conversation-row-${CHANNEL.id}`);
+    await page.evaluate(
+      ({ channel, device }) => {
+        const w = window as unknown as {
+          __mockInject: (
+            conv: string,
+            text: string,
+            who: string,
+            metadata: { id: string },
+          ) => void;
+          __mockEmit: (event: string, payload: unknown) => void;
+        };
+        for (const [id, text] of [
+          ["sidebar-mention", "@tester please check"],
+          ["sidebar-ordinary", "A later ordinary message"],
+        ]) {
+          w.__mockInject(`ch:${channel}`, text, "bob", { id });
+          w.__mockEmit("channel-message", {
+            channel_id: channel,
+            channel_name: "team",
+            from: device,
+            text,
+            event_id: id,
+            reply_to: null,
+          });
+        }
+      },
+      { channel: CHANNEL.id, device: BOB.device },
+    );
+    await expect(
+      row.getByText("[Mentioned you]", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      row.locator("..").getByText("2", { exact: true }),
+    ).toBeVisible();
+    await page.getByTestId(`conversation-row-${BOB.account}`).click();
+    await expect(
+      row.getByText("[Mentioned you]", { exact: true }),
+    ).toBeVisible();
+    if (heldFrames) {
+      await page
+        .getByRole("log", { name: "Messages with bob", exact: true })
+        .getByTestId("virtuoso-item-list")
+        .waitFor({ state: "visible" });
+      await page.evaluate(() => {
+        const request = window.requestAnimationFrame.bind(window);
+        const cancel = window.cancelAnimationFrame.bind(window);
+        let held = true;
+        const frames = new Map<
+          number,
+          { callback: FrameRequestCallback; native: number; arrived: boolean }
+        >();
+        window.requestAnimationFrame = (callback) => {
+          const entry = { callback, native: 0, arrived: false };
+          entry.native = request((time) => {
+            entry.arrived = true;
+            if (held) return;
+            frames.delete(id);
+            callback(time);
+          });
+          const id = entry.native;
+          frames.set(id, entry);
+          return id;
+        };
+        window.cancelAnimationFrame = (id) => {
+          const entry = frames.get(id);
+          if (entry) {
+            cancel(entry.native);
+            frames.delete(id);
+          } else cancel(id);
+        };
+        (
+          window as unknown as {
+            __unreadFrames: { pending: () => number; release: () => void };
+          }
+        ).__unreadFrames = {
+          pending: () =>
+            [...frames.values()].filter((entry) => entry.arrived).length,
+          release: () => {
+            held = false;
+            for (const [id, entry] of frames) {
+              if (!entry.arrived) continue;
+              entry.native = request((time) => {
+                frames.delete(id);
+                entry.callback(time);
+              });
+              entry.arrived = false;
+            }
+          },
+        };
+      });
+    }
+    try {
+      await row.click();
+      const items = page
+        .getByRole("log", { name: "Messages with team", exact: true })
+        .getByTestId("virtuoso-item-list");
+      if (heldFrames) {
+        await expect
+          .poll(() =>
+            page.evaluate(() =>
+              (
+                window as unknown as {
+                  __unreadFrames: { pending: () => number };
+                }
+              ).__unreadFrames.pending(),
+            ),
+          )
+          .toBeGreaterThan(0);
+        expect(
+          await items.evaluate(
+            (element) => getComputedStyle(element).visibility,
+          ),
+        ).toBe("hidden");
+        let presented = false;
+        const presentation = items.waitFor({ state: "visible" }).then(() => {
+          presented = true;
         });
+        // The actual current list remains hidden while its native frame is held.
+        expect(await items.isVisible()).toBe(false);
+        expect(presented).toBe(false);
+        await page.evaluate(() =>
+          (
+            window as unknown as { __unreadFrames: { release: () => void } }
+          ).__unreadFrames.release(),
+        );
+        await presentation;
+      } else {
+        // Initial layout belongs to conversation presentation, before mention semantics.
+        await items.waitFor({ state: "visible" });
       }
-    },
-    { channel: CHANNEL.id, device: BOB.device },
-  );
-  await expect(row.getByText("[Mentioned you]", { exact: true })).toBeVisible();
-  await expect(row.locator("..").getByText("2", { exact: true })).toBeVisible();
-  await page.getByTestId(`conversation-row-${BOB.account}`).click();
-  await expect(row.getByText("[Mentioned you]", { exact: true })).toBeVisible();
-  await row.click();
-  await expect(
-    page.getByText("@tester please check", { exact: true }),
-  ).toBeVisible();
-  await expect(row).not.toContainText("[Mentioned you]");
-});
+      await expect(
+        page.getByText("@tester please check", { exact: true }),
+      ).toBeVisible();
+      await expect(row).not.toContainText("[Mentioned you]");
+    } finally {
+      if (heldFrames)
+        await page.evaluate(() =>
+          (
+            window as unknown as { __unreadFrames?: { release: () => void } }
+          ).__unreadFrames?.release(),
+        );
+    }
+  });
+}
 
 test("unread review clears undiscovered senders and hidden channels without hiding later arrivals", async ({
   page,

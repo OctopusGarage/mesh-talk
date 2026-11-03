@@ -34,7 +34,7 @@ jobs:
           node-version: 22
       - uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
       - name: Verify pinned mutation runner behavior
         run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs
 
@@ -71,7 +71,7 @@ jobs:
       - name: Install mutation test tools
         uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
 
       - name: Select mutation sample
         id: selection

@@ -61,9 +61,11 @@ jobs:
           node scripts/check-repository-hygiene.mjs
       - uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       - name: Validate archive and coverage contracts
-        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
+        # Native environment probes and real Cargo fixtures belong to this
+        # serial owner, outside the parallel portable diagnostic suite.
+        run: node --test --test-concurrency=1 scripts/ci/windows-native-deps.test.mjs scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
       - name: Build frontend
         working-directory: frontend
         run: |
@@ -113,7 +115,7 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       # No Cargo cache, dependency fetch, frontend rebuild or test compilation.
       - uses: actions/download-artifact@v8
         with:
@@ -122,6 +124,8 @@ jobs:
       - name: Run validated serial shard and export partial coverage
         env:
           CARGO_NET_OFFLINE: 'true'
+          # End this failed serial shard promptly; other matrix shards continue.
+          MESH_WINDOWS_FAIL_FAST: '1'
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs consume "${{ matrix.shard }}" "$RUNNER_TEMP/windows-workspace-archive" "$RUNNER_TEMP/windows-workspace-results"

@@ -461,9 +461,16 @@ impl IndexedRelayEndpoint {
                 .await;
         }
         let store = Mutex::new(self.office.clone());
+        let mut mailbox_authorized = None;
         match tokio::time::timeout(
             ROUND_TIMEOUT,
-            serve_wire_bytes_budgeted(&mut channel, &store, &first, &self.budget),
+            crate::node::session::mailbox::serve(
+                &mut channel,
+                &store,
+                &first,
+                &self.budget,
+                &mut mailbox_authorized,
+            ),
         )
         .await
         {
@@ -473,10 +480,20 @@ impl IndexedRelayEndpoint {
             Err(_) => return Err("relay round deadline exceeded".into()),
         }
         for _ in 1..10_000 {
-            match tokio::time::timeout(
-                ROUND_TIMEOUT,
-                serve_one_budgeted(&mut channel, &store, &self.budget),
-            )
+            match tokio::time::timeout(ROUND_TIMEOUT, async {
+                let bytes = match channel.recv().await {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Ok(Served::Closed),
+                };
+                crate::node::session::mailbox::serve(
+                    &mut channel,
+                    &store,
+                    &bytes,
+                    &self.budget,
+                    &mut mailbox_authorized,
+                )
+                .await
+            })
             .await
             {
                 Ok(Ok(Served::Handled(_))) => {}

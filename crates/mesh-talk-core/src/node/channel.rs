@@ -315,6 +315,15 @@ pub(super) struct ChannelMembershipProjection {
 }
 
 impl ChannelMembershipProjection {
+    /// Only the network selection owner may use this under its unchanged
+    /// control/destructive fences and captured canonical rank upper bound.
+    pub(in crate::node) fn allow_network_prefix(&mut self) {
+        if let Some(history) = self.historical.as_mut() {
+            std::sync::Arc::make_mut(history).allow_network_prefix();
+        }
+        self.authority.allow_network_prefix();
+    }
+
     pub(in crate::node) fn empty(channel: ConversationId) -> Self {
         projection::MembershipReducer::new(channel).finish()
     }

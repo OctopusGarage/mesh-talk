@@ -50,12 +50,14 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, LogError> {
         .deserialize(bytes)
         .map_err(|e| invalid(&e.to_string()))
 }
+#[derive(Clone)]
 pub(in crate::node) struct AuthorityHistory {
     profile: Arc<ProfileStorage>,
     job: [u8; 16],
     channel: ConversationId,
     source_revision: i64,
     source_job: [u8; 16],
+    append_only_network: bool,
     _query_lease: Option<Arc<crate::node::channel::checkpoint::causal::Query>>,
 }
 impl AuthorityHistory {
@@ -104,11 +106,20 @@ impl AuthorityHistory {
             channel,
             source_revision,
             source_job,
+            append_only_network: false,
             _query_lease: None,
         }));
         Ok(authority)
     }
     fn guard_on(&self, c: &Connection) -> Result<(), LogError> {
+        if self.append_only_network {
+            return crate::node::channel::graph::require_source_prefix_on(
+                c,
+                self.channel,
+                self.source_job,
+                self.source_revision,
+            );
+        }
         crate::node::channel::graph::require_source_on(
             c,
             self.channel,
@@ -168,6 +179,14 @@ impl AuthorityHistory {
             },
             |removed| Ok(!graph.descends(event, removed)?),
         )?)
+    }
+}
+
+impl AccountAuthority {
+    pub(in crate::node) fn allow_network_prefix(&mut self) {
+        if let Some(history) = self.history.as_mut() {
+            Arc::make_mut(history).append_only_network = true;
+        }
     }
 }
 impl AccountAuthority {

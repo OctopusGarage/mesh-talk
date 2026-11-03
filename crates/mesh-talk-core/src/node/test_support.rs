@@ -9,7 +9,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc;
+use tokio::{net::TcpListener, sync::mpsc};
 
 pub(super) fn node_with_files(
     dir: &Path,
@@ -86,4 +86,94 @@ pub(super) fn settle_group_metadata(node: &Node, group: crate::eventlog::Convers
         }
     }
     panic!("fixture channel metadata did not settle within {turns} bounded turns");
+}
+
+// Each simulated remote host owns its reactor and retirement independently.
+pub(super) struct IndependentPeerRuntime {
+    launch: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    handle: tokio::runtime::Handle,
+}
+impl IndependentPeerRuntime {
+    pub(super) async fn start(node: Arc<Node>, listener: TcpListener) -> Self {
+        let listener = listener.into_std().unwrap();
+        let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
+        let (launch, launched) = tokio::sync::oneshot::channel();
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        let thread = std::thread::Builder::new()
+            .name("account-action-peer".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let listener = TcpListener::from_std(listener).unwrap();
+                    ready.send(tokio::runtime::Handle::current()).unwrap();
+                    let launched = tokio::select! {
+                        _ = &mut stopped => false,
+                        result = launched => result.is_ok(),
+                    };
+                    let task = if launched {
+                        let task = tokio::spawn(node.clone().run_accept_loop(listener));
+                        let _ = stopped.await;
+                        Some(task)
+                    } else {
+                        None
+                    };
+                    node.runtime_work.close();
+                    if let Some(task) = task {
+                        task.abort();
+                        if let Err(error) = task.await {
+                            assert!(
+                                error.is_cancelled(),
+                                "owned peer server failed before shutdown"
+                            );
+                        }
+                    }
+                    node.sessions.clear();
+                    node.runtime_work.drain().await;
+                });
+            })
+            .unwrap();
+        Self {
+            launch: Some(launch),
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+            handle: ready_rx.await.unwrap(),
+        }
+    }
+    pub(super) fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.handle.clone()
+    }
+    pub(super) fn launch(&mut self) {
+        self.launch.take().unwrap().send(()).unwrap();
+    }
+    pub(super) async fn stop(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let thread = self.thread.take().unwrap();
+        let joined = tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .unwrap();
+        assert!(
+            joined.is_ok(),
+            "owned peer runtime must finish its shutdown and writer drain"
+        );
+    }
+}
+impl Drop for IndependentPeerRuntime {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let joined = thread.join();
+            if !std::thread::panicking() {
+                assert!(joined.is_ok(), "owned peer runtime failed during cleanup");
+            }
+        }
+    }
 }

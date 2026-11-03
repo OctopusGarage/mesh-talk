@@ -14,6 +14,8 @@ use std::{
     sync::Arc,
 };
 
+mod checkpoints;
+
 const MAGIC: &[u8; 6] = b"MTORC1";
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 250_000;
@@ -41,6 +43,7 @@ pub(super) struct OpaqueReceiveCache {
     session: [u8; 16],
     record_bytes: u64,
     session_cleaned: bool,
+    checkpoints_ready: bool,
 }
 
 impl OpaqueReceiveCache {
@@ -66,6 +69,7 @@ impl OpaqueReceiveCache {
             session,
             record_bytes: 0,
             session_cleaned: false,
+            checkpoints_ready: false,
         };
         if let Err(error) = Self::initialize(&profile) {
             log::debug!("opaque receive hints unavailable: {error}");
@@ -84,6 +88,12 @@ impl OpaqueReceiveCache {
         match Self::publish(profile, log_path, password, device, account) {
             Ok(source) => owner.source = Some(source),
             Err(error) => log::debug!("opaque receive cache unavailable: {error}"),
+        }
+        if let Some(source) = &owner.source {
+            match checkpoints::initialize(source.profile()) {
+                Ok(()) => owner.checkpoints_ready = true,
+                Err(error) => log::debug!("opaque checkpoint cache unavailable: {error}"),
+            }
         }
         owner
     }

@@ -93,6 +93,23 @@ pub(in crate::node) fn require_source_on(
     Ok(())
 }
 
+/// Read-only network selections separately fence raw controls, destructive
+/// epochs and their finite rank upper bound. Their already-projected prefix
+/// survives ordinary tail appends while the canonical job stays unchanged.
+pub(in crate::node) fn require_source_prefix_on(
+    c: &rusqlite::Connection,
+    channel: crate::eventlog::ConversationId,
+    job: [u8; 16],
+    revision: i64,
+) -> Result<(), LogError> {
+    let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM event_order_current o JOIN event_conversations e ON e.domain=o.domain AND e.conversation=o.conversation WHERE o.domain=?1 AND o.conversation=?2 AND o.order_kind=0 AND o.job=?3 AND o.source_revision>=?4 AND e.revision=o.source_revision AND e.lifecycle=0)",
+        rusqlite::params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),job.as_slice(),revision],|r|r.get(0))?;
+    if !valid {
+        return Err(LogError::StaleCursor);
+    }
+    Ok(())
+}
+
 /// A quantified historical predicate owns its last fully examined key. An
 /// unresolved graph answer never advances that cursor or publishes a result.
 pub(in crate::node) fn any_fact<T>(

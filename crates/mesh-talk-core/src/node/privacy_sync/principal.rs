@@ -108,6 +108,8 @@ pub(super) struct Preparation {
                 + Send,
         >,
     >,
+    history_only: bool,
+    history_refresh: bool,
 }
 impl Default for Preparation {
     fn default() -> Self {
@@ -133,10 +135,42 @@ impl Default for Preparation {
             policy_examined: 0,
             policy_skip: 0,
             policy_scopes: None,
+            history_only: false,
+            history_refresh: false,
         }
     }
 }
 impl Preparation {
+    pub(super) fn enable_history_upload(&mut self) {
+        self.history_only = true;
+    }
+
+    pub(super) fn history_generation(&self) -> Option<OrderGeneration> {
+        self.generation
+    }
+
+    pub(super) fn resume_history(&mut self, generation: Option<OrderGeneration>) -> bool {
+        if !self.ready() || !self.history_only {
+            return false;
+        }
+        match (self.generation, generation) {
+            (Some(old), Some(current))
+                if old.job == current.job
+                    && old.count <= current.count
+                    && self.rank as u64 == old.count => {}
+            _ => return false,
+        }
+        self.generation = generation;
+        self.history_refresh = matches!(self.principal, Some(Principal::Modern { .. }));
+        self.phase = if self.history_refresh {
+            Phase::Authority
+        } else {
+            Phase::Rows
+        };
+        self.metadata.fingerprint = None;
+        true
+    }
+
     pub(super) fn ready(&self) -> bool {
         self.phase == Phase::Ready && !self.reload
     }
@@ -146,6 +180,36 @@ impl Preparation {
     fn stage(&mut self, phase: Phase) -> PreparationStep {
         self.phase = phase;
         PreparationStep::default()
+    }
+    fn classify(
+        &mut self,
+        store: &GuardedSyncStore<'_>,
+        view: &ParticipantView,
+    ) -> Result<PreparationStep, LogError> {
+        let mut principal = store.principal_with_prefix(
+            view.conversation,
+            self.replica_shared,
+            self.generation.filter(|_| self.history_only),
+        )?;
+        if self.history_only
+            && let Principal::Modern { projection, .. } = &mut principal
+        {
+            projection.allow_network_prefix();
+        }
+        let phase = if self.history_refresh {
+            Phase::Rows
+        } else {
+            match &principal {
+                Principal::Denied => Phase::Hash,
+                Principal::Files { .. } => Phase::Files,
+                Principal::Legacy(_) => Phase::Future,
+                Principal::Modern { closing: true, .. } => Phase::ClosingRoots,
+                _ => Phase::Rows,
+            }
+        };
+        self.history_refresh = false;
+        self.principal = Some(principal);
+        Ok(self.stage(phase))
     }
     fn step_inner(
         &mut self,
@@ -258,6 +322,15 @@ impl Preparation {
                 if step.readiness == OrderReadiness::Ready {
                     self.generation =
                         repository.order_generation(&view.conversation, CausalOrder::Logical)?;
+                    if self.history_only
+                        && let Some(generation) = self.generation.as_mut()
+                    {
+                        let count = NetworkSyncStore::metadata(repository, &view.repository)?.count;
+                        if count > generation.count {
+                            return Err(LogError::StaleCursor);
+                        }
+                        generation.count = count;
+                    }
                     self.phase = Phase::Authority;
                 }
                 Ok(PreparationStep {
@@ -285,14 +358,33 @@ impl Preparation {
                     .is_some();
                 if kinds[EventKind::MembershipChange as usize] >= 0 || known {
                     let log = store.node.log.lock().expect("log lock");
-                    let step = store.node.channel_checkpoints.project_step_with_budget(
-                        log.repository()?,
-                        &store.node.identity,
-                        view.conversation,
-                        budget,
-                    )?;
+                    let step = if self.history_only
+                        && let Some(generation) = self.generation
+                    {
+                        store.node.channel_checkpoints.project_network_prefix_step(
+                            log.repository()?,
+                            &store.node.identity,
+                            view.conversation,
+                            generation,
+                            budget,
+                        )?
+                    } else {
+                        store.node.channel_checkpoints.project_step_with_budget(
+                            log.repository()?,
+                            &store.node.identity,
+                            view.conversation,
+                            budget,
+                        )?
+                    };
+                    drop(log);
                     if step.ready {
-                        self.phase = Phase::Classify;
+                        if self.history_only {
+                            // Classify the freshly published view in this turn;
+                            // a later ordinary append must not starve this phase.
+                            self.classify(store, view)?;
+                        } else {
+                            self.phase = Phase::Classify;
+                        }
                     }
                     return Ok(PreparationStep {
                         ready: false,
@@ -301,17 +393,7 @@ impl Preparation {
                 }
                 Ok(self.stage(Phase::Classify))
             }
-            Phase::Classify => {
-                self.principal = Some(store.principal(view.conversation, self.replica_shared)?);
-                let phase = match self.principal.as_ref().expect("classified principal") {
-                    Principal::Denied => Phase::Hash,
-                    Principal::Files { .. } => Phase::Files,
-                    Principal::Legacy(_) => Phase::Future,
-                    Principal::Modern { closing: true, .. } => Phase::ClosingRoots,
-                    _ => Phase::Rows,
-                };
-                Ok(self.stage(phase))
-            }
+            Phase::Classify => self.classify(store, view),
             Phase::Files => {
                 let Principal::Files {
                     scopes,
@@ -504,6 +586,16 @@ impl Preparation {
         view: &ParticipantView,
         budget: PreparationBudget,
     ) -> Result<PreparationStep, LogError> {
+        if self.history_only {
+            // Mailbox upload uses the selected rank suffix, not the optional
+            // whole-selection fingerprint consumed by direct network sync.
+            self.metadata.fingerprint = None;
+            self.phase = Phase::Ready;
+            return Ok(PreparationStep {
+                ready: true,
+                ..Default::default()
+            });
+        }
         if self.hash.is_none() {
             self.metadata.count += view.pending.len() as u64;
             for event in store
@@ -587,10 +679,11 @@ fn capabilities(metadata: &mut SyncMetadata, kind: EventKind) {
 }
 
 impl GuardedSyncStore<'_> {
-    fn principal(
+    fn principal_with_prefix(
         &self,
         conversation: ConversationId,
         replica_shared: bool,
+        prefix: Option<OrderGeneration>,
     ) -> Result<Principal, LogError> {
         if self.inbound && !replica_shared {
             return Ok(Principal::Denied);
@@ -616,7 +709,7 @@ impl GuardedSyncStore<'_> {
             if kinds[EventKind::MembershipChange as usize] < 0 && !known {
                 return Ok(Principal::Public);
             }
-            return self.channel_principal(conversation, false, false, guard.as_ref());
+            return self.channel_principal(conversation, false, false, guard.as_ref(), prefix);
         }
         let state = private.expect("private state");
         let me = self.node.identity.public();
@@ -691,7 +784,7 @@ impl GuardedSyncStore<'_> {
                 skip: 0,
             });
         }
-        self.channel_principal(conversation, relay, own_peer, Some(state))
+        self.channel_principal(conversation, relay, own_peer, Some(state), prefix)
     }
     fn channel_principal(
         &self,
@@ -699,11 +792,17 @@ impl GuardedSyncStore<'_> {
         relay: bool,
         own_peer: bool,
         private: Option<&PrivacyState>,
+        prefix: Option<OrderGeneration>,
     ) -> Result<Principal, LogError> {
-        let projection = self
-            .node
-            .channel_checkpoints
-            .published_projection(conversation)?;
+        let projection = if let Some(prefix) = prefix {
+            self.node
+                .channel_checkpoints
+                .network_prefix_projection(conversation, prefix)?
+        } else {
+            self.node
+                .channel_checkpoints
+                .published_projection(conversation)?
+        };
         let Some(projection) = projection.filter(|p| p.authority.current_event().is_some()) else {
             return Ok(Principal::Legacy(Box::new(LegacyChannel::new(
                 self,
@@ -863,6 +962,7 @@ impl Preparation {
                     &view.repository,
                     self.generation.expect("ranked source").job,
                     self.rank,
+                    self.history_only,
                 )?
                 .ok_or(LogError::StaleCursor)?;
             self.active = Some(Active {

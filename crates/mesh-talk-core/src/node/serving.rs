@@ -293,7 +293,7 @@ impl Node {
                     continue;
                 }
                 let Ok(events) = self
-                    .opaque_relay_round(&mut channel, recipient, Some(conv))
+                    .opaque_relay_round_for(&mut channel, recipient, Some(conv), confirm)
                     .await
                 else {
                     continue;

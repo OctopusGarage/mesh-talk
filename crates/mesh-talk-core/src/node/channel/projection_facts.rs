@@ -40,12 +40,14 @@ struct Context {
     bindings: HashMap<String, crate::discovery::Announce>,
     roots: HashMap<String, (PublicIdentity, EventId, Option<EventId>, bool)>,
 }
+#[derive(Clone)]
 pub(in crate::node) struct ProjectionFacts {
     pub(super) profile: Arc<ProfileStorage>,
     pub(super) job: [u8; 16],
     pub(super) channel: ConversationId,
     source_revision: i64,
     source_job: [u8; 16],
+    append_only_network: bool,
     pub(super) _query_lease: Option<Arc<super::checkpoint::causal::Query>>,
 }
 fn invalid(message: &str) -> LogError {
@@ -147,12 +149,24 @@ impl ProjectionFacts {
             channel,
             source_revision,
             source_job,
+            append_only_network: false,
             _query_lease: None,
         }));
         Ok((reducer, next))
     }
     fn guard_on(&self, c: &Connection) -> Result<(), LogError> {
+        if self.append_only_network {
+            return super::graph::require_source_prefix_on(
+                c,
+                self.channel,
+                self.source_job,
+                self.source_revision,
+            );
+        }
         super::graph::require_source_on(c, self.channel, self.source_job, self.source_revision)
+    }
+    pub(super) fn allow_network_prefix(&mut self) {
+        self.append_only_network = true;
     }
     pub(super) fn contains_event(&self, event: EventId) -> Result<bool, LogError> {
         self.profile.database().read(|c| {self.guard_on(c)?;c.query_row("SELECT EXISTS(SELECT 1 FROM channel_event_authority WHERE job=?1 AND channel=?2 AND event=?3)",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),event.as_bytes().as_slice()],|r|r.get(0)).map_err(Into::into)})

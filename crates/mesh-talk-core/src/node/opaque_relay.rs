@@ -1,5 +1,7 @@
 //! Recipient-encrypted event-log projection for an opaque relay mailbox.
 
+pub(in crate::node) mod incremental;
+
 use super::*;
 use crate::eventlog::store::EventLog;
 use crate::eventlog::sync::SyncStore;
@@ -200,6 +202,8 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     processed_events: HashMap<EventId, Option<EventId>>,
     wrapper_ids: HashMap<EventId, EventId>,
     wrappers: Mutex<WrapperCache>,
+    incremental: incremental::Mode,
+    uninvited_channels: super::privacy_sync::UninvitedChannelStaging,
 }
 
 impl OpaqueMailboxProgress {
@@ -222,6 +226,8 @@ impl OpaqueMailboxProgress {
             processed_events: HashMap::new(),
             wrapper_ids: HashMap::new(),
             wrappers: Mutex::new(WrapperCache::default()),
+            incremental: incremental::Mode::default(),
+            uninvited_channels: super::privacy_sync::UninvitedChannelStaging::new(relay),
         }
     }
 
@@ -253,6 +259,20 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        self.opaque_relay_round_for(channel, recipient, conversation, None)
+            .await
+    }
+
+    pub(in crate::node) async fn opaque_relay_round_for<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        confirm: Option<EventId>,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         if !self.relay_send_allowed(channel.peer_identity())
             && !self.relay_receive_allowed(channel.peer_identity())
         {
@@ -261,19 +281,26 @@ impl Node {
         let legacy = RelayMailbox::new(&self.identity, recipient, channel.peer_identity())
             .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
         let mut uploaded = self
-            .opaque_mailbox_round(channel, recipient, conversation, legacy)
+            .opaque_mailbox_round_confirmed(channel, recipient, conversation, legacy, confirm)
             .await?;
         if self.bridge_directory_allowed() {
             let federated = RelayMailbox::federated(&self.identity, recipient)
                 .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
             uploaded.extend(
-                self.opaque_mailbox_round(channel, recipient, conversation, federated)
-                    .await?,
+                self.opaque_mailbox_round_confirmed(
+                    channel,
+                    recipient,
+                    conversation,
+                    federated,
+                    confirm,
+                )
+                .await?,
             );
         }
         Ok(uploaded)
     }
 
+    #[cfg(test)]
     async fn opaque_mailbox_round<IO>(
         &self,
         channel: &mut crate::transport::SecureChannel<IO>,
@@ -284,9 +311,33 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        self.opaque_mailbox_round_confirmed(channel, recipient, conversation, mailbox, None)
+            .await
+    }
+
+    async fn opaque_mailbox_round_confirmed<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        mailbox: RelayMailbox,
+        confirm: Option<EventId>,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         let mut progress =
             OpaqueMailboxProgress::new(channel.peer_identity(), recipient, conversation, mailbox);
         while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
+        if let Some(inner) = confirm
+            && let Some(outer) = self.opaque_confirmed_wrapper(&progress, inner)?
+            && !progress.uploaded.contains(&(inner, outer))
+        {
+            if progress.uploaded.len() >= 64 {
+                progress.uploaded.remove(0);
+            }
+            progress.uploaded.push((inner, outer));
+        }
         Ok(progress.uploaded)
     }
 
@@ -314,6 +365,12 @@ impl Node {
     {
         if channel.peer_identity() != &progress.relay {
             return Err(super::session::SessionError::UnexpectedMessage);
+        }
+        if let Some(complete) = self
+            .advance_incremental_mailbox(channel, progress, authorize_upload)
+            .await?
+        {
+            return Ok(complete);
         }
         let mut seen = self
             .opaque_receive_cache
@@ -348,43 +405,7 @@ impl Node {
                     .expect("projection lock not poisoned")
                     .authorized_event_ids(&conv)?;
             }
-            if progress.identity_controls.is_none() {
-                progress.identity_controls =
-                    Some(self.file_message_identity_controls_for(&progress.recipient, false)?);
-            }
-            if let Some(identities) = &progress.identity_controls {
-                let guarded = self.sync_store(&progress.recipient);
-                for bundle in identities {
-                    let mut authorized = false;
-                    for (file, manifest) in super::file_message_identity::bundle_references(bundle)
-                    {
-                        if guarded
-                            .lock()
-                            .expect("projection lock")
-                            .file_message_identity(&file, &manifest)?
-                            .is_some_and(|current| current.id == bundle.id)
-                        {
-                            authorized = true;
-                            break;
-                        }
-                    }
-                    if authorized {
-                        controls.insert(bundle.id, bundle.clone());
-                    }
-                }
-            }
-            if progress.consent_offers.is_none() {
-                progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
-            }
-            controls.extend(
-                self.file_consent_controls(
-                    &progress.recipient,
-                    progress.consent_offers.as_deref().unwrap_or(&[]),
-                    false,
-                )?
-                .into_iter()
-                .map(|event| (event.id, event)),
-            );
+            controls = self.opaque_controls(progress, authorize_upload)?;
         }
         let requested: HashSet<_> = source_ids.iter().copied().collect();
         source_ids.extend(controls.keys().copied());
@@ -458,6 +479,65 @@ impl Node {
             .cloned()
             .collect();
         drop(outer_store);
+        self.accept_opaque_wrappers(progress, wrappers)?;
+        if !self.relay_send_allowed(channel.peer_identity()) {
+            progress.uploaded.clear();
+        }
+        Ok(complete)
+    }
+    fn opaque_controls<F: Fn() -> bool + Sync>(
+        &self,
+        progress: &mut OpaqueMailboxProgress,
+        authorize_upload: &F,
+    ) -> Result<HashMap<EventId, Event>, LogError> {
+        let mut controls = HashMap::new();
+        if self.relay_send_allowed(&progress.relay) && authorize_upload() {
+            if progress.identity_controls.is_none() {
+                progress.identity_controls =
+                    Some(self.file_message_identity_controls_for(&progress.recipient, false)?);
+            }
+            if let Some(identities) = &progress.identity_controls {
+                let guarded = self.sync_store(&progress.recipient);
+                for bundle in identities {
+                    let mut authorized = false;
+                    for (file, manifest) in super::file_message_identity::bundle_references(bundle)
+                    {
+                        if guarded
+                            .lock()
+                            .expect("projection lock")
+                            .file_message_identity(&file, &manifest)?
+                            .is_some_and(|current| current.id == bundle.id)
+                        {
+                            authorized = true;
+                            break;
+                        }
+                    }
+                    if authorized {
+                        controls.insert(bundle.id, bundle.clone());
+                    }
+                }
+            }
+            if progress.consent_offers.is_none() {
+                progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
+            }
+            controls.extend(
+                self.file_consent_controls(
+                    &progress.recipient,
+                    progress.consent_offers.as_deref().unwrap_or(&[]),
+                    false,
+                )?
+                .into_iter()
+                .map(|event| (event.id, event)),
+            );
+        }
+        Ok(controls)
+    }
+
+    fn accept_opaque_wrappers(
+        &self,
+        progress: &mut OpaqueMailboxProgress,
+        wrappers: Vec<Event>,
+    ) -> Result<(), super::session::SessionError> {
         let mut inner: Vec<(EventId, Event)> = Vec::new();
         let mut processed = Vec::new();
         let mut retained = Vec::new();
@@ -476,133 +556,151 @@ impl Node {
                 event.id,
             )
         });
-        let store = self.sync_store(channel.peer_identity());
-        for (outer_id, event) in inner {
-            if !self.relay_receive_allowed(channel.peer_identity()) {
-                break;
-            }
-            if super::file_message_identity::is_bundle(&event) {
-                use super::file_message_identity::FileMessageIdentityImportError;
-                if self
-                    .delivery_suspended
-                    .load(std::sync::atomic::Ordering::Acquire)
-                {
+        let store = self.sync_store(&progress.relay);
+        store
+            .lock()
+            .expect("projection lock not poisoned")
+            .swap_uninvited_channel_staging(&mut progress.uninvited_channels)?;
+        // Every error returns operation-owned ancestry to the progress owner.
+        let result: Result<(), super::session::SessionError> = (|| {
+            for (outer_id, event) in inner {
+                if !self.relay_receive_allowed(&progress.relay) {
                     break;
                 }
-                let source =
-                    super::file_message_identity::bundle_accounts(&event).map(|(source, _)| source);
-                let actor = self
-                    .historical_author(&progress.recipient.ed25519_pub)
-                    .filter(|proof| proof.public() == progress.recipient)
-                    .and_then(|proof| proof.account_id());
-                if source.is_none()
-                    || source != actor
-                    || !self.known_account_allowed(&progress.recipient)
-                {
-                    processed.push(outer_id);
+                if super::file_message_identity::is_bundle(&event) {
+                    use super::file_message_identity::FileMessageIdentityImportError;
+                    if self
+                        .delivery_suspended
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    let source = super::file_message_identity::bundle_accounts(&event)
+                        .map(|(source, _)| source);
+                    let actor = self
+                        .historical_author(&progress.recipient.ed25519_pub)
+                        .filter(|proof| proof.public() == progress.recipient)
+                        .and_then(|proof| proof.account_id());
+                    if source.is_none()
+                        || source != actor
+                        || !self.known_account_allowed(&progress.recipient)
+                    {
+                        processed.push(outer_id);
+                        continue;
+                    }
+                    match self.import_file_message_identity_checked(event) {
+                        Ok(()) | Err(FileMessageIdentityImportError::Invalid(_)) => {
+                            processed.push(outer_id)
+                        }
+                        Err(
+                            FileMessageIdentityImportError::MissingProof
+                            | FileMessageIdentityImportError::Persistence(_),
+                        ) => {
+                            progress.defer_event(outer_id)?;
+                        }
+                    }
                     continue;
                 }
-                match self.import_file_message_identity_checked(event) {
-                    Ok(()) | Err(FileMessageIdentityImportError::Invalid(_)) => {
-                        processed.push(outer_id)
+                match self.accept_file_consent_event(&event, &progress.recipient) {
+                    Ok(true) => {
+                        processed.push(outer_id);
+                        continue;
                     }
-                    Err(
-                        FileMessageIdentityImportError::MissingProof
-                        | FileMessageIdentityImportError::Persistence(_),
-                    ) => {
+                    Err(error) => {
+                        // Retry this control after local storage recovers, while
+                        // allowing unrelated messages in the same mailbox through.
+                        log::debug!("file consent persistence deferred: {error}");
+                        // Do not re-download this failed control in every protocol
+                        // step. This ID is deliberately absent from the node-wide seen cache:
+                        // a fresh mailbox operation must retry its persistence.
                         progress.defer_event(outer_id)?;
+                        continue;
                     }
+                    Ok(false) => {}
                 }
-                continue;
-            }
-            match self.accept_file_consent_event(&event, &progress.recipient) {
-                Ok(true) => {
-                    processed.push(outer_id);
-                    continue;
-                }
-                Err(error) => {
-                    // Retry this control after local storage recovers, while
-                    // allowing unrelated messages in the same mailbox through.
-                    log::debug!("file consent persistence deferred: {error}");
-                    // Do not re-download this failed control in every protocol
-                    // step. This ID is deliberately absent from the node-wide seen cache:
-                    // a fresh mailbox operation must retry its persistence.
-                    progress.defer_event(outer_id)?;
-                    continue;
-                }
-                Ok(false) => {}
-            }
-            if self
-                .log
-                .lock()
-                .expect("log mutex not poisoned")
-                .has(&event.id)?
-            {
-                processed.push(outer_id);
-                retained.push((outer_id, event.id));
-                continue;
-            }
-            let inner_id = event.id;
-            let conv = event.conversation_id;
-            let admission = store
-                .lock()
-                .expect("projection lock not poisoned")
-                .ingest(event);
-            if let Err(error) = admission {
-                // Valid wrappers are only transport progress: missing parents,
-                // receive policy or storage failure may reject their contents.
-                // Recreating the round store must not make the same rejected
-                // page appear newly applied forever. Defer only this operation,
-                // so later drains retry after dependencies or policy recover.
-                log::debug!("opaque event admission deferred: {error}");
-                progress.defer_event(outer_id)?;
-            } else {
-                processed.push(outer_id);
                 if self
                     .log
                     .lock()
-                    .expect("log lock not poisoned")
-                    .has(&inner_id)?
+                    .expect("log mutex not poisoned")
+                    .has(&event.id)?
                 {
-                    retained.push((outer_id, inner_id));
+                    processed.push(outer_id);
+                    retained.push((outer_id, event.id));
+                    continue;
                 }
-                self.emit_new_messages(conv);
-                self.process_channel_reception(conv, "catch_up");
-                self.process_file_events_reception(conv, "catch_up");
-                self.process_profile_events(conv);
-                self.persist_media_if_complete(conv);
+                let inner_id = event.id;
+                let conv = event.conversation_id;
+                let (admission, staged) = {
+                    let mut store = store.lock().expect("projection lock not poisoned");
+                    let admission = store.ingest(event);
+                    let staged = store.uninvited_channel_staged(conv, inner_id);
+                    (admission, staged)
+                };
+                if let Err(error) = admission {
+                    // Valid wrappers are only transport progress: missing parents,
+                    // receive policy or storage failure may reject their contents.
+                    // Recreating the round store must not make the same rejected
+                    // page appear newly applied forever. Defer only this operation,
+                    // so later drains retry after dependencies or policy recover.
+                    log::debug!("opaque event admission deferred: {error}");
+                    progress.defer_event(outer_id)?;
+                } else if staged {
+                    // Staging is memory-only preparation. Cancellation drops it,
+                    // so this wrapper must remain retryable without session hints.
+                    progress.defer_event(outer_id)?;
+                } else {
+                    processed.push(outer_id);
+                    if self
+                        .log
+                        .lock()
+                        .expect("log lock not poisoned")
+                        .has(&inner_id)?
+                    {
+                        retained.push((outer_id, inner_id));
+                    }
+                    self.emit_new_messages(conv);
+                    self.process_channel_reception(conv, "catch_up");
+                    self.process_file_events_reception(conv, "catch_up");
+                    self.process_profile_events(conv);
+                    self.persist_media_if_complete(conv);
+                }
             }
-        }
-        let retained_by_outer: HashMap<_, _> = retained.iter().copied().collect();
-        for outer in &processed {
-            if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
-                && !progress.processed_events.contains_key(outer)
-            {
-                return Err(super::session::SessionError::NoProgress);
+            for (outer, inner) in &retained {
+                self.remember_wrapper_id(progress.mailbox.id(), *inner, *outer);
             }
-            progress
-                .processed_events
-                .insert(*outer, retained_by_outer.get(outer).copied());
-        }
-        if !retained.is_empty() {
-            self.opaque_receive_cache
-                .lock()
-                .expect("opaque cache lock not poisoned")
-                .remember(progress.mailbox.id(), &retained);
-        }
-        // Retained pairs stay dependent on exact main-log membership. Only
-        // wrappers without a retained inner event need session-only progress.
-        processed.retain(|outer| !retained_by_outer.contains_key(outer));
-        if !processed.is_empty() {
-            self.opaque_receive_cache
-                .lock()
-                .expect("opaque cache lock not poisoned")
-                .remember_session(progress.mailbox.id(), &processed);
-        }
-        if !self.relay_send_allowed(channel.peer_identity()) {
-            progress.uploaded.clear();
-        }
-        Ok(complete)
+            let retained_by_outer: HashMap<_, _> = retained.iter().copied().collect();
+            for outer in &processed {
+                if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
+                    && !progress.processed_events.contains_key(outer)
+                {
+                    return Err(super::session::SessionError::NoProgress);
+                }
+                progress
+                    .processed_events
+                    .insert(*outer, retained_by_outer.get(outer).copied());
+            }
+            if !retained.is_empty() {
+                self.opaque_receive_cache
+                    .lock()
+                    .expect("opaque cache lock not poisoned")
+                    .remember(progress.mailbox.id(), &retained);
+            }
+            // Retained pairs stay dependent on exact main-log membership. Only
+            // wrappers without a retained inner event need session-only progress.
+            processed.retain(|outer| !retained_by_outer.contains_key(outer));
+            if !processed.is_empty() {
+                self.opaque_receive_cache
+                    .lock()
+                    .expect("opaque cache lock not poisoned")
+                    .remember_session(progress.mailbox.id(), &processed);
+            }
+            Ok(())
+        })();
+        store
+            .lock()
+            .expect("projection lock not poisoned")
+            .swap_uninvited_channel_staging(&mut progress.uninvited_channels)?;
+        result
     }
 }
 
@@ -1176,3 +1274,12 @@ mod permission_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod incremental_tests;
+
+#[cfg(test)]
+mod incremental_receive_tests;
+
+#[cfg(test)]
+mod incremental_admission_tests;
