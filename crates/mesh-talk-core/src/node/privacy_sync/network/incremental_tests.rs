@@ -278,7 +278,7 @@ fn participant_history_upload_append_reuses_authorized_prefix_without_full_hash(
         let work = prepare_upload(&store, &upload);
         assert!(
             work <= 8,
-            "one append revisited old history: {work} rows for {count} messages"
+            "one append must stay within the bounded incremental preparation work"
         );
         assert!(matches!(
             store.history_upload_page(

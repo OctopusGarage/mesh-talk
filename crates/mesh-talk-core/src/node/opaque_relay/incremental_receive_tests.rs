@@ -122,7 +122,7 @@ async fn incremental_receive_revocation_preserves_unhandled_page_for_restore() {
                 LogError::AdmissionRejected(_)
             ))
         ),
-        "disabled receive must interrupt the page: {interrupted:?}"
+        "disabled receive must interrupt the page with an admission rejection"
     );
     assert_eq!(received(), 1);
     assert_eq!(
