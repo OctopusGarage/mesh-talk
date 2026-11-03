@@ -72,6 +72,15 @@
     "reason": "SARIF sink is Vec::remove(0), not logging. Nonempty queue is proven; removal follows successful AES-GCM journal rewrite. Key remains in its encrypted writer. Pinned CodeQL model:8766-8767 over-models receiver. Independently reviewed; evidence in PR #152. Re-reviewed at d9109021 against all four flows from CodeQL analysis 2075206817: public account-certificate validation reaches the aggregate store, but the unchanged sink only removes an in-memory Vec entry; no value is formatted or emitted."
   },
   {
+    "rule": "rust/cleartext-logging",
+    "path": "crates/mesh-talk-core/src/node/delivery_store.rs",
+    "fingerprint": "aa6478bdb3ca79d7:1",
+    "flow": "42bd6840a7fd952b5ca9aec51d6810f0ac258cc852866f4774501a6cefb480ae",
+    "alert": 475,
+    "review": "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/475",
+    "reason": "SARIF sink is Vec::remove(0), not logging. Nonempty queue is proven; removal follows successful AES-GCM journal rewrite. Key remains in its encrypted writer. Pinned CodeQL model:8766-8767 over-models receiver. Independently reviewed; evidence in PR #152. Re-reviewed at d9109021 against all four flows from CodeQL analysis 2075206817: public account-certificate validation reaches the aggregate store, but the unchanged sink only removes an in-memory Vec entry; no value is formatted or emitted. Independently re-reviewed in PR #332 against full CodeQL analysis 2082825027: the same eight numbered source sites remain, while the fourth representative witness now follows the already-listed public Owner account certificate through validate_common and validate_transaction to this unchanged in-memory removal. All nine referenced production files are unchanged from accepted analysis 2082712634; the certificate contains public keys and a signature, and no value is formatted or emitted at this sink. This review binds only the new exact flow; query, matching and rejection rules remain unchanged."
+  },
+  {
     "rule": "js/bad-code-sanitization",
     "path": "scripts/diagnostics/validation-stage.test.mjs",
     "fingerprint": "c87c1a6243dec344:1",

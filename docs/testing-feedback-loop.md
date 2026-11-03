@@ -1232,7 +1232,10 @@ existing alert review and rationale. Moving an
 unchanged finding to another line does not change its identity; changing its
 rule, sink fingerprint or modeled flow does. New findings cannot enter the
 inventory automatically: review their actual source and flow before changing
-this policy through a PR. Remove obsolete entries when their false-positive
+this policy through a PR. An existing alert may retain multiple independently
+reviewed exact witnesses. A known sink or one reviewed witness never qualifies
+another modeled flow; compare the complete source catalog, selected paths and
+source bytes before recording an additional binding. Remove obsolete entries when their false-positive
 model is fixed. No new alert dismissals or query exclusions are introduced.
 Disable diff-informed queries so PR and main use the same full analysis and
 reviewed-finding gate. Keep Rust, JavaScript/TypeScript and Actions analysis,

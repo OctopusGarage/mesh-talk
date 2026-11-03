@@ -53,6 +53,41 @@ test("only the exact reviewed finding and data flow qualify", async t => {
   assert.throws(() => requireCleanCodeQL(directory, reviewed, directory), /changed CodeQL finding/);
 });
 
+test("two reviewed witnesses never admit a third unreviewed flow at the same sink", async t => {
+  const directory = await fixture(t, {
+    "fixture.rs": "sink();\npublic_identifier();\nowner_certificate();\nprivate_key();\n",
+  });
+  const finding = {
+    ruleId: "fixture-rule",
+    locations: [{ physicalLocation: { artifactLocation: { uri: "fixture.rs" }, region: { startLine: 1 } } }],
+    partialFingerprints: { primaryLocationLineHash: "reviewed:1" },
+    codeFlows: [{ threadFlows: [{ locations: [{ location: {
+      message: { text: "public identifier" },
+      physicalLocation: { artifactLocation: { uri: "fixture.rs" }, region: { startLine: 2 } },
+    } }] }] }],
+  };
+  const owner = structuredClone(finding);
+  owner.codeFlows[0].threadFlows[0].locations[0].location.message.text = "public owner certificate";
+  owner.codeFlows[0].threadFlows[0].locations[0].location.physicalLocation.region.startLine = 3;
+  const reviewed = [finding, owner].map(witness => ({
+    ...findingIdentity({}, witness, directory), alert: 1,
+    review: "https://github.com/OctopusGarage/mesh-talk/security/code-scanning/1",
+    reason: "Each exact witness was independently reviewed; the sink is an in-memory operation",
+  }));
+  const report = clean();
+  for (const witness of [finding, owner]) {
+    report.runs[0].results = [witness];
+    await writeFile(path.join(directory, "rust.sarif"), JSON.stringify(report));
+    assert.equal(requireCleanCodeQL(directory, reviewed, directory).reviewedFindings, 1);
+  }
+  const unreviewed = structuredClone(owner);
+  unreviewed.codeFlows[0].threadFlows[0].locations[0].location.message.text = "private key";
+  unreviewed.codeFlows[0].threadFlows[0].locations[0].location.physicalLocation.region.startLine = 4;
+  report.runs[0].results = [unreviewed];
+  await writeFile(path.join(directory, "rust.sarif"), JSON.stringify(report));
+  assert.throws(() => requireCleanCodeQL(directory, reviewed, directory), /unreviewed or changed/);
+});
+
 test("every CodeQL matrix analysis validates its actual local SARIF after upload", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/codeql.yml", import.meta.url), "utf8");
   const analysis = workflow.split(/^      - /m).find(step => step.startsWith("name: Perform CodeQL Analysis\n"));
