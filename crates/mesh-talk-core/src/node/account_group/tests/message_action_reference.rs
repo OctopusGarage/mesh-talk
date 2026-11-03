@@ -414,6 +414,120 @@ pub(super) async fn pull_reference_action_control(
 pub(super) use crate::node::test_support::IndependentPeerRuntime as ActionPeerRuntime;
 
 #[tokio::test]
+async fn multithreaded_peer_runtime_authenticates_while_one_worker_is_held() {
+    peer_authentication_while_worker_is_held(true).await;
+}
+
+#[tokio::test]
+async fn current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held() {
+    peer_authentication_while_worker_is_held(false).await;
+}
+
+async fn peer_authentication_while_worker_is_held(multithreaded: bool) {
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("source"), &account);
+    let reference = node(&directory.path().join("reference"), &account);
+    link(&source, &reference);
+    link(&reference, &source);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&source, &directory.path().join("source"), address.port());
+    configure(&reference, &directory.path().join("reference"), 1);
+    let expected = source.identity.public();
+    let mut owner = if multithreaded {
+        ActionPeerRuntime::start_multithreaded(source, listener).await
+    } else {
+        ActionPeerRuntime::start(source, listener).await
+    };
+    owner.launch();
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let held = owner.runtime_handle().spawn(async move {
+        entered.send(()).unwrap();
+        let _ = released.recv();
+    });
+    let (noise_started, noise_started_rx) = tokio::sync::oneshot::channel();
+    let noise_started = Mutex::new(Some(noise_started));
+    *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+        if phase == "dial_noise_begin"
+            && let Some(sender) = noise_started.lock().unwrap().take()
+        {
+            let _ = sender.send(());
+        }
+    }));
+    let mut dial = None;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .expect("the actual host worker must enter its controlled hold")
+            .unwrap();
+        let client = reference.clone();
+        let identity = expected.clone();
+        dial = Some(tokio::spawn(async move {
+            client.privacy_dial(address, &identity).await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(5), noise_started_rx)
+            .await
+            .expect("the actual client must reach Noise before response observation")
+            .unwrap();
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(5), dial.as_mut().unwrap()).await;
+        match response {
+            Ok(result) => {
+                dial = None;
+                assert!(
+                    multithreaded,
+                    "the held single-thread host cannot answer Noise"
+                );
+                let response = result
+                    .expect("the authenticated client task must join")
+                    .expect("the real Noise response must succeed");
+                assert_eq!(response.peer_identity(), &expected);
+            }
+            Err(_) => assert!(
+                !multithreaded,
+                "the same host must authenticate while one worker remains held"
+            ),
+        }
+        assert!(
+            !held.is_finished(),
+            "the worker must remain held throughout response observation"
+        );
+    })
+    .catch_unwind()
+    .await;
+    drop(release);
+    let cleanup = std::panic::AssertUnwindSafe(async {
+        held.await.unwrap();
+        if let Some(mut dial) = dial {
+            // Release the reactor first, then join the actual in-flight dial.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut dial).await {
+                Ok(result) => {
+                    let _ = result.expect("client retirement must join");
+                }
+                Err(_) => {
+                    dial.abort();
+                    let _ = dial.await;
+                    panic!("the released client must retire");
+                }
+            }
+        }
+        *reference.account_client_test_hook.lock().unwrap() = None;
+        owner.stop().await;
+    })
+    .catch_unwind()
+    .await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    if let Err(panic) = cleanup {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
 async fn independent_peer_runtime_keeps_other_host_progress_while_one_reactor_is_held() {
     use futures_util::FutureExt;
     let directory = tempfile::tempdir().unwrap();

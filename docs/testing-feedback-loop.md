@@ -876,8 +876,15 @@ propagation phase begins only after all nodes have disabled periodic work and
 retains its original deadline, exact message evidence and zero periodic-work
 assertion. A failed cold connection must not silently remove the fixture's only
 remaining preparation path.
-The six simulated hosts use the existing shared independent-peer runtime owner,
-with one reactor per host. Bind every listener before launching those owners.
+The six simulated gossip hosts use the shared independent-peer runtime owner's
+explicit two-worker Tokio mode, matching the real CLI's multi-thread host.
+Account-action fixtures retain that owner's single-thread mode where scheduling
+is part of their controlled boundary. Bind every listener before launching owners.
+Require real exact-peer Noise authentication while one worker of the same
+multi-thread host remains synchronously held. The corresponding single-thread
+control must keep that actual authentication pending until release; a task
+acknowledgement alone does not qualify the serving boundary. Release the hold,
+join the client and held task, then stop and drain the runtime on either outcome.
 A controlled held reactor must keep its own queued task pending while a second
 host acknowledges work; release and join both tasks and runtime owners on every
 exit. Cancellation before server launch must also close admission and join the
@@ -885,7 +892,7 @@ host only after its actual admitted-work permit retires. Verify the runtime is
 stopped when Drop returns and retain stores if retirement is unverified.
 Keep the original absolute eight-second post-send cutoff, including sender
 retirement, and the existing admitted-read completion timestamps. Host isolation
-corrects the simulation boundary; it does not establish why a historical hop
+and explicit scheduling correct the simulation boundary; they do not establish why a historical hop
 was late. All remaining server owners retire before fixture storage.
 
 The modern Leave Noise-fault fixture has an explicit preparation boundary: finish

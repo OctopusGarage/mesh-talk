@@ -97,6 +97,20 @@ pub(super) struct IndependentPeerRuntime {
 }
 impl IndependentPeerRuntime {
     pub(super) async fn start(node: Arc<Node>, listener: TcpListener) -> Self {
+        Self::start_with_workers(node, listener, false).await
+    }
+
+    // Match the CLI's multi-thread Tokio host while retaining the explicitly
+    // single-thread account-action fixtures' scheduling and ownership contract.
+    pub(super) async fn start_multithreaded(node: Arc<Node>, listener: TcpListener) -> Self {
+        Self::start_with_workers(node, listener, true).await
+    }
+
+    async fn start_with_workers(
+        node: Arc<Node>,
+        listener: TcpListener,
+        multithreaded: bool,
+    ) -> Self {
         let listener = listener.into_std().unwrap();
         let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
         let (launch, launched) = tokio::sync::oneshot::channel();
@@ -104,10 +118,14 @@ impl IndependentPeerRuntime {
         let thread = std::thread::Builder::new()
             .name("account-action-peer".into())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
+                let mut builder = if multithreaded {
+                    let mut builder = tokio::runtime::Builder::new_multi_thread();
+                    builder.worker_threads(2);
+                    builder
+                } else {
+                    tokio::runtime::Builder::new_current_thread()
+                };
+                let runtime = builder.enable_all().build().unwrap();
                 runtime.block_on(async move {
                     let listener = TcpListener::from_std(listener).unwrap();
                     ready.send(tokio::runtime::Handle::current()).unwrap();

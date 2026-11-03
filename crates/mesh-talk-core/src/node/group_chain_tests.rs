@@ -1310,7 +1310,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let mut hosts = Vec::with_capacity(6);
     for (index, listener) in listeners.into_iter().enumerate() {
         hosts.push(Some(
-            IndependentPeerRuntime::start(chain.nodes[index].clone(), listener).await,
+            IndependentPeerRuntime::start_multithreaded(chain.nodes[index].clone(), listener).await,
         ));
     }
     for host in hosts.iter_mut().flatten() {

@@ -1918,6 +1918,7 @@
         "crates/mesh-talk-core/src/node/media_store/**",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
+        "crates/mesh-talk-core/src/node/test_support.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/privacy_sync/",
         "crates/mesh-talk-core/src/eventlog/repository/selection.rs"
@@ -1938,6 +1939,8 @@
             "participant_durable_have_request_uses_no_historical_bodies",
             "participant_selection_retirement_",
             "background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
+            "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
+            "current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held",
             "independent_peer_runtime_keeps_other_host_progress_while_one_reactor_is_held",
             "independent_peer_runtime_drop_retires_unlaunched_admitted_work",
             "independent_action_peer_runtime_joins_accepted_connections_and_admitted_writers",
@@ -1959,7 +1962,7 @@
             "reference": "docs/help/topics/channels.md#network-data-protection"
           },
           {
-            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions. Each simulated host owns a separate reactor through the shared independent-peer fixture owner; a held host cannot prevent another host from acknowledging work. Owner retirement closes admission, joins the real server and drains writers before joining its thread. Sender retirement remains inside the original post-send cutoff.",
+            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions. Each simulated gossip host owns an independent two-worker Tokio runtime, matching the multi-thread CLI; account-action callers retain the shared owner's explicit single-thread mode. Real exact-peer Noise authentication must complete on the same multi-thread host while one entered worker remains held; the single-thread negative control must remain pending until release. A held host cannot prevent another host from acknowledging work. These controls qualify fixture scheduling, not the cause of an earlier late hop. Owner retirement closes admission, joins the real server and drains writers before joining its thread. Sender retirement remains inside the original post-send cutoff.",
             "reference": "docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities"
           },
           {
