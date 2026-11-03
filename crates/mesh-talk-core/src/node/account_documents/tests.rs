@@ -178,6 +178,198 @@ async fn routed_offline_member_does_not_starve_sibling_custody_report_after_hist
     failed_initial_sibling_custody_recovery(true).await;
 }
 
+#[tokio::test]
+async fn custody_report_progresses_while_unrelated_channel_recovery_is_held() {
+    use crate::{discovery::Announce, node::account_devices::AccountDevice};
+    use futures_util::FutureExt;
+    use std::sync::{Arc, atomic::Ordering};
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    let unrelated = DeviceIdentity::generate();
+    let group = source
+        .create_channel("Pending report", vec![sibling.identity.public()])
+        .await
+        .unwrap();
+    source
+        .send_channel_message(group, b"original pending custody report")
+        .await
+        .unwrap();
+    let event = source.channel_history(group, 10).unwrap()[0].id;
+    assert!(source.channel_custody_observations(group, event).is_empty());
+    let other = source
+        .create_channel("Unrelated recovery", vec![unrelated.public()])
+        .await
+        .unwrap();
+    assert!(
+        source.channel_history(other, 10).unwrap().is_empty(),
+        "the held route cannot be selected for any locally authored message custody"
+    );
+    for (owner, peer) in [(&source, &sibling), (&sibling, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: peer.identity.public(),
+                certificate: account.certify(&peer.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let sibling_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sibling_address = sibling_listener.local_addr().unwrap();
+    source.roster.lock().unwrap().update(
+        &Announce::new_with_account(
+            &sibling.identity,
+            &account,
+            "custody sibling",
+            sibling_address.port(),
+        ),
+        sibling_address.ip(),
+        &source.user_id(),
+    );
+    let mut held = OfflineCustodyRoute::start(&source, true).await;
+    source.roster.lock().unwrap().update(
+        &Announce::new(&unrelated, "unrelated recovery", held.address.port()),
+        held.address.ip(),
+        &source.user_id(),
+    );
+    source
+        .channel_recovery_periodic_disabled
+        .store(true, Ordering::Relaxed);
+    source.schedule_channel_recovery(other);
+    let mut tasks = tokio::task::JoinSet::new();
+    let (start_parent, parent_ready) = tokio::sync::oneshot::channel();
+    let recovering = Arc::clone(&source);
+    let parent = tasks
+        .spawn(async move {
+            parent_ready.await.unwrap();
+            recovering
+                .run_channel_recovery_with_maintenance(
+                    Arc::new(tokio::sync::Notify::new()),
+                    true,
+                    std::future::pending(),
+                )
+                .await;
+        })
+        .id();
+    let dial_port = Arc::new(std::sync::Mutex::new(None));
+    let previous = source.account_client_test_hook.lock().unwrap().take();
+    let inherited = previous.clone();
+    let observed_port = Arc::clone(&dial_port);
+    let expected_peer = unrelated.public();
+    let installed: Arc<super::super::account_session::AccountClientTestHook> =
+        Arc::new(move |peer, phase| {
+            if tokio::task::try_id() == Some(parent)
+                && peer == expected_peer
+                && let Some(ports) = phase.strip_prefix("dial_socket_ports=(Some(")
+                && let Some(port) = ports
+                    .split(')')
+                    .next()
+                    .and_then(|value| value.parse::<u16>().ok())
+            {
+                *observed_port.lock().unwrap() = Some(port);
+            }
+            if let Some(inherited) = &inherited {
+                inherited(peer, phase);
+            }
+        });
+    struct RestoreHook {
+        node: Arc<Node>,
+        previous: Option<Arc<super::super::account_session::AccountClientTestHook>>,
+        installed: Arc<super::super::account_session::AccountClientTestHook>,
+    }
+    impl Drop for RestoreHook {
+        fn drop(&mut self) {
+            let mut current = self.node.account_client_test_hook.lock().unwrap();
+            if current
+                .as_ref()
+                .is_some_and(|hook| Arc::ptr_eq(hook, &self.installed))
+            {
+                *current = self.previous.take();
+            }
+        }
+    }
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::clone(&installed));
+    let _restore = RestoreHook {
+        node: Arc::clone(&source),
+        previous,
+        installed,
+    };
+    start_parent.send(()).unwrap();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let accepted_peer = tokio::time::timeout(Duration::from_secs(8), held.attempts.recv()).await
+            .expect("unrelated recovery must send actual Noise bytes before custody measurement")
+            .expect("the held endpoint remains owned");
+        assert_eq!(Some(accepted_peer.port()), *dial_port.lock().unwrap(),
+            "the held Noise bytes belong to this exact recovery parent's dial, not another publisher");
+        assert!(!*held.release.borrow());
+        assert!(source.channel_custody_observations(group, event).is_empty(), "no report was warmed before the unrelated hold");
+        let serving = Arc::clone(&sibling);
+        tasks.spawn(async move {
+            let mut children = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = sibling_listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let Some(permit) = serving.runtime_work.admit() else { return; };
+                        let peer = Arc::clone(&serving);
+                        children.spawn(permit.track(Box::pin(async move {
+                            if let Ok(channel) = peer.privacy_accept(stream).await {
+                                peer.serve_connection(channel).await;
+                            }
+                        })));
+                    }
+                    _ = children.join_next(), if !children.is_empty() => {}
+                }
+            }
+        });
+        let started = Instant::now();
+        source.channel_recovery_periodic_disabled.store(false, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let changed = source.delivery_status_notify.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                let observations = source.channel_custody_observations(group, event);
+                if !observations.is_empty() { break; }
+                changed.await;
+            }
+        }).await.expect("authenticated custody report must publish while unrelated recovery remains held");
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert!(!*held.release.borrow(), "the report cannot borrow completion of the unrelated exchange");
+        let observations = source.channel_custody_observations(group, event);
+        assert!(observations.iter().any(|meta| {
+            meta.valid(&account.public().ed25519_pub) && meta.tombstone
+                && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if holder == &sibling.user_id())
+        }), "the current sibling authenticated a negative exact durable-have claim");
+    }).catch_unwind().await;
+    held.release.send_replace(true);
+    source.runtime_work.close();
+    sibling.runtime_work.close();
+    let retired = tokio::time::timeout(Duration::from_secs(5), async {
+        held.stop().await;
+        tasks.shutdown().await;
+        source.runtime_work.drain().await;
+        sibling.runtime_work.drain().await;
+    })
+    .await;
+    if retired.is_err() {
+        let retained = dir.keep();
+        panic!(
+            "custody fixture retirement unverified; retained {}",
+            retained.display()
+        );
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 // This endpoint never authenticates, answers Have, or stores a custody copy.
 // Read one real Noise byte before closing so the failure belongs to this route,
 // rather than to an unrelated service at a hard-coded host port.

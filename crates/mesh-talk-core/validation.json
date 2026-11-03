@@ -157,7 +157,7 @@
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
           {
-            "name": "Account-maintenance peer waits cannot block bounded local channel preparation or mandatory Directory publication; one parent owns both futures, independent wake subscriptions preserve local demand, and cancellation joins the complete lifetime.",
+            "name": "Account-maintenance peer waits cannot block bounded local channel preparation or mandatory Directory publication; one parent owns local recovery, account maintenance and custody futures, independent wake subscriptions preserve local demand, and cancellation joins the complete lifetime. The existing serial three-second custody turn progresses during unrelated history/fallback waits without adding tasks or transport allowances.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -335,7 +335,7 @@
       },
       "consumers": ["desktop-account-group-inventory"],
       "escalation": [
-        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. In mandatory-wake acceptance, retain the first signed source floor and first receiver-head times plus bounded actual inventory Header/Complete evidence; negative coverage must hold the exact newly created source key outside storage locks until the original five-second cutoff, with Owner access present and receiver inventory absent. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores."
+        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. In mandatory-wake acceptance, retain the first signed source floor and first receiver-head times plus bounded actual inventory Header/Complete evidence; negative coverage first establishes actual Owner access and an equal signed inventory baseline inside the existing cold setup watchdog, then holds a strictly newer exact-source header outside storage locks until the original five-second cutoff. Require the first fresh signed floor and changed member label, exact held-header version, live hook task, retained old receiver baseline and absent fresh inventory; keep the positive creation window unchanged. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores."
       ]
     },
     {
@@ -362,7 +362,8 @@
             "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
             "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
             "custody_retry_classes_each_rotate_through_all_competing_peers",
-            "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers"
+            "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers",
+            "custody_report_progresses_while_unrelated_channel_recovery_is_held"
           ]
         }
       ],
@@ -1809,6 +1810,7 @@
       ],
       "escalation": [
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
+        "Persistent-history harness changes require cargo test -p mesh-talk-core --test persistent_history -- --include-ignored --test-threads=1, including both history observer controls and the real restart scenario. Preserve the single query, original row deadlines and timestamped two-direction assertions; retain terminal responses and bounded diagnostics across both process lifetimes. Hosted native backend acceptance remains required.",
         "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --lib storage::profile::tests::profile_lock -- --test-threads=1 and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
         "Dedicated indexed relay lifecycle changes require the complete mesh-talk-node binary tests and, on Unix, the indexed_relay_cli integration target. Exercise all five branches and gateway proxy cancellation; successful Unix SIGTERM evidence does not establish native Windows forced-stop recovery or production-KDF startup performance."
       ],

@@ -102,9 +102,21 @@ and report assertions still execute normally under the original watchdogs.
 The shared tool-version fixture retains the same environment across receipt-reuse
 invocations. Queued resource tests observe their actual waiting owner under the
 existing whole-test watchdog rather than a separate startup cutoff.
+Queued CLI fixtures release their controlled gates and resource holds before
+requesting cancellation, then await the existing process owner's verified close
+and descendant retirement. Remove their temporary repository only after that
+proof; retain it and fail when cleanup remains unverified. Preserve bounded
+phase and output diagnostics without extending the functional watchdog.
 Production version checks and their owning stage-identity regressions remain
 independently required. Failed outer invocations must retain the launch error
 and termination signal as well as stdout/stderr; a null status is not a cause.
+
+Persistent-history CLI acceptance sends one history query after identity recovery
+and peer rediscovery. Require its timestamped sent and received rows; live message
+output cannot certify the query. Preserve terminal query errors, bounded stdout
+and stderr, and both process lifetimes' stop evidence. Do not retry the query or
+warm storage to hide an unavailable response. A passing diagnostic run alone does
+not establish the cause of an earlier discarded response.
 
 Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
 state polling, termination grace periods and tests of time-dependent behavior.
@@ -545,13 +557,28 @@ exact-history and consent assertions remain. Failure reports retain the last
 operation phase, and every exit joins admitted fixture producers before teardown.
 
 The mandatory account-wake fixture also separates its synchronous SQL observer
-from the two simulated hosts with two protocol workers. Its first five-second
-window still starts before group creation, and its second starts before either
-Appearance policy write. A held fresh source inventory header must cause the
-first window to fail even after Owner access arrives. Qualify the exact new key,
-positive source head and missing receiver document, then release and join before
-asserting. Keep bounded local-publication and actual header/completion timing;
-executor alignment alone does not prove a historical timeout mechanism.
+from the two simulated hosts with two protocol workers. The positive case's first
+five-second window starts before group creation; its second starts before either
+Appearance policy write. The negative control first establishes actual Owner
+access and equal signed source/receiver inventory inside the existing cold setup
+watchdog. It then measures a real display-name publication under the original
+five seconds, retaining the normal durable preference and self-history triggers.
+Hold only a strictly newer signed header for that same source key. Require its
+version to match the first actual new source floor and changed member label,
+with the hook task still alive, Owner access intact and the receiver retaining
+exactly the old baseline. Owner access cannot certify that newer inventory.
+Release and join before asserting. Keep bounded local-publication and actual
+header/completion timing; executor alignment alone does not prove a historical
+timeout mechanism.
+
+Custody recovery must progress independently of unrelated history and fallback
+network waits. Hold an actual unrelated Noise exchange, bind its accepted port
+to the identified recovery parent task and verify that its channel has no
+message eligible for custody retry. Require an authenticated signed exact-event
+holder report within the existing eight seconds while that exchange remains
+held. The original failed-send and sibling-import scenarios retain their own
+eight-second observers. Release gates, close admission and join/drain admitted
+work before removing stores; retain storage if retirement cannot be verified.
 
 When a reference-device fixture requires a synchronous capability-cache override
 and admission on one current-thread runtime, keep that requester and its watchers

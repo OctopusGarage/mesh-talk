@@ -687,13 +687,19 @@ group connection or consume the connection budget reserved for ordinary delivery
 Private route rounds launch at most two probes concurrently and advance their
 cursor only for launched work; canceled queued routes retain their next turn.
 
-Account maintenance and bounded local channel recovery are sibling futures owned
-by the same recovery task. A held maintenance peer exchange cannot delay local
+Account maintenance, bounded local channel recovery and custody recovery are
+three futures owned by the same recovery task. A held maintenance peer exchange
+cannot delay local
 checkpoint/presentation progress or its mandatory Directory publication. The
 maintenance owner retains one state and uses independent broadcast/watch receivers
 plus the existing three-second Skip clock; it never consumes local recovery or
 roster Notify permits. Each bounded turn yields, and parent cancellation drops
-both futures. During an ordinary recovery network turn, the same parent polls its
+all three futures. Custody retains its own three-second Skip clock, one serial
+retry/recheck turn and existing rotating cursors. A held history or fallback
+exchange cannot prevent a healthy peer's exact durable-have report. Custody
+uses the existing transport admission and peer deadlines; it adds no task,
+queue or connection allowance. During an ordinary recovery network turn, the
+same parent polls its
 existing local-work notification alongside the pinned network future. Each local
 wake advances one bounded checkpoint/presentation turn and yields. The network
 turn retains its original leases, cursors, ordering and deadlines. If local work

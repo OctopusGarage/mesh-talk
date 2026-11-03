@@ -2969,11 +2969,14 @@ async fn account_network_children_retain_retirement_admission_until_cancelled() 
     }
 }
 
-fn group_inventory_version_for(
+fn group_inventory_snapshot_for(
     node: &Node,
     key: &crate::node::AccountDocumentKey,
     expected_name: &str,
-) -> Option<crate::node::DocumentVersion> {
+) -> Option<(
+    crate::node::DocumentVersion,
+    crate::node::GroupInventoryReference,
+)> {
     let document = node
         .account_document(key)
         .unwrap_or_else(|_| panic!("canonical inventory document read must succeed"))?;
@@ -2999,7 +3002,15 @@ fn group_inventory_version_for(
             && reference.name == expected_name,
         "canonical inventory must describe the expected group and source"
     );
-    Some(document.meta.version())
+    Some((document.meta.version(), reference))
+}
+
+fn group_inventory_version_for(
+    node: &Node,
+    key: &crate::node::AccountDocumentKey,
+    expected_name: &str,
+) -> Option<crate::node::DocumentVersion> {
+    group_inventory_snapshot_for(node, key, expected_name).map(|(version, _)| version)
 }
 
 #[tokio::test]
@@ -3045,6 +3056,8 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
         last_complete_ms: Option<u128>,
         held: bool,
         held_task: Option<std::sync::Weak<()>>,
+        baseline: Option<crate::node::DocumentVersion>,
+        held_version: Option<crate::node::DocumentVersion>,
     }
     struct ReleaseInventory(Arc<tokio::sync::Semaphore>);
     impl Drop for ReleaseInventory {
@@ -3081,6 +3094,7 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
     *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let expected = receiver.identity.public();
         let own = source.user_id();
+        let account_public = source.account.public().ed25519_pub;
         let observed = inventory_wire.clone();
         let release = inventory_release.clone();
         let previous = previous_session.clone();
@@ -3099,17 +3113,28 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                             if let Ok(meta) =
                                 serde_json::from_slice::<crate::node::AccountDocumentMeta>(body)
                                 && !meta.tombstone
+                                && (!hold_inventory || meta.account_public == account_public)
                                 && meta.writer_device == own
                                 && matches!(&meta.key, crate::node::AccountDocumentKey::GroupInventory { source_device, .. } if *source_device == own)
                                 && wire.key.as_ref().is_none_or(|key| *key == meta.key)
                             {
-                                wire.key.get_or_insert(meta.key);
+                                wire.key.get_or_insert(meta.key.clone());
                                 wire.headers += 1;
                                 let now = started.elapsed().as_millis();
                                 wire.first_header_ms.get_or_insert(now);
                                 wire.last_header_ms = Some(now);
-                                if hold_inventory {
+                                if hold_inventory
+                                    && wire.baseline.as_ref().is_some_and(|baseline| {
+                                        (meta.revision, &meta.writer_device, &meta.content_hash)
+                                            > (
+                                                baseline.revision,
+                                                &baseline.writer_device,
+                                                &baseline.content_hash,
+                                            )
+                                    })
+                                {
                                     wire.held = true;
+                                    wire.held_version = Some(meta.version());
                                     let task = Arc::new(());
                                     wire.held_task = Some(Arc::downgrade(&task));
                                     held_task = Some(task);
@@ -3216,6 +3241,7 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
     let mut source_floor = None;
     let mut source_floor_ms = None;
     let mut receiver_head_ms = None;
+    let mut baseline_inventory = None;
     let outcome = std::panic::AssertUnwindSafe(async {
         // Cold reciprocal authentication/document setup is a prerequisite,
         // not part of either subsequent publication's wake observation.
@@ -3230,21 +3256,64 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            if hold_inventory {
+                phase = "negative_owner_precondition";
+                let channel = source
+                    .create_channel("Mandatory group", vec![])
+                    .await
+                    .unwrap();
+                observed_channel = Some(channel);
+                let key = crate::node::AccountDocumentKey::GroupInventory {
+                    channel: hex::encode(channel.as_bytes()),
+                    source_device: source.user_id(),
+                };
+                source_inventory_key = Some(key.clone());
+                loop {
+                    let current = group_inventory_version_for(&source, &key, "Mandatory group");
+                    let received = group_inventory_version_for(&receiver, &key, "Mandatory group");
+                    let owner = receiver
+                        .account_group_access(channel)
+                        .is_ok_and(|access| access.role == super::super::AccountGroupRole::Owner);
+                    if owner && current.is_some() && current == received {
+                        baseline_inventory = current;
+                        // Arm only after real Owner access and this exact signed
+                        // baseline were imported. Initial cold publication is free.
+                        inventory_wire.lock().unwrap().baseline = baseline_inventory.clone();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
         })
         .await?;
         // Start before the durable trigger; retain one common five-second
         // window through mandatory delivery and both optional-off assertions.
         tokio::time::timeout(Duration::from_secs(5), async {
-            phase = "create_channel";
-            let channel = source
-                .create_channel("Mandatory group", vec![])
-                .await
-                .unwrap();
-            observed_channel = Some(channel);
-            source_inventory_key = Some(crate::node::AccountDocumentKey::GroupInventory {
-                channel: hex::encode(channel.as_bytes()),
-                source_device: source.user_id(),
-            });
+            phase = if hold_inventory {
+                "publish_fresh_inventory"
+            } else {
+                "create_channel"
+            };
+            let channel = if hold_inventory {
+                // The normal local profile owner changes the inventory member
+                // label, not group authority. The original durable preference
+                // and history triggers below wake the ordinary publisher.
+                source
+                    .set_profile_display_name("Post-owner mandatory inventory")
+                    .unwrap();
+                observed_channel.unwrap()
+            } else {
+                let channel = source
+                    .create_channel("Mandatory group", vec![])
+                    .await
+                    .unwrap();
+                observed_channel = Some(channel);
+                source_inventory_key = Some(crate::node::AccountDocumentKey::GroupInventory {
+                    channel: hex::encode(channel.as_bytes()),
+                    source_device: source.user_id(),
+                });
+                channel
+            };
             source
                 .set_account_preference(
                     SyncCategory::Appearance,
@@ -3263,13 +3332,43 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                 // Capture the first actual signed source head inside this same
                 // trigger window; later publication cannot move this floor.
                 if source_floor.is_none() {
-                    source_floor = group_inventory_version_for(&source, key, "Mandatory group");
+                    source_floor = group_inventory_snapshot_for(&source, key, "Mandatory group")
+                        .filter(|(version, reference)| {
+                            !hold_inventory
+                                || baseline_inventory.as_ref().is_some_and(|baseline| {
+                                    (
+                                        version.revision,
+                                        &version.writer_device,
+                                        &version.content_hash,
+                                    ) > (
+                                        baseline.revision,
+                                        &baseline.writer_device,
+                                        &baseline.content_hash,
+                                    ) && reference.members.iter().any(|member| {
+                                        member.public == source.identity.public()
+                                            && member.name.as_deref()
+                                                == Some("Post-owner mandatory inventory")
+                                    })
+                                })
+                        })
+                        .map(|(version, _)| version);
                     if source_floor.is_some() {
                         source_floor_ms = Some(started.elapsed().as_millis());
                     }
                 }
                 let received = group_inventory_version_for(&receiver, key, "Mandatory group");
-                if received.is_some() && receiver_head_ms.is_none() {
+                if receiver_head_ms.is_none()
+                    && received.as_ref().is_some_and(|version| {
+                        !hold_inventory
+                            || source_floor.as_ref().is_some_and(|floor| {
+                                (
+                                    version.revision,
+                                    &version.writer_device,
+                                    &version.content_hash,
+                                ) >= (floor.revision, &floor.writer_device, &floor.content_hash)
+                            })
+                    })
+                {
                     receiver_head_ms = Some(started.elapsed().as_millis());
                 }
                 mandatory.0 = receiver
@@ -3349,10 +3448,13 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
             && !inventory_release.is_closed()
             && wire.key.is_some()
             && wire.key == source_inventory_key
+            && wire.held_version == source_floor
     };
-    let receiver_meta_absent = source_inventory_key
-        .as_ref()
-        .is_some_and(|key| receiver.account_document_meta(key).is_none());
+    let receiver_baseline_retained = source_inventory_key.as_ref().is_some_and(|key| {
+        receiver
+            .account_document_meta(key)
+            .is_some_and(|meta| !meta.tombstone && Some(meta.version()) == baseline_inventory)
+    });
     if outcome.as_ref().is_ok_and(Result::is_err) {
         let statuses = [(&source, &receiver), (&receiver, &source)].map(|(node, peer)| {
             node.device_sync_status()
@@ -3397,10 +3499,12 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                 wire.last_header_ms,
                 wire.last_complete_ms,
                 exact_header_held,
+                wire.baseline.clone(),
+                wire.held_version.clone(),
             )
         };
         eprintln!(
-            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?} publication_phases={publication_phases:?} source_floor_ms={source_floor_ms:?} receiver_head_ms={receiver_head_ms:?} inventory_wire(headers,completes,first_header_ms,last_header_ms,last_complete_ms,held_exact)={inventory_wire:?}",
+            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?} publication_phases={publication_phases:?} source_floor_ms={source_floor_ms:?} receiver_head_ms={receiver_head_ms:?} inventory_wire(headers,completes,first_header_ms,last_header_ms,last_complete_ms,held_exact,baseline,held_version)={inventory_wire:?}",
             started.elapsed().as_millis()
         );
     }
@@ -3430,7 +3534,7 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
         assert_eq!(phase, "mandatory_group_observation");
         assert!(
             mandatory.0,
-            "real Owner access must arrive independently of held inventory"
+            "established Owner access must remain while fresh inventory is held"
         );
         assert!(
             source_floor.is_some(),
@@ -3441,8 +3545,8 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
             "the exact new source inventory header must remain held at timeout"
         );
         assert!(
-            receiver_meta_absent && !mandatory.1,
-            "held canonical inventory must remain absent"
+            receiver_baseline_retained && !mandatory.1,
+            "the real baseline must remain while the newer canonical inventory is held"
         );
         assert!(
             appearance_enable_phases.is_empty(),
