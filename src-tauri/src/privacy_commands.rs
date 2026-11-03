@@ -432,7 +432,8 @@ mod tests {
                 .privacy_snapshot()
                 .invisible
         );
-        node.0.blocking_write().take();
+        let runtime = node.0.blocking_write().take().unwrap();
+        tauri::async_runtime::block_on(runtime.stop());
         let saved = mesh_talk_core::node::PrivacyPolicy::open(
             &root.path().join("accounts/alice/privacy.policy"),
             "pw",

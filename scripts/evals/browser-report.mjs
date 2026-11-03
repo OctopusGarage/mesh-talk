@@ -65,6 +65,7 @@ export function requiredBrowserPaths(tier) {
     ["file-send-progress.spec.ts", "image sender keeps confirmed upload percent and ETA visible until recipient custody"],
     ["file-send-progress.spec.ts", "concurrent sends keep progress with their own file bubbles"],
     ["file-send-progress.spec.ts", "a failed folder send removes preparing progress and offers retry"],
+    ["file-send-progress.spec.ts", "receive progress follows measured chunks with the shared motion cadence"],
     ["directory-transfer.spec.ts", "folder picker sends its path as an attachment"],
     ["directory-transfer.spec.ts", "received folder waits until ready and automatically extracts through save-to-dir"],
     ["directory-transfer.spec.ts", "folders automatically use Downloads and expose Reveal in chat and history"],

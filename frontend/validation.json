@@ -43,7 +43,9 @@
         "frontend/e2e/helpers/sidebar-actions.ts",
         "frontend/e2e/minimum-window.spec.ts"
       ],
-      "frontend": ["src/components/ui/dialog.test.ts"],
+      "frontend": [
+        "src/components/ui/dialog.test.ts"
+      ],
       "capability": {
         "summary": "Preserve active focus ownership across deferred dialog closure and subsequent user interactions.",
         "guide": "docs/module-boundaries.md#dialog-focus-ownership",
@@ -66,7 +68,9 @@
         "frontend/package-lock.json",
         "scripts/diagnostics/react-singleton.test.mjs"
       ],
-      "node": ["scripts/diagnostics/react-singleton.test.mjs"],
+      "node": [
+        "scripts/diagnostics/react-singleton.test.mjs"
+      ],
       "capability": {
         "summary": "Keep the production React renderer and hooks bound to one runtime across dependency layouts.",
         "guide": "docs/testing-feedback-loop.md#production-frontend-startup",
@@ -403,7 +407,9 @@
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
       ],
-      "frontend": ["src/features/chat/ComposerScreenshot.test.ts"],
+      "frontend": [
+        "src/features/chat/ComposerScreenshot.test.ts"
+      ],
       "capability": {
         "summary": "Copy the confirmed edited screenshot to the clipboard, stage the same PNG, and send explicitly even after native capture loses input focus.",
         "guide": "docs/help/topics/screenshots.md",
@@ -594,7 +600,9 @@
         "src/store/chat.test.ts",
         "src/features/chat/MessageBubble.test.ts"
       ],
-      "consumers": ["frontend-chat"],
+      "consumers": [
+        "frontend-chat"
+      ],
       "capability": {
         "summary": "Select and reconcile owner-scoped history while coalescing automatic invalidations into bounded native read bundles.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
@@ -617,11 +625,15 @@
         "frontend/src/store/outgoingIntent.test.ts",
         "frontend/e2e/file-send-progress.spec.ts"
       ],
-      "frontend": ["src/store/outgoingIntent.test.ts"],
+      "frontend": [
+        "src/store/outgoingIntent.test.ts"
+      ],
       "escalation": [
         "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion."
       ],
-      "consumers": ["frontend-chat"],
+      "consumers": [
+        "frontend-chat"
+      ],
       "capability": {
         "summary": "Own optimistic outgoing intents and project backend acceptance within the current frontend owner lifetime.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
@@ -655,8 +667,13 @@
         "frontend/src/store/conversationState.ts",
         "frontend/src/store/conversationModel.ts"
       ],
-      "consumers": ["frontend-history", "frontend-outgoing"],
-      "frontend": ["src/store/reception.test.ts"]
+      "consumers": [
+        "frontend-history",
+        "frontend-outgoing"
+      ],
+      "frontend": [
+        "src/store/reception.test.ts"
+      ]
     },
     {
       "id": "frontend-chat",
@@ -667,7 +684,9 @@
         "frontend/src/store/rosterRefresh.ts",
         "frontend/e2e/connection-recovery.spec.ts"
       ],
-      "frontend": ["src/store/chat.test.ts"],
+      "frontend": [
+        "src/store/chat.test.ts"
+      ],
       "capability": {
         "summary": "Bound identity startup waits and recover automatically after transient identity failures while retaining owner and runtime authority.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
@@ -688,8 +707,13 @@
         "frontend/src/store/ownership.ts",
         "frontend/src/store/ownership.test.ts"
       ],
-      "frontend": ["src/store/ownership.test.ts"],
-      "consumers": ["frontend-history", "frontend-outgoing"]
+      "frontend": [
+        "src/store/ownership.test.ts"
+      ],
+      "consumers": [
+        "frontend-history",
+        "frontend-outgoing"
+      ]
     },
     {
       "id": "frontend-channel-actions",
@@ -714,7 +738,9 @@
         "src/features/chat/channelPermissions.test.ts",
         "src/features/chat/Sidebar.test.ts"
       ],
-      "consumers": ["frontend-chat"],
+      "consumers": [
+        "frontend-chat"
+      ],
       "escalation": [
         "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
       ],
@@ -740,7 +766,8 @@
         "frontend/src/main.tsx",
         "frontend/src/index.css",
         "frontend/src/vite-env.d.ts",
-        "frontend/src/components/ErrorBoundary.tsx"
+        "frontend/src/components/ErrorBoundary.tsx",
+        "frontend/e2e/login-layout.spec.ts"
       ],
       "frontend": [
         "src/store/auth.test.ts",
@@ -811,8 +838,12 @@
     },
     {
       "id": "frontend-window-controls",
-      "paths": ["frontend/src/components/WindowControls.tsx"],
-      "frontend": ["src/lib/platform.test.ts"],
+      "paths": [
+        "frontend/src/components/WindowControls.tsx"
+      ],
+      "frontend": [
+        "src/lib/platform.test.ts"
+      ],
       "escalation": [
         "Platform predicate unit tests do not execute OS window actions; required browser window-control scenarios and real affected native platform evidence remain necessary."
       ]
@@ -828,7 +859,10 @@
         "frontend/e2e/avatar-gallery-loading.spec.ts",
         "frontend/e2e/theme-contrast.spec.ts"
       ],
-      "frontend": ["src/lib/pack.test.ts", "src/lib/stickerPacks.test.ts"],
+      "frontend": [
+        "src/lib/pack.test.ts",
+        "src/lib/stickerPacks.test.ts"
+      ],
       "escalation": [
         "Pack browser scenario changes require their complete browser spec; unit tests alone do not prove installation or restart persistence."
       ]
@@ -874,8 +908,13 @@
     },
     {
       "id": "frontend-browser-fixture",
-      "paths": ["frontend/e2e/tauri-mock.ts"],
-      "frontend": ["src/lib/events.test.ts", "src/store/chat.test.ts"],
+      "paths": [
+        "frontend/e2e/tauri-mock.ts"
+      ],
+      "frontend": [
+        "src/lib/events.test.ts",
+        "src/store/chat.test.ts"
+      ],
       "escalation": [
         "Shared mocked IPC changes require affected browser scenarios; mocks do not prove native transport or persistent cleanup."
       ]
@@ -909,7 +948,9 @@
     },
     {
       "id": "frontend-dm-reception-acceptance",
-      "paths": ["frontend/e2e/unread-badge.spec.ts"],
+      "paths": [
+        "frontend/e2e/unread-badge.spec.ts"
+      ],
       "frontend": [
         "src/store/chat.test.ts",
         "src/store/reception.test.ts",
@@ -982,7 +1023,9 @@
         "src/store/chat.test.ts",
         "src/lib/events.test.ts"
       ],
-      "consumers": ["frontend-chat"],
+      "consumers": [
+        "frontend-chat"
+      ],
       "capability": {
         "summary": "Coalesce scoped group invalidations and keep group details consistent with bounded fallback queries.",
         "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
@@ -1325,7 +1368,10 @@
         "src/features/chat/attachments/conversationIntake.test.ts",
         "src/lib/automaticDownloads.test.ts"
       ],
-      "consumers": ["frontend-chat", "frontend-history"],
+      "consumers": [
+        "frontend-chat",
+        "frontend-history"
+      ],
       "capability": {
         "summary": "Protected text and raster images use owner-scoped reveal, local temporary plaintext and revocable image URLs, fresh verification and concealed shared projections.",
         "guide": "docs/privacy-controls.md#protected-messages",
@@ -1369,7 +1415,9 @@
         "src/features/chat/AccountBindingRecovery.test.ts",
         "src/features/chat/MemberProfileDialog.test.ts"
       ],
-      "consumers": ["frontend-chat"],
+      "consumers": [
+        "frontend-chat"
+      ],
       "capability": {
         "summary": "Edit one ordinary profile and show the same About text in conversation headers and contact details with session-bound refresh.",
         "guide": "docs/peer-trust.md",
@@ -1709,7 +1757,9 @@
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/personal-messages.spec.ts"
       ],
-      "frontend": ["src/features/chat/PersonalDevices.test.ts"],
+      "frontend": [
+        "src/features/chat/PersonalDevices.test.ts"
+      ],
       "escalation": [
         "Check hostname wrapping and local-device labeling in the device popover on native linked devices; browser mocks do not prove private transport."
       ],
@@ -2042,7 +2092,11 @@
         "frontend/src/features/chat/MediaPreview.test.ts",
         "frontend/src/features/chat/ReceiveProgress.tsx",
         "frontend/src/features/chat/ReceiveProgress.test.ts",
-        "frontend/e2e/image-receiving.spec.ts"
+        "frontend/e2e/image-receiving.spec.ts",
+        "frontend/src/features/chat/ComposerImagePreview.tsx",
+        "frontend/e2e/composer-preview-layout.spec.ts",
+        "frontend/e2e/video-player-layout.spec.ts",
+        "frontend/e2e/fixtures/video-metadata.json"
       ],
       "frontend": [
         "src/features/chat/MediaPreview.test.ts",
@@ -2076,7 +2130,8 @@
         ]
       },
       "escalation": [
-        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior. Geometry polls must retain unavailable measurements as pending, capture positive baselines and reuse coherent visible image/frame samples. A transient unavailable measurement must recover and permanent absence must fail without weakening exact geometry, cache reuse or assertion budgets."
+        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior. Geometry polls must retain unavailable measurements as pending, capture positive baselines and reuse coherent visible image/frame samples. A transient unavailable measurement must recover and permanent absence must fail without weakening exact geometry, cache reuse or assertion budgets.",
+        "Verify pending image frame dimensions before/after decoding and video source dimensions before/after player metadata, including cached remount, portrait and oversized sources. Confirm actual WKWebView geometry and frame timing separately. Video players and native controls must remain outside shared-element transforms from the first frame; keep opacity feedback, autoplay, Escape, focus restoration and rapid reopening. Separate fresh-process startup from repeat opens, record visibility and media presentation counters, and exclude hidden-window samples from performance comparisons."
       ]
     },
     {
@@ -2250,7 +2305,9 @@
         "frontend/src/features/chat/ReceiveProgress.tsx",
         "frontend/src/features/chat/ReceiveProgress.test.ts"
       ],
-      "frontend": ["src/features/chat/ReceiveProgress.test.ts"],
+      "frontend": [
+        "src/features/chat/ReceiveProgress.test.ts"
+      ],
       "capability": {
         "summary": "Distinguish waiting for the first file chunk from active chunk reception without changing determinate progress counts.",
         "guide": "docs/help/topics/channels.md#file-delivery",
@@ -2383,6 +2440,41 @@
       "escalation": [
         "Exercise actual Tauri IPC with a stalled renderer, renderer reload, app lock and runtime/account replacement; mocked IPC does not certify the native queue boundary."
       ]
+    },
+    {
+      "id": "frontend-interaction-motion",
+      "paths": [
+        "frontend/src/components/ui/tabs.tsx",
+        "frontend/src/components/ui/tabs.test.ts",
+        "frontend/src/index.css",
+        "frontend/src/features/chat/TransferBar.tsx",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/DESIGN.md",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/useMessageArrivalMotion.ts",
+        "frontend/src/features/chat/useMessageArrivalMotion.test.ts",
+        "frontend/e2e/history-motion.spec.ts"
+      ],
+      "frontend": [
+        "src/components/ui/tabs.test.ts",
+        "src/features/chat/TransferBar.test.ts",
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/features/chat/useMessageArrivalMotion.test.ts"
+      ],
+      "escalation": [
+        "Verify rapid surface reversal, pointer-to-keyboard tabs, reduced motion, and media return to an offscreen thumbnail in the native WebView. Presentation must not invent progress or delivery confirmation.",
+        "Run e2e/history-motion.spec.ts and verify initial history, conversation switching, deferred live rows, and virtualized revisit in the native WebView."
+      ],
+      "capability": {
+        "summary": "Keep presentation motion brief, input-aware and grounded in authoritative transfer and device-link state.",
+        "guide": "frontend/DESIGN.md#interaction-motion",
+        "invariants": [
+          {
+            "name": "Keyboard tab selection remains immediate; reduced motion removes spatial movement and progress never implies delivery.",
+            "reference": "frontend/DESIGN.md#interaction-motion"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [
@@ -2401,7 +2493,9 @@
         "e2e/privacy.spec.ts",
         "e2e/tray-navigation.spec.ts"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "group-file-network-cost-acceptance",
@@ -2410,8 +2504,12 @@
         "frontend/src/features/chat/GroupPreferences.tsx",
         "frontend/e2e/group-network-cost.spec.ts"
       ],
-      "browser": ["e2e/group-network-cost.spec.ts"],
-      "native": ["host"]
+      "browser": [
+        "e2e/group-network-cost.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "frontend-screenshot-submission-acceptance",
@@ -2422,7 +2520,9 @@
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
       ],
-      "browser": ["e2e/screenshot-portable.spec.ts"]
+      "browser": [
+        "e2e/screenshot-portable.spec.ts"
+      ]
     },
     {
       "id": "frontend-local-agent-acceptance",
@@ -2436,7 +2536,9 @@
         "e2e/local-agent-access.spec.ts",
         "e2e/settings-categories.spec.ts"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "frontend-exact-search-acceptance",
@@ -2450,7 +2552,10 @@
         "crates/mesh-talk-core/src/node/search.rs",
         "crates/mesh-talk-core/src/node/queries.rs"
       ],
-      "browser": ["e2e/chat.spec.ts", "e2e/hidden-contacts.spec.ts"]
+      "browser": [
+        "e2e/chat.spec.ts",
+        "e2e/hidden-contacts.spec.ts"
+      ]
     },
     {
       "id": "frontend-delivery-details-acceptance",
@@ -2465,7 +2570,9 @@
         "frontend/e2e/automatic-delivery.spec.ts",
         "frontend/src/features/chat/MessageStatus.tsx"
       ],
-      "browser": ["e2e/automatic-delivery.spec.ts"]
+      "browser": [
+        "e2e/automatic-delivery.spec.ts"
+      ]
     },
     {
       "id": "frontend-presence-acceptance",
@@ -2476,7 +2583,9 @@
         "frontend/src/features/chat/ChatApp.tsx",
         "frontend/e2e/person-presence.spec.ts"
       ],
-      "browser": ["e2e/person-presence.spec.ts"]
+      "browser": [
+        "e2e/person-presence.spec.ts"
+      ]
     },
     {
       "id": "frontend-saved-devices",
@@ -2485,7 +2594,9 @@
         "frontend/src/features/chat/PersonalDevices.test.ts",
         "frontend/src/features/chat/ConversationHeaders.tsx"
       ],
-      "browser": ["e2e/personal-messages.spec.ts"]
+      "browser": [
+        "e2e/personal-messages.spec.ts"
+      ]
     },
     {
       "id": "frontend-visual",
@@ -2497,7 +2608,9 @@
         "frontend/src/lib/theme.ts",
         "frontend/src/store/theme.ts"
       ],
-      "browser": ["e2e/ui-visual-regression.spec.ts"]
+      "browser": [
+        "e2e/ui-visual-regression.spec.ts"
+      ]
     },
     {
       "id": "frontend-bootstrap-acceptance",
@@ -2508,7 +2621,11 @@
         "frontend/src/vite-env.d.ts",
         "frontend/src/components/ErrorBoundary.tsx"
       ],
-      "browser": ["e2e/chat.spec.ts", "e2e/ui-visual-regression.spec.ts"]
+      "browser": [
+        "e2e/chat.spec.ts",
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/login-layout.spec.ts"
+      ]
     },
     {
       "id": "frontend-auth-screens-acceptance",
@@ -2518,12 +2635,14 @@
         "frontend/src/components/ui/label.tsx",
         "frontend/src/features/auth/DeviceEnrollmentDialog.tsx",
         "frontend/src/features/auth/DeviceEnrollmentDialog.test.ts",
-        "frontend/src/lib/api/auth.ts"
+        "frontend/src/lib/api/auth.ts",
+        "frontend/e2e/login-layout.spec.ts"
       ],
       "browser": [
         "e2e/chat.spec.ts",
         "e2e/recovery.spec.ts",
-        "e2e/device-enrollment.spec.ts"
+        "e2e/device-enrollment.spec.ts",
+        "e2e/login-layout.spec.ts"
       ]
     },
     {
@@ -2540,23 +2659,39 @@
     },
     {
       "id": "frontend-window-controls-acceptance",
-      "paths": ["frontend/src/components/WindowControls.tsx"],
-      "browser": ["e2e/window-controls.spec.ts"]
+      "paths": [
+        "frontend/src/components/WindowControls.tsx"
+      ],
+      "browser": [
+        "e2e/window-controls.spec.ts"
+      ]
     },
     {
       "id": "frontend-pack-acceptance",
-      "paths": ["frontend/e2e/packs.spec.ts"],
-      "browser": ["e2e/packs.spec.ts"]
+      "paths": [
+        "frontend/e2e/packs.spec.ts"
+      ],
+      "browser": [
+        "e2e/packs.spec.ts"
+      ]
     },
     {
       "id": "frontend-packs-empty-acceptance",
-      "paths": ["frontend/e2e/packs-empty.spec.ts"],
-      "browser": ["e2e/packs-empty.spec.ts"]
+      "paths": [
+        "frontend/e2e/packs-empty.spec.ts"
+      ],
+      "browser": [
+        "e2e/packs-empty.spec.ts"
+      ]
     },
     {
       "id": "frontend-stickers-acceptance",
-      "paths": ["frontend/e2e/stickers.spec.ts"],
-      "browser": ["e2e/stickers.spec.ts"]
+      "paths": [
+        "frontend/e2e/stickers.spec.ts"
+      ],
+      "browser": [
+        "e2e/stickers.spec.ts"
+      ]
     },
     {
       "id": "frontend-theme-picker-acceptance",
@@ -2574,32 +2709,53 @@
     },
     {
       "id": "frontend-avatar-gallery-acceptance",
-      "paths": ["frontend/e2e/avatar-gallery.spec.ts"],
-      "browser": ["e2e/avatar-gallery.spec.ts"]
+      "paths": [
+        "frontend/e2e/avatar-gallery.spec.ts"
+      ],
+      "browser": [
+        "e2e/avatar-gallery.spec.ts"
+      ]
     },
     {
       "id": "frontend-avatar-gallery-loading-acceptance",
-      "paths": ["frontend/e2e/avatar-gallery-loading.spec.ts"],
-      "browser": ["e2e/avatar-gallery-loading.spec.ts"]
+      "paths": [
+        "frontend/e2e/avatar-gallery-loading.spec.ts"
+      ],
+      "browser": [
+        "e2e/avatar-gallery-loading.spec.ts"
+      ]
     },
     {
       "id": "frontend-theme-contrast-acceptance",
-      "paths": ["frontend/e2e/theme-contrast.spec.ts"],
-      "browser": ["e2e/theme-contrast.spec.ts"]
+      "paths": [
+        "frontend/e2e/theme-contrast.spec.ts"
+      ],
+      "browser": [
+        "e2e/theme-contrast.spec.ts"
+      ]
     },
     {
       "id": "frontend-composer-acceptance",
-      "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
-      "browser": ["e2e/ui-audit-composer.spec.ts"]
+      "paths": [
+        "frontend/e2e/ui-audit-composer.spec.ts"
+      ],
+      "browser": [
+        "e2e/ui-audit-composer.spec.ts"
+      ]
     },
     {
       "id": "frontend-composer-input-acceptance",
       "paths": [
         "frontend/src/features/chat/Composer.tsx",
         "frontend/src/features/chat/ComposerAdmission.test.ts",
-        "frontend/e2e/composer-layout.spec.ts"
+        "frontend/e2e/composer-layout.spec.ts",
+        "frontend/src/features/chat/ComposerImagePreview.tsx",
+        "frontend/e2e/composer-preview-layout.spec.ts"
       ],
-      "browser": ["e2e/composer-layout.spec.ts"]
+      "browser": [
+        "e2e/composer-layout.spec.ts",
+        "e2e/composer-preview-layout.spec.ts"
+      ]
     },
     {
       "id": "frontend-message-expiry-acceptance",
@@ -2613,7 +2769,9 @@
         "frontend/e2e/message-expiry.spec.ts",
         "frontend/e2e/tauri-mock.ts"
       ],
-      "browser": ["e2e/message-expiry.spec.ts"]
+      "browser": [
+        "e2e/message-expiry.spec.ts"
+      ]
     },
     {
       "id": "frontend-text-submission-acceptance",
@@ -2621,7 +2779,9 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/automatic-delivery.spec.ts"
       ],
-      "browser": ["e2e/automatic-delivery.spec.ts"]
+      "browser": [
+        "e2e/automatic-delivery.spec.ts"
+      ]
     },
     {
       "id": "frontend-dm-unread-acceptance",
@@ -2634,7 +2794,9 @@
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs"
       ],
-      "browser": ["e2e/unread-badge.spec.ts"]
+      "browser": [
+        "e2e/unread-badge.spec.ts"
+      ]
     },
     {
       "id": "frontend-identity-recovery-acceptance",
@@ -2643,7 +2805,9 @@
         "frontend/src/store/chat.test.ts",
         "frontend/e2e/connection-recovery.spec.ts"
       ],
-      "browser": ["e2e/connection-recovery.spec.ts"]
+      "browser": [
+        "e2e/connection-recovery.spec.ts"
+      ]
     },
     {
       "id": "frontend-presence-recovery-acceptance",
@@ -2661,7 +2825,9 @@
         "e2e/person-presence.spec.ts",
         "e2e/connection-recovery.spec.ts"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "group-sync",
@@ -2671,7 +2837,10 @@
         "frontend/src/lib/events.ts",
         "frontend/e2e/group-sync.spec.ts"
       ],
-      "browser": ["e2e/group-sync.spec.ts", "e2e/channel-lifecycle.spec.ts"]
+      "browser": [
+        "e2e/group-sync.spec.ts",
+        "e2e/channel-lifecycle.spec.ts"
+      ]
     },
     {
       "id": "frontend-state-push",
@@ -2725,7 +2894,9 @@
         "frontend/e2e/update-flow.spec.ts",
         "frontend/src/lib/types.ts"
       ],
-      "browser": ["e2e/update-flow.spec.ts"]
+      "browser": [
+        "e2e/update-flow.spec.ts"
+      ]
     },
     {
       "id": "frontend-notification-permission-acceptance",
@@ -2769,7 +2940,9 @@
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/channel-history.spec.ts"
       ],
-      "browser": ["e2e/channel-history.spec.ts"]
+      "browser": [
+        "e2e/channel-history.spec.ts"
+      ]
     },
     {
       "id": "protected-message-acceptance",
@@ -2808,7 +2981,9 @@
         "e2e/protected-messages.spec.ts",
         "e2e/ui-visual-regression.spec.ts"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "frontend-account-profile-acceptance",
@@ -2863,8 +3038,12 @@
         "frontend/e2e/account-binding-recovery.spec.ts",
         "frontend/e2e/account-binding-recovery.spec.ts-snapshots/"
       ],
-      "browser": ["e2e/account-binding-recovery.spec.ts"],
-      "native": ["host"]
+      "browser": [
+        "e2e/account-binding-recovery.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "public-site-experience",
@@ -2973,7 +3152,10 @@
         "frontend/e2e/call-media-physical.spec.ts",
         "docs/help/topics/calls.md"
       ],
-      "browser": ["e2e/call-media.spec.ts", "e2e/call-readiness.spec.ts"]
+      "browser": [
+        "e2e/call-media.spec.ts",
+        "e2e/call-readiness.spec.ts"
+      ]
     },
     {
       "id": "frontend-inline-media-acceptance",
@@ -2989,7 +3171,9 @@
         "frontend/e2e/media-hook-harness.tsx",
         "frontend/src/features/chat/ReceiveProgress.tsx",
         "frontend/src/features/chat/ReceiveProgress.test.ts",
-        "frontend/e2e/image-receiving.spec.ts"
+        "frontend/e2e/image-receiving.spec.ts",
+        "frontend/e2e/video-player-layout.spec.ts",
+        "frontend/e2e/fixtures/video-metadata.json"
       ],
       "browser": [
         "e2e/media-scroll.spec.ts",
@@ -2999,9 +3183,12 @@
         "e2e/protected-messages.spec.ts",
         "e2e/ui-visual-regression.spec.ts",
         "e2e/image-receiving.spec.ts",
-        "e2e/file-receive-controls.spec.ts"
+        "e2e/file-receive-controls.spec.ts",
+        "e2e/video-player-layout.spec.ts"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "frontend-image-live-text-acceptance",
@@ -3017,7 +3204,9 @@
         "e2e/media-recovery.spec.ts",
         "e2e/protected-messages.spec.ts"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "frontend-reply-preview-acceptance",
@@ -3032,7 +3221,10 @@
         "frontend/src/features/chat/replyNavigation.test.ts",
         "frontend/e2e/helpers/message-highlight.ts"
       ],
-      "browser": ["e2e/reply-preview.spec.ts", "e2e/chat.spec.ts"]
+      "browser": [
+        "e2e/reply-preview.spec.ts",
+        "e2e/chat.spec.ts"
+      ]
     },
     {
       "id": "frontend-camera-capture-acceptance",
@@ -3045,8 +3237,12 @@
         "frontend/src/features/chat/attachments/conversationIntake.test.ts",
         "frontend/e2e/camera-capture.spec.ts"
       ],
-      "browser": ["e2e/camera-capture.spec.ts"],
-      "native": ["host"]
+      "browser": [
+        "e2e/camera-capture.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "frontend-message-forwarding-acceptance",
@@ -3055,8 +3251,12 @@
         "frontend/src/lib/api/messageForwarding.ts",
         "frontend/e2e/forwarding.spec.ts"
       ],
-      "browser": ["e2e/forwarding.spec.ts"],
-      "native": ["host"]
+      "browser": [
+        "e2e/forwarding.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "frontend-selected-reactions-acceptance",
@@ -3068,8 +3268,13 @@
         "frontend/e2e/reaction-summaries.spec.ts",
         "src-tauri/src/owner_commands/reactions.rs"
       ],
-      "browser": ["e2e/reaction-summaries.spec.ts", "e2e/chat.spec.ts"],
-      "native": ["host"]
+      "browser": [
+        "e2e/reaction-summaries.spec.ts",
+        "e2e/chat.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     }
   ]
 }
