@@ -500,6 +500,55 @@ async fn independent_peer_runtime_keeps_other_host_progress_while_one_reactor_is
 }
 
 #[tokio::test]
+async fn independent_peer_runtime_drop_retires_unlaunched_admitted_work() {
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("source"), &account);
+    let admitted = source.runtime_work.admit().unwrap();
+    let owner = ActionPeerRuntime::start(
+        source.clone(),
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    )
+    .await;
+    let runtime = owner.runtime_handle();
+    // Leave the real server unlaunched: cancellation during preparation must
+    // still close admission and join the host after admitted work retires.
+    let mut dropping = tokio::task::spawn_blocking(move || drop(owner));
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !source.runtime_work.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Drop must close real host admission before its cleanup backstop");
+        assert!(
+            !dropping.is_finished(),
+            "Drop cannot return while the real admitted work permit is held"
+        );
+    })
+    .catch_unwind()
+    .await;
+    drop(admitted);
+    let retirement = tokio::time::timeout(std::time::Duration::from_secs(5), &mut dropping).await;
+    if retirement.is_err() {
+        let _ = directory.keep();
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    retirement
+        .expect("Drop must join the unlaunched host after admitted work retires")
+        .unwrap();
+    assert!(
+        runtime.spawn(async {}).await.unwrap_err().is_cancelled(),
+        "the host runtime must already be stopped when Drop returns"
+    );
+    source.close_profile().unwrap();
+}
+
+#[tokio::test]
 async fn independent_action_peer_runtime_joins_accepted_connections_and_admitted_writers() {
     let directory = tempfile::tempdir().unwrap();
     let account = Account::generate();

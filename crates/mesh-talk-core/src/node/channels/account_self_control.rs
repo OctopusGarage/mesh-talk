@@ -1058,6 +1058,269 @@ pub(in crate::node) mod tests {
         }
     }
 
+    type SelfControlPredicate = (bool, Option<usize>, Option<bool>, [Option<bool>; 2]);
+    type SelfControlPhaseTrace =
+        std::sync::Mutex<std::collections::VecDeque<(u128, &'static str, String)>>;
+
+    struct SelfControlFailureDiagnostics<'a> {
+        owner: &'a Node,
+        executor: &'a Node,
+        account_id: &'a str,
+        id: crate::node::AccountGroupOperationId,
+        group: ConversationId,
+        input: AccountSelfControlInput,
+    }
+
+    impl SelfControlFailureDiagnostics<'_> {
+        fn report(
+            &self,
+            nodes: &[(&str, std::sync::Arc<Node>)],
+            last_predicate: Option<SelfControlPredicate>,
+            trace: &SelfControlPhaseTrace,
+            operation_trace: &std::sync::Mutex<SelfControlOperationTrace>,
+            external_trace: &SelfControlPhaseTrace,
+        ) -> String {
+            // Retain the actual deadline state before any fallible diagnostic
+            // projection. Pending diagnostics must not replace this failure.
+            let failure_trace = trace
+                .lock()
+                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
+                .map_err(|_| "trace mutex poisoned");
+            let operation_trace = operation_trace
+                .lock()
+                .map(|trace| format!("{trace:?}"))
+                .map_err(|_| "operation trace mutex poisoned");
+            let external_trace = external_trace
+                .lock()
+                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
+                .map_err(|_| "external trace mutex poisoned");
+            let original = format!(
+                "self control original deadline expired: predicates={last_predicate:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?}"
+            );
+            eprintln!("{original}");
+            let group = self.group;
+            let id = self.id;
+            let input = self.input;
+            let pending = input != AccountSelfControlInput::Leave;
+            let event_kind = input.event_kind();
+            let full_source = self.executor.identity.public();
+            let contains_effects = |node: &Node, events: &[EventId]| -> Result<bool, String> {
+                let log = node
+                    .log
+                    .lock()
+                    .map_err(|_| "event log mutex poisoned".to_owned())?;
+                let mut present = !events.is_empty();
+                for event in events {
+                    present &= log
+                        .get(event)
+                        .map_err(|error| format!("{error:?}"))?
+                        .is_some();
+                }
+                Ok(present)
+            };
+            let diagnostics: Vec<_> = nodes.iter().map(|(label, node)| {
+                let status = node.account_group_operation_status(self.account_id, id);
+                let status_error = status.as_ref().err();
+                let observed = status.as_ref().ok().and_then(Option::as_ref);
+                let phase = observed.map(|status| &status.phase);
+                let committed_count = observed.map(|status| status.committed_events.len());
+                let effects_local = observed.map(|status| contains_effects(node, &status.committed_events));
+                let effects_external = observed.map(|status| contains_effects(self.owner, &status.committed_events));
+                let effects = node.log.lock().map_err(|_| "event log mutex poisoned".to_owned())
+                    .and_then(|log| log.events(&group).map(|events| events.into_iter()
+                        .filter(|event| event.kind == event_kind).count()).map_err(|error| format!("{error:?}")));
+                let role = node.account_group_access(group).map(|access| access.role);
+                let source_role = node.account_group_projection(group)
+                    .map(|projection| Node::public_account_group_source(group, &projection, &full_source, &self.executor.own_group_proof()).map(|source| source.role));
+                let sync: Vec<_> = node.device_sync_status().into_iter().map(|status|
+                    (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
+                format!("node={label} phase={phase:?} status_error={status_error:?} role={role:?} source_role={source_role:?} effects={effects:?} committed_count={committed_count:?} effects_local={effects_local:?} effects_external={effects_external:?} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == self.executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
+            }).collect();
+            let exact_owner_route = self
+                .executor
+                .routing_peer(&self.owner.user_id())
+                .is_some_and(|route| route.public == self.owner.identity.public());
+            let selected_owner = self
+                .executor
+                .channel_members(group)
+                .contains(&self.owner.identity.public());
+            let departure_retry = self
+                .executor
+                .channels
+                .lock()
+                .map(|channels| {
+                    channels
+                        .pending_departures(&self.executor.user_id())
+                        .iter()
+                        .any(|(channel, _)| *channel == group)
+                })
+                .map_err(|_| "channel book mutex poisoned");
+            let source_capacity = self.executor.sessions.test_capacity_snapshot();
+            let owner_capacity = self.owner.sessions.test_capacity_snapshot();
+            format!(
+                "{original}; self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry:?} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn self_control_timeout_diagnostics_preserve_real_pending_and_committed_evidence() {
+        for pending in [false, true] {
+            let f = fixture(pending);
+            let group = f.group;
+            let account_id = f.account.account_id();
+            let directory = tempfile::tempdir().unwrap();
+            let executor = direct_node(&directory.path().join("executor"), f.member, f.account);
+            for event in f.events {
+                executor.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            executor.process_channel(group);
+            crate::node::test_support::settle_group_metadata(&executor, group);
+            let input = if pending {
+                AccountSelfControlInput::Accept
+            } else {
+                AccountSelfControlInput::Leave
+            };
+            let id = executor
+                .new_account_group_operation_id(&account_id)
+                .unwrap();
+            executor
+                .submit_account_group_operation(&account_id, id, group, input.operation())
+                .unwrap();
+            executor.maintain_account_group_operations().await;
+            let status = executor
+                .account_group_operation_status(&account_id, id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                status.phase,
+                crate::node::AccountGroupOperationPhase::Committed
+            );
+            assert_eq!(status.committed_events.len(), 1);
+            executor.await_channel_metadata(group).await.unwrap();
+            let owner = direct_node(&directory.path().join("owner"), f.owner, f.owner_account);
+            // Use the actual signed controls and committed effect. Their durable
+            // presence does not manufacture a prepared canonical projection.
+            for event in executor.log.lock().unwrap().events(&group).unwrap() {
+                assert!(event.verify_integrity() && event.verify_signature());
+                owner.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            let pending_projection = owner.account_group_projection(group);
+            assert!(matches!(
+                pending_projection,
+                Err(crate::eventlog::LogError::StaleCursor)
+            ));
+            let external_present = status
+                .committed_events
+                .iter()
+                .all(|event| owner.log.lock().unwrap().get(event).unwrap().is_some());
+            assert!(external_present);
+            let expected_role = if pending {
+                AccountGroupRole::Member
+            } else {
+                AccountGroupRole::Left
+            };
+            let ready_role = executor.account_group_access(group).unwrap().role == expected_role;
+            let pending_role = match owner.account_group_access(group) {
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                other => panic!("the imported owner must remain genuinely Pending: {other:?}"),
+            };
+            let predicate = (
+                status.phase == crate::node::AccountGroupOperationPhase::Committed,
+                Some(status.committed_events.len()),
+                Some(external_present),
+                [Some(ready_role), Some(pending_role)],
+            );
+            let mut operation_trace = SelfControlOperationTrace {
+                started: Some(std::time::Instant::now()),
+                ..SelfControlOperationTrace::default()
+            };
+            operation_trace.record("reference", "admission_started".to_owned());
+            operation_trace.record("reference", format!("convergence_predicates={predicate:?}"));
+            let operation_trace = std::sync::Mutex::new(operation_trace);
+            let trace = std::sync::Mutex::new(std::collections::VecDeque::from([(
+                0,
+                "ready",
+                format!("executor_phase={:?}", status.phase),
+            )]));
+            let effect_marker = format!("committed_effect={:?}", status.committed_events[0]);
+            let external_trace = std::sync::Mutex::new(std::collections::VecDeque::from([(
+                0,
+                "owner",
+                effect_marker.clone(),
+            )]));
+            let original_prefix =
+                format!("self control original deadline expired: predicates=Some({predicate:?})");
+            let diagnostics = SelfControlFailureDiagnostics {
+                owner: &owner,
+                executor: &executor,
+                account_id: &account_id,
+                id,
+                group,
+                input,
+            }
+            .report(
+                &[("ready", executor.clone()), ("pending", owner.clone())],
+                Some(predicate),
+                &trace,
+                &operation_trace,
+                &external_trace,
+            );
+            assert!(diagnostics.starts_with(&original_prefix));
+            assert!(diagnostics.contains("admission_started"));
+            assert!(diagnostics.contains("convergence_predicates="));
+            let observations_begin = diagnostics.find("nodes=").unwrap();
+            for marker in [
+                "admission_started",
+                "executor_phase=Committed",
+                &effect_marker,
+            ] {
+                assert!(diagnostics.find(marker).unwrap() < observations_begin);
+            }
+            assert!(diagnostics.contains("node=ready phase=Some(Committed)"));
+            assert!(diagnostics.contains("committed_count=Some(1)"));
+            assert!(diagnostics.contains("effects=Ok(1)"));
+            assert!(diagnostics.contains("effects_local=Some(Ok(true))"));
+            assert!(diagnostics.contains("effects_external=Some(Ok(true))"));
+            assert!(diagnostics.contains("node=pending phase=None"));
+            assert!(diagnostics.contains("source_role=Err(StaleCursor)"));
+            assert!(diagnostics.contains(if pending {
+                "role=Ok(Member)"
+            } else {
+                "role=Ok(Left)"
+            }));
+            let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = trace.lock().unwrap();
+                panic!("controlled local diagnostic trace poison");
+            }));
+            assert!(poisoned.is_err());
+            let poisoned_report = SelfControlFailureDiagnostics {
+                owner: &owner,
+                executor: &executor,
+                account_id: &account_id,
+                id,
+                group,
+                input,
+            }
+            .report(
+                &[("ready", executor.clone()), ("pending", owner.clone())],
+                Some(predicate),
+                &trace,
+                &operation_trace,
+                &external_trace,
+            );
+            assert!(poisoned_report.starts_with(&original_prefix));
+            assert!(poisoned_report.contains("trace=Err(\"trace mutex poisoned\")"));
+            assert!(poisoned_report.contains("admission_started"));
+            assert!(poisoned_report.contains(&effect_marker));
+            assert!(poisoned_report.contains("source_role=Err(StaleCursor)"));
+            for node in [&executor, &owner] {
+                node.runtime_work.close();
+                node.runtime_work.drain().await;
+            }
+        }
+    }
+
     struct SelfControlHoldRelease(std::sync::Arc<tokio::sync::Semaphore>);
 
     impl Drop for SelfControlHoldRelease {
@@ -2098,82 +2361,30 @@ pub(in crate::node) mod tests {
         .await;
         let held_request_flags = request_hold.as_ref().map(|hold| hold.flags());
         if convergence.is_err() {
-            // Retain the actual deadline state before any fallible diagnostic
-            // projection. Pending diagnostics must not replace this failure.
-            let failure_trace = trace
-                .lock()
-                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
-                .map_err(|_| "trace mutex poisoned");
-            let operation_trace = operation_trace
-                .lock()
-                .map(|trace| format!("{trace:?}"))
-                .map_err(|_| "operation trace mutex poisoned");
-            let external_trace = external_trace
-                .lock()
-                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
-                .map_err(|_| "external trace mutex poisoned");
-            eprintln!(
-                "self control original deadline expired: predicates={last_predicate:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?}"
-            );
-            let contains_effects = |node: &Node, events: &[EventId]| -> Result<bool, String> {
-                let log = node
-                    .log
-                    .lock()
-                    .map_err(|_| "event log mutex poisoned".to_owned())?;
-                let mut present = !events.is_empty();
-                for event in events {
-                    present &= log
-                        .get(event)
-                        .map_err(|error| format!("{error:?}"))?
-                        .is_some();
-                }
-                Ok(present)
-            };
-            let diagnostics: Vec<_> = nodes.iter().map(|(label, node)| {
-                let status = node.account_group_operation_status(&shared.account_id(), id);
-                let status_error = status.as_ref().err();
-                let observed = status.as_ref().ok().and_then(Option::as_ref);
-                let phase = observed.map(|status| &status.phase);
-                let committed_count = observed.map(|status| status.committed_events.len());
-                let effects_local = observed.map(|status| contains_effects(node, &status.committed_events));
-                let effects_external = observed.map(|status| contains_effects(&owner, &status.committed_events));
-                let effects = node.log.lock().map_err(|_| "event log mutex poisoned".to_owned())
-                    .and_then(|log| log.events(&group).map(|events| events.into_iter()
-                        .filter(|event| event.kind == event_kind).count()).map_err(|error| format!("{error:?}")));
-                let role = node.account_group_access(group).map(|access| access.role);
-                let source_role = node.account_group_projection(group)
-                    .map(|projection| Node::public_account_group_source(group, &projection, &full_source, &executor.own_group_proof()).map(|source| source.role));
-                let sync: Vec<_> = node.device_sync_status().into_iter().map(|status|
-                    (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
-                format!("node={label} phase={phase:?} status_error={status_error:?} role={role:?} source_role={source_role:?} effects={effects:?} committed_count={committed_count:?} effects_local={effects_local:?} effects_external={effects_external:?} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
-            }).collect();
             let listeners_finished: Vec<_> = handles
                 .iter()
                 .map(|handle| handle.as_ref().map(|handle| handle.is_finished()))
                 .collect();
-            let exact_owner_route = executor
-                .routing_peer(&owner.user_id())
-                .is_some_and(|route| route.public == owner.identity.public());
-            let selected_owner = executor
-                .channel_members(group)
-                .contains(&owner.identity.public());
-            let departure_retry = executor
-                .channels
-                .lock()
-                .map(|channels| {
-                    channels
-                        .pending_departures(&executor.user_id())
-                        .iter()
-                        .any(|(channel, _)| *channel == group)
-                })
-                .map_err(|_| "channel book mutex poisoned");
-            let source_capacity = executor.sessions.test_capacity_snapshot();
-            let owner_capacity = owner.sessions.test_capacity_snapshot();
+            let diagnostics = SelfControlFailureDiagnostics {
+                owner: &owner,
+                executor: &executor,
+                account_id: &shared.account_id(),
+                id,
+                group,
+                input,
+            }
+            .report(
+                &nodes,
+                last_predicate,
+                &trace,
+                &operation_trace,
+                &external_trace,
+            );
             if let Some(hold) = request_hold.as_ref() {
                 hold.release.close();
             }
             panic!(
-                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?} listeners_finished={listeners_finished:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry:?} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
+                "{diagnostics}; held_request_flags={held_request_flags:?} listeners_finished={listeners_finished:?}"
             );
         }
         let history = convergence.unwrap();

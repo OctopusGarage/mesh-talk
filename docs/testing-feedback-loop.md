@@ -634,6 +634,11 @@ changing short-circuit evaluation. On deadline expiry, retain the last observed
 predicate and operation traces before projecting diagnostic roles; pending
 `StaleCursor` or read errors remain diagnostic values and must not replace the
 original timeout. Unobserved predicates remain explicitly unobserved.
+Exercise that same diagnostic owner with actual committed Accept/Leave effects,
+an independent store whose signed controls remain genuinely Pending, and a
+controlled poison of its local trace mutex. Require primary predicate, phase and
+effect evidence before the fallible node observations; normal convergence tests
+cannot validate this failure-only path.
 
 Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
 
@@ -875,7 +880,10 @@ The six simulated hosts use the existing shared independent-peer runtime owner,
 with one reactor per host. Bind every listener before launching those owners.
 A controlled held reactor must keep its own queued task pending while a second
 host acknowledges work; release and join both tasks and runtime owners on every
-exit. Keep the original absolute eight-second post-send cutoff, including sender
+exit. Cancellation before server launch must also close admission and join the
+host only after its actual admitted-work permit retires. Verify the runtime is
+stopped when Drop returns and retain stores if retirement is unverified.
+Keep the original absolute eight-second post-send cutoff, including sender
 retirement, and the existing admitted-read completion timestamps. Host isolation
 corrects the simulation boundary; it does not establish why a historical hop
 was late. All remaining server owners retire before fixture storage.
