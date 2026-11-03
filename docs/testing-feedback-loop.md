@@ -117,6 +117,11 @@ output cannot certify the query. Preserve terminal query errors, bounded stdout
 and stderr, and both process lifetimes' stop evidence. Do not retry the query or
 warm storage to hide an unavailable response. A passing diagnostic run alone does
 not establish the cause of an earlier discarded response.
+Keep ordinary observer controls in `persistent_history_observer`; the native
+`persistent_history` target contains only its ignored real-process scenario.
+Run both the ordinary target and `node scripts/evals/backend-runner.mjs` when
+changing this boundary. The actual native consumer requires complete scenario
+names and a zero-filter Cargo summary; raw Cargo success alone is insufficient.
 
 Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
 state polling, termination grace periods and tests of time-dependent behavior.

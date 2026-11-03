@@ -13,10 +13,14 @@
 //! Nodes are also started SEQUENTIALLY (start one, await its line, then the next) so a
 //! slow machine never has to run two KDF-heavy cold starts concurrently.
 
+#[path = "support/history_observer.rs"]
+mod history_observer;
 mod support;
 
+use history_observer::{read_cli_lines, retain_line, wait_for_history_line};
+
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -28,91 +32,6 @@ struct CliNode {
     lines: Receiver<String>,
     transcript: Arc<Mutex<VecDeque<String>>>,
     readers: Vec<std::thread::JoinHandle<()>>,
-}
-
-fn retain_line(transcript: &Mutex<VecDeque<String>>, line: String) {
-    let mut transcript = transcript.lock().unwrap();
-    if transcript.len() == 64 {
-        transcript.pop_front();
-    }
-    transcript.push_back(line.chars().take(1024).collect());
-}
-
-fn read_cli_lines(
-    stream: impl Read,
-    name: &str,
-    transcript: &Mutex<VecDeque<String>>,
-    output: Option<mpsc::Sender<String>>,
-) {
-    for line in BufReader::new(stream).lines() {
-        match line {
-            Ok(line) => {
-                retain_line(transcript, format!("{name}: {line}"));
-                if output
-                    .as_ref()
-                    .is_some_and(|output| output.send(line).is_err())
-                {
-                    break;
-                }
-            }
-            Err(error) => {
-                retain_line(transcript, format!("{name} read error: {error}"));
-                return;
-            }
-        }
-    }
-    retain_line(transcript, format!("{name} EOF"));
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum HistoryObservationError {
-    Response(String),
-    Timeout,
-    Closed,
-    TooManyRows,
-}
-
-fn wait_for_history_line(
-    lines: &Receiver<String>,
-    pending: &mut VecDeque<String>,
-    message: &str,
-    timeout: Duration,
-) -> Result<String, HistoryObservationError> {
-    let deadline = Instant::now() + timeout;
-    if let Some(index) = pending.iter().position(|line| line.contains(message)) {
-        return Ok(pending.remove(index).unwrap());
-    }
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(HistoryObservationError::Timeout)?;
-        let line = lines.recv_timeout(remaining).map_err(|error| match error {
-            mpsc::RecvTimeoutError::Timeout => HistoryObservationError::Timeout,
-            mpsc::RecvTimeoutError::Disconnected => HistoryObservationError::Closed,
-        })?;
-        if line == "(no history)"
-            || line.starts_with("history unavailable:")
-            || line.starts_with("no peer matches prefix")
-            || line == "peer vanished from roster"
-            || line.ends_with("peers; be more specific")
-            || line.starts_with("usage: /history")
-        {
-            return Err(HistoryObservationError::Response(line));
-        }
-        // Live reception output is `from ...`; only the history command prints
-        // the timestamped row. Replayed reception cannot prove this query.
-        if line.starts_with('[') {
-            if line.contains(message) {
-                return Ok(line);
-            }
-            // One /history command requested at most 20 rows. Equal clocks
-            // sort by event identity, so the reply may precede our sent row.
-            if pending.len() == 20 {
-                return Err(HistoryObservationError::TooManyRows);
-            }
-            pending.push_back(line);
-        }
-    }
 }
 
 impl CliNode {
@@ -283,118 +202,4 @@ fn message_history_survives_restart() {
         Duration::from_secs(10),
     )
     .expect("history shows Bob's received reply after restart");
-}
-
-#[test]
-fn history_observer_preserves_terminal_query_failure_without_reissuing_command() {
-    for response in [
-        "(no history)",
-        "history unavailable: persistent order cursor is stale",
-        "no peer matches prefix '01234567'",
-        "peer vanished from roster",
-    ] {
-        let (sender, lines) = mpsc::channel();
-        sender.send(response.to_owned()).unwrap();
-        assert_eq!(
-            wait_for_history_line(
-                &lines,
-                &mut VecDeque::new(),
-                "ping-from-alice",
-                Duration::from_secs(1)
-            ),
-            Err(HistoryObservationError::Response(response.to_owned()))
-        );
-    }
-    let (sender, lines) = mpsc::channel();
-    drop(sender);
-    assert_eq!(
-        wait_for_history_line(
-            &lines,
-            &mut VecDeque::new(),
-            "ping-from-alice",
-            Duration::from_secs(1)
-        ),
-        Err(HistoryObservationError::Closed)
-    );
-}
-
-#[test]
-fn history_observer_requires_query_rows_and_retains_bounded_nonmatching_output() {
-    let transcript = Mutex::new(VecDeque::new());
-    let mut pending = VecDeque::new();
-    let (sender, lines) = mpsc::channel();
-    read_cli_lines(
-        std::io::Cursor::new(
-            b"from bob: ping-from-alice\n[123] you: ping-from-alice\n[124] bob: pong-from-bob\n",
-        ),
-        "stdout",
-        &transcript,
-        Some(sender),
-    );
-    assert_eq!(
-        wait_for_history_line(
-            &lines,
-            &mut pending,
-            "ping-from-alice",
-            Duration::from_secs(1)
-        )
-        .unwrap(),
-        "[123] you: ping-from-alice"
-    );
-    assert_eq!(
-        wait_for_history_line(
-            &lines,
-            &mut pending,
-            "pong-from-bob",
-            Duration::from_secs(1)
-        )
-        .unwrap(),
-        "[124] bob: pong-from-bob"
-    );
-    assert!(
-        transcript
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line == "stdout: from bob: ping-from-alice")
-    );
-    let (sender, reversed) = mpsc::channel();
-    read_cli_lines(
-        std::io::Cursor::new(b"[123] bob: pong-from-bob\n[123] you: ping-from-alice\n"),
-        "stdout",
-        &transcript,
-        Some(sender),
-    );
-    assert_eq!(
-        wait_for_history_line(
-            &reversed,
-            &mut pending,
-            "ping-from-alice",
-            Duration::from_secs(1)
-        )
-        .unwrap(),
-        "[123] you: ping-from-alice"
-    );
-    assert_eq!(
-        pending.front().map(String::as_str),
-        Some("[123] bob: pong-from-bob")
-    );
-    assert_eq!(
-        wait_for_history_line(
-            &reversed,
-            &mut pending,
-            "pong-from-bob",
-            Duration::from_secs(1)
-        )
-        .unwrap(),
-        "[123] bob: pong-from-bob"
-    );
-    assert!(pending.is_empty());
-    for index in 0..100 {
-        retain_line(&transcript, format!("stderr: {index} {}", "x".repeat(2000)));
-    }
-    let retained = transcript.lock().unwrap();
-    assert_eq!(retained.len(), 64);
-    assert!(retained.front().unwrap().starts_with("stderr: 36 "));
-    assert!(retained.iter().all(|line| line.len() <= 1024));
 }
