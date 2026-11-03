@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 
 const capturedOutput = (stdout, stderr = "") => ({ stdout, stderr, output: stdout + stderr, outputTruncated: false });
 const suiteOutput = expected => expected.map(name => `test ${name} ... ok`).join("\n") + `\ntest result: ok. ${expected.length} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`;
@@ -99,8 +100,9 @@ test("intentional lifecycle fault fixtures cannot cancel their real validation o
   const files = ["backend-eval-report.test.mjs", "pr-platform.test.mjs", "pr-preflight-output.test.mjs"].map(name => fileURLToPath(new URL(name, import.meta.url)));
   // A fresh test driver must not inherit node:test's child-context marker,
   // which otherwise silently suppresses execution of these nested test files.
-  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)), "fault-fixtures", "--", process.execPath, "--test", "--test-reporter=tap", "--test-name-pattern", "backend (output cap|timeout)|bounded child execution|browser wrapper exposes", ...files], { cwd: directory, env: { ...process.env, CI: "1", MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined }, encoding: "utf8", timeout: 25000 });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const { env } = toolVersionFixture(directory, { ...process.env, CI: "1", MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined });
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)), "fault-fixtures", "--", process.execPath, "--test", "--test-reporter=tap", "--test-name-pattern", "backend (output cap|timeout)|bounded child execution|browser wrapper exposes", ...files], { cwd: directory, env, encoding: "utf8", timeout: 25000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   assert.match(result.stdout, /browser wrapper exposes/);
   assert.match(result.stdout, /backend timeout/);
   assert.match(result.stdout, /^# pass 4$/mu, "all four selected fault controls must actually pass");

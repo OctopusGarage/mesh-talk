@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { versions } from "./windows-coverage.mjs";
 
 test("native Host isolation preserves default targets, accumulated coverage and real failure", (t) => {
   const root = mkdtempSync(join(tmpdir(), "mesh-native-host-coverage-"));
@@ -20,7 +21,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     new URL("../../.github/workflows/ci.yml", import.meta.url),
     "utf8",
   );
-  assert.match(workflow, /cargo-llvm-cov@0\.8\.7,cargo-nextest@0\.9\.148/u);
+  assert.ok(workflow.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
   const commands = workflow.split("\n").map((line) => line.trim());
   const hostCommands = commands.filter((line) =>
     line.startsWith("cargo llvm-cov nextest "),

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { versions } from "../ci/windows-coverage.mjs";
 
 const workflow = readFileSync(new URL("../../.github/workflows/mutants.yml", import.meta.url), "utf8");
 const wrapper = readFileSync(new URL("../release/run-mutants.mjs", import.meta.url), "utf8");
@@ -68,7 +69,7 @@ test("deep mutation samples use process-isolated tests with bounded execution", 
   assert.doesNotMatch(workflow, /cargo test --workspace/);
   assert.doesNotMatch(wrapper, /"--baseline", "skip"/);
   assert.match(workflow, /tool: cargo-mutants@27\.1\.0/);
-  assert.match(workflow, /cargo-nextest@0\.9\.148/);
+  assert.ok(workflow.includes(`cargo-nextest@${versions.nextest}`));
   assert.match(wrapper, /const shard = mutationShard\(Number\(process\.env\.GITHUB_RUN_NUMBER/);
   assert.match(wrapper, /"--shard", shard/);
   assert.match(wrapper, /"--sharding", "round-robin"/);

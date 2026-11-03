@@ -687,13 +687,19 @@ group connection or consume the connection budget reserved for ordinary delivery
 Private route rounds launch at most two probes concurrently and advance their
 cursor only for launched work; canceled queued routes retain their next turn.
 
-Account maintenance and bounded local channel recovery are sibling futures owned
-by the same recovery task. A held maintenance peer exchange cannot delay local
+Account maintenance, bounded local channel recovery and custody recovery are
+three futures owned by the same recovery task. A held maintenance peer exchange
+cannot delay local
 checkpoint/presentation progress or its mandatory Directory publication. The
 maintenance owner retains one state and uses independent broadcast/watch receivers
 plus the existing three-second Skip clock; it never consumes local recovery or
 roster Notify permits. Each bounded turn yields, and parent cancellation drops
-both futures. During an ordinary recovery network turn, the same parent polls its
+all three futures. Custody retains its own three-second Skip clock, one serial
+retry/recheck turn and existing rotating cursors. A held history or fallback
+exchange cannot prevent a healthy peer's exact durable-have report. Custody
+uses the existing transport admission and peer deadlines; it adds no task,
+queue or connection allowance. During an ordinary recovery network turn, the
+same parent polls its
 existing local-work notification alongside the pinned network future. Each local
 wake advances one bounded checkpoint/presentation turn and yields. The network
 turn retains its original leases, cursors, ordering and deadlines. If local work
@@ -1105,6 +1111,15 @@ sequenceDiagram
 ```
 
 Current `send_call_signal` is ephemeral, device-addressed and uses a fresh live Noise connection. It does not append signals to the durable message log or upload them to post-office mailboxes. A participant visible only through opaque federation therefore does not automatically have a usable call-signaling path. WebRTC then needs its own permitted ICE/media path; post offices supply no TURN service. Text/file relay success proves neither requirement.
+
+The call store owns non-trickle SDP preparation. It sends an offer or answer only
+after native ICE gathering completes with a usable local candidate. The existing
+twenty-second call timer also bounds outgoing preparation after media capture;
+ringing and accepted-call timers retain their existing ownership. Hangup,
+timeout and session teardown abort the exact peer connection's pending gathering
+wait before closing it. Every settlement removes its native and cancellation
+listeners, and a late completion cannot signal for or terminate a replacement
+call. Candidate readiness is an observed protocol condition, not elapsed time.
 
 
 ### G. Linking and ongoing account synchronization

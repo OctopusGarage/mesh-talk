@@ -2,6 +2,8 @@ import { expect, type Page } from "@playwright/test";
 
 export type Harness = {
   phase: () => string;
+  waitForConnection: () => Promise<void>;
+  connectionWaiters: () => number;
   signal: (from: string, payload: string) => void;
   start: (target: string, video?: boolean) => Promise<void>;
   accept: () => Promise<void>;
@@ -74,7 +76,25 @@ export async function prepareCallMedia(
           if (!tracks.includes(track)) tracks.push(track);
         }
       });
+      let connectionWaiters = 0;
       window.__callMediaHarness = {
+        waitForConnection: () => new Promise((resolve, reject) => {
+          const callId = useCalls.getState().callId;
+          if (!callId) { reject(new Error('No active call')); return; }
+          connectionWaiters++;
+          let unsubscribe = () => {};
+          const check = state => {
+            if (state.callId === callId && state.phase !== 'connected' &&
+                !['idle', 'ended'].includes(state.phase)) return;
+            unsubscribe();
+            connectionWaiters--;
+            if (state.callId === callId && state.phase === 'connected') resolve();
+            else reject(new Error('Call ended before connection: ' + (state.endedReason ?? state.phase)));
+          };
+          unsubscribe = useCalls.subscribe(check);
+          check(useCalls.getState());
+        }),
+        connectionWaiters: () => connectionWaiters,
         phase: () => useCalls.getState().phase,
         signal: (from, payload) => useCalls.getState().onSignal({ from, payload }),
         start: (target, video = true) => useCalls.getState().startCall({ name: target, accountId: target, deviceIds: [target] }, video),

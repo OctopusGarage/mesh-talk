@@ -2,9 +2,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { versions } from "../ci/windows-coverage.mjs";
 
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
+
+test("real compiler contracts do not compete for the native job's Cargo cache", () => {
+  for (const [workflow, name, expected] of [
+    ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "native-host-coverage", "rust-profile", "asan-cli"]],
+    ["windows-workspace.yml", "Validate archive and coverage contracts", ["windows-native-deps", "backend-coverage", "rust-profile", "windows-coverage-cli"]],
+  ]) {
+    const caller = step(read(workflow), name);
+    assert.ok(caller, `${workflow}: compiler contract step is missing`);
+    assert.match(caller, /run: node --test --test-concurrency=1 /, `${workflow}: real compiler contracts share Cargo's package-cache lock`);
+    for (const fixture of expected) assert.ok(caller.includes(`scripts/ci/${fixture}.test.mjs`), `${workflow}: missing ${fixture}`);
+    assert.doesNotMatch(caller, /continue-on-error|\|\| true|&\s*$/m);
+  }
+});
 
 test("verification Rust caches restore on PRs and publish reusable main caches", () => {
   for (const file of ["ci.yml", "windows-workspace.yml", "e2e-backend.yml", "hidden-contacts-native.yml", "sanitizers.yml", "mutants.yml"]) {
@@ -180,7 +194,7 @@ test("Windows builds once then requires four complete serial archive partitions"
   assert.match(windows, /ref: \$\{\{ github.sha \}\}/);
   assert.match(windows, /toolchain: \$\{\{ needs.build.outputs.rust \}\}/);
   assert.match(windows, /RUST_TEST_THREADS: '1'/);
-  assert.match(windows, /cargo-nextest@0\.9\.148,cargo-llvm-cov@0\.8\.7/);
+  assert.ok(windows.includes(`cargo-nextest@${versions.nextest},cargo-llvm-cov@${versions.llvmCov}`));
   assert.match(windows, /if-no-files-found: error/);
   assert.doesNotMatch(windows.split("  tests:\n")[1], /Swatinem\/rust-cache|cargo build|npm ci/);
 });

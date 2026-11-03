@@ -788,23 +788,35 @@ async fn an_awaiting_control_cannot_use_transferred_owner_authority() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consecutive_account_controls_progress_while_public_fanout_is_stalled() {
-    consecutive_control_fanout_fixture(false, false).await;
+    consecutive_control_fanout_fixture(false, UnusedPublicConnection::None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consecutive_controls_establish_a_cold_public_hold_before_measuring_progress() {
-    consecutive_control_fanout_fixture(true, false).await;
+    consecutive_control_fanout_fixture(true, UnusedPublicConnection::None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consecutive_controls_require_a_live_public_hold_after_an_unused_authenticated_connection()
 {
-    consecutive_control_fanout_fixture(false, true).await;
+    consecutive_control_fanout_fixture(false, UnusedPublicConnection::Authenticated).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn consecutive_controls_require_a_live_public_hold_after_an_accepted_pre_noise_tcp_close() {
+    consecutive_control_fanout_fixture(false, UnusedPublicConnection::BeforeAuthentication).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnusedPublicConnection {
+    None,
+    Authenticated,
+    BeforeAuthentication,
 }
 
 async fn consecutive_control_fanout_fixture(
     delayed_responder: bool,
-    close_unused_connection: bool,
+    unused_connection: UnusedPublicConnection,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -856,32 +868,58 @@ async fn consecutive_control_fanout_fixture(
     );
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let authentication_may_start = Arc::new(tokio::sync::Semaphore::new(0));
     struct StopOnDrop(
         Arc<tokio::sync::Semaphore>,
         Arc<std::sync::atomic::AtomicBool>,
+        Arc<tokio::sync::Semaphore>,
     );
     impl Drop for StopOnDrop {
         fn drop(&mut self) {
             self.1.store(true, std::sync::atomic::Ordering::SeqCst);
             self.0.close();
+            self.2.close();
         }
     }
-    let _stop_on_drop = StopOnDrop(release.clone(), stopping.clone());
+    let _stop_on_drop = StopOnDrop(
+        release.clone(),
+        stopping.clone(),
+        authentication_may_start.clone(),
+    );
+    let pre_authentication_closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pre_authentication_port = Arc::new(Mutex::new(None::<u16>));
+    let (accepted_tcp, accepted_tcp_ready) = tokio::sync::oneshot::channel::<u16>();
+    let accepted_tcp = Arc::new(Mutex::new(Some(accepted_tcp)));
+    let (authentication_closed, authentication_retired) = tokio::sync::oneshot::channel::<u16>();
+    let authentication_closed = Arc::new(Mutex::new(Some(authentication_closed)));
     let pre_request_closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let pre_request_closed = Arc::new(tokio::sync::Notify::new());
     let (arrived, stalled_response) = tokio::sync::oneshot::channel::<std::sync::Weak<()>>();
     let arrived = Arc::new(Mutex::new(Some(arrived)));
+    let public_hold_observer = Arc::downgrade(&arrived);
     let (begin_response, response_may_start) = tokio::sync::oneshot::channel();
     let responder_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut tasks = tokio::task::JoinSet::new();
-    tasks.spawn(owner.clone().run_accept_loop(owner_listener));
+    let mut owner_listener = Some(owner_listener);
+    if unused_connection != UnusedPublicConnection::BeforeAuthentication {
+        tasks.spawn(
+            owner
+                .clone()
+                .run_accept_loop(owner_listener.take().unwrap()),
+        );
+    }
     let peer = external.clone();
     let expected = owner.identity.public();
     let peer_release = release.clone();
     let peer_stopping = stopping.clone();
     let started = responder_started.clone();
     let closed_count = pre_request_closes.clone();
+    let authentication_closed_count = pre_authentication_closes.clone();
     let closed_notification = pre_request_closed.clone();
+    let selected_port = pre_authentication_port.clone();
+    let accepted_tcp = accepted_tcp.clone();
+    let authentication_closed = authentication_closed.clone();
+    let authentication_release = authentication_may_start.clone();
     tasks.spawn(async move {
         if delayed_responder {
             response_may_start.await.expect("the first committed effect must start the controlled responder");
@@ -894,20 +932,42 @@ async fn consecutive_control_fanout_fixture(
         loop {
             tokio::select! {
                 incoming = external_listener.accept() => {
-                    let (stream, _) = incoming.unwrap();
+                    let (stream, address) = incoming.unwrap();
+                    let controlled = {
+                        let mut selected = selected_port.lock().unwrap();
+                        if *selected == Some(address.port()) {
+                            selected.take();
+                            true
+                        } else { false }
+                    };
+                    let accepted = controlled.then(|| accepted_tcp.lock().unwrap().take().unwrap());
+                    let retired = controlled.then(|| (address.port(), authentication_closed.lock().unwrap().take().unwrap()));
+                    let authentication_release = authentication_release.clone();
                     let peer = peer.clone();
+                    let Some(permit) = peer.runtime_work.admit() else { return; };
                     let release = peer_release.clone();
                     let stopping = peer_stopping.clone();
                     let arrived = arrived.clone();
                     let expected = expected.clone();
                     let closed_count = closed_count.clone();
+                    let authentication_closed_count = authentication_closed_count.clone();
                     let closed_notification = closed_notification.clone();
-                    connections.spawn(Box::pin(async move {
+                    connections.spawn(permit.track(Box::pin(async move {
+                        if let Some(accepted) = accepted {
+                            let _ = accepted.send(address.port());
+                            let _ = authentication_release.acquire().await;
+                        }
                         let mut channel = match peer.privacy_accept(stream).await {
                             Ok(channel) => channel,
                             Err(_) if stopping.load(std::sync::atomic::Ordering::SeqCst) => return,
+                            Err(error) if crate::node::session_pool::retryable_transport_error(&error) => {
+                                authentication_closed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                if let Some((port, retired)) = retired { let _ = retired.send(port); }
+                                return;
+                            }
                             Err(error) => panic!("public fixture authentication failed before cleanup: {error}"),
                         };
+                        assert!(retired.is_none(), "the controlled pre-Noise TCP close cannot authenticate");
                         assert_eq!(channel.peer_identity(), &expected);
                         let first = match channel.recv().await {
                             Ok(first) => first,
@@ -941,7 +1001,7 @@ async fn consecutive_control_fanout_fixture(
                             }
                             drop(live);
                         }
-                    }));
+                    })));
                 }
                 joined = connections.join_next(), if !connections.is_empty() => {
                     joined.unwrap().expect("public response fixture connection must not panic");
@@ -950,7 +1010,32 @@ async fn consecutive_control_fanout_fixture(
         }
     });
     let observation = std::panic::AssertUnwindSafe(async {
-        if close_unused_connection {
+        if unused_connection == UnusedPublicConnection::BeforeAuthentication {
+            super::cold_account_setup(async {
+                use tokio::io::AsyncWriteExt;
+                let socket = tokio::net::TcpSocket::new_v4().unwrap();
+                socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                let expected_port = socket.local_addr().unwrap().port();
+                *pre_authentication_port.lock().unwrap() = Some(expected_port);
+                let mut unused = socket.connect(external_address).await.unwrap();
+                let accepted_port = accepted_tcp_ready.await.expect("the exact raw TCP connection must be accepted before closing");
+                assert_eq!(accepted_port, expected_port);
+                assert_eq!(unused.local_addr().unwrap().port(), accepted_port);
+                eprintln!("public fixture accepted pre-Noise TCP port={accepted_port}");
+                unused.shutdown().await.unwrap();
+                drop(unused);
+                authentication_may_start.close();
+                let retired_port = authentication_retired.await.expect("the accepted pre-Noise close must retire without an authentication panic");
+                assert_eq!(retired_port, accepted_port);
+                assert_eq!(pre_authentication_closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(pre_request_closes.load(std::sync::atomic::Ordering::SeqCst), 0,
+                    "pre-authentication closure cannot qualify as an unused authenticated connection");
+                let no_public_request = public_hold_observer.upgrade().is_some_and(|arrived| arrived.lock().unwrap().is_some());
+                assert!(no_public_request, "no application request has qualified as the public hold yet");
+            }).await.expect("the exact accepted pre-Noise TCP close must finish before control admission");
+            tasks.spawn(owner.clone().run_accept_loop(owner_listener.take().unwrap()));
+        }
+        if unused_connection == UnusedPublicConnection::Authenticated {
             // Only this controlled companion opens an unused authenticated dial.
             // Its close cannot substitute for the subsequent actual public hold.
             let before = pre_request_closes.load(std::sync::atomic::Ordering::SeqCst);
@@ -1093,6 +1178,7 @@ async fn consecutive_control_fanout_fixture(
     .await;
     stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     release.close();
+    authentication_may_start.close();
     for current in [&owner, &external] {
         current.runtime_work.close();
         current.sessions.clear();

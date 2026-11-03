@@ -1,0 +1,90 @@
+// Requires only the pinned Nextest and an already-installed stable Rust toolchain.
+// This verifies the partition/receipt protocol, not sanitizer instrumentation;
+// the sanitizer workflow separately requires an actual Linux ASan error control.
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { versions } from "./windows-coverage.mjs";
+
+const driver = `import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+const [owner, root, mode] = process.argv.slice(2);
+const { runPartition, verifyAsanUnion, partitionArgs, verifySmoke } = await import(pathToFileURL(owner));
+const { command: runLogged } = await import(pathToFileURL(path.join(path.dirname(owner), "windows-coverage.mjs")));
+process.chdir(root);
+const identity = JSON.parse(process.env.MESH_ASAN_PROTOCOL_IDENTITY);
+const buildArgs = ["--offline", "--locked", "-p", "asan-protocol-fixture", "--lib"];
+const directory = shard => path.join(root, "evidence", String(shard));
+if (mode === "run") {
+ const bundles = [];
+ for (const shard of [1,2,3,4]) bundles.push(await runPartition(shard, directory(shard), { buildArgs, identity }));
+ writeFileSync(path.join(root, "summary.json"), JSON.stringify(verifyAsanUnion(bundles, identity)));
+} else if (mode === "fail") {
+ await runPartition(1, path.join(root, "failed"), { buildArgs, identity });
+} else if (mode === "changed") {
+ await runPartition(1, path.join(root, "changed"), { buildArgs, identity, afterExecution: async () => { throw Error("final identity changed"); } });
+} else if (mode === "envelope") {
+ const output = path.join(root, "signal-evidence"); mkdirSync(output);
+ const args = ["--manifest-path", path.join(root, "signal-smoke/Cargo.toml"), "--offline", "--locked", "--lib"];
+ for (const name of ["clean", "intentional_asan_error"]) {
+  let failed = false;
+  try { await runLogged([...partitionArgs("run", args), "-E", \`test(=\${name})\`], { env: { ...process.env, NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1", RUST_TEST_THREADS: "1" }, receipt: path.join(output, \`smoke-\${name}\`) }); }
+  catch (error) { if (name !== "intentional_asan_error" || !error.message.includes("failed: 100/")) throw error; failed = true; }
+  if (failed !== (name === "intentional_asan_error")) throw Error("signal protocol outcome mismatch");
+ }
+ const files = Object.fromEntries(["smoke-clean.jsonl", "smoke-clean.log", "smoke-intentional_asan_error.jsonl", "smoke-intentional_asan_error.log"].map(name => [name, createHash("sha256").update(readFileSync(path.join(output, name))).digest("hex")]));
+ writeFileSync(path.join(output, "smoke.json"), JSON.stringify({ schema: 1, identity, files }));
+ verifySmoke(output, identity);
+} else if (mode === "verify") {
+ const bundles = [1,2,3,4].map(shard => ({ receipt: JSON.parse(readFileSync(path.join(directory(shard), "receipt.json"))), full: JSON.parse(readFileSync(path.join(directory(shard), "full.json"))), selected: JSON.parse(readFileSync(path.join(directory(shard), "selected.json"))), execution: readFileSync(path.join(directory(shard), "execution.jsonl"), "utf8") }));
+ verifyAsanUnion(bundles, identity);
+} else throw Error("unknown protocol mode");
+`;
+
+test("real pinned Nextest preserves the full default-lib union and rejects failed/altered receipts", { timeout: 120000 }, t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mesh-asan-protocol-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const directory of ["src", "tests", ".config", "scripts/ci"]) mkdirSync(path.join(root, directory), { recursive: true });
+  for (const name of ["asan.mjs", "windows-coverage.mjs"]) copyFileSync(new URL(`./${name}`, import.meta.url), path.join(root, "scripts/ci", name));
+  copyFileSync(new URL("../../.config/nextest-asan.toml", import.meta.url), path.join(root, ".config/nextest-asan.toml"));
+  writeFileSync(path.join(root, "Cargo.toml"), '[package]\nname="asan-protocol-fixture"\nversion="0.0.0"\nedition="2024"\n[workspace]\n');
+  writeFileSync(path.join(root, "Cargo.lock"), 'version = 4\n[[package]]\nname = "asan-protocol-fixture"\nversion = "0.0.0"\n');
+  const cases = Array.from({ length: 32 }, (_, index) => `#[test] fn case_${index}() { assert!(std::env::var_os("MESH_ASAN_PROTOCOL_FAIL").is_none(), "intentional protocol failure"); assert_eq!(std::env::var("RUST_TEST_THREADS").unwrap(), "1"); assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some()); }`).join("\n");
+  writeFileSync(path.join(root, "src/lib.rs"), `${cases}\n#[test] #[ignore] fn ignored() { panic!("default ignored cases must not run"); }\n`);
+  // --lib must not silently expand into bin/integration targets.
+  writeFileSync(path.join(root, "tests/must_not_run.rs"), '#[test] fn integration() { panic!("ASan is core lib only"); }\n');
+  mkdirSync(path.join(root, "signal-smoke/src"), { recursive: true });
+  writeFileSync(path.join(root, "signal-smoke/Cargo.toml"), '[package]\nname="mesh-asan-smoke"\nversion="0.0.0"\nedition="2024"\n[workspace]\n');
+  writeFileSync(path.join(root, "signal-smoke/Cargo.lock"), 'version = 4\n[[package]]\nname = "mesh-asan-smoke"\nversion = "0.0.0"\n');
+  // Signal/channel protocol only: this is not sanitizer instrumentation or UB.
+  writeFileSync(path.join(root, "signal-smoke/src/lib.rs"), '#[test] fn clean() {}\n#[test] fn intentional_asan_error() { use std::io::Write; std::io::stderr().write_all(b"PROTOCOL FIXTURE ONLY: ERROR: AddressSanitizer: heap-use-after-free\\n").unwrap(); std::process::abort(); }\n');
+  writeFileSync(path.join(root, "driver.mjs"), driver);
+  const env = { ...process.env, CARGO_NET_OFFLINE: "true", CARGO_TERM_COLOR: "never", MESH_ASAN_PROTOCOL_IDENTITY: JSON.stringify({ source: "stable-protocol-fixture", nextest: versions.nextest }) };
+  for (const name of Object.keys(env)) if (name.startsWith("CARGO_LLVM_COV") || name.startsWith("__CARGO_LLVM_COV") || ["RUSTFLAGS", "RUSTDOCFLAGS", "ASAN_OPTIONS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "LLVM_PROFILE_FILE", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "MESH_VALIDATION_PROCESS_GROUP_OWNER"].includes(name)) delete env[name];
+  const run = (mode, environment = env) => spawnSync(process.execPath, [path.join(root, "driver.mjs"), path.join(root, "scripts/ci/asan.mjs"), root, mode], { cwd: root, env: environment, encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024 });
+  const accepted = run("run");
+  assert.equal(accepted.status, 0, `${accepted.error ?? ""}\n${accepted.stdout}\n${accepted.stderr}`);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 33, executedTests: 32, ignoredTests: 1, shards: 4 });
+  const failed = run("fail", { ...env, MESH_ASAN_PROTOCOL_FAIL: "1" });
+  assert.equal(failed.status, 1, `${failed.error ?? ""}\n${failed.stderr}`);
+  assert.match(failed.stderr, /failed: 100/u);
+  assert(!existsSync(path.join(root, "failed/receipt.json")));
+  assert.match(readFileSync(path.join(root, "failed/execution.jsonl"), "utf8"), /"event":"failed"/u);
+  const changed = run("changed");
+  assert.equal(changed.status, 1);
+  assert.match(changed.stderr, /final identity changed/u);
+  assert(!existsSync(path.join(root, "changed/receipt.json")), "changed final identity cannot certify completed tests");
+  const signal = run("envelope");
+  assert.equal(signal.status, 0, `${signal.error ?? ""}\n${signal.stdout}\n${signal.stderr}`);
+  assert.match(readFileSync(path.join(root, "signal-evidence/smoke-intentional_asan_error.jsonl"), "utf8"), /PROTOCOL FIXTURE ONLY/u);
+  const execution = path.join(root, "evidence/1/execution.jsonl");
+  writeFileSync(execution, readFileSync(execution, "utf8") + " ");
+  const altered = run("verify");
+  assert.equal(altered.status, 1);
+  assert.match(altered.stderr, /execution digest mismatch/u);
+});

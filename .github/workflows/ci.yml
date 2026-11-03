@@ -89,10 +89,12 @@ jobs:
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.148
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
 
       - name: Verify coverage accumulation with the actual tool
-        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs
+        # These fixtures launch real Cargo/rustc processes and share this job's
+        # package cache. Give each compiler contract exclusive execution.
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/asan-cli.test.mjs
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend

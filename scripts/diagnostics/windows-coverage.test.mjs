@@ -4,7 +4,38 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { command, inventory, verifyPartition, verifyExecution, validateLcov, verifyIdentity, verifyTargets, validateProfilePath, verifyLayout } from "../ci/windows-coverage.mjs";
+import { versions, command, consumerFailurePolicy, inventory, verifyPartition, verifyExecution, validateLcov, verifyIdentity, verifyTargets, validateProfilePath, verifyLayout } from "../ci/windows-coverage.mjs";
+
+test("nextest security minimum and every CI installer follow the version owner", () => {
+  // GHSA-vc25-qg58-w57c: portable recording parsing is patched in 0.9.150.
+  const minimum = [0, 9, 150];
+  const current = versions.nextest.split(".").map(Number);
+  assert.equal(current.length, minimum.length);
+  assert(current.every(Number.isSafeInteger));
+  const changed = current.findIndex((part, index) => part !== minimum[index]);
+  assert(changed < 0 || current[changed] > minimum[changed], "nextest must include the recording parser security fix");
+  const config = readFileSync(new URL("../../.config/nextest.toml", import.meta.url), "utf8");
+  assert.equal(config.match(/^nextest-version = "([^"]+)"$/mu)?.[1], versions.nextest);
+  for (const file of ["ci.yml", "windows-workspace.yml", "mutants.yml"]) {
+    const source = readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
+    const pins = [...source.matchAll(/cargo-nextest@([0-9.]+)/gu)].map(match => match[1]);
+    assert(pins.length > 0, `${file} must install the owned nextest version`);
+    assert(pins.every(pin => pin === versions.nextest), `${file} nextest installer drift`);
+  }
+});
+
+test("only the actual Windows consumer opts into first-failure completion", () => {
+  assert.equal(consumerFailurePolicy({}), "--no-fail-fast");
+  assert.equal(consumerFailurePolicy({ GITHUB_ACTIONS: "true" }), "--no-fail-fast");
+  assert.equal(consumerFailurePolicy({ MESH_WINDOWS_FAIL_FAST: "0" }), "--no-fail-fast");
+  assert.equal(consumerFailurePolicy({ MESH_WINDOWS_FAIL_FAST: "1" }), "--fail-fast");
+  for (const value of ["", "true", "2"]) assert.throws(() => consumerFailurePolicy({ MESH_WINDOWS_FAIL_FAST: value }), /must be 0 or 1/u);
+  const workflow = readFileSync(new URL("../../.github/workflows/windows-workspace.yml", import.meta.url), "utf8");
+  assert.equal(workflow.match(/MESH_WINDOWS_FAIL_FAST:/gu)?.length, 1);
+  const consumer = workflow.split("      - name: Run validated serial shard and export partial coverage\n")[1]?.split("      - name:")[0];
+  assert.match(consumer, /MESH_WINDOWS_FAIL_FAST: '1'/u);
+  assert.match(workflow, /fail-fast: false/u);
+});
 
 function commandFixture(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), "windows-coverage-evidence-"));

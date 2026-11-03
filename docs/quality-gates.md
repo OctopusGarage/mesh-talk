@@ -81,7 +81,8 @@ Each broad run rotates through one of 256 round-robin samples and partitions tha
 same sample across four runners (subshards of 1024), without changing the selected
 mutant set. Each runner uses one in-place worker, incremental compilation, the
 symbol-free `mutants` Cargo profile, and the workspace-root build cache. Every
-mutant still runs the workspace tests through pinned cargo-nextest 0.9.148. Its
+mutant still runs the workspace tests through cargo-nextest pinned by the
+[shared CI tool owner](../scripts/ci/windows-coverage.mjs). Its
 `mutants` profile isolates each test in a process and fails tests exceeding 60
 seconds (with a five-second termination grace period). This catches injected busy
 loops even when they prevent an async timeout from being polled. The 360-second

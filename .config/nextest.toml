@@ -1,3 +1,5 @@
+nextest-version = "0.9.150"
+
 # Keep a stuck registered metadata IPC case from consuming the whole serial
 # Windows shard or Linux/macOS Host coverage pass. A timeout fails the case;
 # it never permits skipping its result.
