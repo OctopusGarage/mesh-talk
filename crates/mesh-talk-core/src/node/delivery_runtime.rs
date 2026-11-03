@@ -8,6 +8,7 @@ use super::session::SessionError;
 use super::*;
 use crate::eventlog::{ConversationId, Event, EventId, LogError};
 use crate::identity::device::PublicIdentity;
+use std::sync::atomic::Ordering;
 
 // Owned by the delivery loop: cancellation drops every retained channel. Keep
 // eight scheduling slots, at most six retained sockets (one outbound permit
@@ -3293,6 +3294,23 @@ impl Node {
         if complete {
             if chunks {
                 let final_chunk = file.final_chunk.ok_or(SessionError::UnexpectedMessage)?;
+                let bridge = self.bridge_generation.load(Ordering::SeqCst);
+                self.prepare_opaque_confirmation(opaque, &|| {
+                    current()
+                        && channel.io_admitted()
+                        && (!federated
+                            || (self.bridge_directory_allowed()
+                                && self.bridge_generation.load(Ordering::SeqCst) == bridge))
+                })
+                .await?;
+                if !current()
+                    || !channel.io_admitted()
+                    || (federated
+                        && (!self.bridge_directory_allowed()
+                            || self.bridge_generation.load(Ordering::SeqCst) != bridge))
+                {
+                    return Err(SessionError::UnexpectedMessage);
+                }
                 let outer = self
                     .opaque_confirmed_wrapper(opaque, final_chunk)?
                     .ok_or(SessionError::NoProgress)?;

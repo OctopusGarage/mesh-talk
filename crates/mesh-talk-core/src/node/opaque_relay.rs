@@ -9,7 +9,7 @@ use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, EventKind, 
 use crate::identity::device::PublicIdentity;
 use crate::postoffice::opaque::RelayMailbox;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 // IDs only, scoped to one mailbox operation. Exhaustion ends that operation;
@@ -329,14 +329,34 @@ impl Node {
         let mut progress =
             OpaqueMailboxProgress::new(channel.peer_identity(), recipient, conversation, mailbox);
         while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
-        if let Some(inner) = confirm
-            && let Some(outer) = self.opaque_confirmed_wrapper(&progress, inner)?
-            && !progress.uploaded.contains(&(inner, outer))
-        {
-            if progress.uploaded.len() >= 64 {
-                progress.uploaded.remove(0);
+        if let Some(inner) = confirm {
+            if !channel.io_admitted() {
+                return Err(super::session::SessionError::UnexpectedMessage);
             }
-            progress.uploaded.push((inner, outer));
+            let relay = progress.relay.clone();
+            let federated = RelayMailbox::is_federated_id(&progress.mailbox.id());
+            let privacy = self.privacy.generation.load(Ordering::SeqCst);
+            let bridge = self.bridge_generation.load(Ordering::SeqCst);
+            let current = || {
+                self.relay_send_allowed(&relay)
+                    && self.privacy.generation.load(Ordering::SeqCst) == privacy
+                    && (!federated
+                        || (self.bridge_directory_allowed()
+                            && self.bridge_generation.load(Ordering::SeqCst) == bridge))
+            };
+            self.prepare_opaque_confirmation(&mut progress, &current)
+                .await?;
+            if !current() || !channel.io_admitted() {
+                return Err(super::session::SessionError::UnexpectedMessage);
+            }
+            if let Some(outer) = self.opaque_confirmed_wrapper(&progress, inner)?
+                && !progress.uploaded.contains(&(inner, outer))
+            {
+                if progress.uploaded.len() >= 64 {
+                    progress.uploaded.remove(0);
+                }
+                progress.uploaded.push((inner, outer));
+            }
         }
         Ok(progress.uploaded)
     }

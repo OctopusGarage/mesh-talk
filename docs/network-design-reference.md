@@ -2427,6 +2427,23 @@ IDs and 64 recent result hints per exchange. Bodies are fetched and wrapped
 only for selected IDs without confirmed wrapper custody. Supplemental identity
 and consent controls retain their independent bounded selectors.
 
+Completed upload qualifications are kept in the existing bounded signed
+checkpoint store independently of those four heavyweight views. Rotating through
+more relay/mailbox scopes therefore does not restart unchanged history traversal
+merely because a view was evicted. A qualification compares the captured local
+history/authority stamp with the current stamp and a fresh authenticated remote
+store UUID, mailbox, destructive epoch and arrival incarnation. Ordinary appends
+do not invalidate an unrelated scope; remote replacement or retention changes do.
+Authenticated cursor rejection and regression below the recorded revision/commit
+floors invalidate a qualification even when the incarnation fields still match.
+Partial pages use their authenticated window bounds for these comparisons.
+Completion is published only for a finished captured upload after final probing,
+never by attaching a newer source stamp to an older finite prefix. Send-only
+operation checks the remote binding without advancing unprocessed incoming IDs.
+Explicit event custody checks lazily prepare the existing bounded selection when
+needed, then require selected membership and fresh exact remote evidence; a
+completion qualification alone never confirms an event.
+
 Optional checkpoints and inner-to-wrapper mappings live on the existing
 encrypted profile connection. Checkpoints are locally signed and bind the full
 relay, recipient and mailbox identities, the local destructive epoch and source

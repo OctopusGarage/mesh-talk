@@ -17,6 +17,33 @@ fn bounded<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .ok()
 }
 
+// Preserve the deployed signed receive cursor when upgrading its hint envelope.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct PreviousReceipt {
+    cursor: Option<MailboxCursor>,
+    pending: Vec<EventId>,
+    epoch: i64,
+    source_floor: i64,
+    runtime: [u8; 16],
+    session_only: bool,
+}
+
+fn receipt_body(bytes: &[u8]) -> Option<Receipt> {
+    bounded(bytes).or_else(|| {
+        let old: PreviousReceipt = bounded(bytes)?;
+        Some(Receipt {
+            cursor: old.cursor,
+            pending: old.pending,
+            epoch: old.epoch,
+            source_floor: old.source_floor,
+            runtime: old.runtime,
+            session_only: old.session_only,
+            completed: None,
+        })
+    })
+}
+
 impl Node {
     pub(super) fn seal_mailbox_hint(&self, key: &[u8], body: Vec<u8>) -> Option<Vec<u8>> {
         let mut message = b"MeshTalkMailboxHintV1\0".to_vec();
@@ -53,12 +80,18 @@ impl Node {
         let runtime = cache.session_epoch();
         if let Ok(Some(bytes)) = cache.get_checkpoint(key) {
             if let Some(body) = self.open_mailbox_hint(key, &bytes)
-                && let Some(receipt) = bounded::<Receipt>(&body)
+                && let Some(receipt) = receipt_body(&body)
             {
                 let valid = receipt.epoch == epoch
                     && receipt.source_floor <= source
                     && receipt.source_floor >= 0
                     && receipt.pending.len() <= MAX_PENDING
+                    && receipt.completed.as_ref().is_none_or(|completed| {
+                        completed.remote.conversation == conv
+                            && completed.remote.epoch >= 0
+                            && completed.upper >= 0
+                            && completed.revision >= 0
+                    })
                     && (!receipt.session_only || receipt.runtime == runtime)
                     && receipt.cursor.as_ref().is_none_or(|c| {
                         c.conversation == conv && c.after >= 0 && c.epoch >= 0 && c.revision >= 0
@@ -76,6 +109,7 @@ impl Node {
             source_floor: source,
             runtime,
             session_only: false,
+            completed: None,
         })
     }
     pub(super) fn save_mailbox_receipt(
@@ -133,6 +167,362 @@ impl Node {
                 .put_wrapper_hint(&key, &value)
         {
             log::debug!("mailbox wrapper hint unavailable: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    use crate::postoffice::IndexedPostOffice;
+    use crate::storage::profile::ProfileStorageLease;
+
+    #[test]
+    fn previous_receipt_preserves_receive_progress_without_upload_completion() {
+        let cursor = MailboxCursor {
+            store_uuid: [3; 16],
+            conversation: ConversationId::new([5; 32]),
+            epoch: 4,
+            first_seen: Some(10),
+            revision: 8,
+            after: 17,
+            window: Some((20, 9)),
+        };
+        let pending = vec![EventId::new([8; 32])];
+        let old = PreviousReceipt {
+            cursor: Some(cursor.clone()),
+            pending: pending.clone(),
+            epoch: 2,
+            source_floor: 7,
+            runtime: [1; 16],
+            session_only: true,
+        };
+        let decoded = receipt_body(&bincode::serialize(&old).unwrap()).unwrap();
+        assert_eq!(decoded.cursor, Some(cursor));
+        assert_eq!(decoded.pending, pending);
+        assert_eq!(decoded.epoch, 2);
+        assert_eq!(decoded.source_floor, 7);
+        assert_eq!(decoded.runtime, [1; 16]);
+        assert!(decoded.session_only);
+        assert!(decoded.completed.is_none());
+        let upgraded = receipt_body(&bincode::serialize(&decoded).unwrap()).unwrap();
+        assert!(upgraded == decoded);
+    }
+
+    async fn connection(
+        node: &Node,
+        office: IndexedPostOffice,
+        relay: &DeviceIdentity,
+    ) -> (
+        crate::transport::SecureChannel<tokio::io::DuplexStream>,
+        tokio::task::JoinHandle<usize>,
+    ) {
+        let keys = relay.secret_bytes();
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let task = tokio::spawn(async move {
+            let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+            let mut channel = crate::transport::SecureChannel::accept(server, &identity)
+                .await
+                .unwrap();
+            let store = Mutex::new(office);
+            let budget = session::RemoteHaveBudget::default();
+            let mut authorized = None;
+            let mut custody = 0;
+            while let Ok(bytes) = channel.recv().await {
+                custody += usize::from(session::durable_have_query_for_test(&bytes).is_some());
+                mailbox::serve(&mut channel, &store, &bytes, &budget, &mut authorized)
+                    .await
+                    .unwrap();
+            }
+            custody
+        });
+        let channel =
+            crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public()))
+                .await
+                .unwrap();
+        (channel, task)
+    }
+
+    async fn completed_round(
+        node: &Node,
+        office: IndexedPostOffice,
+        relay: &DeviceIdentity,
+        remote: &DeviceIdentity,
+        conversation: ConversationId,
+    ) -> (Receipt, Vec<u8>, usize) {
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(
+            &relay.public(),
+            &remote.public(),
+            Some(conversation),
+            mailbox,
+        );
+        let (mut channel, task) = connection(node, office, relay).await;
+        while !node
+            .advance_opaque_mailbox(&mut channel, &mut progress)
+            .await
+            .unwrap()
+        {}
+        let receipt = state(&progress).receipt.clone();
+        let key = state(&progress).key.clone();
+        drop(progress);
+        drop(channel);
+        (receipt, key, task.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn completion_does_not_promote_new_append_or_cancelled_final_probe() {
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        for cancel in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let relay_root = tempfile::tempdir().unwrap();
+            let remote = DeviceIdentity::generate();
+            let proof = crate::discovery::Announce::new_with_account(
+                &remote,
+                &Account::generate(),
+                "Remote",
+                47475,
+            );
+            let (node, _, _) = crate::node::test_support::node_with_files(
+                root.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            let conversation = crate::node::conversation::dm_conversation_id(
+                &node.identity.public(),
+                &remote.public(),
+            );
+            let mut previous = None;
+            for seq in 1..=32 {
+                let event = Event::new(
+                    &node.identity,
+                    conversation,
+                    seq,
+                    previous.into_iter().collect(),
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![7; 128],
+                );
+                previous = Some(event.id);
+                node.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            while !node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .prepare_kind_metadata_step(
+                    crate::eventlog::sync::network::PreparationBudget::default(),
+                )
+                .unwrap()
+                .ready
+            {}
+            let relay = DeviceIdentity::generate();
+            let office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+                &relay_root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+            let mut progress = OpaqueMailboxProgress::new(
+                &relay.public(),
+                &remote.public(),
+                Some(conversation),
+                mailbox,
+            );
+            let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+            for _ in 0..2048 {
+                assert!(
+                    !node
+                        .advance_opaque_mailbox(&mut channel, &mut progress)
+                        .await
+                        .unwrap()
+                );
+                if state(&progress).final_probe {
+                    break;
+                }
+            }
+            assert!(state(&progress).final_probe);
+            assert!(
+                state(&progress).receipt.completed.is_none(),
+                "upload acknowledgments alone must not publish completion before the final probe"
+            );
+            let tail = Event::new(
+                &node.identity,
+                conversation,
+                33,
+                previous.into_iter().collect(),
+                33,
+                0,
+                EventKind::Message,
+                vec![8; 128],
+            );
+            node.log.lock().unwrap().append_durable(tail).unwrap();
+            if !cancel {
+                while !node
+                    .advance_opaque_mailbox(&mut channel, &mut progress)
+                    .await
+                    .unwrap()
+                {}
+                assert!(
+                    state(&progress).receipt.completed.is_none(),
+                    "a finite old prefix cannot be qualified with a newly appended source stamp"
+                );
+            }
+            drop(progress);
+            drop(channel);
+            task.await.unwrap();
+            let mut converged = false;
+            // Cancellation before the creation probe can legitimately reset
+            // transport rank and finish the retained old finite window first.
+            // A later operation resumes its append tail; no partial prefix may
+            // qualify the new source as complete in the meantime.
+            for _ in 0..3 {
+                let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+                let mut progress = OpaqueMailboxProgress::new(
+                    &relay.public(),
+                    &remote.public(),
+                    Some(conversation),
+                    mailbox,
+                );
+                let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+                while !node
+                    .advance_opaque_mailbox(&mut channel, &mut progress)
+                    .await
+                    .unwrap()
+                {}
+                let view = office.open_view(&progress.mailbox.id()).unwrap();
+                let count = office.metadata(&view).unwrap().count;
+                let completed = state(&progress).receipt.completed.is_some();
+                if count < 33 {
+                    assert!(
+                        !completed,
+                        "an old finite prefix cannot qualify the missing new tail"
+                    );
+                }
+                converged = count == 33 && completed;
+                drop(progress);
+                drop(channel);
+                task.await.unwrap();
+                if converged {
+                    break;
+                }
+            }
+            assert!(
+                converged,
+                "bounded fresh operations must upload and qualify the appended tail"
+            );
+
+            for no_prior in [false, true] {
+                if no_prior {
+                    node.set_post_office_permissions(true, false);
+                }
+                let (mut receipt, key, _) =
+                    completed_round(&node, office.clone(), &relay, &remote, conversation).await;
+                assert!(receipt.completed.is_some());
+                if no_prior {
+                    // Same incarnation, but the observed source has rolled back
+                    // below the outgoing proof even without a receive cursor.
+                    receipt.cursor = None;
+                    let completed = receipt.completed.as_mut().unwrap();
+                    completed.upper += 1_000_000;
+                    completed.revision += 1_000_000;
+                } else {
+                    // A future receive cursor is rejected with reset=true even
+                    // though UUID, destructive epoch and first_seen all match.
+                    let cursor = receipt.cursor.as_mut().unwrap();
+                    cursor.after += 1_000_000;
+                    cursor.revision += 1_000_000;
+                    cursor.window = None;
+                }
+                let signed = node
+                    .seal_mailbox_hint(&key, bincode::serialize(&receipt).unwrap())
+                    .unwrap();
+                node.opaque_receive_cache
+                    .lock()
+                    .unwrap()
+                    .put_checkpoint(&key, &signed)
+                    .unwrap();
+                node.opaque_upload_cache.lock().unwrap().entries.clear();
+                let (restored, _, custody) =
+                    completed_round(&node, office.clone(), &relay, &remote, conversation).await;
+                assert!(
+                    custody >= 33,
+                    "same-binding cursor or outgoing-floor rollback must requalify custody"
+                );
+                assert!(restored.completed.is_some());
+                let (_, _, custody) =
+                    completed_round(&node, office.clone(), &relay, &remote, conversation).await;
+                assert_eq!(
+                    custody, 0,
+                    "the repaired proof must return to bounded quiet probes"
+                );
+                if no_prior {
+                    let proof = restored.completed;
+                    let mailbox =
+                        RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+                    let unrelated = Event::new(
+                        &node.identity,
+                        ConversationId::new([211; 32]),
+                        1,
+                        vec![],
+                        1,
+                        0,
+                        EventKind::Message,
+                        vec![9; 128],
+                    );
+                    office
+                        .clone()
+                        .ingest(mailbox.wrap(&unrelated).unwrap())
+                        .unwrap();
+                    let (grown, _, custody) =
+                        completed_round(&node, office.clone(), &relay, &remote, conversation).await;
+                    assert_eq!(
+                        custody, 0,
+                        "ordinary remote growth must preserve outgoing qualification"
+                    );
+                    assert!(
+                        grown.completed == proof,
+                        "quiet remote growth must not rewrite a sufficient completed-upload proof"
+                    );
+                }
+            }
+
+            // Force the compact-only path, then retire privacy authority while
+            // its exact target selection yields between bounded turns.
+            node.opaque_upload_cache.lock().unwrap().entries.clear();
+            let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+            let mut progress = OpaqueMailboxProgress::new(
+                &relay.public(),
+                &remote.public(),
+                Some(conversation),
+                mailbox,
+            );
+            let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+            while !node
+                .advance_opaque_mailbox(&mut channel, &mut progress)
+                .await
+                .unwrap()
+            {}
+            assert!(state(&progress).lease.0.lock().unwrap().view.is_none());
+            let mut prepare = Box::pin(node.prepare_opaque_confirmation(&mut progress, &|| true));
+            assert!(futures_util::poll!(prepare.as_mut()).is_pending());
+            node.privacy
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            assert!(
+                matches!(prepare.await, Err(session::SessionError::UnexpectedMessage)),
+                "privacy retirement must reject target preparation resumed after a yield"
+            );
+            drop(progress);
+            drop(channel);
+            task.await.unwrap();
         }
     }
 }

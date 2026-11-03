@@ -16,6 +16,11 @@ const MAX_PENDING: usize = 256;
 const MAX_RESULTS: usize = 64;
 const PAGE_BYTES: usize = crate::transport::MAX_PLAINTEXT - 2048;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static HISTORY_METADATA_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Default)]
 pub(in crate::node) struct UploadCache {
     entries: BTreeMap<Vec<u8>, Arc<Mutex<UploadEntry>>>,
@@ -104,6 +109,37 @@ pub(super) struct State {
     controls: Option<VecDeque<EventId>>,
     wrote: bool,
     final_probe: bool,
+    remote: Option<RemoteBinding>,
+    remote_floor: Option<(i64, i64)>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RemoteBinding {
+    store_uuid: [u8; 16],
+    conversation: ConversationId,
+    epoch: i64,
+    first_seen: Option<u64>,
+}
+impl From<&MailboxCursor> for RemoteBinding {
+    fn from(cursor: &MailboxCursor) -> Self {
+        Self {
+            store_uuid: cursor.store_uuid,
+            conversation: cursor.conversation,
+            epoch: cursor.epoch,
+            first_seen: cursor.first_seen,
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CompletedUpload {
+    local: HistorySyncStamp,
+    remote: RemoteBinding,
+    upper: i64,
+    revision: i64,
+}
+impl CompletedUpload {
+    fn accepts(&self, remote: &RemoteBinding, (upper, revision): (i64, i64)) -> bool {
+        self.remote == *remote && self.upper <= upper && self.revision <= revision
+    }
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Receipt {
@@ -113,6 +149,7 @@ struct Receipt {
     source_floor: i64,
     runtime: [u8; 16],
     session_only: bool,
+    completed: Option<CompletedUpload>,
 }
 #[derive(Serialize, Deserialize)]
 struct Sealed {
@@ -343,29 +380,55 @@ impl Node {
                 controls: None,
                 wrote: false,
                 final_probe: false,
+                remote: None,
+                remote_floor: None,
             }));
             return Ok(Some(false));
         }
         if !state(p).remote_done && state(p).page.is_none() {
-            let page =
-                mailbox::delta(channel, p.mailbox.id(), state(p).receipt.cursor.as_ref()).await?;
-            if page.reset
-                && !(state(p).wrote
-                    && state(p).receipt.cursor.as_ref().is_some_and(|old| {
-                        old.first_seen.is_none()
-                            && old.store_uuid == page.cursor.store_uuid
-                            && old.epoch == page.cursor.epoch
-                    }))
-            {
+            // A send-only probe observes the current finite upper, never an old
+            // receive window; it does not advance the incoming receive cursor.
+            let prior = if self.relay_receive_allowed(&p.relay) {
+                state(p).receipt.cursor.as_ref()
+            } else {
+                None
+            };
+            let page = mailbox::delta(channel, p.mailbox.id(), prior).await?;
+            let remote = RemoteBinding::from(&page.cursor);
+            let floor = page
+                .cursor
+                .window
+                .unwrap_or((page.cursor.after, page.cursor.revision));
+            let own_creation = state(p).wrote
+                && state(p).remote.as_ref().is_some_and(|old| {
+                    old.first_seen.is_none()
+                        && old.store_uuid == remote.store_uuid
+                        && old.epoch == remote.epoch
+                });
+            let changed = state(p)
+                .receipt
+                .completed
+                .as_ref()
+                .is_some_and(|completed| !completed.accepts(&remote, floor))
+                || state(p)
+                    .remote
+                    .as_ref()
+                    .is_some_and(|old| *old != remote && !own_creation);
+            if changed || (page.reset && !own_creation) {
+                state_mut(p).receipt.completed = None;
                 let mut entry = state(p).lease.0.lock().expect("upload entry");
                 entry.rank = -1;
                 entry.complete = false;
                 drop(entry);
-                state_mut(p).receipt.pending.clear();
-                state_mut(p).retry = None;
                 state_mut(p).history_checked = false;
                 state_mut(p).history_done = false;
                 state_mut(p).history_ids.clear();
+            }
+            state_mut(p).remote = Some(remote);
+            state_mut(p).remote_floor = Some(floor);
+            if page.reset && !own_creation {
+                state_mut(p).receipt.pending.clear();
+                state_mut(p).retry = None;
             }
             if self.relay_receive_allowed(&p.relay) {
                 state_mut(p).incoming = page.ids.iter().copied().collect();
@@ -425,6 +488,44 @@ impl Node {
             state_mut(p).retry = None;
             return Ok(Some(false));
         }
+        if done && self.upload_permitted(p, current) {
+            let captured = {
+                let entry = state(p).lease.0.lock().expect("upload entry");
+                if entry.complete {
+                    entry.stamp.clone()
+                } else {
+                    None
+                }
+            };
+            if let (Some(local), Some(remote), Some((upper, revision)), Some(conv)) = (
+                captured,
+                state(p).remote.clone(),
+                state(p).remote_floor,
+                p.conversation,
+            ) && self
+                .sync_store(&p.recipient)
+                .lock()
+                .expect("projection")
+                .history_sync_stamp(&conv)?
+                == Some(local.clone())
+                && !state(p)
+                    .receipt
+                    .completed
+                    .as_ref()
+                    .is_some_and(|completed| {
+                        completed.local == local && completed.accepts(&remote, (upper, revision))
+                    })
+            {
+                // Keep sufficient proof unchanged when unrelated remote data grows.
+                state_mut(p).receipt.completed = Some(CompletedUpload {
+                    local,
+                    remote,
+                    upper,
+                    revision,
+                });
+            }
+            self.save_mailbox_receipt(p)?;
+        }
         Ok(Some(done))
     }
     async fn incremental_history_step<
@@ -448,6 +549,20 @@ impl Node {
             let owner = self.sync_store(&p.recipient);
             let store = owner.lock().expect("projection");
             let stamp = store.history_sync_stamp(&conv)?;
+            if stamp.as_ref().is_some_and(|stamp| {
+                state(p)
+                    .receipt
+                    .completed
+                    .as_ref()
+                    .is_some_and(|completed| {
+                        &completed.local == stamp
+                            && state(p).remote.as_ref() == Some(&completed.remote)
+                    })
+            }) {
+                state_mut(p).history_checked = true;
+                state_mut(p).history_done = true;
+                return Ok(());
+            }
             let mut e = state(p).lease.0.lock().expect("upload entry");
             if e.view.is_none() {
                 e.view = Some(store.open_history_upload(&conv)?);
@@ -497,17 +612,22 @@ impl Node {
                     view,
                     crate::eventlog::sync::network::PreparationBudget::default(),
                 )?;
+                #[cfg(test)]
+                HISTORY_METADATA_ROWS.with(|rows| rows.set(rows.get() + step.rows));
                 if !step.ready {
                     return Ok(());
                 }
-                store.history_upload_id_page(
+                let page = store.history_upload_id_page(
                     view,
                     e.rank,
                     crate::eventlog::sync::network::IdPageBudget {
                         ids: 16,
                         examined: 64,
                     },
-                )?
+                )?;
+                #[cfg(test)]
+                HISTORY_METADATA_ROWS.with(|rows| rows.set(rows.get() + page.ids.len()));
+                page
             };
             state_mut(p).history_after = page.next_rank;
             state_mut(p).history_complete = page.complete;
@@ -564,6 +684,63 @@ impl Node {
         self.send_mailbox_event(channel, p, event, current, true)
             .await?
             .ok_or(session::SessionError::NoProgress)
+    }
+    /// A compact completed-upload hint does not authorize a particular event.
+    /// Recreate the existing selected export before resolving an exact target.
+    pub(in crate::node) async fn prepare_opaque_confirmation<F: Fn() -> bool + Sync>(
+        &self,
+        p: &mut OpaqueMailboxProgress,
+        current: &F,
+    ) -> Result<(), session::SessionError> {
+        if !matches!(p.incremental, Mode::Active(_)) {
+            return Ok(());
+        }
+        let generation = self
+            .privacy
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let Some(conversation) = p.conversation else {
+            return Ok(());
+        };
+        loop {
+            if !self.upload_permitted(p, current)
+                || self
+                    .privacy
+                    .generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+            {
+                return Err(session::SessionError::UnexpectedMessage);
+            }
+            let ready = {
+                let owner = self.sync_store(&p.recipient);
+                let store = owner.lock().expect("projection");
+                let mut entry = state(p).lease.0.lock().expect("upload entry");
+                if entry.view.is_none() {
+                    entry.view = Some(store.open_history_upload(&conversation)?);
+                }
+                let view = entry.view.as_ref().expect("confirmation view");
+                let step = store.prepare_history_upload_step(
+                    view,
+                    crate::eventlog::sync::network::PreparationBudget::default(),
+                )?;
+                store.validate_history_upload(view)?;
+                step.ready
+            };
+            if !self.upload_permitted(p, current)
+                || self
+                    .privacy
+                    .generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+            {
+                return Err(session::SessionError::UnexpectedMessage);
+            }
+            if ready {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
     }
     pub(in crate::node) fn opaque_confirmed_wrapper(
         &self,

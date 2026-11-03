@@ -429,6 +429,8 @@ impl Node {
                                     }
                                     for mailbox in mailboxes.into_iter().flatten() {
                                         let mailbox_id = mailbox.id();
+                                        let federated = RelayMailbox::is_federated_id(&mailbox_id);
+                                        let bridge = self.bridge_generation.load(Ordering::SeqCst);
                                         let mut progress =
                                             super::opaque_relay::OpaqueMailboxProgress::new(
                                                 &relay.public,
@@ -439,6 +441,9 @@ impl Node {
                                         let current = || {
                                             self.group_file_custody_current(job)
                                                 && self.relay_send_allowed(&relay.public)
+                                                && (!federated
+                                                    || (self.bridge_directory_allowed()
+                                                        && self.bridge_generation.load(Ordering::SeqCst) == bridge))
                                                 && self
                                                     .roster
                                                     .lock()
@@ -485,7 +490,23 @@ impl Node {
                                             Ok(chunk) => chunk,
                                             Err(error) => { log::warn!("Group file completion deferred after storage failure: {error}"); return; }
                                         };
-                                        if let Some(outer) = final_chunk.and_then(|inner| self.opaque_confirmed_wrapper(&progress, inner).ok().flatten())
+                                        let outer = if let Some(inner) = final_chunk {
+                                            if self.prepare_opaque_confirmation(&mut progress, &|| {
+                                                current() && channel.io_admitted()
+                                            }).await.is_err() {
+                                                return;
+                                            }
+                                            if !current() || !channel.io_admitted() {
+                                                return;
+                                            }
+                                            match self.opaque_confirmed_wrapper(&progress, inner) {
+                                                Ok(outer) => outer,
+                                                Err(_) => return,
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(outer) = outer
                                             && matches!(
                                                 super::session::request_durable_have(
                                                     &mut channel,

@@ -2746,6 +2746,10 @@
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {
+            "name": "Rotating beyond four heavyweight views preserves bounded completed-upload qualifications; exact current authority and fresh remote destructive identity are checked before skipping history, while explicit event custody still validates current selection and exact remote evidence.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
             "name": "Only completed admission or bounded pending retry evidence can advance incoming checkpoints; caches never authorize admission, deletion reversal, custody or recipient delivery.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
