@@ -395,7 +395,7 @@ async fn assert_reference_controls(modern: bool) {
         if modern {
             assert!(canonical_source.authority.authority.is_some());
         }
-        let status = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let status = super::functional_account_convergence(async {
             loop {
                 if let Some(status) = reference
                     .account_group_operation_status(&account.account_id(), id)

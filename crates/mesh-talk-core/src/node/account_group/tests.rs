@@ -1803,8 +1803,8 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         "source acceptance is not a fabricated public EventId"
     );
     let private_started = std::time::Instant::now();
-    let committed = tokio::time::timeout(std::time::Duration::from_secs(8), async {
-        loop {
+    let committed = functional_account_convergence(async {
+        let committed = loop {
             let status = reference
                 .account_group_operation_status(&account.account_id(), id)
                 .unwrap();
@@ -1827,29 +1827,7 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
                 break status;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        let requester_phase = reference.account_group_operation_status(&account.account_id(), id)
-            .unwrap().map(|status| status.phase);
-        let source_phase = owner.account_group_operation_status(&account.account_id(), id)
-            .unwrap().map(|status| status.phase);
-        let requester_projection = reference.operation_projection(group).unwrap();
-        let source_projection = owner.operation_projection(group).unwrap();
-        let operation_metadata: Vec<_> = [("source", &owner), ("requester", &reference)].into_iter().map(|(label, node)| {
-            let versions: Vec<_> = [("source", owner.user_id()), ("requester", reference.user_id())].into_iter().map(|(writer, source_device)| {
-                let meta = node.account_document_meta(&crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device });
-                (writer, meta.map(|meta| (meta.revision, meta.content_hash)))
-            }).collect();
-            (label, versions, node.sessions.test_capacity_snapshot())
-        }).collect();
-        eprintln!("owner rename private metadata={operation_metadata:?} omitted={} phases={:?}", private_trace_omitted.load(std::sync::atomic::Ordering::Relaxed), private_trace.lock().unwrap());
-        panic!("real owner rename did not converge: requester={requester_phase:?}, source={source_phase:?}, request_heads={}, result_heads={}, requester_ready={}, source_ready={}",
-            requester_projection.requests.len(), source_projection.results.len(),
-            reference.group_operation_versions.lock().unwrap().contains_key(&owner.user_id()),
-            owner.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()));
-    });
+        };
     for current in [&owner, &reference] {
         *current.account_client_test_hook.lock().unwrap() = None;
         *current.account_session_test_hook.lock().unwrap() = None;
@@ -1858,10 +1836,9 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         "owner rename private receipt elapsed_ms={}",
         private_started.elapsed().as_millis()
     );
-    // Durable private commitment does not certify public fanout or directory
-    // arrival. Observe those through their existing authenticated owners after
-    // the original eight-second private request/result barrier has completed.
-    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+    // Observe public receipt through its authenticated owner within the same
+    // functional convergence bound as durable private commitment.
+    {
         let observing = external.clone();
         let owner_public = owner.identity.public();
         let public_receipt = async move {
@@ -1897,9 +1874,31 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+        committed
     })
     .await
-    .expect("public rename receipt and private directory observation must converge independently");
+    .unwrap_or_else(|_| {
+        let requester_phase = reference.account_group_operation_status(&account.account_id(), id)
+            .unwrap().map(|status| status.phase);
+        let source_phase = owner.account_group_operation_status(&account.account_id(), id)
+            .unwrap().map(|status| status.phase);
+        let requester_projection = reference.operation_projection(group).unwrap();
+        let source_projection = owner.operation_projection(group).unwrap();
+        let operation_metadata: Vec<_> = [("source", &owner), ("requester", &reference)].into_iter().map(|(label, node)| {
+            let versions: Vec<_> = [("source", owner.user_id()), ("requester", reference.user_id())].into_iter().map(|(writer, source_device)| {
+                let meta = node.account_document_meta(&crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device });
+                (writer, meta.map(|meta| (meta.revision, meta.content_hash)))
+            }).collect();
+            (label, versions, node.sessions.test_capacity_snapshot())
+        }).collect();
+        eprintln!("owner rename private metadata={operation_metadata:?} omitted={} phases={:?}", private_trace_omitted.load(std::sync::atomic::Ordering::Relaxed), private_trace.lock().unwrap());
+        panic!("real owner rename did not converge: requester={requester_phase:?}, source={source_phase:?}, request_heads={}, result_heads={}, requester_ready={}, source_ready={}",
+            requester_projection.requests.len(), source_projection.results.len(),
+            reference.group_operation_versions.lock().unwrap().contains_key(&owner.user_id()),
+            owner.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()));
+    });
+
     let events: Vec<_> = external
         .log
         .lock()
