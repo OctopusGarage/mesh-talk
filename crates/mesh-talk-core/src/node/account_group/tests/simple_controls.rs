@@ -462,7 +462,7 @@ async fn assert_reference_controls(modern: bool) {
         assert_eq!(
             effects.len(),
             1,
-            "modern={modern}, kind={kind:?}, status={status:?}, actual_policy={:?}",
+            "modern={modern}, kind={kind:?}, actual_policy={:?}",
             owner.channel_history_policy(group).unwrap()
         );
         assert!(effects[0].verify_integrity() && effects[0].verify_signature());
