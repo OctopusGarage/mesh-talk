@@ -178,6 +178,126 @@ async fn routed_offline_member_does_not_starve_sibling_custody_report_after_hist
     failed_initial_sibling_custody_recovery(true).await;
 }
 
+// This endpoint never authenticates, answers Have, or stores a custody copy.
+// Read one real Noise byte before closing so the failure belongs to this route,
+// rather than to an unrelated service at a hard-coded host port.
+struct OfflineCustodyRoute {
+    address: std::net::SocketAddr,
+    release: tokio::sync::watch::Sender<bool>,
+    attempts: tokio::sync::mpsc::Receiver<std::net::SocketAddr>,
+    server: tokio::task::JoinHandle<()>,
+}
+impl OfflineCustodyRoute {
+    async fn start(node: &Node, held: bool) -> Self {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, opened) = tokio::sync::watch::channel(!held);
+        let (observed, attempts) = tokio::sync::mpsc::channel(16);
+        let work = node.runtime_work.clone();
+        let server = tokio::spawn(async move {
+            let mut children = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (mut stream, peer) = accepted.unwrap();
+                        let Some(permit) = work.admit() else { return; };
+                        let mut opened = opened.clone();
+                        let observed = observed.clone();
+                        children.spawn(permit.track(Box::pin(async move {
+                            let mut byte = [0];
+                            if stream.read_exact(&mut byte).await.is_ok() {
+                                let _ = observed.try_send(peer);
+                                while !*opened.borrow_and_update() {
+                                    if opened.changed().await.is_err() { break; }
+                                }
+                            }
+                            // No Noise response or application frame is sent.
+                            drop(stream);
+                        })));
+                    }
+                    _ = children.join_next(), if !children.is_empty() => {}
+                }
+            }
+        });
+        Self {
+            address,
+            release,
+            attempts,
+            server,
+        }
+    }
+    async fn stop(&mut self) {
+        self.release.send_replace(true);
+        self.server.abort();
+        let _ = (&mut self.server).await;
+    }
+}
+impl Drop for OfflineCustodyRoute {
+    fn drop(&mut self) {
+        self.release.send_replace(true);
+        self.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn offline_custody_route_closes_an_observed_real_noise_attempt() {
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let external = DeviceIdentity::generate();
+    let mut route = OfflineCustodyRoute::start(&source, true).await;
+    let stream = tokio::net::TcpStream::connect(route.address).await.unwrap();
+    let exact_peer = stream.local_addr().unwrap();
+    let probe_source = source.clone();
+    let expected = external.public();
+    let mut probe = tokio::spawn(async move {
+        crate::transport::SecureChannel::connect(stream, &probe_source.identity, Some(&expected))
+            .await
+    });
+    let mut probe_result_consumed = false;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let peer = tokio::time::timeout(std::time::Duration::from_secs(8), route.attempts.recv())
+            .await
+            .expect("the exact endpoint must receive real Noise bytes")
+            .unwrap();
+        assert_eq!(
+            peer, exact_peer,
+            "the observed Noise bytes belong to this exact accepted socket"
+        );
+        assert!(
+            !probe.is_finished(),
+            "an unreleased endpoint cannot complete authentication"
+        );
+        route.release.send_replace(true);
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(8), &mut probe)
+            .await
+            .expect("closing the observed socket must finish the attempt");
+        probe_result_consumed = true;
+        let error = match joined.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("the offline endpoint cannot authenticate"),
+        };
+        assert!(
+            super::super::session_pool::retryable_transport_error(&error),
+            "{error:?}"
+        );
+    })
+    .catch_unwind()
+    .await;
+    if !probe_result_consumed {
+        probe.abort();
+        let _ = probe.await;
+    }
+    route.stop().await;
+    source.runtime_work.close();
+    source.runtime_work.drain().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 async fn failed_initial_sibling_custody_recovery(with_offline_route: bool) {
     use crate::{discovery::Announce, node::account_devices::AccountDevice};
     use std::time::Duration;
@@ -235,44 +355,127 @@ async fn failed_initial_sibling_custody_recovery(with_offline_route: bool) {
     let event = source.channel_history(group, 10).unwrap()[0].id;
     assert!(source.channel_custody_observations(group, event).is_empty());
     assert_eq!(source.channel_custody_count(group, event).unwrap(), Some(0));
-    if with_offline_route {
-        // Publish the signed offline route only after the original one-peer
-        // failure. This member never serves its identity at the advertised port.
+    let mut offline = if with_offline_route {
+        Some(OfflineCustodyRoute::start(&source, false).await)
+    } else {
+        None
+    };
+    if let Some(route) = &offline {
+        // Publish only after the original one-peer failure. The fixture owns
+        // this unavailable route and never serves the external identity.
         source.roster.lock().unwrap().update(
-            &Announce::new(&external, "Offline custody member", 9),
+            &Announce::new(&external, "Offline custody member", route.address.port()),
             source_addr.ip(),
             &source.user_id(),
         );
         assert!(
             source
                 .routing_peer(&external.public().user_id())
-                .is_some_and(|peer| peer.public == external.public() && peer.addr.port() == 9)
+                .is_some_and(|peer| peer.public == external.public() && peer.addr == route.address)
         );
+    }
+    let phases = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let started = std::time::Instant::now();
+    struct RestoreHooks<'a> {
+        nodes: [&'a Node; 2],
+        previous: Vec<Option<std::sync::Arc<super::super::account_session::AccountClientTestHook>>>,
+    }
+    impl Drop for RestoreHooks<'_> {
+        fn drop(&mut self) {
+            for (node, old) in self.nodes.into_iter().zip(self.previous.drain(..)) {
+                *node.account_client_test_hook.lock().unwrap() = old;
+            }
+        }
+    }
+    let mut restore = RestoreHooks {
+        nodes: [&source, &sibling],
+        previous: Vec::new(),
+    };
+    for (index, node) in [&source, &sibling].into_iter().enumerate() {
+        let old = node.account_client_test_hook.lock().unwrap().take();
+        restore.previous.push(old.clone());
+        let phases = phases.clone();
+        *node.account_client_test_hook.lock().unwrap() =
+            Some(std::sync::Arc::new(move |peer, phase| {
+                if phase.starts_with("channel_recovery_")
+                    || phase.starts_with("dial_")
+                    || phase.starts_with("session_checkout_")
+                {
+                    let mut phases = phases.lock().unwrap();
+                    if phases.len() == 96 {
+                        phases.pop_front();
+                    }
+                    phases.push_back((
+                        index,
+                        started.elapsed().as_millis(),
+                        peer.user_id(),
+                        phase.clone(),
+                    ));
+                }
+                if let Some(old) = &old {
+                    old(peer, phase);
+                }
+            }));
     }
     let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
     let sibling_server = tokio::spawn(sibling.clone().run_accept_loop(sibling_listener));
-    let history = tokio::time::timeout(Duration::from_secs(8), async {
-        while !ready_history(sibling.channel_history(group, 10))
-            .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    use futures_util::FutureExt;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let history = tokio::time::timeout(Duration::from_secs(8), async {
+            while !ready_history(sibling.channel_history(group, 10))
+                .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let history_completed_at = started.elapsed();
+        let repaired = tokio::time::timeout(Duration::from_secs(8), async {
+            while sibling.channel_custody_count(group, event).unwrap() != Some(0) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        (history, repaired, history_completed_at)
     })
-    .await;
-    let repaired = tokio::time::timeout(Duration::from_secs(8), async {
-        while sibling.channel_custody_count(group, event).unwrap() != Some(0) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
+    .catch_unwind()
     .await;
     let source_observations = source.channel_custody_observations(group, event);
     let sibling_observations = sibling.channel_custody_observations(group, event);
+    let offline_observed = offline.as_mut().map(|route| {
+        let mut retained_wire_attempts = 0;
+        while route.attempts.try_recv().is_ok() {
+            retained_wire_attempts += 1;
+        }
+        (
+            retained_wire_attempts,
+            route.attempts.is_closed(),
+            *route.release.borrow(),
+        )
+    });
+    if let Some(route) = &mut offline {
+        route.stop().await;
+    }
+    source.runtime_work.close();
+    sibling.runtime_work.close();
     for server in [source_server, sibling_server] {
         server.abort();
         let _ = server.await;
     }
     source.runtime_work.drain().await;
     sibling.runtime_work.drain().await;
+    drop(restore);
+    let (history, repaired, history_completed_at) = match outcome {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    if history.is_err() || repaired.is_err() {
+        eprintln!(
+            "failed-initial custody recovery history_completed_at={history_completed_at:?} completion_at={:?} offline(retained_wire_attempts,observer_closed,released)={offline_observed:?} phases={:?}",
+            started.elapsed(),
+            phases.lock().unwrap().clone()
+        );
+    }
     history.expect("authenticated History recovers the exact original outgoing message");
     assert!(
         repaired.is_ok(),

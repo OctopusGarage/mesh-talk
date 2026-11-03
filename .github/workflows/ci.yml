@@ -94,7 +94,7 @@ jobs:
       - name: Verify coverage accumulation with the actual tool
         # These fixtures launch real Cargo/rustc processes and share this job's
         # package cache. Give each compiler contract exclusive execution.
-        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/asan-cli.test.mjs
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend

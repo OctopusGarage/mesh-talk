@@ -508,6 +508,17 @@ functional watchdog. A fixed startup sleep or a shorter wall-clock timeout does
 not prove notification ownership. Removing mail-change scheduling must fail this
 oracle; keep ordinary jitter and continuation pacing in the other fixtures.
 
+Failed-initial-custody recovery fixtures retain the real failed send and empty
+custody observations before recovery; they must not use successful-custody warmup.
+An advertised unavailable external identity uses a fixture-owned TCP endpoint,
+which observes actual initiator bytes and closes before authentication or any
+Have/custody response. A held endpoint control binds the exact accepted socket,
+keeps authentication pending, then requires a typed transport failure on close.
+Preserve the original eight-second History and repair observers. Retain bounded
+passive recovery/dial evidence, the History-completion milestone and observed
+endpoint state; restore prior hooks and retire all owned work before teardown.
+This controlled fault does not establish an unobserved historical timeout cause.
+
 Post-create custody setup requires the selected channel's authenticated inventory
 and control head floors plus exact bidirectional device capabilities within its
 thirty-second watchdog, with the current whole-Optional bootstrap complete in
@@ -1424,7 +1435,14 @@ workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
-another test on that machine. Each consumer has a ninety-minute aggregate budget
+another test on that machine. Actual CI consumers set `MESH_WINDOWS_FAIL_FAST=1`
+and end a failed serial shard after its first failing case; the matrix keeps
+independent shards running. This avoids hiding a known failure behind the rest of
+a long partition. The default diagnostic CLI retains collection of all failures.
+A successful consumer must still execute every selected case exactly once and
+pass complete execution/coverage validation. Early failed or incomplete runs
+retain diagnostic evidence and never receive an acceptance receipt. Each
+consumer has a ninety-minute aggregate budget
 for its serial partition and evidence export; the producer retains sixty minutes.
 These job budgets do not extend case deadlines or omit slow tests. Nextest uses a
 fresh process per test, so tests
@@ -1472,10 +1490,35 @@ execution and coverage validation produce an acceptance receipt; partial output
 never certifies a shard. Each output stream remains bounded to 128 MiB.
 
 The producer executes a tiny real archive/consumer CLI regression before expensive
-workspace compilation or accepting the full archive. Its local Git fixture, both partitions, runtime and compiled
+workspace compilation or accepting the full archive. Its local Git fixture, all four partitions, runtime and compiled
 helper paths, default ignored case, clean source, offline LCOV and captured timing
 exercise the same helper. Run its tests with the pinned nextest/coverage tools and
 LLVM tools matching rustc; portable Health does not install those tools.
+
+AddressSanitizer and LeakSanitizer retain the complete default core-library
+inventory and instrumented standard library across four independent Linux
+partitions. Each runner executes one test at a time with no retries. The exact
+nightly cohort comes from the installed release manifest and matching compiler
+and Cargo fingerprints. An explicit Nextest sanitizer config preserves the
+original case budgets without inheriting unrelated Host/Windows watchdogs.
+Every shard first proves a real clean execution and an actual intentional
+use-after-free diagnosis using the same sanitizer settings and target.
+
+The existing `ASan + LeakSanitizer (core)` required check is the substantive
+full-union validator. It requires all four jobs to succeed, exact
+source/run/attempt/shard artifact names, matching compiler/config identities,
+identical full inventories, and a disjoint exhaustive selected union. It
+revalidates each successful execution and the raw clean/error smoke channels;
+missing, altered, stale, failed or partial evidence cannot certify acceptance.
+Default ignored cases retain their original policy. A failed shard stops at its
+first failing case while independent shards continue. Build-cache publication
+remains main-only.
+
+`scripts/ci/asan-cli.test.mjs` uses the pinned Nextest with an already installed
+stable compiler to prove the listing, partition, execution and receipt protocol.
+Synthetic diagnostic records in that fixture do not prove sanitizer
+instrumentation. The real Linux clean/error controls and complete source-bound
+core execution remain required hosted evidence.
 
 Linux CI produces both strict backend scenario evidence and instrumented
 coverage in the same execution, including the separate ignored bridge and

@@ -297,6 +297,12 @@ export async function produce(directory) {
   console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);
 }
 
+export function consumerFailurePolicy(env = process.env) {
+  const value = env.MESH_WINDOWS_FAIL_FAST;
+  assert.ok(value === undefined || value === "0" || value === "1", "MESH_WINDOWS_FAIL_FAST must be 0 or 1");
+  return value === "1" ? "--fail-fast" : "--no-fail-fast";
+}
+
 export async function consume(shard, directory, output) {
   assert.ok(windowsPartitions.includes(shard), "shard must be an integer from 1 through 4");
   mkdirSync(output, { recursive: true });
@@ -336,7 +342,7 @@ export async function consume(shard, directory, output) {
   assert.deepEqual(observed, expected, "Consumer partition differs from producer inventory");
   writeJson(path.join(output, "selected-inventory.json"), observed[shard]);
   const started = performance.now();
-  const events = await command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`, "--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
+  const events = await command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`, "--test-threads", "1", "--retries", "0", consumerFailurePolicy(), "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
     env: { ...process.env, CARGO_NET_OFFLINE: "true", RUST_TEST_THREADS: "1", NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1" },
     ...evidence("execution"), liveStdout: true,
   });

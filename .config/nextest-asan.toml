@@ -1,0 +1,6 @@
+nextest-version = "0.9.150"
+
+# ASan keeps Cargo's existing case budgets; do not inherit default CI watchdogs.
+[profile.default]
+test-threads = 1
+retries = 0
