@@ -1748,6 +1748,14 @@ only that account's control headers before body admission. Upgrading the older
 unscoped derived queue rebuilds metadata in bounded pages and preserves exact
 completed-control evidence; warm reopen keeps the existing discovery position.
 
+Pending DM attempts are driven by the account/conversation/purpose/ticket index,
+with exact retained-event and conversation lookups. A SQL row limit alone does
+not bound examined history: the join order must not start with the retained
+domain. Regression evidence uses SQLite VM work on un-analyzed databases with
+different retained-history sizes, independently of elapsed time. Incoming message
+classification uses direct-conversation identity and indexed membership metadata;
+it does not hydrate existing conversation bodies to distinguish a DM from a channel.
+
 An authenticated legacy adoption preserves the previous owner's imported prefix;
 the event-source publication transaction fixes its end before new-account event
 appends. A compatible older indexed profile with one authenticated namespace can

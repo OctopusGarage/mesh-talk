@@ -16,6 +16,9 @@ mod network;
 pub(in crate::node) use network::{HistorySyncStamp, HistoryUpload};
 mod principal;
 
+#[cfg(test)]
+mod admission_tests;
+
 const MAX_PENDING_CHANNEL_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
@@ -1567,21 +1570,21 @@ impl SyncStore for GuardedSyncStore<'_> {
                     || super::delivery_receipt::delivery_conversation_id(&own, &proof.public())
                         == event.conversation_id
             });
-            let channel = self
-                .node
-                .channels
-                .lock()
-                .expect("channels lock not poisoned")
-                .state(&event.conversation_id)
-                .is_some()
-                || self
+            let channel = !direct
+                && (self
                     .node
-                    .log
+                    .channels
                     .lock()
-                    .expect("log lock not poisoned")
-                    .events(&event.conversation_id)?
-                    .iter()
-                    .any(|entry| entry.kind == EventKind::MembershipChange);
+                    .expect("channels lock not poisoned")
+                    .state(&event.conversation_id)
+                    .is_some()
+                    || self
+                        .node
+                        .log
+                        .lock()
+                        .expect("log lock not poisoned")
+                        .repository()?
+                        .has_kind(&event.conversation_id, EventKind::MembershipChange)?);
             let relay = self
                 .node
                 .privacy

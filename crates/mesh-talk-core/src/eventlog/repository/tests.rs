@@ -1636,6 +1636,88 @@ fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads(
 }
 
 #[test]
+fn runtime_metadata_receive_selection_vm_work_is_independent_of_retained_history() {
+    for controls in [false, true] {
+        let mut measured = Vec::new();
+        for count in [256, 1024] {
+            let directory = tempfile::tempdir().unwrap();
+            let (profile, repository, local, account) = receive_profile(&directory);
+            // Authored retained history is not receive work. Keep one remote
+            // candidate in the same conversation and leave statistics cold.
+            for sequence in 1..=count {
+                repository
+                    .append(&event(
+                        &local,
+                        sequence,
+                        vec![],
+                        sequence,
+                        EventKind::Message,
+                    ))
+                    .unwrap();
+            }
+            let pending = event(
+                &DeviceIdentity::generate(),
+                count + 1,
+                vec![],
+                count + 1,
+                if controls {
+                    EventKind::Delete
+                } else {
+                    EventKind::Message
+                },
+            );
+            repository.append(&pending).unwrap();
+            repository
+                .initialize_receiving(
+                    Author::from_ed25519(local.public().ed25519_pub),
+                    &account.public(),
+                )
+                .unwrap();
+            let pending_rows: i64 = profile
+                .database()
+                .read(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM participant_receive_pending WHERE domain=?1",
+                        [repository.domain.0.as_slice()],
+                        |row| row.get(0),
+                    )
+                    .map_err(LogError::from)
+                })
+                .unwrap();
+            assert_eq!(pending_rows, 1);
+            let before = repository.body_read_counts();
+            let ids = if controls {
+                repository.pending_control_ids(pending.conversation_id, 128, 8 * 1024 * 1024)
+            } else {
+                repository.pending_receive_ids(pending.conversation_id, 128, 8 * 1024 * 1024)
+            }
+            .unwrap();
+            assert_eq!(ids, vec![pending.id]);
+            assert_eq!(repository.body_read_counts(), before);
+            measured.push(super::receiving::receive_selection_work());
+        }
+        // Count real bundled SQLite VM instructions, including rejected join
+        // work; a LIMIT on returned rows cannot establish this bound.
+        println!(
+            "receive selection VM steps: controls={controls}, history256={}, history1024={}",
+            measured[0].0, measured[1].0
+        );
+        assert!(
+            measured.iter().all(|(steps, _)| *steps <= 512),
+            "one pending receive must not scan the retained event domain"
+        );
+        assert!(
+            measured.iter().all(|(_, sorts)| *sorts == 0),
+            "pending receive order must come from its bounded queue index"
+        );
+        assert!(
+            measured[1].0 <= measured[0].0 + 128,
+            "retained history growth must not scale fixed pending selection work"
+        );
+    }
+}
+
+#[test]
 fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() {
     let dir = tempfile::tempdir().unwrap();
     let (profile, repo, local, account) = receive_profile(&dir);

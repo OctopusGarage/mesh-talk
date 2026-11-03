@@ -2712,6 +2712,7 @@
         "crates/mesh-talk-core/src/node/privacy_sync/network.rs",
         "crates/mesh-talk-core/src/postoffice/federation/indexed.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/admission_tests.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/current.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/replay.rs",
         "crates/mesh-talk-core/src/node/channel/graph/preparing.rs"
@@ -2730,6 +2731,7 @@
             "node::channel::tests::",
             "node::channel_account_authority::",
             "node::privacy_sync::principal::",
+            "node::privacy_sync::admission_tests::",
             "invisible_late_invitation_can_arrive_through_an_allowed_post_office"
           ]
         }
