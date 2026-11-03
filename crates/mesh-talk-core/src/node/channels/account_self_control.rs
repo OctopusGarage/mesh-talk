@@ -1997,6 +1997,7 @@ pub(in crate::node) mod tests {
         );
         let event_kind = input.event_kind();
         let remaining = operation_budget.saturating_sub(admission_started.elapsed());
+        let mut last_predicate = None;
         let convergence = tokio::time::timeout(remaining, async {
             let mut previous_phase = None;
             loop {
@@ -2019,18 +2020,28 @@ pub(in crate::node) mod tests {
                     ));
                     previous_phase = phase;
                 }
+                let mut requester_committed = false;
+                let mut committed_count = None;
+                let mut external_present = None;
+                let mut role_ready = [None, None];
                 let ready = reference
                     .account_group_operation_status(&shared.account_id(), id)
                     .unwrap()
                     .is_some_and(|status| {
-                        status.phase == AccountGroupOperationPhase::Committed
+                        requester_committed = status.phase == AccountGroupOperationPhase::Committed;
+                        committed_count = Some(status.committed_events.len());
+                        requester_committed
                             && status.committed_events.len() == 1
-                            && status.committed_events.iter().all(|event| {
-                                owner.log.lock().unwrap().get(event).unwrap().is_some()
-                            })
+                            && {
+                                let present = status.committed_events.iter().all(|event| {
+                                    owner.log.lock().unwrap().get(event).unwrap().is_some()
+                                });
+                                external_present = Some(present);
+                                present
+                            }
                     })
-                    && [&reference, &executor].into_iter().all(|node| {
-                        match node.account_group_access(group) {
+                    && [&reference, &executor].into_iter().enumerate().all(|(index, node)| {
+                        let matches = match node.account_group_access(group) {
                             Ok(access) => {
                                 access.role
                                     == if accepted_after {
@@ -2041,8 +2052,17 @@ pub(in crate::node) mod tests {
                             }
                             Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
                             Err(error) => panic!("self-control role observation failed: {error}"),
-                        }
+                        };
+                        role_ready[index] = Some(matches);
+                        matches
                     });
+                let predicate = (requester_committed, committed_count, external_present, role_ready);
+                if last_predicate != Some(predicate) {
+                    operation_trace.lock().unwrap().record("reference", format!(
+                        "convergence_predicates requester_committed={} committed_count={:?} external_present={:?} roles_reference_executor={:?}",
+                        predicate.0, predicate.1, predicate.2, predicate.3));
+                    last_predicate = Some(predicate);
+                }
                 if ready {
                     // Capture the first ready history only after the exact
                     // committed effect and both roles are visible. Keep this
@@ -2078,30 +2098,55 @@ pub(in crate::node) mod tests {
         .await;
         let held_request_flags = request_hold.as_ref().map(|hold| hold.flags());
         if convergence.is_err() {
-            let diagnostics: Vec<_> = nodes.iter().map(|(label, node)| {
-                let status = node.account_group_operation_status(&shared.account_id(), id).ok().flatten();
-                let phase = status.as_ref().map(|status| &status.phase);
-                let committed_count = status.as_ref().map_or(0, |status| status.committed_events.len());
-                let effects_local = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| node.log.lock().unwrap().get(event).unwrap().is_some()));
-                let effects_external = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| owner.log.lock().unwrap().get(event).unwrap().is_some()));
-                let effects = node.log.lock().unwrap().events(&group).unwrap().into_iter()
-                    .filter(|event| event.kind == event_kind).count();
-                let role = node.account_group_access(group).map(|access| access.role);
-                let source_role = Node::public_account_group_source(group, &node.account_group_projection(group).unwrap(), &full_source, &executor.own_group_proof()).map(|source| source.role);
-                let sync: Vec<_> = node.device_sync_status().into_iter().map(|status|
-                    (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
-                format!("node={label} phase={phase:?} role={role:?} source_role={source_role:?} effects={effects} committed_count={committed_count} effects_local={effects_local} effects_external={effects_external} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
-            }).collect();
-            // Drop the diagnostic mutex before panicking; background observers
-            // must not turn the original failure into unrelated poison panics.
-            let failure_trace = trace.lock().unwrap().iter().cloned().collect::<Vec<_>>();
-            let operation_trace = format!("{:?}", operation_trace.lock().unwrap());
+            // Retain the actual deadline state before any fallible diagnostic
+            // projection. Pending diagnostics must not replace this failure.
+            let failure_trace = trace
+                .lock()
+                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
+                .map_err(|_| "trace mutex poisoned");
+            let operation_trace = operation_trace
+                .lock()
+                .map(|trace| format!("{trace:?}"))
+                .map_err(|_| "operation trace mutex poisoned");
             let external_trace = external_trace
                 .lock()
-                .unwrap()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
+                .map(|trace| trace.iter().cloned().collect::<Vec<_>>())
+                .map_err(|_| "external trace mutex poisoned");
+            eprintln!(
+                "self control original deadline expired: predicates={last_predicate:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?}"
+            );
+            let contains_effects = |node: &Node, events: &[EventId]| -> Result<bool, String> {
+                let log = node
+                    .log
+                    .lock()
+                    .map_err(|_| "event log mutex poisoned".to_owned())?;
+                let mut present = !events.is_empty();
+                for event in events {
+                    present &= log
+                        .get(event)
+                        .map_err(|error| format!("{error:?}"))?
+                        .is_some();
+                }
+                Ok(present)
+            };
+            let diagnostics: Vec<_> = nodes.iter().map(|(label, node)| {
+                let status = node.account_group_operation_status(&shared.account_id(), id);
+                let status_error = status.as_ref().err();
+                let observed = status.as_ref().ok().and_then(Option::as_ref);
+                let phase = observed.map(|status| &status.phase);
+                let committed_count = observed.map(|status| status.committed_events.len());
+                let effects_local = observed.map(|status| contains_effects(node, &status.committed_events));
+                let effects_external = observed.map(|status| contains_effects(&owner, &status.committed_events));
+                let effects = node.log.lock().map_err(|_| "event log mutex poisoned".to_owned())
+                    .and_then(|log| log.events(&group).map(|events| events.into_iter()
+                        .filter(|event| event.kind == event_kind).count()).map_err(|error| format!("{error:?}")));
+                let role = node.account_group_access(group).map(|access| access.role);
+                let source_role = node.account_group_projection(group)
+                    .map(|projection| Node::public_account_group_source(group, &projection, &full_source, &executor.own_group_proof()).map(|source| source.role));
+                let sync: Vec<_> = node.device_sync_status().into_iter().map(|status|
+                    (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
+                format!("node={label} phase={phase:?} status_error={status_error:?} role={role:?} source_role={source_role:?} effects={effects:?} committed_count={committed_count:?} effects_local={effects_local:?} effects_external={effects_external:?} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
+            }).collect();
             let listeners_finished: Vec<_> = handles
                 .iter()
                 .map(|handle| handle.as_ref().map(|handle| handle.is_finished()))
@@ -2115,17 +2160,20 @@ pub(in crate::node) mod tests {
             let departure_retry = executor
                 .channels
                 .lock()
-                .unwrap()
-                .pending_departures(&executor.user_id())
-                .iter()
-                .any(|(channel, _)| *channel == group);
+                .map(|channels| {
+                    channels
+                        .pending_departures(&executor.user_id())
+                        .iter()
+                        .any(|(channel, _)| *channel == group)
+                })
+                .map_err(|_| "channel book mutex poisoned");
             let source_capacity = executor.sessions.test_capacity_snapshot();
             let owner_capacity = owner.sessions.test_capacity_snapshot();
             if let Some(hold) = request_hold.as_ref() {
                 hold.release.close();
             }
             panic!(
-                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace} trace={failure_trace:?} external_trace={external_trace:?} listeners_finished={listeners_finished:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
+                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace:?} trace={failure_trace:?} external_trace={external_trace:?} listeners_finished={listeners_finished:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry:?} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
             );
         }
         let history = convergence.unwrap();

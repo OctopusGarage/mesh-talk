@@ -584,6 +584,22 @@ holder report within the existing eight seconds while that exchange remains
 held. The original failed-send and sibling-import scenarios retain their own
 eight-second observers. Release gates, close admission and join/drain admitted
 work before removing stores; retain storage if retirement cannot be verified.
+The failed-initial and sibling-custody scenarios use two protocol workers so
+their synchronous SQL observer does not serialize the simulated independent
+hosts on its own thread. Keep both eight-second observers, the thirty-second
+cold setup and its current readiness predicates unchanged. Capture the first
+failed boundary before later waits or cleanup replace its evidence; retain
+bounded first/last phases per node and setup completion counts around channel
+creation. Channel creation and cold setup belong inside the same caught lifetime
+as the measured scenario. Retire every initial and replacement server before
+removing stores, preserving the original failure when cleanup also fails.
+
+Legacy channel receivers carry both content and metadata-only batch terminals.
+Classify terminals with `reception_only`; assert their channel and completion
+shape before continuing. Never classify by empty plaintext: empty content is
+still a message. Restart and membership fixtures keep their original five-second
+message deadline and exact plaintext/sender assertions. A terminal-before-empty-
+content control verifies this distinction without extra history queries.
 
 When a reference-device fixture requires a synchronous capability-cache override
 and admission on one current-thread runtime, keep that requester and its watchers
@@ -613,6 +629,11 @@ executor during setup. Use an instance-scoped test gate before privacy and
 membership locks, retain real private role/capability exchanges and release the
 gate on every exit. Assert the admitted executor's full identity and derive its
 diagnostic label from admission, rather than assuming the setup peer was chosen.
+Record the compound convergence predicate transitions without extra queries or
+changing short-circuit evaluation. On deadline expiry, retain the last observed
+predicate and operation traces before projecting diagnostic roles; pending
+`StaleCursor` or read errors remain diagnostic values and must not replace the
+original timeout. Unobserved predicates remain explicitly unobserved.
 
 Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
 
@@ -850,6 +871,14 @@ propagation phase begins only after all nodes have disabled periodic work and
 retains its original deadline, exact message evidence and zero periodic-work
 assertion. A failed cold connection must not silently remove the fixture's only
 remaining preparation path.
+The six simulated hosts use the existing shared independent-peer runtime owner,
+with one reactor per host. Bind every listener before launching those owners.
+A controlled held reactor must keep its own queued task pending while a second
+host acknowledges work; release and join both tasks and runtime owners on every
+exit. Keep the original absolute eight-second post-send cutoff, including sender
+retirement, and the existing admitted-read completion timestamps. Host isolation
+corrects the simulation boundary; it does not establish why a historical hop
+was late. All remaining server owners retire before fixture storage.
 
 The modern Leave Noise-fault fixture has an explicit preparation boundary: finish
 both genuine mandatory Directory passes inside cold setup before admitting its

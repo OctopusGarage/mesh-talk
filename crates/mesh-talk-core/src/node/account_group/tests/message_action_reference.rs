@@ -411,94 +411,91 @@ pub(super) async fn pull_reference_action_control(
     });
 }
 
-// Keep simulated remote devices on their own reactor/scheduling thread while
-// B retains its current-thread capability override + synchronous admission seam.
-pub(super) struct ActionPeerRuntime {
-    launch: Option<tokio::sync::oneshot::Sender<()>>,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-    handle: tokio::runtime::Handle,
-}
-impl ActionPeerRuntime {
-    pub(super) async fn start(node: Arc<Node>, listener: TcpListener) -> Self {
-        let listener = listener.into_std().unwrap();
-        let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
-        let (launch, launched) = tokio::sync::oneshot::channel();
-        let (ready, ready_rx) = tokio::sync::oneshot::channel();
-        let thread = std::thread::Builder::new()
-            .name("account-action-peer".into())
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                runtime.block_on(async move {
-                    let listener = TcpListener::from_std(listener).unwrap();
-                    ready.send(tokio::runtime::Handle::current()).unwrap();
-                    let launched = tokio::select! {
-                        _ = &mut stopped => false,
-                        result = launched => result.is_ok(),
-                    };
-                    let task = if launched {
-                        let task = tokio::spawn(node.clone().run_accept_loop(listener));
-                        let _ = stopped.await;
-                        Some(task)
-                    } else {
-                        None
-                    };
-                    node.runtime_work.close();
-                    if let Some(task) = task {
-                        task.abort();
-                        if let Err(error) = task.await {
-                            assert!(
-                                error.is_cancelled(),
-                                "owned peer server failed before shutdown"
-                            );
-                        }
-                    }
-                    node.sessions.clear();
-                    node.runtime_work.drain().await;
-                });
-            })
-            .unwrap();
-        Self {
-            launch: Some(launch),
-            shutdown: Some(shutdown),
-            thread: Some(thread),
-            handle: ready_rx.await.unwrap(),
-        }
-    }
-    pub(super) fn runtime_handle(&self) -> tokio::runtime::Handle {
-        self.handle.clone()
-    }
-    pub(super) fn launch(&mut self) {
-        self.launch.take().unwrap().send(()).unwrap();
-    }
-    pub(super) async fn stop(mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        let thread = self.thread.take().unwrap();
-        let joined = tokio::task::spawn_blocking(move || thread.join())
+pub(super) use crate::node::test_support::IndependentPeerRuntime as ActionPeerRuntime;
+
+#[tokio::test]
+async fn independent_peer_runtime_keeps_other_host_progress_while_one_reactor_is_held() {
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let left = node(&directory.path().join("left"), &account);
+    let right = node(&directory.path().join("right"), &account);
+    let mut left_owner =
+        ActionPeerRuntime::start(left, TcpListener::bind("127.0.0.1:0").await.unwrap()).await;
+    let mut right_owner =
+        ActionPeerRuntime::start(right, TcpListener::bind("127.0.0.1:0").await.unwrap()).await;
+    left_owner.launch();
+    right_owner.launch();
+    let left_handle = left_owner.runtime_handle();
+    let right_handle = right_owner.runtime_handle();
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    // Dropping the sender releases the exact held reactor, including on unwind.
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let held = left_handle.spawn(async move {
+        entered.send(()).unwrap();
+        let _ = released.recv();
+    });
+    let mut same_host_task = None;
+    let mut independent_task = None;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
             .await
+            .expect("the host hold must enter before the diagnostic backstop")
             .unwrap();
+        let (same_ack, mut same_ack_rx) = tokio::sync::oneshot::channel();
+        same_host_task = Some(left_handle.spawn(async move {
+            let _ = same_ack.send(());
+        }));
         assert!(
-            joined.is_ok(),
-            "owned peer runtime must finish its shutdown and writer drain"
+            matches!(
+                same_ack_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "an owned task on the held current-thread reactor cannot run"
         );
+        let (independent_ack, independent_ack_rx) = tokio::sync::oneshot::channel();
+        independent_task = Some(right_handle.spawn(async move {
+            independent_ack.send(std::thread::current().id()).unwrap();
+        }));
+        let peer_thread =
+            tokio::time::timeout(std::time::Duration::from_secs(5), independent_ack_rx)
+                .await
+                .expect("an independent host must acknowledge before the diagnostic backstop")
+                .unwrap();
+        assert_ne!(peer_thread, std::thread::current().id());
+        assert!(
+            !held.is_finished(),
+            "host A must remain held through host B's acknowledgement"
+        );
+        assert!(
+            matches!(
+                same_ack_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "host B's progress must not release host A"
+        );
+    })
+    .catch_unwind()
+    .await;
+    drop(release);
+    let cleanup = std::panic::AssertUnwindSafe(async {
+        held.await.unwrap();
+        if let Some(task) = same_host_task {
+            task.await.unwrap();
+        }
+        if let Some(task) = independent_task {
+            task.await.unwrap();
+        }
+        left_owner.stop().await;
+        right_owner.stop().await;
+    })
+    .catch_unwind()
+    .await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
     }
-}
-impl Drop for ActionPeerRuntime {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let joined = thread.join();
-            if !std::thread::panicking() {
-                assert!(joined.is_ok(), "owned peer runtime failed during cleanup");
-            }
-        }
+    if let Err(panic) = cleanup {
+        std::panic::resume_unwind(panic);
     }
 }
 
@@ -527,7 +524,7 @@ async fn independent_action_peer_runtime_joins_accepted_connections_and_admitted
     let mut owner = ActionPeerRuntime::start(source.clone(), listener).await;
     owner.launch();
     let peer_thread = owner
-        .handle
+        .runtime_handle()
         .spawn(async { std::thread::current().id() })
         .await
         .unwrap();
@@ -542,7 +539,7 @@ async fn independent_action_peer_runtime_joins_accepted_connections_and_admitted
     let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let written = completed.clone();
     let writer_node = source.clone();
-    let writer = owner.handle.spawn(async move {
+    let writer = owner.runtime_handle().spawn(async move {
         writer_node
             .account_blocking(move |_| {
                 entered.send(()).unwrap();
@@ -770,7 +767,7 @@ async fn reference_message_action(recall: bool) {
         if target.user_id() != reference.user_id() {
             let runtime = ActionPeerRuntime::start(target.clone(), listener).await;
             if target.user_id() == external.user_id() {
-                external_runtime = Some(runtime.handle.clone());
+                external_runtime = Some(runtime.runtime_handle());
             }
             peer_runtimes.push(runtime);
         } else {

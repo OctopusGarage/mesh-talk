@@ -372,7 +372,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls.",
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation; original cold/readiness and operation deadlines remain unchanged, and first failures plus admitted-work retirement survive setup panics.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -1006,6 +1006,11 @@
             "node::channel_senders::tests::",
             "node::node::tests::channel_checkpoint_",
             "node::node::tests::group_reception_",
+            "node::node::tests::channel_content_receiver_distinguishes_terminal_from_empty_message",
+            "node::node::tests::channel_sending_survives_restart",
+            "node::node::tests::two_nodes_exchange_a_channel_message_over_loopback_tcp",
+            "node::node::tests::renaming_a_channel_propagates_to_members_and_is_owner_only",
+            "node::node::tests::adding_a_channel_member_lets_them_receive_new_messages",
             "channel_causal_query_yields_exact_work_and_preserves_strict_ancestry",
             "channel_owner_query_preserves_later_unobserved_ownership_loss",
             "channel_projection_control_does_not_drain_historical_ancestry_in_one_turn",
@@ -1031,7 +1036,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact retained commit cutoffs distinguish pre-open sources from later message and invitation-release arrivals within one bounded continuation, preserving expiry, silent repair and visible legacy batch completion without changing durable receipt counts. Exact discard evidence and independent role terminal facts survive retries and restart.",
+            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact retained commit cutoffs distinguish pre-open sources from later message and invitation-release arrivals within one bounded continuation, preserving expiry, silent repair and visible legacy batch completion without changing durable receipt counts. Legacy-stream fixtures distinguish explicitly typed metadata-only batch terminals from content, preserve empty content and retain the original message deadlines and payload assertions. Exact discard evidence and independent role terminal facts survive retries and restart.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1933,6 +1938,8 @@
             "participant_durable_have_request_uses_no_historical_bodies",
             "participant_selection_retirement_",
             "background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
+            "independent_peer_runtime_keeps_other_host_progress_while_one_reactor_is_held",
+            "independent_action_peer_runtime_joins_accepted_connections_and_admitted_writers",
             "gossip_history_receipts_distinguish_read_completion_from_delayed_delivery",
             "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet"
           ]
@@ -1951,7 +1958,7 @@
             "reference": "docs/help/topics/channels.md#network-data-protection"
           },
           {
-            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions.",
+            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions. Each simulated host owns a separate reactor through the shared independent-peer fixture owner; a held host cannot prevent another host from acknowledging work. Owner retirement closes admission, joins the real server and drains writers before joining its thread. Sender retirement remains inside the original post-send cutoff.",
             "reference": "docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities"
           },
           {
