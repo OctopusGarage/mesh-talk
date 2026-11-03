@@ -800,7 +800,7 @@
         ]
       },
       "escalation": [
-        "Contact deletion/admission changes require session-authority, persistence and native mesh acceptance evidence. Registered real-runtime fixtures require joined retirement before offline persistence reads and mock-app/store destruction, including assertion failures; follow docs/testing-feedback-loop.md#completion-and-retirement-evidence."
+        "Contact deletion/admission changes require session-authority, persistence and native mesh acceptance evidence. Registered real-runtime fixtures require joined retirement before offline persistence reads and mock-app/store destruction, including assertion failures. Early body-failure controls preserve the exact original panic only after independently witnessed blocking-work or graceful-task retirement; cleanup cannot depend on a final business value or inspect a probe failure before awaiting its retirement owner. Follow docs/testing-feedback-loop.md#completion-and-retirement-evidence."
       ]
     },
     {
@@ -932,7 +932,7 @@
       ],
       "consumers": ["desktop-session"],
       "escalation": [
-        "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks. Registered real-runtime fixtures require joined retirement before offline persistence reads and mock-app/store destruction, including assertion failures; follow docs/testing-feedback-loop.md#completion-and-retirement-evidence."
+        "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks. Registered real-runtime fixtures require joined retirement before offline persistence reads and mock-app/store destruction, including assertion failures. Early body-failure controls preserve the exact original panic only after independently witnessed blocking-work or graceful-task retirement; cleanup cannot depend on a final business value or inspect a probe failure before awaiting its retirement owner. Follow docs/testing-feedback-loop.md#completion-and-retirement-evidence."
       ],
       "capability": {
         "summary": "Expose scoped account privacy and explicit recipient review of authenticated device account changes.",

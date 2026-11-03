@@ -296,6 +296,33 @@ mod tests {
 
     #[test]
     fn registered_privacy_commands_authorize_and_persist_real_runtime() {
+        registered_privacy_scenario(|| {}, || {});
+    }
+
+    #[test]
+    fn registered_privacy_body_panic_preserves_primary_after_verified_retirement() {
+        #[derive(Debug, PartialEq)]
+        struct EarlyPrivacyFailure(&'static str);
+        let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = retired.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registered_privacy_scenario(
+                || std::panic::panic_any(EarlyPrivacyFailure("initial authenticated snapshot")),
+                move || observed.store(true, std::sync::atomic::Ordering::SeqCst),
+            );
+        }));
+        let failure = outcome.expect_err("the original body panic must be propagated");
+        assert_eq!(
+            failure.downcast_ref::<EarlyPrivacyFailure>(),
+            Some(&EarlyPrivacyFailure("initial authenticated snapshot"))
+        );
+        assert!(
+            retired.load(std::sync::atomic::Ordering::SeqCst),
+            "the original panic must propagate only after verified runtime retirement"
+        );
+    }
+
+    fn registered_privacy_scenario(body_boundary: impl FnOnce(), after_retired: impl FnOnce()) {
         let root = tempfile::tempdir().unwrap();
         let app_state = AppState::new(AuthService::new(Arc::new(IdentityManager::new(
             FileManager::new(root.path().to_owned()),
@@ -371,6 +398,7 @@ mod tests {
             let read = invoke("get_privacy", serde_json::json!({"owner":"alice"})).unwrap();
             assert_eq!(read.owner, "alice");
             assert!(!read.policy.invisible);
+            body_boundary();
             let changed = invoke(
                 "set_invisible",
                 serde_json::json!({"owner":"alice", "invisible":true}),
@@ -463,11 +491,15 @@ mod tests {
                 })
                 .await;
                 drop(release);
-                assert!(writers.join_next().await.unwrap().unwrap());
-                assert!(writers.join_next().await.is_none());
+                let writer = writers.join_next().await;
+                let extra = writers.join_next().await;
                 if !ready {
                     retirement.await;
                 }
+                // Retirement must not depend on the body's privacy value: an
+                // earlier assertion may have failed before changing that value.
+                assert!(matches!(writer, Some(Ok(_))));
+                assert!(extra.is_none());
                 ready
             })
         }));
@@ -484,6 +516,7 @@ mod tests {
             }
             panic!("registered runtime cleanup returned with admitted work held");
         }
+        after_retired();
         if let Err(panic) = original {
             std::panic::resume_unwind(panic);
         }

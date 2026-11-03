@@ -47,6 +47,15 @@ work. A controlled admitted-work probe retains its real participant permit and
 SDK handle through entry, release and join, and rejects cleanup that returns
 while that work remains held. Keep business assertions inside owned cleanup:
 release held work, await retirement and then propagate the original panic.
+Cleanup must also complete when the body fails before its intended mutation.
+Do not require a final business value from a cleanup probe. Collect its outcome,
+release its gate and await the same retirement future before checking the probe
+or propagating an error. An original-failure regression must preserve the exact
+panic payload and independently witness retirement; retaining a store and
+rethrowing that payload alone does not prove joined cleanup. A registered
+graceful host task provides a separate witness: observe actual shutdown entry
+while its cleanup remains held, release it, then require completion and the
+awaited stop owner. Drop-only cancellation cannot stand in for that sequence.
 Retain stores whenever retirement is unverified. A Rust assertion summary alone
 cannot certify process success while native connection teardown remains active;
 require the complete test process exit status as well.
@@ -624,6 +633,24 @@ run on the observing device's runtime. Shutdown closes admission, cancels and jo
 producers, clears idle sessions, drains admitted writers and joins every owned
 thread, including panic cleanup. A same-source topology comparison diagnoses a
 fixture constraint; it does not establish the cause of every CI timing failure.
+
+A public channel peer-round owner must retain the existing three selected peers,
+two active groups, rotation and per-peer deadlines while scheduling admitted
+children independently. The controlled loopback commits a fresh signed event
+through the real producer before invoking that same owner. A held real public
+view must observe both receivers still missing the event, then admit the second
+exchange. Require its exact canonical ID and bytes, stamped after the actual
+read within the original eight seconds, while the first view remains held; a
+managed synchronous hold leaves executor work schedulable. A free-worker
+acknowledgement and a borrowed-parent counterfactual separate parent coupling
+from executor starvation: the counterfactual must keep the second round unstarted
+while held, then the same un-aborted owner must establish the canonical receipt
+after release. First-applied progress cancels and joins siblings. Parent cancellation cannot
+certify child retirement: the canonical participant drain must remain pending
+while actual child work is held, then complete only after release and retirement.
+Release gates, join owners and drain hosts before propagating a primary failure;
+an unexpected owner panic cannot qualify a successful receipt. These controls
+prove a scheduling mechanism, not the sole cause of an earlier delayed hop.
 
 Modern self-control fixtures allow thirty seconds for cold, bidirectional
 capability and role readiness before admission, matching the existing owner-rename

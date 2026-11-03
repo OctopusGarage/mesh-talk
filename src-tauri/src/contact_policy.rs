@@ -770,8 +770,89 @@ mod tests {
         tauri::async_runtime::block_on(node_state.0.blocking_write().take().unwrap().stop());
     }
 
+    struct ContactRetirementProbe {
+        entered: Option<tokio::sync::oneshot::Receiver<()>>,
+        release: Option<tokio::sync::oneshot::Sender<()>>,
+        completed: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    impl ContactRetirementProbe {
+        fn install(runtime: &mut mesh_talk_core::node::NodeRuntime) -> Self {
+            let (shutdown, stopped) = tokio::sync::oneshot::channel();
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let (completed, completion) = tokio::sync::oneshot::channel();
+            let handle =
+                tauri::async_runtime::block_on(async { tokio::runtime::Handle::current() });
+            let task = handle.spawn(async move {
+                if stopped.await.is_ok() {
+                    let _ = entered.send(());
+                    let _ = released.await;
+                    let _ = completed.send(());
+                }
+            });
+            runtime.register_graceful_host_task(shutdown, task);
+            Self {
+                entered: Some(entry),
+                release: Some(release),
+                completed: Some(completion),
+            }
+        }
+
+        async fn retire(&mut self, runtime: mesh_talk_core::node::NodeRuntime) {
+            let retirement = runtime.stop();
+            tokio::pin!(retirement);
+            let ready = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(retirement.as_mut(), cx).is_ready(),
+                )
+            })
+            .await;
+            let entered = self.entered.take().unwrap().await;
+            // Release and await the actual owner before evaluating any oracle.
+            let _ = self.release.take().unwrap().send(());
+            if !ready {
+                retirement.await;
+            }
+            let completed = self.completed.take().unwrap().await;
+            assert!(
+                !ready,
+                "retirement returned while graceful host work was held"
+            );
+            assert!(entered.is_ok(), "the real host must receive shutdown");
+            assert!(completed.is_ok(), "the real host cleanup must complete");
+        }
+    }
+
     #[test]
     fn registered_ipc_commands_authorize_persist_and_restore_offline() {
+        registered_contact_scenario(|| {}, || {});
+    }
+
+    #[test]
+    fn registered_contact_body_panic_preserves_primary_after_verified_retirement() {
+        #[derive(Debug, PartialEq)]
+        struct ContactBodyFailure(&'static str);
+        let retired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = retired.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registered_contact_scenario(
+                || std::panic::panic_any(ContactBodyFailure("authenticated contact mutation")),
+                move || observed.store(true, std::sync::atomic::Ordering::SeqCst),
+            );
+        }));
+        let failure = outcome.expect_err("the original contact panic must propagate");
+        assert_eq!(
+            failure.downcast_ref::<ContactBodyFailure>(),
+            Some(&ContactBodyFailure("authenticated contact mutation"))
+        );
+        assert!(
+            retired.load(std::sync::atomic::Ordering::SeqCst),
+            "the original panic must propagate only after verified runtime retirement"
+        );
+    }
+
+    fn registered_contact_scenario(body_boundary: impl FnOnce(), after_retired: impl FnOnce()) {
         let dir = tempfile::tempdir().unwrap();
         let auth = crate::services::auth_service::AuthService::new(std::sync::Arc::new(
             mesh_talk_core::identity::manager::IdentityManager::new(
@@ -853,7 +934,7 @@ mod tests {
         )
         .is_err());
 
-        let runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+        let mut runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
             dir.path(),
             "alice",
             "Alice",
@@ -867,6 +948,7 @@ mod tests {
         ))
         .unwrap();
         let own = runtime.account_id().to_owned();
+        let mut retirement_probe = ContactRetirementProbe::install(&mut runtime);
         *node_state.0.blocking_write() = Some(runtime);
         let mut retired = false;
         let original = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -952,10 +1034,11 @@ mod tests {
             serde_json::json!({ "owner": "alice", "account": A, "hidden": true, "name": "Alice" }),
         )
         .unwrap();
+            body_boundary();
             // Stop the node: restoration remains a local authenticated operation.
             tauri::async_runtime::block_on(async {
                 let runtime = { node_state.0.write().await.take().unwrap() };
-                runtime.stop().await;
+                retirement_probe.retire(runtime).await;
             });
             retired = true;
             assert!(
@@ -980,7 +1063,7 @@ mod tests {
             tauri::async_runtime::block_on(async {
                 let runtime = { node_state.0.write().await.take() };
                 if let Some(runtime) = runtime {
-                    runtime.stop().await;
+                    retirement_probe.retire(runtime).await;
                     retired = true;
                 }
             });
@@ -999,6 +1082,7 @@ mod tests {
             }
             panic!("contact runtime retirement could not be verified");
         }
+        after_retired();
         if let Err(panic) = original {
             std::panic::resume_unwind(panic);
         }

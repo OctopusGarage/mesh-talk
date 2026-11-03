@@ -31,6 +31,70 @@ const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
 const CHANNEL_RECOVERY_MAX_INTERVAL: Duration = Duration::from_secs(60);
 const CHANNEL_RECOVERY_GROUP_CONCURRENCY: usize = 2;
 
+/// Bounded peer children retain participant admission through actual retirement.
+/// A completed applied page cancels and joins the remaining sessions.
+pub(super) async fn complete_channel_peer_rounds<F>(
+    node: &Arc<Node>,
+    rounds: impl IntoIterator<Item = F>,
+) -> (bool, bool)
+where
+    F: std::future::Future<Output = Option<(usize, bool)>> + Send + 'static,
+{
+    let mut rounds = rounds.into_iter();
+    let mut children = tokio::task::JoinSet::new();
+    let mut checked = false;
+    let mut clean = true;
+    let mut closed = false;
+    let mut failure = None;
+    loop {
+        while !closed && children.len() < CHANNEL_RECOVERY_PEERS_PER_TICK {
+            let Some(round) = rounds.next() else { break };
+            let Some(permit) = node.runtime_work.admit() else {
+                closed = true;
+                children.abort_all();
+                break;
+            };
+            children.spawn(permit.track(round));
+        }
+        let Some(result) = children.join_next().await else {
+            break;
+        };
+        match result {
+            Ok(Some((applied, peer_clean))) => {
+                checked = true;
+                clean &= peer_clean;
+                if applied > 0 {
+                    break;
+                }
+            }
+            Ok(None) => {}
+            Err(error) if closed && error.is_cancelled() => {}
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    // Abort is a request, not retirement. A first applied page keeps this
+    // group's lane until every cancelled child has actually dropped its scope.
+    children.abort_all();
+    while let Some(result) = children.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+            && failure.is_none()
+        {
+            failure = Some(error);
+        }
+    }
+    if let Some(error) = failure {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+        panic!("owned channel peer child was unexpectedly cancelled");
+    }
+    (checked, clean)
+}
+
 #[derive(Default)]
 struct ChannelRecoveryBackoff {
     idle_rounds: u32,
@@ -694,7 +758,7 @@ impl Node {
         let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
-        let node = self.as_ref();
+        let node = &self;
         let mut metadata = self.subscribe_channel_changes();
         let mut network = self.network_changes.subscribe();
         let mut backoff = ChannelRecoveryBackoff::default();
@@ -3016,7 +3080,7 @@ impl Node {
     /// every channel and member a turn without making the background loop dial the
     /// full group. Any member holding an event can serve it, even if its author is
     /// offline. The ordinary sync store enforces membership and validates events.
-    pub(in crate::node) async fn pull_one_channel_from_member(&self, cursor: usize) {
+    pub(in crate::node) async fn pull_one_channel_from_member(self: &Arc<Self>, cursor: usize) {
         let channels = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let mut channels: Vec<_> = book
@@ -3037,7 +3101,7 @@ impl Node {
     }
 
     async fn pull_channel_from_members(
-        &self,
+        self: &Arc<Self>,
         channel: ConversationId,
         cursor: usize,
         reconcile_controls: bool,
@@ -3094,90 +3158,74 @@ impl Node {
             own.ed25519_pub[1] ^ channel_id.as_bytes()[1],
         ]));
         let start = rotation.wrapping_add(cursor) % peers.len();
-        let mut exchanges = stream::iter(0..peers.len().min(CHANNEL_RECOVERY_PEERS_PER_TICK))
-            .map(|offset| {
-                let peer = &peers[(start + offset) % peers.len()];
-                async move {
+        let rounds = (0..peers.len().min(CHANNEL_RECOVERY_PEERS_PER_TICK)).map(|offset| {
+            let peer = peers[(start + offset) % peers.len()].clone();
+            let node = self.clone();
+            async move {
+                #[cfg(test)]
+                node.trace_account_client(&peer.public, || {
+                    format!("channel_recovery_peer_begin channel={channel:?}")
+                });
+                let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                    let Ok(mut conn) = node.privacy_sync_dial(peer.addr, &peer.public).await else {
+                        return None;
+                    };
                     #[cfg(test)]
-                    self.trace_account_client(&peer.public, || {
-                        format!("channel_recovery_peer_begin channel={channel:?}")
+                    node.trace_account_client(&peer.public, || {
+                        format!("channel_recovery_connection_ready channel={channel:?}")
                     });
-                    let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                        let Ok(mut conn) = self.privacy_sync_dial(peer.addr, &peer.public).await
-                        else {
+                    // Recovery fetches retained history; it must not turn an
+                    // outbound connection into a sharing-preference bypass.
+                    let sharing = match node.shares_replica(&channel) {
+                        Ok(sharing) => sharing,
+                        Err(error) => {
+                            log::warn!("channel replica export deferred: {error}");
                             return None;
-                        };
-                        #[cfg(test)]
-                        self.trace_account_client(&peer.public, || {
-                            format!("channel_recovery_connection_ready channel={channel:?}")
-                        });
-                        // Recovery fetches retained history; it must not turn an
-                        // outbound connection into a sharing-preference bypass.
-                        let sharing = match self.shares_replica(channel_id) {
-                            Ok(sharing) => sharing,
-                            Err(error) => {
-                                log::warn!("channel replica export deferred: {error}");
-                                return None;
-                            }
-                        };
-                        let store = if sharing {
-                            self.sync_store(conn.peer_identity())
-                        } else {
-                            self.pull_sync_store(conn.peer_identity())
-                        };
-                        #[cfg(test)]
-                        self.trace_account_client(&peer.public, || {
-                            format!("channel_recovery_sync_begin channel={channel:?}")
-                        });
-                        let report = match request_round(&mut conn, &store, *channel_id).await {
-                            Ok(report) => report,
-                            Err(error) => {
-                                log::warn!("channel recovery exchange deferred: {error}");
-                                return None;
-                            }
-                        };
-                        #[cfg(test)]
-                        self.trace_account_client(&peer.public, || {
-                            format!("channel_recovery_sync_done channel={channel:?}")
-                        });
-                        self.recycle_sync_channel(conn);
-                        Some((report.applied, report.rejected.is_empty()))
-                    })
-                    .await;
-                    #[cfg(test)]
-                    self.trace_account_client(&peer.public, || {
-                        let outcome = match &result {
-                            Ok(Some(_)) => "complete",
-                            Ok(None) => "failed",
-                            Err(_) => "timeout",
-                        };
-                        format!("channel_recovery_peer_end channel={channel:?} outcome={outcome}")
-                    });
-                    if let Ok(Some((applied, clean))) = result {
-                        self.process_channel_reception(*channel_id, "catch_up");
-                        self.process_file_events_reception(*channel_id, "catch_up");
-                        Some((applied, clean))
+                        }
+                    };
+                    let store = if sharing {
+                        node.sync_store(conn.peer_identity())
                     } else {
-                        None
-                    }
-                }
-            })
-            .buffer_unordered(CHANNEL_RECOVERY_PEERS_PER_TICK);
-        let mut checked = false;
-        let mut clean = true;
-        while let Some(result) = exchanges.next().await {
-            if let Some((applied, peer_clean)) = result {
-                checked = true;
-                clean &= peer_clean;
-                if applied > 0 {
-                    // Release this group's lane as soon as a source makes
-                    // progress. Dropping the remaining futures closes their
-                    // uncompleted sessions; subsequent passes rotate sources.
-                    break;
+                        node.pull_sync_store(conn.peer_identity())
+                    };
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        format!("channel_recovery_sync_begin channel={channel:?}")
+                    });
+                    let report = match request_round(&mut conn, &store, channel).await {
+                        Ok(report) => report,
+                        Err(error) => {
+                            log::warn!("channel recovery exchange deferred: {error}");
+                            return None;
+                        }
+                    };
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        format!("channel_recovery_sync_done channel={channel:?}")
+                    });
+                    node.recycle_sync_channel(conn);
+                    Some((report.applied, report.rejected.is_empty()))
+                })
+                .await;
+                #[cfg(test)]
+                node.trace_account_client(&peer.public, || {
+                    let outcome = match &result {
+                        Ok(Some(_)) => "complete",
+                        Ok(None) => "failed",
+                        Err(_) => "timeout",
+                    };
+                    format!("channel_recovery_peer_end channel={channel:?} outcome={outcome}")
+                });
+                if let Ok(Some((applied, clean))) = result {
+                    node.process_channel_reception(channel, "catch_up");
+                    node.process_file_events_reception(channel, "catch_up");
+                    Some((applied, clean))
+                } else {
+                    None
                 }
             }
-        }
-        drop(exchanges);
+        });
+        let (checked, clean) = complete_channel_peer_rounds(self, rounds).await;
         #[cfg(test)]
         self.trace_account_client(&self.identity.public(), || {
             format!(

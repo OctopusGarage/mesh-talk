@@ -157,7 +157,7 @@
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
           {
-            "name": "Account-maintenance peer waits cannot block bounded local channel preparation or mandatory Directory publication; one parent owns local recovery, account maintenance and custody futures, independent wake subscriptions preserve local demand, and cancellation joins the complete lifetime. The existing serial three-second custody turn progresses during unrelated history/fallback waits without adding tasks or transport allowances.",
+            "name": "Account-maintenance peer waits cannot block bounded local channel preparation or mandatory Directory publication; one parent owns local recovery, account maintenance and custody futures, independent wake subscriptions preserve local demand, and cancellation joins the complete lifetime. The existing serial three-second custody turn progresses during unrelated history/fallback waits; that custody turn adds no task or transport allowance. Selected public peer exchanges retain separately owned bounded children under the participant retirement barrier.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -1306,7 +1306,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
@@ -1921,7 +1921,8 @@
         "crates/mesh-talk-core/src/node/test_support.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/privacy_sync/",
-        "crates/mesh-talk-core/src/eventlog/repository/selection.rs"
+        "crates/mesh-talk-core/src/eventlog/repository/selection.rs",
+        "crates/mesh-talk-core/src/node/channels.rs"
       ],
       "rust": [
         {
@@ -1945,7 +1946,10 @@
             "independent_peer_runtime_drop_retires_unlaunched_admitted_work",
             "independent_action_peer_runtime_joins_accepted_connections_and_admitted_writers",
             "gossip_history_receipts_distinguish_read_completion_from_delayed_delivery",
-            "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet"
+            "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet",
+            "bounded_peer_round_owner_keeps_other_receiver_progress_during_a_held_public_view",
+            "bounded_peer_round_parent_cancellation_retains_held_child_until_runtime_drain",
+            "borrowed_peer_round_parent_defers_other_receiver_until_held_view_release"
           ]
         }
       ],
@@ -1962,7 +1966,7 @@
             "reference": "docs/help/topics/channels.md#network-data-protection"
           },
           {
-            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions. Each simulated gossip host owns an independent two-worker Tokio runtime, matching the multi-thread CLI; Ordinary React/Recall and Rename remote hosts also use that multi-thread mode, including actual post-commit authenticated public receipt. Their reference coordinator and deliberate held-reactor/negative scheduler controls retain their explicit current-thread boundaries. Real exact-peer Noise authentication must complete on the same multi-thread host while one entered worker remains held; the single-thread negative control must remain pending until release. A held host cannot prevent another host from acknowledging work. These controls qualify fixture scheduling, not the cause of an earlier late hop. Owner retirement closes admission, joins the real server and drains writers before joining its thread. Sender retirement remains inside the original post-send cutoff.",
+            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions. Each simulated gossip host owns an independent two-worker Tokio runtime, matching the multi-thread CLI; Ordinary React/Recall and Rename remote hosts also use that multi-thread mode, including actual post-commit authenticated public receipt. Their reference coordinator and deliberate held-reactor/negative scheduler controls retain their explicit current-thread boundaries. Real exact-peer Noise authentication must complete on the same multi-thread host while one entered worker remains held; the single-thread negative control must remain pending until release. A held host cannot prevent another host from acknowledging work. These controls qualify fixture scheduling, not the cause of an earlier late hop. Owner retirement closes admission, joins the real server and drains writers before joining its thread. Sender retirement remains inside the original post-send cutoff. Selected public peer rounds are separately scheduled, with participant work admitted before spawn and actual child retirement joined or retained by the canonical drain on parent cancellation. Three selected peers, two active groups, rotation, first-applied sibling cancellation and existing peer deadlines remain bounded. A real held-view control requires the other receiver canonical ID/bytes within the original eight seconds while a worker is available; parent cancellation must leave the real drain pending until held child retirement. Unexpected owner panics cannot certify receipt success.",
             "reference": "docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities"
           },
           {
