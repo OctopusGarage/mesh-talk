@@ -2347,6 +2347,10 @@
           {
             "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
           }
         ]
       },

@@ -874,6 +874,16 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   checks exact manifest membership through the existing history export owner.
   It resumes append-only work, reopens changed authority and defers incomplete
   selections; an older positive membership result is never a reusable grant.
+  Pending selections retain their finite preparation; admission and periodic
+  retry advance them with bounded turns, and only ready selections are evicted.
+  Refill skips existing jobs, whose retry owner checks current authority again.
+  Pending refill cannot block queued work; orphan selections finish or retire
+  through the same owner before the worker returns to idle cadence.
+  Each bounded job may retain its exact selected-manifest qualification under
+  a nonmissing history/authority stamp. Unchanged retries compare that stamp
+  before reopening a selection; changed or unavailable versions requalify
+  through the same owner. Every use still checks the current offer, membership,
+  retained bytes and consent, followed by fresh remote custody evidence.
 - Peer-avatar journals reclaim obsolete versions using encrypted record-log
   rewrites. They compact on opening older redundant logs and amortize subsequent
   rewrites by profile-version count. Latest clear tombstones survive compaction;

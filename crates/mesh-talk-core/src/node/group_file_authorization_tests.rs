@@ -187,3 +187,523 @@ async fn group_file_exact_outgoing_retains_at_most_four_prepared_recipient_views
         4
     );
 }
+
+#[tokio::test]
+async fn group_file_five_cold_interleaved_scopes_finish_without_discarding_pending_work() {
+    let root = tempfile::tempdir().unwrap();
+    let node = node(root.path());
+    let peers: Vec<_> = (0..5).map(|_| DeviceIdentity::generate()).collect();
+    let channel = node
+        .create_channel(
+            "Interleaved custody",
+            peers.iter().map(DeviceIdentity::public).collect(),
+        )
+        .await
+        .unwrap();
+    let event = append_history(&node, channel, 128);
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    let mut completed = [false; 5];
+    for _ in 0..512 {
+        for (index, peer) in peers.iter().enumerate() {
+            // Finished recipients model queued jobs in their held cooldown;
+            // other scopes get one bounded turn before rotation.
+            if completed[index] {
+                continue;
+            }
+            match node.group_file_outgoing_contains(channel, event, &peer.public()) {
+                Ok(true) => completed[index] = true,
+                Err(LogError::StaleCursor) => {}
+                Ok(false) => panic!("an established recipient lost exact source entitlement"),
+                Err(error) => panic!("interleaved custody preparation failed: {error}"),
+            }
+            assert!(node.group_file_delivery.authorization.lock().unwrap().len() <= 4);
+        }
+        if completed.iter().all(|done| *done) {
+            break;
+        }
+    }
+    assert!(
+        completed.iter().all(|done| *done),
+        "every cold scope must progress under the four-view limit: {completed:?}"
+    );
+}
+
+#[tokio::test]
+async fn group_file_periodic_retry_finishes_orphan_pending_views_and_becomes_idle() {
+    let root = tempfile::tempdir().unwrap();
+    let node = node(root.path());
+    let peers: Vec<_> = (0..4).map(|_| DeviceIdentity::generate()).collect();
+    let channel = node
+        .create_channel(
+            "Orphan custody",
+            peers.iter().map(DeviceIdentity::public).collect(),
+        )
+        .await
+        .unwrap();
+    let event = append_history(&node, channel, 128);
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    for peer in &peers {
+        assert!(matches!(
+            node.group_file_outgoing_contains(channel, event, &peer.public()),
+            Err(LogError::StaleCursor)
+        ));
+    }
+    assert!(node.group_file_delivery.jobs.lock().unwrap().is_empty());
+    assert_eq!(
+        node.group_file_delivery.authorization.lock().unwrap().len(),
+        4
+    );
+    for _ in 0..512 {
+        // No manifest/job can revisit these views. The existing periodic
+        // owner must discharge their admitted finite preparation itself.
+        node.retry_group_file_delivery().await;
+        if node
+            .group_file_delivery
+            .authorization
+            .lock()
+            .unwrap()
+            .values()
+            .all(|view| view.ready)
+        {
+            break;
+        }
+    }
+    assert!(
+        node.group_file_delivery
+            .authorization
+            .lock()
+            .unwrap()
+            .values()
+            .all(|view| view.ready),
+        "orphan pending preparation must not be stranded outside the job queue"
+    );
+    assert!(
+        !node.group_file_work_pending(),
+        "completed orphan preparation must permit idle cadence"
+    );
+}
+
+#[tokio::test]
+async fn group_file_periodic_retry_retires_invalid_orphans_before_new_scope_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let node = node(root.path());
+    let peers: Vec<_> = (0..5).map(|_| DeviceIdentity::generate()).collect();
+    let old = node
+        .create_channel(
+            "Removed custody",
+            peers[..4].iter().map(DeviceIdentity::public).collect(),
+        )
+        .await
+        .unwrap();
+    let fresh = node
+        .create_channel("Current custody", vec![peers[4].public()])
+        .await
+        .unwrap();
+    let old_event = append_history(&node, old, 128);
+    let fresh_event = append_history(&node, fresh, 128);
+    crate::node::test_support::settle_group_metadata(&node, old);
+    crate::node::test_support::settle_group_metadata(&node, fresh);
+    for peer in &peers[..4] {
+        assert!(matches!(
+            node.group_file_outgoing_contains(old, old_event, &peer.public()),
+            Err(LogError::StaleCursor)
+        ));
+    }
+    node.log.lock().unwrap().drop_conversation(&old).unwrap();
+    for _ in 0..16 {
+        node.retry_group_file_delivery().await;
+    }
+    assert!(
+        !node
+            .group_file_delivery
+            .authorization
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.0 == *old.as_bytes()),
+        "invalid source views must be released even when their jobs never existed"
+    );
+    assert!(settle_contains(
+        &node,
+        fresh,
+        fresh_event,
+        &peers[4].public()
+    ));
+    assert!(!node.group_file_work_pending());
+}
+
+struct QueuedFixture {
+    _root: tempfile::TempDir,
+    node: Arc<Node>,
+    channel: ConversationId,
+    manifest: EventId,
+    file: ConversationId,
+    peers: Vec<DeviceIdentity>,
+}
+
+async fn queued_fixture() -> QueuedFixture {
+    let root = tempfile::tempdir().unwrap();
+    let node = node(root.path());
+    let peers: Vec<_> = (0..5).map(|_| DeviceIdentity::generate()).collect();
+    let channel = node
+        .create_channel(
+            "Queued custody",
+            peers.iter().map(DeviceIdentity::public).collect(),
+        )
+        .await
+        .unwrap();
+    append_history(&node, channel, 128);
+    // These are legacy accepted members. Authentication supplies each original
+    // device proof without changing the group's existing admission contract.
+    for peer in &peers {
+        let account = crate::identity::account::Account::generate();
+        let proof = Announce::new_with_account(peer, &account, "Custody recipient", 47479);
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    }
+    node.cached_peer_snapshot_async().await.unwrap();
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    let source = root.path().join("queued.bin");
+    std::fs::write(&source, [7; 128]).unwrap();
+    let (manifest, file) = node
+        .enqueue_file_channel_progress_expiring_if(
+            channel,
+            &source,
+            crate::file::FileKind::File,
+            |_| {},
+            None,
+            |commit| commit(),
+        )
+        .await
+        .unwrap();
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    let mut previous = 0;
+    for _ in 0..1024 {
+        match node.queue_group_file_delivery(file, manifest) {
+            Ok(()) | Err(LogError::StaleCursor) => {}
+            Err(error) => panic!("group queue admission failed: {error}"),
+        }
+        let count = node.group_file_delivery.jobs.lock().unwrap().len();
+        assert!(
+            count >= previous,
+            "prepared recipient jobs must not disappear during refill"
+        );
+        previous = count;
+        if count == 5 {
+            break;
+        }
+    }
+    assert_eq!(
+        node.group_file_delivery.jobs.lock().unwrap().len(),
+        5,
+        "refill must reach the fifth recipient after the first four were queued"
+    );
+    QueuedFixture {
+        _root: root,
+        node,
+        channel,
+        manifest,
+        file,
+        peers,
+    }
+}
+
+#[tokio::test]
+async fn group_file_queue_restarts_skip_queued_prefix_and_admit_all_five_recipients() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let file = fixture.file;
+    let manifest = fixture.manifest;
+    let before = node.received_files.lock().unwrap().body_reads();
+    node.queue_group_file_delivery(file, manifest).unwrap();
+    assert_eq!(
+        node.received_files.lock().unwrap().body_reads(),
+        before,
+        "queued keys are revalidated by the retry owner, not rehydrated by every refill"
+    );
+}
+
+fn settle_job(node: &Node, job: &GroupFileUpload) -> bool {
+    for _ in 0..4096 {
+        match node.group_file_custody_allowed(job) {
+            Ok(allowed) => return allowed,
+            Err(LogError::StaleCursor) => {}
+            Err(error) => panic!("queued custody preparation failed: {error}"),
+        }
+    }
+    panic!("queued custody did not finish finite preparation")
+}
+
+#[tokio::test]
+async fn group_file_five_queued_warm_jobs_compare_versions_without_sql_changes() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let jobs: Vec<_> = node
+        .group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    // Establish all five exact authorizations. A four-view LRU alone cannot
+    // retain them, so the following cycles exercise real eviction pressure.
+    for job in &jobs {
+        assert!(settle_job(node, job));
+    }
+    let before = node
+        .storage
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    for _ in 0..2 {
+        // Real retry selection clones jobs afresh, rather than borrowing the
+        // original queue entry or depending on one call's stack-local result.
+        let selected: Vec<_> = node
+            .group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for job in &selected {
+            assert!(settle_job(node, job));
+        }
+    }
+    assert_eq!(
+        node.storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        before,
+        "five unchanged queued scopes must compare qualified versions without rebuilding SQL selections"
+    );
+}
+
+#[tokio::test]
+async fn group_file_queued_qualification_rechecks_appends_and_signed_departure() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let jobs: Vec<_> = node
+        .group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    for job in &jobs {
+        assert!(settle_job(node, job));
+    }
+    let job = {
+        let views = node.group_file_delivery.authorization.lock().unwrap();
+        jobs.iter()
+            .find(|job| {
+                !views.contains_key(&(
+                    *fixture.channel.as_bytes(),
+                    job.recipient.ed25519_pub,
+                    job.recipient.x25519_pub,
+                ))
+            })
+            .unwrap()
+            .clone()
+    };
+    let before_stamp = node
+        .sync_store(&job.recipient)
+        .lock()
+        .unwrap()
+        .history_sync_stamp(&fixture.channel)
+        .unwrap();
+    assert!(before_stamp.is_some());
+    append_history(node, fixture.channel, 1);
+    crate::node::test_support::settle_group_metadata(node, fixture.channel);
+    let after_stamp = node
+        .sync_store(&job.recipient)
+        .lock()
+        .unwrap()
+        .history_sync_stamp(&fixture.channel)
+        .unwrap();
+    assert_ne!(
+        before_stamp, after_stamp,
+        "ordinary source append changes the qualified observation"
+    );
+    let before = node
+        .storage
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    assert!(
+        settle_job(node, &job),
+        "the retained manifest remains authorized after a new message"
+    );
+    assert!(
+        node.storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap()
+            > before,
+        "an evicted scope must requalify through its exact prepared owner after a source version change"
+    );
+    let warm = node
+        .storage
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    assert!(settle_job(node, &job));
+    assert_eq!(
+        node.storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        warm
+    );
+    let peer = fixture
+        .peers
+        .iter()
+        .find(|peer| peer.public() == job.recipient)
+        .unwrap();
+    let leave = {
+        let log = node.log.lock().unwrap();
+        let (parents, lamport) = log.prepare(&fixture.channel).unwrap();
+        Event::new(
+            peer,
+            fixture.channel,
+            1,
+            parents,
+            lamport,
+            1,
+            EventKind::ChannelLeave,
+            vec![],
+        )
+    };
+    node.log.lock().unwrap().append(leave).unwrap();
+    assert!(
+        !matches!(node.group_file_custody_allowed(&job), Ok(true)),
+        "a queued positive qualification must not conceal an unapplied signed departure"
+    );
+    crate::node::test_support::settle_group_metadata(node, fixture.channel);
+    assert!(
+        !settle_job(node, &job),
+        "fresh membership still governs every use of a qualified job"
+    );
+}
+
+#[tokio::test]
+async fn group_file_refused_and_completed_cold_recipients_skip_outgoing_preparation() {
+    for completed in [false, true] {
+        let fixture = queued_fixture().await;
+        let node = &fixture.node;
+        let completion = if completed {
+            let chunks = node
+                .files
+                .lock()
+                .unwrap()
+                .retention_for(fixture.file)
+                .unwrap()
+                .unwrap()
+                .chunks;
+            Some(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .authored_header(
+                        &fixture.file,
+                        Author::from_ed25519(node.identity.public().ed25519_pub),
+                        u64::from(chunks),
+                    )
+                    .unwrap()
+                    .expect("verified source has its exact final chunk")
+                    .id,
+            )
+        } else {
+            None
+        };
+        for peer in &fixture.peers {
+            let proof = node.historical_author(&peer.public().ed25519_pub).unwrap();
+            let decision = Decision {
+                file: fixture.file,
+                manifest: fixture.manifest,
+                sender: node.identity.public(),
+                recipient: peer.public(),
+                sender_account: Some(node.account_id()),
+                recipient_account: proof.account_id().unwrap(),
+                decision: if completed {
+                    ReceiveDecision::Accepted
+                } else {
+                    ReceiveDecision::Declined
+                },
+                completion,
+            };
+            let event = decision.event(peer, 1).unwrap();
+            assert!(
+                Decision::open(&event).is_some_and(|opened| opened == decision),
+                "fixture must first verify the original recipient's signed terminal control"
+            );
+            assert!(
+                node.accept_file_consent_event(&event, &peer.public())
+                    .unwrap()
+            );
+            let retained = node
+                .file_consent
+                .lock()
+                .unwrap()
+                .received_control_for(fixture.manifest, &peer.public())
+                .unwrap()
+                .expect("the authenticated exact control must be durably retained");
+            assert_eq!(retained.id, event.id);
+            assert!(Decision::open(&retained).is_some_and(|opened| opened == decision));
+        }
+        // Simulate reconstruction after process-local jobs and selections were
+        // discarded. Signed terminal controls remain in their durable owner.
+        crate::node::test_support::settle_group_metadata(node, fixture.channel);
+        for peer in &fixture.peers {
+            assert!(
+                node.group_file_offer(fixture.file, fixture.manifest, &peer.public())
+                    .unwrap()
+                    .is_some(),
+                "fixture must retain a currently authorized signed offer"
+            );
+        }
+        let progress = node.file_progress(fixture.file).unwrap().unwrap();
+        assert_eq!(progress.done, progress.total);
+        node.group_file_delivery.jobs.lock().unwrap().clear();
+        node.group_file_delivery
+            .authorization
+            .lock()
+            .unwrap()
+            .clear();
+        let before = node
+            .storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap();
+        for _ in 0..2 {
+            node.queue_group_file_delivery(fixture.file, fixture.manifest)
+                .expect(
+                    "definitive signed terminal decisions must bypass cold entitlement preparation",
+                );
+            assert!(node.group_file_delivery.jobs.lock().unwrap().is_empty());
+            assert!(
+                node.group_file_delivery
+                    .authorization
+                    .lock()
+                    .unwrap()
+                    .is_empty(),
+                "terminal recipients must not recreate source-history selections"
+            );
+        }
+        assert_eq!(
+            node.storage
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap(),
+            before,
+            "five terminal recipients must remain read-only after restart (completed={completed})"
+        );
+    }
+}

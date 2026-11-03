@@ -947,6 +947,18 @@ contains outgoing group files, not historical private consent controls. Pending
 work keeps the producer's existing short retry interval. Payload pages recheck
 current authority, refusal, relay role and managed runtime I/O admission.
 
+Exact outgoing entitlement retains at most four heavy recipient/channel views.
+Pending finite preparation advances through admission and periodic retry turns;
+only ready views may be evicted. Refill skips already queued keys without
+preventing the rotating retry owner from checking their current authority.
+Orphan preparation finishes or retires through this same owner before idle
+cadence resumes. Each of the bounded jobs can retain one selected-manifest
+qualification shared by its retry clones. Only a fresh, nonmissing, identical
+history/authority stamp permits reuse. Missing or changed versions prepare and
+check exact membership again; only a positive selection with matching before
+and after versions publishes a qualification. Current offer, membership, bytes,
+consent and exact remote custody remain independently checked on every use.
+
 This worker deposits the original sender's retained chunks. Existing authorized
 sharing-member recovery still works over reachable application routes; it does
 not promise relay-only recovery from a third-party replica when the original
