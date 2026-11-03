@@ -1570,14 +1570,18 @@ and its existing command/test watchdog; remove competing compiler work rather
 than extending deadlines when a contract waits for a sibling fixture's lock.
 Portable diagnostics and independent CI jobs retain their existing scheduling.
 
-Linux/macOS coverage runs the desktop Host package with pinned Nextest in separate
-case processes, retaining the exact metadata IPC watchdog. The remaining default
-workspace targets run with Cargo and expose test output immediately, so one stuck
-case cannot hide another case's panic until suite completion. Both passes accumulate
-into one workspace report, with doctests checked separately. This bounds case failure
-and improves diagnostics;
-it does not establish the cause of a previously observed Host hang. The real-tool
-`scripts/ci/native-host-coverage.test.mjs` checks both partitions and failure propagation.
+Linux/macOS coverage runs both the desktop Host and remaining complete workspace
+partitions with pinned Nextest, four concurrent case processes and no retries.
+Both use the same repository default profile, so the existing metadata IPC and
+reconnect case watchdogs apply on every platform. Unit, binary, integration and
+test-enabled example targets retain their default selection and ignored policy;
+doctests remain separate. Successful partitions accumulate into one report; any
+partition failure prevents that report and cannot qualify partial coverage.
+The real-tool `scripts/ci/native-host-coverage.test.mjs` requires actual target
+coverage, both partition failure controls, empty-selection rejection and genuine
+parked-process termination while collection continues. Its short controlled
+watchdog exists only in the isolated fixture; production case budgets remain
+unchanged. Source-shape checks do not replace this hosted pinned-tool evidence.
 
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
