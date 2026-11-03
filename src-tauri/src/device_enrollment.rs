@@ -209,8 +209,10 @@ fn stage_enrolled(
             reopened.set_device_sync_category(category, true)?;
         }
     }
-    drop(reopened);
     crate::shared_account_login::stage_applied_login(&directory, enrolled.access_snapshot())?;
+    reopened
+        .close_profile()
+        .map_err(|_| CommandError::Crypto("Linked profile still has active storage work".into()))?;
     publish(stage.path(), &credentials.login_name, &user.user_id)?;
     Ok(credentials)
 }
@@ -319,18 +321,18 @@ pub async fn complete_device_enrollment<R: tauri::Runtime>(
     })
     .await
     .map_err(|_| CommandError::Internal("Device enrollment worker stopped".into()))??;
-    let saved_session = app_state
+    app_state
         .session()
-        .matching(&lease, |_| {
-            settings_state.activate(lease.owner());
-            crate::commands::persist_saved_login(
-                &app_handle,
-                &settings_state,
-                &user,
-                &credentials.password,
-            )
-        })
+        .matching(&lease, |_| settings_state.activate(lease.owner()))
         .map_err(CommandError::Authorization)?;
+    let saved_session = crate::commands::remember_login_owned(
+        app_handle.clone(),
+        app_state.inner().clone(),
+        settings_state.inner().clone(),
+        lease.clone(),
+        credentials.password.clone(),
+    )
+    .await?;
     crate::runtime_bootstrap::spawn_node_runtime(
         app_handle,
         lease,
@@ -513,6 +515,7 @@ mod tests {
         assert_eq!(
             reopened
                 .account_profile(&source.account_id())
+                .unwrap()
                 .unwrap()
                 .display_name,
             "Source nickname"

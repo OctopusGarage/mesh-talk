@@ -19,7 +19,7 @@ export interface ForwardResult {
     target: ForwardTarget;
     source_id: string | null;
     message_id: string | null;
-    status: "accepted" | "failed";
+    status: "accepted" | "failed" | "pending";
     error: string | null;
   }>;
 }

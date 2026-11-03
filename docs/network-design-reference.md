@@ -463,6 +463,12 @@ Elapsed age uses a monotonic clock, independently of wall-clock corrections.
 An absent observation means no current detail is available, including after
 restart, eviction or invalidation. It does not establish that no attempt occurred.
 
+An individual peer's endpoint changes cancel only control work whose captured
+routes changed. Unrelated direct/relay attempts and their observations retain
+progress. Task identities prevent a cancelled old attempt from retiring a
+replacement with the same logical work key. A whole-network change or runtime
+retirement still cancels the worker's complete bounded task set.
+
 The immutable destination and admission token bind updates to their originating
 attempt. A late completion cannot replace a newer attempt or publish across a
 privacy-generation change. Cancellation, route reset and participant retirement
@@ -681,6 +687,26 @@ group connection or consume the connection budget reserved for ordinary delivery
 Private route rounds launch at most two probes concurrently and advance their
 cursor only for launched work; canceled queued routes retain their next turn.
 
+Account maintenance and bounded local channel recovery are sibling futures owned
+by the same recovery task. A held maintenance peer exchange cannot delay local
+checkpoint/presentation progress or its mandatory Directory publication. The
+maintenance owner retains one state and uses independent broadcast/watch receivers
+plus the existing three-second Skip clock; it never consumes local recovery or
+roster Notify permits. Each bounded turn yields, and parent cancellation drops
+both futures. During an ordinary recovery network turn, the same parent polls its
+existing local-work notification alongside the pinned network future. Each local
+wake advances one bounded checkpoint/presentation turn and yields. The network
+turn retains its original leases, cursors, ordering and deadlines. If local work
+consumed a notification, replay one coalesced wake after the network turn completes
+so queued network targets retain their next turn. No extra worker or queue owns
+this progress, and parent cancellation drops the active exchange.
+
+New account-group creation gives invitation-target verification one twenty-second
+deadline across the complete selected account set and its device routes. Every
+required account must pass the existing authenticated binding and capability
+checks before host authorization or durable group creation. Expiry rejects the
+selection without creating a partial group or skipping an unavailable target.
+
 Membership and key controls are signed authority. Invitations require normal acceptance; owners, transfers, removals and departures affect the projected authorized membership. A directory or relay cannot grant access. Historical recovery obeys invitation/key/visibility constraints and must not expose uninvited ancestry to a new participant.
 
 Account-authorized groups grant membership and owner roles to accounts, not
@@ -712,6 +738,97 @@ new controls; older envelopes receive an upgrade response before unknown kinds
 are transferred. Group counts and composite avatars use the same accepted
 account projection; pending invitations and duplicate devices do not add people.
 
+Initial account migration preserves departures from the exact original legacy
+membership and acceptance lifetimes. A cut produced after a known departure omits
+that inactive accepted binding while retaining current invitation bindings. Old
+signed initial cuts containing historical bindings remain readable: a validated
+legacy departure from the original parent cut cannot silently restore that initial
+account incarnation. Another original certified member of the same account keeps
+it accepted until that original cohort has departed; later inheritance does not
+extend the initial cohort. Fresh accepted invitations create a different grant
+incarnation and are not revoked by an old departure.
+
+Structural replay retains signed grant rows so unrelated valid owner controls do
+not disappear. Permission, administration, content export and key recipients use
+the effective membership view. Transfer to a closed initial member cannot create
+an ownerless valid authority. Epoch accounting deduplicates physical lifetime
+forks, records which departures the initial ancestor cut already counted, and
+avoids counting an overlapping modern revocation twice. It remains monotonic when
+new evidence or a fresh grant arrives.
+
+Negative group-state proofs preserve the exact departed source lifetime and the
+complete closure cut, including the initial authority and all required original
+departures. A source omitted from the initial cut can retain its earlier cleanup
+provenance only within that same initial incarnation; newer grant history blocks
+that fallback. Later unrelated controls remain current without being appended to
+a misleading post-departure proof. Existing proof bounds remain unchanged: when a
+complete proof cannot fit, publish explicit unavailability instead of retaining
+stale positive metadata or granting authority from incomplete evidence.
+
+The desktop reuses one unresolved account Leave intent per group across dialog
+remounts and navigation. Reopening the member list must not mint a second Leave.
+A format rejection before journal admission is a definite input rejection, not
+an unconfirmed operation requiring endless status reads. Genuine IPC or journal
+uncertainty retains the original ID and does not imply cancellation or departure.
+Status observation has bounded waits even when a native cancellation remains
+outstanding; the original mutation still owns its result.
+
+Before an owner-authorized format migration, account departure coordinates the
+original physical member devices through the mandatory private document lane.
+One durable parent operation freezes the verified account-bound membership
+lifetimes. Each original member signs its own existing empty departure control;
+a new sibling cannot sign that event, and the owner need not be online. The
+parent completes only when every frozen leg has a verified terminal result.
+Internal child operations are absent from the public operation list and ordinary
+operation documents. A separately negotiated child-document capability keeps
+older clients on the unchanged operation and public-event formats. Offline or
+older original devices keep the parent pending until they return or upgrade.
+Once any departure commits, cancellation cannot undo it; remaining work rolls
+forward against the same frozen lifetimes and never targets a later invitation.
+Mandatory document workers retain interrupted pages in the queue until their
+retry deadline. Other ready peers may proceed, and the exact queued deadline
+wakes the runner; a pending page must not create repeated maintenance turns
+before it is due. Optional history and favorites retain independent scheduling.
+One admitted local-maintenance turn runs on the blocking pool independently of
+this document scheduler. Notifications received during that turn retain one
+follow-up; completing a no-op turn alone does not schedule another. The actual
+blocking closure owns its runtime retirement permit through cancellation, so
+shutdown cannot reopen stores before that work retires. Source execution and
+signed publication retain their existing durable order. Ordinary and legacy
+operation-document publishers share a feature-owned per-Node unit guard. Each
+group pass acquires it before projection capture and retains it through the
+signed store merge, so an older snapshot cannot overwrite a newer published
+head at a higher revision. Callers enter without journal, document, membership
+or delivery guards; the publication gate never spans network work. Its unit
+poison can be recovered because it owns no payload; journal and store poison
+retain their own failure policy. Invitation asset preparation remains outside
+this gate; its durable local commit and publication use the blocking pool.
+Exact-source fanout
+refresh finishes inside its existing worker before public distribution. A failed
+refresh defers the same durable fanout revision. Shared journal and store guards
+still serialize work that requires the same authority; scheduling independence
+does not bypass those guards or promise progress through a blocked journal.
+Explicit attachment selection remains a bounded, read-only rotating scan. Its
+completed batch rechecks current worker capacity, active identities and retry
+deadlines before reservation. Skipped jobs remain in the durable journal for an
+ordinary wake, completion or repair turn; a retained same-peer batch cannot pin
+later peers. This adds neither network workers nor another durable work queue.
+
+Reading a pending operation's unchanged status retains its retry nonce and does
+not wake all-peer reconciliation. Only advancing the existing one-second query
+retry gate emits that wake; admission and cancellation keep their own immediate
+notifications. UI polling must not become an unbounded synchronization producer.
+
+Normal and legacy operation publishers each select at most 128 retained groups
+per turn. When more remain, each turn includes the 64 most recently changed groups
+and rotates through the next 64 stable group keys with an independent cursor for
+each publisher. Retained terminal history therefore cannot permanently displace
+older pending requests or recovery heads. Cursors advance before document writes,
+reset on reopen and never change durable journal state. Selection releases the
+journal guard before publication; existing limits of 4,096 operation-document keys
+and 32 MiB of live operation data still bound successful writes. Fair selection
+does not evict retained authority or guarantee publication into a full store.
+
 Same-account group inventory is independent of that authority upgrade. Certified
 devices exchange bounded, versioned descriptive references through the existing
 private account-document session, including legacy groups currently held by only
@@ -727,6 +844,13 @@ current legacy device membership and modern account binding remain separate
 eligibility rules. A local absence is not evidence of global deletion. Source
 retractions and later observations retain their version ordering, and one source
 cannot erase another source's valid reference.
+Signed directory acknowledgements retain exact evaluated source heads. Compatible
+observations do not acknowledge each other's acknowledgement-only revisions;
+unchanged public control cuts therefore reach a publication fixed point. An
+incompatible or unavailable observation still requires its exact signed head to
+be acknowledged after evaluating its public cut. A stale acknowledgement cannot
+suppress a later independent source observation. Reference-only devices never
+publish borrowed observations or acknowledgements.
 
 Authoritative local state wins over descriptive references. Borrowed member facts
 are display data: they cannot enter the ChannelBook, establish network account
@@ -741,6 +865,15 @@ group state and do not establish account-wide authority or departure.
 Descriptive labels normalize control characters and bound UTF-8 text with a
 visible ellipsis or ID fallback. Invalid display text must not suppress a group
 entry, and this projection never renames its authoritative local group.
+
+Account-operation message fanout carries the committed public event ID into the
+existing bounded group distribution owner. That same round requests durable-have
+proofs from recipients and eligible custody relays; synchronizing event bytes alone
+cannot count as confirmation. Own-account siblings remain excluded from external
+member-copy counts, and full control distribution still reaches every routed member.
+The derived operation index is rebuilt on restart, allowing the latest retained
+source message to obtain missing confirmation after an upgrade without resending a
+new logical message. This evidence establishes custody, not delivery or reading.
 
 Small groups retain direct fanout. Text/sticker distribution in larger groups seeds a bounded subset and relies on authorized member recovery; membership/key controls retain their broader bounded fanout. File manifests have their own fanout behavior and must not inherit a text-only optimization without an explicit retention/recovery design.
 
@@ -817,7 +950,7 @@ clients need the updated behavior; existing opaque post offices are reused.
 
 Each accepted member controls **Share a copy**. A receiver can obtain its own authorized events while declining to serve retained history. Recovery automatically selects accepted sharing members from signed group state; users need not inspect individual members or grant separate DM permissions. Lower-frequency reconciliation still checks known non-sharing members so a later sharing change can be learned. The serving peer always enforces current authority and sharing preference.
 
-Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules.
+Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules. Source-revision preparation resumes through the existing bounded work and coalesced wake; it does not count as a persistence failure. Actual I/O, database and encrypted-storage failures retain their catch-up provenance and capped exponential plaintext retry schedule.
 
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
@@ -847,6 +980,26 @@ account device's attestation of its authenticated check; they do not introduce
 holder-signed delivery receipts. Later confirmations and revocations reconcile
 independently of the immutable message-history digest. Local legacy observations
 migrate automatically without replacing newer shared revisions.
+
+When initial copy confirmation fails, the existing recovery slot may query a
+currently certified account sibling for the exact retained event if that turn
+did not attempt external replication. When both kinds of work remain pending
+for the same message, successive scan cycles alternate their priority. Peer
+rotation advances independently of that alternation, so an unavailable external
+route cannot indefinitely suppress the sibling report or skip alternate peers.
+This retains one exchange in the existing slot and the original time budgets.
+The report reuses the authenticated read-only
+durable-have exchange, including for siblings without a physical group grant;
+it neither transfers the original nor grants membership. An honest negative
+report is sufficient for synchronized known-zero status. History plaintext alone
+is not proof that the sibling retains the original encrypted event.
+
+A logical account owner or member with an associated own-account history row
+may display zero from signed negative observations only when no positive claim
+remains after journal reconciliation. Without the public membership information
+needed to qualify positive external holders, that positive count remains unknown.
+The report query uses the existing recovery clock and slot, and stops after an
+authenticated report rather than repeatedly polling account-only history caches.
 
 The displayed member-copy count deduplicates accepted external member accounts
 and excludes the sender's entire account. Own-device synchronization and opaque
@@ -1005,6 +1158,24 @@ they know the account ID and establish a Noise connection. The version-5 documen
 domain has an independent legacy-peer cooldown; older peers keep ordinary sync
 and existing device labels. Unavailable hostnames fall back to the existing labels.
 
+Public contact profiles and group activity use optional version-6 document domains
+on the same certified sibling sessions. Existing domain identifiers, request versions,
+and signed inventory encodings remain unchanged. An older peer's pre-header close
+backs off only these extensions; ordinary documents and mandatory topology continue.
+Public profiles follow Profile consent on both devices and retain the contact's
+original account signature. Each source keeps one bounded head per contact; the
+public-profile owner resolves signed revision ties, including an explicit avatar
+clear. Private avatar overrides remain under Appearance consent. Publication repairs
+at most 16 contact heads per worker turn and optional repair cannot prevent login.
+
+Group activity follows History consent on both devices. A source signs at most 20
+control observations, binding them to its exact inventory snapshot. A reference
+consumer uses only the activity from the same selected source and matching snapshot;
+a missing or stale observation remains unavailable. Activity cannot import membership,
+keys, routes or message bodies. Local validated group state retains precedence.
+Both domains have separate bounded key quotas, reuse manifest/chunk/digest handling,
+and reject generic desktop writes in favor of the existing typed owners.
+
 Each domain compares a deterministic digest of signed metadata. Mismatches exchange
 paged manifests, then only needed verified content; a patch carries a complete
 record for its key, never an unvalidated full-state replacement. Version order is
@@ -1012,6 +1183,14 @@ revision, writer device and content hash, independent of wall-clock skew. Deleti
 tombstones participate in the digest. Equal metadata with a missing blob remains
 incomplete and cannot report up to date. Interrupted transfers preserve the old
 accepted version. Startup removes only managed incomplete document chunks.
+
+Each external wake or periodic refresh compares every enabled domain in a fresh
+sweep once the previous sweep has finished. Completed-domain bits belong to that
+sweep; digests and capability cooldowns remain peer-scoped. Wakes during a partial
+page or sweep coalesce into one follow-up sweep without resetting its cursor or
+starving other domains. Starting a fresh sweep does not create a continuation
+when backoff prevents I/O. Mandatory metadata and optional documents share this
+existing owner and scheduling rule.
 
 Manifests carry at most 64 records per turn; chunks are at most 16 KiB and a turn
 transfers at most 12 MiB. Drafts are capped at 64 KiB, packs at 12 MiB and private
@@ -1039,6 +1218,45 @@ history continues. Known recalls exclude private message bodies and file cards
 from account archive export, including cached pages. Control revisions invalidate
 stale exports; late original content also observes accepted recall state. Local
 hide/delete and conversation clearing do not become global recalls.
+
+#### Personal conversation removal
+
+Removing a contact is an account-personal action, independent of its current
+presence. The confirmation offers keeping or deleting history; keeping history
+does not silently erase it. An exited group's separate **Delete chat** action
+removes that chat and its history. Leaving a group can request the same cleanup,
+but its original signed account Leave must commit before any private erasure.
+The accepted cleanup choice stays bound to that exact operation ID and membership
+lifetime. Rejection, cancellation, an orphaned intent or a later invitation must
+not authorize deletion of another lifetime.
+
+The encrypted account-document store owns these private controls and monotone
+history floors. They reuse the mandatory certified-sibling control lane through
+a separately negotiated version-7 document request. A nonce-bound capability
+echo on the ordinary version-5 control exchange authorizes this extension;
+transport failure alone is not evidence of unsupported capability. Version-5
+digests and pages exclude its new keys. Deployed public group operations and
+event encodings remain unchanged. Older peers retain their supported exchange
+and require an upgrade for this capability. Offline or older
+siblings are not reported as having completed deletion.
+
+Persist the winning floor before retryable sidecar and managed-media cleanup.
+Publish a full-device acknowledgement only after that local cleanup completes.
+Public Leave commitment and private history cleanup are separate observations:
+the desktop keeps the original ticket while cleanup remains incomplete, including
+after restart. It must not clear its cache or announce cleanup success solely
+because the public Leave committed. Standalone deletion returns success only
+after local cleanup; subsequent sibling convergence remains independently tracked.
+
+Conversation removal preserves canonical signed protocol events, membership
+proofs, independently retained Favorites and exported files. It does not grant or
+revoke another account's membership, erase its history or act as a communication
+block. Presence-only discovery cannot restore a removed contact. Explicit reopen
+or authenticated new live content can restore visibility while retaining the
+history floor. Historical sibling imports require that exact source device to
+have applied the current floor; stale archive, draft, file-card and cached repair
+work must not resurrect deleted content. Device-local **Clear history** retains
+its existing local scope.
 
 Sibling file bytes use an optional checked attachment request on the same account
 session. Only that request admits the appended typed unavailable/source-disabled
@@ -1194,9 +1412,13 @@ semantics.
 Sibling history invalidations that arrive while an older page is active retain
 one coalesced follow-up per active worker (at most four). The worker immediately
 queues that follow-up and cannot report UpToDate while it is pending; policy
-replacement/cancellation and worker failure clear the pending marker. Saved
-Messages participates in the same bounded UI history reconciliation even when
-the own account is absent from the contact roster.
+replacement, cancellation or a terminated worker retire its pending marker.
+A failed optional favorites response does not retire the history worker:
+unfinished archive pages and any coalesced refresh still schedule immediate
+history work while retaining the favorites error. Without pending history work,
+that error waits for the next normal wake or repair tick instead of creating a
+busy retry loop. Saved Messages participates in the same bounded UI history
+reconciliation even when the own account is absent from the contact roster.
 
 Every account-target enqueue persists verified recipient and sibling fanout
 bindings before constructing immutable delivery destinations. Acceptance cannot
@@ -1210,7 +1432,175 @@ It never marks a safety number verified or merges old-account conversations.
 
 Ongoing `MTAHS2` reconciliation separates file cards from file bytes; frozen `MTAHS1` retains its attachment-coupled behavior. Source and receiver category intersections and process-local policy revisions guard selected exports and durable imports. These changes keep the existing bounded page/frame budgets.
 
-Channel archive, file-card and attachment-byte exports require both source and requester to be accepted channel members. A pending invitation alone is not read permission.
+Optional attachment encryption and verification run in admitted blocking work
+without retaining the account-sync commit, delivery or policy guards. Preparation
+checks runtime admission and the exact policy revision between chunks. Final
+publication reacquires the commit guards and rechecks personal removal, recall,
+the policy revision and the live manifest/card, so deletion, policy replacement
+(including off/on) or runtime retirement during preparation cannot revive bytes.
+The final rename and fsync remain inside this commit boundary; synchronous disk
+work is not preemptible, and retirement still waits for its admitted worker.
+
+Channel archive, file-card and attachment-byte exports require the source to
+retain accepted membership under its current account. A certified sibling with
+an independently verified current binding to that same accepted account may
+receive a private account copy without a separate physical device membership.
+The source reuses the canonical account grant or validated legacy account-bound
+membership; a certificate or descriptive group inventory alone cannot grant read
+access. Pending invitations, retired account bindings and previous-account
+archives do not establish this entitlement. Existing source/receiver category
+permissions, signed history-sharing policy, recall, expiry and exact attachment
+scope still apply. Selected pages and subsequent chunks recheck current
+entitlement and privacy state; receiving a private copy installs no public
+membership, sender key or group administration permission.
+
+Authenticated sibling Wake hints carry invalidation metadata only. Their bounded
+existing worker remains active when optional history, attachment, appearance and
+contact synchronization are disabled, so mandatory account control requests and
+results can progress promptly. Every subsequent content exchange independently
+enforces its category permissions. A local TCP/authentication capacity rejection
+leaves the Wake revision unacknowledged and retries unchanged work on the existing
+ten-second reconciliation interval. A newer durable local publication may bypass
+only that local-admission cooldown through the existing notification/debounce;
+remote exchange or capability failures retain their sixty-second cooldown even
+when another local publication occurs. Neither path adds a sender or TCP slot.
+
+The two existing mandatory account-document workers reserve one slot for
+GroupControl and one for GroupInventory/DeviceHostname. Their independent
+per-peer cursors preserve partial pages and retry deadlines; neither lane can
+occupy the other's slot. This prevents directory pagination or a held directory
+response from delaying an accepted account operation's request/result, while
+directory work retains a bounded opportunity to progress. Both lanes use the
+same authenticated session pool and eight-slot TCP budget. Aggregate status
+retains either lane's error/upgrade and reports up to date only after both settle.
+
+A negotiated operation exchange may omit role rows only when the request's
+nonzero role-only digest exactly matches the source's current role-only digest.
+The source filters those equivalent rows before applying page row/byte limits;
+operation, legacy-operation and personal-control rows retain their existing
+lexical key order, exclusive continuation and full-scope completion digest.
+Legacy, absent and mismatched role digests keep the complete role scope. The
+receiver settles only when its full local digest matches that completion digest;
+a role change behind a continuation therefore requires a fresh scope rather than
+claiming convergence or skipping unknown authority.
+
+When a negotiated page includes normal operation rows before legacy-operation
+rows, the exporter completes that normal prefix before loading the first legacy
+payload. The existing exclusive continuation resumes the remaining key order;
+legacy-only pages retain the 64-row ceiling. This is an earlier authenticated
+page boundary, not partial-record adoption: nonce/capability checks and atomic
+page commit still apply, and the completion digest still covers the full scope.
+The wire format, byte ceiling, worker limits and exchange deadlines do not change.
+
+Operation maintenance checks current signed metadata hashes against its existing
+processed-input index before loading and decoding unchanged heads. Fully verified
+frames authored by this exact local device can enter that same index without
+executing a second effect. Changed, unbound or unfinished foreign inputs still
+follow ordinary verification and retry; diagnostic projection readers remain
+complete. Current metadata is rechecked under the payload guard, with no nested
+processed-index/store locks, new cache, authority rule or network resource.
+Local normal and legacy publishers use that same verified hash only to compare
+an unchanged own projection without repeating its signature checks under the
+document lock. They require the exact full device identity, group and revision;
+changed bytes or an absent process-local witness take the full verification path.
+
+Within the Control slot, locally pending account operations prioritize their
+selected executors by full device identity. An unrelated sibling's metadata read
+may be cancelled and requeued from its exact cursor checkpoint. The replacement
+starts only after owned cancellation completes and releases admission; cancellation
+neither retires protocol support nor reports a network failure. An active selected
+executor is not restarted by repeated status polling. Terminal operations retire
+that priority, allowing unrelated sibling metadata to resume. Accepted mutations
+are never cancelled by this scheduling rule, and worker/TCP limits do not increase.
+
+An initial Control dial timeout owns no response bytes or continuation. If the
+original operation still selects that full device identity, a strictly newer
+authenticated Wake received after that failed attempt began may restart the
+comparison once, including a new publication observed during its stalled dial.
+The ordinary retry deadline still starts at failure completion. This applies only without an active or parked comparison pair. Reception
+time orders this evidence but is excluded from Wake-token equality; duplicate
+notifications and status polling cannot renew the opportunity. Remote dial
+timeout is distinct from outer negotiation/local-admission waits, authentication
+rejection, malformed responses and partial-page failures, whose ordinary retry
+rules remain unchanged. The restart uses the existing Control slot and session
+admission; it adds no worker, comparison, wire format or authority.
+
+A read dispatched before a new operation selects that same executor cannot
+retroactively become its protected foreground comparison. After owned cancellation
+releases admission, the Control owner parks the exact original metadata checkpoint
+and starts an independent comparison from the beginning. At most one checkpoint is
+parked per certified remote device (at most 63); no response bytes are parked and
+only the existing single Control worker reads pages. The two comparisons alternate
+after validated page completion, preserving their own continuation keys, digests,
+support observations and retry deadlines. Failed or deferred admission does not
+pay for a page turn. Readiness respects both deadlines, and aggregate status cannot
+claim convergence while either comparison remains unfinished.
+
+A pair's initial scheduling credit covers one validated foreground page and,
+when its original checkpoint is incomplete, one validated original resume page.
+Failed or deferred reads retain that credit; follow-up publications never renew
+it. After both pages are paid, a pair without a locally selected operation no
+longer outranks a fresh authenticated hint from another sibling. Its later pages
+use ordinary scheduling and owned cancellation while retaining both independent
+checkpoints. Local operation priority and newly owed replacement/resume turns
+keep their existing protection. Pair lifetime and cursor alternation therefore
+do not confer permanent cross-peer priority or delay discovery of incoming
+account operations. No worker, cursor, timer, wire or authority is added.
+
+Only newly admitted immutable operation IDs or a new authenticated Wake token
+coalesce a foreground follow-up; polling and operation status writes do not.
+If one comparison has completed while the other still has a continuation, a
+new follow-up reuses the completed slot for a fresh foreground prefix. The
+unfinished checkpoint becomes the exact retained background, regardless of
+which slot had completed. The fresh prefix pays its next validated page before
+that background resumes. Both-partial comparisons retain their two independent
+checkpoints; failed/deferred pages and unchanged demand cannot rotate a slot.
+The owner retains the current bounded pending-ID snapshot rather than an
+ever-growing history. Once the previous operation settles, a newly selected other
+executor retains its priority over resumed background work. Policy or identity
+changes retire both comparisons through the existing worker cleanup.
+
+Comparison-start demand travels with the checkpoint through the queue, task
+rollback and paired page swaps. Resuming an old partial page cannot overwrite
+that witness with today's pending IDs or Wake token. A genuinely new demand for
+an already queued peer therefore starts a fresh foreground comparison before
+replaying its old suffix; an unchanged demand continues its existing comparison.
+Successful refresh clears the witness, while refused refresh preserves it.
+Snapshots use the existing pending-operation quota and never accumulate an
+unbounded history; the existing active-task rollback copies remain bounded by
+the same single Control worker.
+
+The same Control owner retains at most 64 authenticated Wake sender tokens, keyed
+by full Ed25519/X25519 identity and current account binding. Fresh tokens coalesce
+in sender FIFO order. A waiting sender may preempt an unrelated ordinary metadata read, including a
+natural first turn ordered by a publication hint. A hint alone is not an explicit
+operation or a reservation. The owed replacement foreground page, its initial
+original resume page and an active locally selected executor remain protected.
+The replacement page is followed by the owed interrupted page before more sender
+hints; a hint storm cannot repeatedly cancel either turn. Completed initial
+credits do not protect every later page of an unfinished pair.
+Partial-page and parked-comparison retry deadlines remain in force,
+and policy/identity changes retire stale tokens. Hints confer no read or mutation
+authority; every replacement exchange performs normal session admission.
+
+The other two synchronization slots reserve one worker for optional private
+documents and one for history/favorites. Authorized custody and preference
+documents therefore do not wait for history/favorite responses. Each keeps its
+own continuation and retry state, and all optional category/read-entitlement
+checks remain in force. Document progress and archive progress are reported
+separately; the total remains four synchronization workers sharing the same
+eight TCP slots. Missing-attachment selection runs inside the existing history
+worker and its tracked blocking work, so a stalled local scan cannot park the
+parent scheduler or delay otherwise ready document workers. On completion, the
+parent still checks the captured policy revision and certified sibling before
+scheduling selected files; cancellation retains the blocking worker's admission
+until it exits.
+
+Local history admission backpressure retains the peer, history/favorites cursors
+and pending refresh through the existing five-second backoff. The queued retry
+deadline wakes the existing history lane when its worker is available; ordinary
+wakes and periodic refresh cannot consume that deferred demand or shorten its
+backoff. Other ready peers can proceed while it waits, without a busy retry loop.
 
 Message Yourself is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
 
@@ -1910,14 +2300,129 @@ A deleted local record or recalled event does not recall already copied data fro
 | Directory presence                   | At most 15 seconds.                                                                                                                                           | Origin freshness is not renewed by forwarding. Refresh and network delays can still affect observed liveness.                                                                                             |
 | Relay seed probes / reconciliation   | Eight concurrent probes and eight relay sync operations, separately. Coalesced durable/directory/route wakes; immediate bounded-batch continuation; adaptive jittered idle fallback.             | Not a fixed five-second end-to-end convergence promise or a global eight-socket cap for the relay process.                                                                                 |
 | Relay storage                        | Soft limits of 100,000 events and 512 MiB, with 5,000-event / 16 MiB compaction slack.                                                                        | Storage can temporarily exceed soft limits; capacity may evict younger copies before their age limit.                                                                                                     |
+| Indexed relay Have memory            | Four shared, nonwaiting 32 MiB logical reservations per endpoint. | Reservations span receive/conversion/use; overload is retryable. The 128 MiB accounting budget excludes other process memory and is not an RSS measurement. |
+| Indexed federation staging           | 512 outstanding sessions, 262,144 entries and 64 MiB accounted storage; 256 current inbound/eight outbound directions. | Remote inventory and selected local snapshots share charges. Cancellation revokes authority immediately; bounded cleanup releases charges later. |
+| Indexed relay maintenance            | Separate slices of up to 512 raw producer rows and 512 retained IDs hashed per pass; minimum 10 ms pause and three times slice duration; retry backoff 100 ms–5 s. | Interleaves retention, preparation and cleanup. Pacing is not a total service CPU or hard transaction latency cap. |
+| Indexed physical page reclamation   | Mode 2; start at 256 free pages, drain to at most 64, up to 64 iterations per eligible slice; 100 ms successful cooldown plus measured duty. | Only already-free pages. One background PASSIVE completion attempt can copy uncapped WAL work; partial transfer/typed contention retries independently at 100 ms–5 s. Page counts and file lengths are distinct from filesystem block release. |
 | Maximum relay event age              | Thirty days from retained original arrival semantics.                                                                                                         | Upper age bound, not minimum guaranteed retention. Forwarding/restart must preserve expiry behavior.                                                                                                      |
 | Group initial text/sticker seeding   | Small-group threshold five members; larger groups normally seed two peers.                                                                                    | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                 |
 | Group recovery                       | Three peers per channel recovery step; coalesced wakes visit up to eight joined channels; jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                      | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                        |
 | Group control fanout                 | At most four concurrent contacts.                                                                                                                             | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                |
 
-The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+
+### Idle mailbox work and rejected pages
+
+Post offices answer capability and whole-mailbox fingerprint probes through the
+persistent event log's indexed metadata and cached digest. A probe for unchanged
+mail must not export or clone ciphertext history. Appends, retention rewrites and
+reopening retain the persistent log's existing cache invalidation rules. Unknown
+and empty mailbox probes do not populate the retained digest cache.
+Post-office and unfiltered event-log responses select a causal prefix within the
+existing frame and burst budgets before cloning ciphertext; unrelated tail
+payloads remain borrowed. Custom policy projections retain their admission rules
+through the default bounded-export adapter.
+
+The paged network-store contract separates those collecting SDK operations from
+bounded ID and event pages. Its unfiltered SQL path reads a covering commit index,
+skips peer-known IDs, and fetches headers and bodies only for selected unknown
+events. Examined rows and selected bytes have separate budgets. Empty scanning
+pages with continuations mean progress, not an empty history. Existing participant
+policy projections use an explicit legacy adapter until their own owners adopt
+the paged contract.
+
+The SDK's `node::request_round` accepts a caller-owned authenticated
+`SecureChannel`, selected conversation and `SyncStore`. The caller retains
+admission and disclosure policy responsibility. This existing collecting
+compatibility path also lets external acceptance rigs observe a live relay over
+its normal authenticated protocol; it does not open retired legacy paths or
+acquire a second profile writer lease. Production participant and relay workers
+continue to use their bounded network stores.
+
+Durable admission assigns a commit ordinal only after every same-conversation
+parent exists. Commit-order export therefore supplies the required topological
+prefix even when signed clocks are inverted. Deterministic timeline ordering is
+a separate contract. A sync view captures a finite exclusive commit cutoff plus
+store, domain, conversation and destructive-generation binding; later appends
+belong to a later exchange. Destructive or authorization changes invalidate the
+view. No database transaction or mutex spans network I/O.
+
+Paged exchanges retain one ID chunk and bounded event frames rather than all
+local IDs. Existing peer Have chunk and aggregate limits remain enforced.
+An unavailable current fingerprint bypasses the optional probe; it cannot become
+a fabricated digest or an empty-set match. Availability, fingerprints and view
+completion never replace a fresh durable custody qualification. Local page or
+decode failures abort the exchange while preserving any committed received prefix.
+The dedicated post-office CLI uses the direct indexed path. Participant and
+collecting SDK paths retain their separate adoption boundary; this does not
+establish their startup or resident-memory bounds. The shared endpoint's Have
+reservations bound concurrent aggregate reception as well as each individual
+peer's existing aggregate limit.
+
+The internal indexed relay policy applies persisted monotonic expiry before an
+exact custody result or eligible body read. Its policy views also bind arrival
+and cutoff identities; an old view cannot freeze eligibility across expiry,
+origin correction or retirement. Capacity charges hidden rows until bounded
+reclamation removes them. Temporary pressure requests persistent draining and
+returns a local retryable error; a permanently oversized event has a distinct
+local resource failure. Neither outcome is a rejected peer event or successful
+custody. Arrival removal and graph finalization commit together. The
+[storage owner](ARCHITECTURE.md#storage-replay-and-query-budgets) defines these
+transactions and budgets. The dedicated runtime's paced maintenance owner
+advances reclamation and demanded digests without inline history hashing. Scoped
+queue saturation leaves optional fingerprint readiness pending for a later probe;
+only explicit federation demand starts global inventory preparation. Typed local
+failures do not select older wire versions. The runtime stops admission on a
+faulted profile and joins owned work before releasing its lease during
+cooperative shutdown.
+
+An opaque mailbox exchange retains IDs of wrappers whose inner events cannot yet
+be admitted, so a rejected page cannot repeatedly occupy every response while
+later valid events wait. These hints belong only to that mailbox operation and
+remain bounded; they do not claim acceptance, custody or recipient delivery.
+A later operation retries the rejected events after permissions, causal parents
+or local storage recover. Existing signature, conversation and attachment policy
+checks remain authoritative.
+
+Successfully opened wrappers whose inner events are retained in the local event
+log also produce optional encrypted receive hints in a sidecar next to that log.
+Hints bind the complete local device, account and derived mailbox identity. On
+Node recreation, only mappings whose inner IDs still exist after local replay
+seed the receive set. Missing local history therefore remains recoverable even
+when an older hint file survives. Invalid envelopes, ignored file-consent controls,
+staged events outside the main log and rejected admissions are not persisted as
+receive hints. Existing operation-local retry rules continue to apply.
+
+The sidecar appends only new ID mappings, without storing message content or
+rewriting history. It is limited to 250,000 mappings and 64 MiB; saturation stops
+new hint writes. Duplicate hints perform no disk writes. Corrupt, foreign-owner
+or unavailable files are preserved and disable this optimization for that run;
+receive continues through ordinary validation. Hints need no per-event fsync and
+may be lost on a crash: they never acknowledge custody or delivery. This reduces
+repeat mailbox transfer after restart, while encrypted history replay, local
+index reconstruction and uncached controls still require startup work.
 
 ### Session reuse contract
+
+A fresh node dial, including Control-priority account synchronization, has one
+twenty-second deadline across privacy admission, authentication admission, TCP
+capacity, and every candidate route. Per-route adaptive deadlines cannot extend
+that overall lifetime. Aggregate expiry is distinct from a remote Noise dial
+timeout and cannot trigger the selected-operation Wake recovery described above.
+The disclosure read gate still encloses the Noise handshake and verified-peer
+commit, so a completed privacy change cannot be followed by an old attempt's
+identity disclosure. Cancellation drops all racing sockets, their permits and
+the authentication lease before releasing the gate.
+
+Discovery owns each visibility guard together with its UDP operation. One second
+bounds the complete announcement or routed probe, including guard acquisition;
+socket backpressure cannot retain the guard indefinitely. A timeout cancels the
+send, and the existing periodic producer owns retries. Disabling visibility still
+waits for any already-admitted send and prevents subsequent publication.
+
+The optional pinned relay gateway owns its proxy accept loop and every forwarding
+task. Gateway cancellation and upstream replacement close the owned listener and
+active streams; old forwarding tasks cannot retain a port or outlive their gateway.
 
 A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout. When an authenticated
 route race wins a different endpoint from the caller's verified roster hint, the
@@ -1959,6 +2464,43 @@ entries are capped at 256, expire after sixty seconds, and bind the actual
 authenticated endpoint, full identity and privacy generation. A successful
 negotiation clears that endpoint's negative entry.
 
+Identity-only Noise sessions from unconfigured legacy peers may reuse completed
+generic sync rounds when a current signed announcement names the exact same Ed25519
+and X25519 identity, carries no account certificate, and has no post-office role.
+That compatibility does not infer an account binding: current or historical account
+proofs, durable linked-device pins (including pins without cached announcements),
+and account or role transitions still reject the older identity-only channel.
+Endpoint, privacy generation, I/O admission and conversation scope checks remain
+mandatory, including for bare Noise reuse when no announcement or pin exists.
+These compatibility checks apply to generic sync only. Negotiated account-session
+reuse retains its existing independent certified-sibling admission and account
+scope checks; an identity-only generic session cannot substitute for that owner.
+An SDK peer without an in-band announcement may retain its already negotiated,
+completed Account session when its current signed presence names the exact full
+identity and own account, its durable sibling certificate remains valid, and
+configured account proofs accept that binding. Conflicting account or relay-role
+proofs reject reuse. This does not promote a generic session into an Account
+session or bypass the Account exchange's existing certification checks.
+
+A reusable inbound account session becomes idle only after its authenticated
+request has completed and the terminal response has been written. Completed idle
+sessions cannot consume all listener or shared admission indefinitely: the existing
+session owner may retire the oldest such session under capacity pressure, before
+waiting for the listener's connection reservation. At most one retirement is
+pending until the owning server future drops its actual socket and TCP permits.
+No permit is manufactured or released early, and the eight shared/seven directional
+budgets remain unchanged.
+
+Non-consuming readiness ends the idle registration before framed reception starts;
+ready bytes win a simultaneous retirement signal. Handshakes, frame reads and active
+responses are never retired by this policy. Cancellation removes the registration,
+and waiting for readiness plus the next frame retains the existing enclosing
+thirty-second deadline. Ordinary event-log sync is not classified as completed idle
+between its request/followup frames, because those boundaries do not establish that
+its logical exchange has finished. Retiring an account idle session changes neither
+peer authority nor receipt semantics; subsequent requests use existing authenticated
+fresh-session recovery.
+
 Pool lookup preserves explicit listener isolation. Up to 256 bounded route
 affinities remember an actually authenticated fallback for the same requested
 endpoint, identity and policy generation; a fallback is reusable only while the
@@ -1982,6 +2524,15 @@ channel still performs its own identity-pinned Noise handshake and retains its
 own connection permits. A different candidate, identity or privacy generation
 has independent admission.
 
+Fresh authenticated account GroupControl requests use the Control admission
+class; other callers retain Ordinary admission. A Control waiter may overtake
+queued Ordinary handshakes, including directory and Wake work, but never an
+active handshake. Each class remains FIFO, and after one Control admission the
+oldest waiting Ordinary caller gets the next turn before another Control. A small
+owned lease and cancellation-safe waiter ticket retain this ordering through
+timeout, caller retirement and route races. Priority changes neither identity
+validation nor connection capacity, and confers no account or group authority.
+
 The gate registry retains at most 256 live keys, prunes only expired weak entries
 and never evicts an active owner into a duplicate gate. Gate acquisition uses
 the existing two-second capacity wait; the actual handshake retains its adaptive
@@ -1990,6 +2541,30 @@ Network/session clearing cannot discard an active gate; old work must retire or
 cancel before another request for that same key begins. These hints authorize
 neither peer identity nor recipient delivery. Repeated unreachable probes must
 leave bounded capacity for other authenticated peers and relay exchanges.
+
+Local authentication/TCP admission contention is backpressure, not a negative
+peer-authentication or protocol-capability observation. Account synchronization
+retains its verified page/digest and capability records, releases the worker and
+retries through its existing delayed loop. Coalesced refresh wakes must neither
+restart that deferred page nor create a no-I/O self-requeue loop. History,
+favorites and attachment progress remain pending; identity, framing and content
+validation failures retain their error paths. The socket and authentication
+limits are unchanged.
+
+Account group fanout retains the same committed journal revision after local
+admission backpressure on direct or eligible relay paths. Direct control rounds
+also retain that revision after a local `StaleCursor` or a retryable closed-session
+transport error. A responder whose finite view becomes invalid can close Noise
+before sending an application error; that failed round cannot acknowledge completed
+fanout. The shared session classifier keeps policy and protocol rejections outside
+this transport retry. The existing bounded
+queue retries after one second without blocking other ready groups; queue
+overflow returns the revision to its durable journal cursor. Successful rounds
+remain deduplicated, and retry never invents custody or recipient confirmation.
+Other transport failures keep their existing recovery policy. This
+continuation preserves the original operation, effect and journal sequence; it
+does not replace the independent ten-second departure retry or change peer and
+foreground-operation deadlines.
 
 Historical-route rounds launch at most two device probes concurrently. Each may
 race at most two candidates, so this producer alone consumes at most four of the
@@ -2201,11 +2776,12 @@ reject the appended optional tags safely and keep ten-second anti-entropy.
 Existing frame indices and stored encodings remain unchanged.
 Appending records does not reset a forward cursor: a changed sweep schedules a
 fresh pass for IDs inserted behind that cursor. Up-to-date status requires a
-completed validated sweep and no pending attachment work. Four history workers
-and two attachment workers separate text/preferences from slow file downloads;
-whole-operation deadlines and policy cancellation bound their lifetimes. Tracked
-blocking work keeps source scans and durable imports out of the shared network
-accept task, and runtime retirement waits for admitted persistence work.
+completed validated sweep and no pending attachment work. Four synchronization
+workers and two attachment workers keep document/history lanes and file downloads
+within their existing budgets; network deadlines and policy cancellation bound
+asynchronous exchanges. Tracked blocking work keeps source scans and durable
+imports out of the shared network accept task, and runtime retirement waits for
+admitted persistence work.
 One metadata index selects at most sixteen payloads per page; append-only sources
 extend the index, while erasure, policy and membership changes invalidate it.
 Known-account history uses a first-DM metadata index that scans only appended
@@ -2216,12 +2792,16 @@ both live admission and replay, with clear tombstones winning equal revisions.
 Preference consumers use the core's `(revision, device_id)` order. Contact imports
 persist whole records in bounded batches, compare the expected local record at
 the commit boundary to preserve concurrent local edits, and reload each affected
-UI projection once. Linked imports preserve device-local contact deletions;
+UI projection once. Linked imports respect account-personal conversation removal;
 local committed mutations wake publication immediately.
 
 Federation wakes on durable mailbox, directory and effective route changes,
-coalesces bursts, caches unchanged inventories and continues full mailbox batches
-without waiting for the idle fallback. Complete outgoing and inbound exchanges
+coalesces bursts and caches unchanged inventories. Consecutive full mailbox
+batches continue with a per-edge delay growing from 100 milliseconds to at most
+five seconds, so inconsistent inventories or retention churn cannot create
+unbounded immediate reconciliation. A drained batch resets that delay. Mail and
+presence notifications do not bypass a saturated edge's continuation deadline;
+other healthy edges retain independent progress. Complete outgoing and inbound exchanges
 have absolute deadlines and rotate mailbox attempts across failures. Bridge
 negotiation distinguishes transport/malformed/policy failures from supported
 compatibility fallback and retains bounded per-relay retry state. Discovery keeps

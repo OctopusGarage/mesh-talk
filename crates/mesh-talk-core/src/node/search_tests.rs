@@ -5,11 +5,35 @@ use super::*;
 use crate::discovery::announce::Announce;
 use crate::discovery::roster::Roster;
 use crate::identity::device::DeviceIdentity;
-use crate::node::MessageProtection;
+use crate::node::{DmEnvelope, MessageBody, MessageProtection};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+// Authored controls invalidate the canonical source. Drive the same bounded
+// projection turns as the runtime before asserting the settled search result.
+fn settle_channel_reads(node: &Node, channel: crate::eventlog::ConversationId) {
+    for _ in 0..256 {
+        if matches!(
+            node.channel_checkpoints.source_binding(channel),
+            Ok(Some(_))
+        ) {
+            node.process_channel_recalls(channel).unwrap();
+            assert!(
+                node.channel_checkpoints
+                    .history_read_ready(channel)
+                    .unwrap()
+            );
+            return;
+        }
+        let log = node.log.lock().unwrap();
+        node.channel_checkpoints
+            .project_step(log.repository().unwrap(), &node.identity, channel)
+            .unwrap();
+    }
+    panic!("finite channel checkpoint did not settle");
+}
 
 #[tokio::test]
 async fn search_finds_a_sent_dm_by_keyword() {
@@ -47,7 +71,7 @@ async fn search_finds_a_sent_dm_by_keyword() {
     // No peer is reachable (port 1), but send_dm still records to the sidecar.
     let peer_uid = peer.public().user_id();
     let _ = node.send_dm(&peer_uid, b"lunch at noon tomorrow").await; // delivery fails; sidecar written
-    let hits = node.search("NOON");
+    let hits = node.search("NOON").unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].from_me);
     assert_eq!(hits[0].label, "Peer");
@@ -58,9 +82,9 @@ async fn search_finds_a_sent_dm_by_keyword() {
     );
     original_roster.lock().unwrap().evict_stale(Duration::ZERO);
     assert!(original_roster.lock().unwrap().peers().is_empty());
-    let offline_hits = node.search("NOON");
+    let offline_hits = node.search("NOON").unwrap();
     assert_eq!(offline_hits.len(), 1);
-    assert_eq!(node.search_recent("NOON").hits.len(), 1);
+    assert_eq!(node.search_recent("NOON").unwrap().hits.len(), 1);
     assert_eq!(offline_hits[0].target, peer_uid);
     assert_eq!(
         offline_hits[0].account_id.as_deref(),
@@ -71,10 +95,10 @@ async fn search_finds_a_sent_dm_by_keyword() {
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         &node.user_id(),
     );
-    assert!(node.search("NOON").is_empty());
-    assert!(node.search_recent("NOON").hits.is_empty());
-    assert!(node.search("   ").is_empty());
-    assert!(node.search("absent-keyword").is_empty());
+    assert!(node.search("NOON").unwrap().is_empty());
+    assert!(node.search_recent("NOON").unwrap().hits.is_empty());
+    assert!(node.search("   ").unwrap().is_empty());
+    assert!(node.search("absent-keyword").unwrap().is_empty());
 }
 
 #[test]
@@ -112,12 +136,12 @@ fn search_finds_account_message_after_contact_goes_offline() {
         .record(conversation, 1, 1, &message.encode())
         .unwrap();
 
-    assert_eq!(node.known_account_ids(), vec![contact.clone()]);
-    let hits = node.search("PROJECT");
+    assert_eq!(node.known_account_ids().unwrap(), vec![contact.clone()]);
+    let hits = node.search("PROJECT").unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].target, contact);
     assert_eq!(hits[0].text, b"offline project notes");
-    assert_eq!(node.search_recent("PROJECT").hits.len(), 1);
+    assert_eq!(node.search_recent("PROJECT").unwrap().hits.len(), 1);
 }
 
 #[test]
@@ -168,9 +192,9 @@ fn search_does_not_present_a_relay_only_account_as_a_contact() {
         )
         .unwrap();
 
-    assert!(node.known_account_ids().contains(&relay_id));
-    assert!(node.search("diagnostic").is_empty());
-    assert!(node.search_recent("diagnostic").hits.is_empty());
+    assert!(node.known_account_ids().unwrap().contains(&relay_id));
+    assert!(node.search("diagnostic").unwrap().is_empty());
+    assert!(node.search_recent("diagnostic").unwrap().hits.is_empty());
 
     // A durable proof may still describe the same device as an ordinary peer
     // while its current signed announcement advertises the relay role.
@@ -195,8 +219,8 @@ fn search_does_not_present_a_relay_only_account_as_a_contact() {
             1,
         ))
         .unwrap();
-    assert!(node.search("diagnostic").is_empty());
-    assert!(node.search_recent("diagnostic").hits.is_empty());
+    assert!(node.search("diagnostic").unwrap().is_empty());
+    assert!(node.search_recent("diagnostic").unwrap().hits.is_empty());
 }
 
 #[tokio::test]
@@ -245,11 +269,11 @@ async fn search_excludes_recalled_account_text() {
             .record(conv, seq, now, &message.encode())
             .unwrap();
     }
-    assert_eq!(node.search("account text").len(), 2);
+    assert_eq!(node.search("account text").unwrap().len(), 2);
     node.recall_account(&contact, recalled).await.unwrap();
-    assert!(node.search("withdrawn").is_empty());
-    assert!(node.search_recent("withdrawn").hits.is_empty());
-    assert_eq!(node.search("retained").len(), 1);
+    assert!(node.search("withdrawn").unwrap().is_empty());
+    assert!(node.search_recent("withdrawn").unwrap().hits.is_empty());
+    assert_eq!(node.search("retained").unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -278,15 +302,17 @@ async fn search_excludes_recalled_channel_text() {
         .unwrap();
     let recalled = node
         .channel_history(channel, 10)
+        .unwrap()
         .into_iter()
         .find(|entry| entry.text == b"withdrawn channel text")
         .unwrap()
         .id;
-    assert_eq!(node.search("channel text").len(), 2);
+    assert_eq!(node.search("channel text").unwrap().len(), 2);
     node.recall_channel(channel, recalled).await.unwrap();
-    assert!(node.search("withdrawn").is_empty());
-    assert!(node.search_recent("withdrawn").hits.is_empty());
-    assert_eq!(node.search("retained").len(), 1);
+    settle_channel_reads(&node, channel);
+    assert!(node.search("withdrawn").unwrap().is_empty());
+    assert!(node.search_recent("withdrawn").unwrap().hits.is_empty());
+    assert_eq!(node.search("retained").unwrap().len(), 1);
 }
 
 fn recent_search_node(dir: &std::path::Path) -> Arc<Node> {
@@ -337,10 +363,10 @@ fn recent_search_distinguishes_equal_account_text_and_deduplicates_sibling_copie
             )
             .unwrap();
     }
-    let response = node.search_recent("PROJECT");
+    let response = node.search_recent("PROJECT").unwrap();
     assert_eq!(response.per_conversation_limit, 2000);
     assert_eq!(response.hits.len(), 2);
-    let history = node.account_history(&contact, 10);
+    let history = node.account_history(&contact, 10).unwrap();
     for (hit, expected) in response.hits.iter().zip(history.iter().rev()) {
         assert_eq!(
             hit.reference,
@@ -363,8 +389,8 @@ async fn recent_search_channel_reference_matches_history_and_excludes_recall() {
     node.send_channel_message(channel, b"canonical channel token")
         .await
         .unwrap();
-    let id = node.channel_history(channel, 10)[0].id;
-    let response = node.search_recent("channel token");
+    let id = node.channel_history(channel, 10).unwrap()[0].id;
+    let response = node.search_recent("channel token").unwrap();
     assert_eq!(response.hits.len(), 1);
     assert_eq!(
         response.hits[0].reference,
@@ -374,13 +400,13 @@ async fn recent_search_channel_reference_matches_history_and_excludes_recall() {
         }
     );
     node.recall_channel(channel, id).await.unwrap();
-    assert!(node.search_recent("channel token").hits.is_empty());
+    settle_channel_reads(&node, channel);
+    assert!(node.search_recent("channel token").unwrap().hits.is_empty());
 }
 
 #[tokio::test]
 async fn recent_search_recovered_channel_send_preserves_original_id() {
     use crate::eventlog::event::EventId;
-    use crate::node::recovered_sent_ids::RecoveredSentIds;
 
     let dir = tempfile::tempdir().unwrap();
     let node = recent_search_node(dir.path());
@@ -393,12 +419,16 @@ async fn recent_search_recovered_channel_send_preserves_original_id() {
         .unwrap();
     let entry = node.sentlog.lock().unwrap().entries(&channel)[0].clone();
     let original = EventId::new([99; 32]);
-    let mut index = RecoveredSentIds::open(&dir.path().join("recovered.log"), "pw").unwrap();
-    index.record(&entry, original).unwrap();
-    *node.recovered_sent_ids.lock().unwrap() = Some(index);
-    assert_eq!(node.channel_history(channel, 10)[0].id, original);
+    node.recovered_sent_ids
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .record(&entry, original)
+        .unwrap();
+    assert_eq!(node.channel_history(channel, 10).unwrap()[0].id, original);
     assert_eq!(
-        node.search_recent("archive token").hits[0].reference,
+        node.search_recent("archive token").unwrap().hits[0].reference,
         SearchReference::Channel {
             channel_id: channel,
             message_id: Some(original)
@@ -436,7 +466,7 @@ fn recent_search_legacy_receive_is_device_scoped_and_unresolved_send_is_unavaila
         .unwrap()
         .record(conversation, 999, 20, &body)
         .unwrap();
-    let response = node.search_recent("legacy token");
+    let response = node.search_recent("legacy token").unwrap();
     assert_eq!(response.hits.len(), 2);
     assert_eq!(
         response.hits[0].reference,
@@ -483,11 +513,11 @@ fn recent_search_reports_recent_window_and_does_not_find_older_match() {
             .record(conversation, index, index, &envelope.encode())
             .unwrap();
     }
-    let response = node.search_recent("needle");
+    let response = node.search_recent("needle").unwrap();
     assert_eq!(response.per_conversation_limit, 2000);
     assert!(response.hits.is_empty());
-    assert_eq!(node.search_recent("recent row").hits.len(), 2000);
-    assert!(node.search_recent("  ").hits.is_empty());
+    assert_eq!(node.search_recent("recent row").unwrap().hits.len(), 2000);
+    assert!(node.search_recent("  ").unwrap().hits.is_empty());
 }
 
 #[test]
@@ -513,7 +543,7 @@ fn recent_search_excludes_expired_account_plaintext() {
         .unwrap()
         .record(conversation, 1, 1, &envelope.encode())
         .unwrap();
-    assert!(node.search_recent("expired token").hits.is_empty());
+    assert!(node.search_recent("expired token").unwrap().hits.is_empty());
 }
 
 #[tokio::test]
@@ -540,8 +570,11 @@ async fn recent_search_includes_durably_accepted_message_before_sidecar_recovery
         node.delivery.lock().unwrap().pending_transactions().len(),
         1
     );
-    assert_eq!(node.account_history(&account.account_id(), 10)[0].id, id);
-    let response = node.search_recent("WAL token");
+    assert_eq!(
+        node.account_history(&account.account_id(), 10).unwrap()[0].id,
+        id
+    );
+    let response = node.search_recent("WAL token").unwrap();
     assert_eq!(response.hits.len(), 1);
     assert_eq!(
         response.hits[0].reference,
@@ -580,12 +613,12 @@ fn search_context_selects_exact_old_account_id_and_bounded_canonical_neighbors()
             .record(conversation, index, index, &envelope.encode())
             .unwrap();
     }
-    let history = node.account_history(&contact, usize::MAX);
+    let history = node.account_history(&contact, usize::MAX).unwrap();
     let reference = SearchReference::Account {
         account_id: contact.clone(),
         message_id: Some(history[50].id),
     };
-    let context = node.search_context(&reference).unwrap();
+    let context = node.search_context(&reference).unwrap().unwrap();
     assert_eq!(context.newer_entries, 549);
     assert_eq!(context.messages.len(), 51);
     assert_eq!(
@@ -603,6 +636,7 @@ fn search_context_selects_exact_old_account_id_and_bounded_canonical_neighbors()
                 account_id: contact.clone(),
                 message_id
             })
+            .unwrap()
             .is_none()
         );
     }
@@ -611,6 +645,7 @@ fn search_context_selects_exact_old_account_id_and_bounded_canonical_neighbors()
             account_id: "e".repeat(32),
             message_id: Some(history[50].id)
         })
+        .unwrap()
         .is_none()
     );
 }
@@ -651,6 +686,7 @@ async fn search_context_rejects_recall_and_expiry_and_scrubs_neighbor_recalled_t
                 account_id: contact.clone(),
                 message_id: Some(EventId::new([index; 32]))
             })
+            .unwrap()
             .is_none()
         );
     }
@@ -659,6 +695,7 @@ async fn search_context_rejects_recall_and_expiry_and_scrubs_neighbor_recalled_t
             account_id: contact,
             message_id: Some(EventId::new([2; 32])),
         })
+        .unwrap()
         .unwrap();
     assert!(context.messages.iter().any(|e| e.recalled));
     assert!(context.messages.iter().all(|e| e.recalled_text.is_none()));
@@ -695,6 +732,7 @@ fn search_context_preserves_legacy_namespace_after_verified_account_binding() {
             message_id: Some(id)
         })
         .unwrap()
+        .unwrap()
         .messages[0]
             .text,
         b"legacy"
@@ -704,6 +742,7 @@ fn search_context_preserves_legacy_namespace_after_verified_account_binding() {
             account_id: account.account_id(),
             message_id: Some(id)
         })
+        .unwrap()
         .is_none()
     );
     node.roster.lock().unwrap().update(
@@ -716,6 +755,7 @@ fn search_context_preserves_legacy_namespace_after_verified_account_binding() {
             device_id: peer.user_id(),
             message_id: Some(id)
         })
+        .unwrap()
         .is_none()
     );
 }
@@ -730,13 +770,14 @@ async fn search_context_channel_uses_canonical_exact_identity() {
             .await
             .unwrap();
     }
-    let history = node.channel_history(channel, 10);
+    let history = node.channel_history(channel, 10).unwrap();
     let reference = SearchReference::Channel {
         channel_id: channel,
         message_id: Some(history[1].id),
     };
     assert_eq!(
         node.search_context(&reference)
+            .unwrap()
             .unwrap()
             .messages
             .iter()
@@ -745,7 +786,8 @@ async fn search_context_channel_uses_canonical_exact_identity() {
         history.iter().map(|e| e.id).collect::<Vec<_>>()
     );
     node.recall_channel(channel, history[1].id).await.unwrap();
-    assert!(node.search_context(&reference).is_none());
+    settle_channel_reads(&node, channel);
+    assert!(node.search_context(&reference).unwrap().is_none());
 }
 
 #[test]
@@ -776,7 +818,7 @@ fn recent_search_preserves_expiry_deadline_from_canonical_history() {
         )
         .unwrap();
     assert_eq!(
-        node.search_recent("expiring token").hits[0].expires_at_ms,
+        node.search_recent("expiring token").unwrap().hits[0].expires_at_ms,
         Some(deadline)
     );
 }
@@ -805,7 +847,7 @@ fn canonical_projection_decodes_only_selected_rows_for_recent_and_exact_context(
             .unwrap();
     }
     super::super::queries::reset_projection_decodes();
-    let recent = node.account_history(&contact, 3);
+    let recent = node.account_history(&contact, 3).unwrap();
     assert_eq!(recent.len(), 3);
     assert_eq!(super::super::queries::projection_decodes(), 3);
     let mut middle = [1; 32];
@@ -816,6 +858,7 @@ fn canonical_projection_decodes_only_selected_rows_for_recent_and_exact_context(
             account_id: contact,
             message_id: Some(EventId::new(middle)),
         })
+        .unwrap()
         .unwrap();
     assert_eq!(context.messages.len(), 51);
     assert_eq!(context.newer_entries, 64);
@@ -848,8 +891,8 @@ fn recent_search_global_limit_matches_full_order_across_conversations() {
                 .unwrap();
         }
     }
-    let all = node.search_recent("token");
-    let limited = node.search_recent_limited("token", 4);
+    let all = node.search_recent("token").unwrap();
+    let limited = node.search_recent_limited("token", 4).unwrap();
     assert_eq!(
         limited
             .hits
@@ -861,7 +904,12 @@ fn recent_search_global_limit_matches_full_order_across_conversations() {
             .map(|hit| (&hit.reference, hit.hit.wall_clock))
             .collect::<Vec<_>>()
     );
-    assert!(node.search_recent_limited("token", 0).hits.is_empty());
+    assert!(
+        node.search_recent_limited("token", 0)
+            .unwrap()
+            .hits
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -880,7 +928,7 @@ async fn channel_projection_decodes_only_selected_rows_and_preserves_exact_conte
             .unwrap();
     }
     super::super::queries::reset_projection_decodes();
-    let recent = node.channel_history(channel, 3);
+    let recent = node.channel_history(channel, 3).unwrap();
     assert_eq!(recent.len(), 3);
     assert_eq!(super::super::queries::projection_decodes(), 3);
     let mut middle = [1; 32];
@@ -891,6 +939,7 @@ async fn channel_projection_decodes_only_selected_rows_and_preserves_exact_conte
             channel_id: channel,
             message_id: Some(EventId::new(middle)),
         })
+        .unwrap()
         .unwrap();
     assert_eq!(context.messages.len(), 51);
     assert_eq!(context.newer_entries, 64);
@@ -956,7 +1005,7 @@ fn device_history_keeps_envelope_deadline_metadata_for_legacy_stored_rows() {
             EventId::new([9; 32]),
         )
         .unwrap();
-    let history = node.dm_history(&peer.public(), 1);
+    let history = node.dm_history(&peer.public(), 1).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].expires_at_ms, Some(deadline));
 }
@@ -1033,7 +1082,7 @@ fn bounded_history_with_authenticated_peer_recall_never_clones_retained_plaintex
     );
     node.log.lock().unwrap().append(delete).unwrap();
     super::super::received_log::reset_history_clone_bytes();
-    let history = node.account_history(&account_id, 3);
+    let history = node.account_history(&account_id, 3).unwrap();
     assert_eq!(history.len(), 3);
     assert_eq!(
         super::super::received_log::history_clone_bytes(),
@@ -1042,6 +1091,7 @@ fn bounded_history_with_authenticated_peer_recall_never_clones_retained_plaintex
     );
     assert!(
         node.recalled_targets_account(&account_id)
+            .unwrap()
             .contains(&EventId::new(target))
     );
     let mut neighbor = [2; 32];
@@ -1052,6 +1102,7 @@ fn bounded_history_with_authenticated_peer_recall_never_clones_retained_plaintex
             account_id,
             message_id: Some(EventId::new(neighbor)),
         })
+        .unwrap()
         .unwrap();
     assert_eq!(context.messages.len(), 51);
     assert!(
@@ -1095,7 +1146,7 @@ fn canonical_dedup_keeps_earliest_clock_copy_despite_reverse_insertion() {
             )
             .unwrap();
     }
-    let history = node.account_history(&contact, 1);
+    let history = node.account_history(&contact, 1).unwrap();
     assert_eq!(history[0].wall_clock, 1);
     assert_eq!(history[0].text, b"first canonical copy");
 }
@@ -1127,21 +1178,25 @@ fn malformed_nested_protection_is_absent_from_history_search_and_context() {
         )
         .unwrap();
 
-    let history = node.account_history(&contact, 10);
+    let history = node.account_history(&contact, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert!(history[0].text.is_empty());
     for query in ["MTPR1", "MTEX1", "c2VjcmV0", "secret"] {
-        assert!(node.search(query).is_empty());
-        assert!(node.search_recent(query).hits.is_empty());
+        assert!(node.search(query).unwrap().is_empty());
+        assert!(node.search_recent(query).unwrap().hits.is_empty());
     }
     let reference = SearchReference::Account {
         account_id: contact,
         message_id: Some(id),
     };
-    let context = node.search_context(&reference).unwrap();
+    let context = node.search_context(&reference).unwrap().unwrap();
     assert_eq!(context.messages.len(), 1);
     assert!(context.messages[0].text.is_empty());
-    assert!(node.protected_message_content(&reference).is_none());
+    assert!(
+        node.protected_message_content(&reference)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1164,18 +1219,18 @@ async fn protected_channel_exact_reveal_excludes_search_context_recall_and_wrong
         channel_id: channel,
         message_id: Some(id),
     };
-    let history = node.channel_history(channel, 10);
+    let history = node.channel_history(channel, 10).unwrap();
     assert_eq!(history[0].protection, Some(MessageProtection::Click));
     assert!(history[0].text.is_empty());
-    assert!(node.search("private").is_empty());
-    assert!(node.search_recent("private").hits.is_empty());
+    assert!(node.search("private").unwrap().is_empty());
+    assert!(node.search_recent("private").unwrap().hits.is_empty());
     assert!(
-        node.search_context(&reference).unwrap().messages[0]
+        node.search_context(&reference).unwrap().unwrap().messages[0]
             .text
             .is_empty()
     );
     assert_eq!(
-        node.protected_message_content(&reference),
+        node.protected_message_content(&reference).unwrap(),
         Some((MessageProtection::Click, b"private token".to_vec()))
     );
     assert!(
@@ -1183,6 +1238,7 @@ async fn protected_channel_exact_reveal_excludes_search_context_recall_and_wrong
             channel_id: other,
             message_id: Some(id)
         })
+        .unwrap()
         .is_none()
     );
     assert!(
@@ -1190,11 +1246,21 @@ async fn protected_channel_exact_reveal_excludes_search_context_recall_and_wrong
             channel_id: channel,
             message_id: None
         })
+        .unwrap()
         .is_none()
     );
     node.recall_channel(channel, id).await.unwrap();
-    assert!(node.protected_message_content(&reference).is_none());
-    assert!(node.channel_history(channel, 10)[0].recalled_text.is_none());
+    settle_channel_reads(&node, channel);
+    assert!(
+        node.protected_message_content(&reference)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        node.channel_history(channel, 10).unwrap()[0]
+            .recalled_text
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1257,12 +1323,12 @@ async fn protected_channel_retains_redaction_and_exact_content_after_restart_and
         "pw",
     )
     .unwrap();
-    let history = reopened.channel_history(channel, 10);
+    let history = reopened.channel_history(channel, 10).unwrap();
     assert_eq!(history[0].id, id);
     assert_eq!(history[0].protection, Some(MessageProtection::Authenticate));
     assert!(history[0].text.is_empty());
     assert_eq!(
-        reopened.protected_message_content(&reference),
+        reopened.protected_message_content(&reference).unwrap(),
         Some((MessageProtection::Authenticate, b"retained secret".to_vec()))
     );
 }
@@ -1294,20 +1360,20 @@ async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_expo
         channel_id: channel,
         message_id: Some(id),
     };
-    let entry = &node.channel_history(channel, 10)[0];
+    let entry = &node.channel_history(channel, 10).unwrap()[0];
     assert_eq!(entry.protection, Some(MessageProtection::Authenticate));
     assert!(!entry.file.as_ref().unwrap().name.contains("sensitive"));
     {
         let book = node.files.lock().unwrap();
-        let manifest = book.manifest(&file).unwrap();
-        assert!(!book.accepts(manifest.unprotected()));
+        let manifest = book.manifest(file).unwrap().unwrap();
+        assert!(!book.accepts(manifest.unprotected()).unwrap());
         let downgraded = crate::file::AnyManifest::Protected {
             protection: MessageProtection::Click,
             inner: Box::new(manifest.unprotected().clone()),
         };
-        assert!(!book.accepts(&downgraded));
+        assert!(!book.accepts(&downgraded).unwrap());
         assert!(!crate::node::files::same_file_transfer(
-            manifest,
+            &manifest,
             manifest.unprotected()
         ));
     }
@@ -1328,26 +1394,31 @@ async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_expo
     }
     assert!(node.read_media(file).is_none());
     assert!(node.read_file(file).is_err());
-    assert!(!node.file_ready_to_save(file));
+    assert!(!node.file_ready_to_save(file).unwrap());
     let output = dir.path().join("export.png");
     assert!(node.save_file(file, &output).is_err());
     assert!(!output.exists());
     assert!(node.save_file_into_dir(file, dir.path()).is_err());
     assert_eq!(
-        node.protected_image_protection(&reference),
+        node.protected_image_protection(&reference).unwrap(),
         Some(MessageProtection::Authenticate)
     );
     assert_eq!(
-        node.protected_image_content(&reference),
+        node.protected_image_content(&reference).unwrap(),
         Some((MessageProtection::Authenticate, bytes.to_vec()))
     );
-    assert!(node.protected_message_content(&reference).is_none());
+    assert!(
+        node.protected_message_content(&reference)
+            .unwrap()
+            .is_none()
+    );
     let wrong = node.create_channel("wrong", vec![]).await.unwrap();
     assert!(
         node.protected_image_content(&SearchReference::Channel {
             channel_id: wrong,
             message_id: Some(id)
         })
+        .unwrap()
         .is_none()
     );
     assert!(node.recall_account(&"a".repeat(32), id).await.is_err());
@@ -1377,7 +1448,8 @@ async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_expo
     node.log.lock().unwrap().append(foreign.clone()).unwrap();
     assert!(node.recall_channel(channel, foreign.id).await.is_err());
     node.recall_channel(channel, id).await.unwrap();
-    assert!(node.protected_image_content(&reference).is_none());
+    settle_channel_reads(&node, channel);
+    assert!(node.protected_image_content(&reference).unwrap().is_none());
     let (account_id, account_file) = node
         .enqueue_protected_file_to_account_progress_expiring_if(
             &node.account_id(),
@@ -1396,7 +1468,7 @@ async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_expo
     };
     assert!(node.read_media(account_file).is_none());
     assert_eq!(
-        node.protected_image_content(&account_reference),
+        node.protected_image_content(&account_reference).unwrap(),
         Some((MessageProtection::Click, bytes.to_vec()))
     );
     let video = dir.path().join("video.mp4");
@@ -1450,7 +1522,16 @@ async fn protected_image_without_manifest_never_uses_ordinary_media_read() {
         .unwrap();
     // Lifecycle cleanup retires the manifest before deleting the encrypted blob.
     // Model that intermediate state without relying on scheduler timing.
-    *node.files.lock().unwrap() = crate::node::filebook::FileBook::new();
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "DELETE FROM file_book_offers WHERE file=?1",
+                [file.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(node.media.read(file), Some(bytes.to_vec()));
     assert!(node.read_media(file).is_none());
 }
@@ -1496,17 +1577,17 @@ async fn protected_image_retains_policy_and_exact_bytes_after_restart() {
     )
     .unwrap();
     assert_eq!(
-        node.account_history(&account, 10)[0].protection,
+        node.account_history(&account, 10).unwrap()[0].protection,
         Some(MessageProtection::Click)
     );
     assert!(node.read_media(file).is_none());
     assert!(node.read_file(file).is_err());
     assert_eq!(
-        node.protected_image_content(&reference),
+        node.protected_image_content(&reference).unwrap(),
         Some((MessageProtection::Click, bytes.to_vec()))
     );
     node.recall_account(&account, id).await.unwrap();
-    assert!(node.protected_image_content(&reference).is_none());
+    assert!(node.protected_image_content(&reference).unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1532,10 +1613,143 @@ async fn protected_image_expiry_hides_explicit_and_ordinary_bytes() {
         account_id: node.account_id(),
         message_id: Some(id),
     };
-    assert!(node.protected_image_content(&reference).is_some());
+    assert!(node.protected_image_content(&reference).unwrap().is_some());
     Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
-    assert!(node.protected_image_content(&reference).is_none());
-    assert!(node.protected_image_protection(&reference).is_none());
+    assert!(node.protected_image_content(&reference).unwrap().is_none());
+    assert!(
+        node.protected_image_protection(&reference)
+            .unwrap()
+            .is_none()
+    );
     assert!(node.read_media(file).is_none());
     assert!(node.read_file(file).is_err());
+}
+
+#[test]
+fn indexed_runtime_recent_history_fetches_only_selected_bodies_after_reopen() {
+    use crate::identity::account::Account;
+    use crate::node::conversation::account_conversation_id;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let secrets = identity.secret_bytes();
+    let account = Account::generate();
+    let peer = "a".repeat(32);
+    let conversation = account_conversation_id(&account.account_id(), &peer);
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open_with_account(
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+            Account::from_secret_bytes(account.secret_bytes()),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("messages.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open();
+    for n in 1u64..=512 {
+        let mut id = [0; 32];
+        id[24..].copy_from_slice(&n.to_be_bytes());
+        let body = MessageBody::new(vec![b'x'; 16 * 1024], None).encode();
+        let envelope = DmEnvelope::new(account.account_id(), peer.clone(), id, body).encode();
+        let mut sent = node.sentlog.lock().unwrap();
+        sent.record(conversation, n, n, &envelope).unwrap();
+        sent.record(ConversationId::new([77; 32]), n, n, &vec![b'z'; 32 * 1024])
+            .unwrap();
+    }
+    let page = node.account_history(&peer, 50).unwrap();
+    assert_eq!(page.len(), 50);
+    assert_eq!(node.sentlog.lock().unwrap().body_reads(), 50);
+    assert_eq!(page.first().unwrap().wall_clock, 463);
+    assert_eq!(page.last().unwrap().wall_clock, 512);
+    let generation = |node: &Node| {
+        node.storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT job FROM history_order_jobs WHERE conversation=?1",
+                    [conversation.as_bytes().as_slice()],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let first = generation(&node);
+    drop(node);
+    let reopened = open();
+    assert_eq!(
+        reopened.sentlog.lock().unwrap().body_reads(),
+        0,
+        "ordinary startup must not hydrate transcript history"
+    );
+    assert_eq!(reopened.received.lock().unwrap().body_reads(), 0);
+    assert_eq!(reopened.received_files.lock().unwrap().body_reads(), 0);
+    assert_eq!(reopened.account_history(&peer, 50).unwrap(), page);
+    assert_eq!(reopened.sentlog.lock().unwrap().body_reads(), 50);
+    assert_eq!(
+        generation(&reopened),
+        first,
+        "unchanged recent reads reuse persisted ranks"
+    );
+}
+
+#[test]
+fn indexed_runtime_recent_history_reuses_metadata_prefix_after_ordinary_append() {
+    use crate::node::conversation::account_conversation_id;
+    use crate::node::transcript_repository::take_header_reads_for_test;
+    for retained in [128, 512] {
+        let dir = tempfile::tempdir().unwrap();
+        let node = recent_search_node(dir.path());
+        let peer = "a".repeat(32);
+        let conversation = account_conversation_id(&node.account_id(), &peer);
+        let append = |sequence: u64, clock: u64| {
+            let mut id = [91; 32];
+            id[24..].copy_from_slice(&sequence.to_be_bytes());
+            let plaintext = DmEnvelope::new(
+                node.account_id(),
+                peer.clone(),
+                id,
+                MessageBody::new(vec![b'x'; 4096], None).encode(),
+            )
+            .encode();
+            node.sentlog
+                .lock()
+                .unwrap()
+                .record(conversation, sequence, clock, &plaintext)
+                .unwrap();
+        };
+        for sequence in 1..=retained {
+            append(sequence, sequence);
+        }
+        assert_eq!(node.account_history(&peer, 50).unwrap().len(), 50);
+        take_header_reads_for_test();
+        append(retained + 1, retained + 1);
+        let recent = node.account_history(&peer, 50).unwrap();
+        let examined = take_header_reads_for_test();
+        assert_eq!(recent.len(), 50);
+        assert_eq!(recent.first().unwrap().wall_clock, retained - 48);
+        assert_eq!(recent.last().unwrap().wall_clock, retained + 1);
+        assert!(
+            examined <= 16,
+            "one ordinary append must not rescan {retained} historical metadata rows (examined {examined})"
+        );
+        append(retained + 2, 0);
+        let reordered = node.account_history(&peer, retained as usize + 2).unwrap();
+        assert_eq!(reordered.len(), retained as usize + 2);
+        assert_eq!(reordered.first().unwrap().wall_clock, 0);
+        assert_eq!(reordered.last().unwrap().wall_clock, retained + 1);
+        let mut deleted = [91; 32];
+        deleted[24..].copy_from_slice(&1u64.to_be_bytes());
+        node.delete_account_message(&peer, EventId::new(deleted))
+            .unwrap();
+        let erased = node.account_history(&peer, retained as usize + 2).unwrap();
+        assert_eq!(erased.len(), retained as usize + 1);
+        assert!(erased.iter().all(|row| row.id != EventId::new(deleted)));
+    }
 }

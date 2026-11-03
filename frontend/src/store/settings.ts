@@ -20,6 +20,7 @@ import {
   type ScreenshotRegistration,
 } from "@/lib/api/screenshotShortcuts";
 import { errorMessage } from "@/lib/error";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 const emptyRegistration = (): ScreenshotRegistration => ({
   global_active: false,
@@ -135,7 +136,7 @@ export const useSettings = create<SettingsStore>((set, get) => ({
     const lease = captureRuntimeOwner();
     if (!lease.owner || !lease.current() || get().owner !== lease.owner) return;
     try {
-      const s = await settingsApi.get();
+      const s = await readWithDeadline(() => settingsApi.get());
       if (!lease.current() || get().owner !== lease.owner) return;
       set({
         screenshotShortcuts: s.screenshot_shortcuts ?? {

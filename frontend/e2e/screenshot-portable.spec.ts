@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 test.beforeEach(async ({ context, browserName }) => {
   if (browserName === "chromium")
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);

@@ -6,7 +6,8 @@ const state = vi.hoisted(() => ({
   url: null as string | null,
   status: undefined as { ready: boolean; unavailable?: boolean } | undefined,
 }));
-vi.mock("react-i18next", () => ({
+vi.mock("react-i18next", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-i18next")>()),
   useTranslation: () => ({
     t: (key: string) => (key === "message.sticker" ? "[Sticker]" : key),
   }),

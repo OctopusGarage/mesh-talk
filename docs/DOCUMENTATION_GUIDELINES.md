@@ -122,6 +122,19 @@ fragment links, and opening those URLs expands the relevant answer. Feature
 summaries link directly to their maintained help topics. Mobile navigation moves
 focus to its destination instead of leaving it inside a collapsed menu.
 
+FAQ motion scenarios prime real dictionaries by awaiting the
+[public language owner](../site/i18n.js) before starting geometry interactions.
+Keep language assertions after priming, verify active expansion before the actual
+chooser change, and retain its bounded language, geometry and visibility checks.
+Dedicated public-language scenarios exercise chooser loading, failure and stale
+request behavior.
+Their chooser and initial-navigation assertions await the current
+`MeshTalkLocale.ready` operation before checking content; settlement also occurs
+on failure and never starts another selection. Superseded work cannot settle a
+newer choice. Keep the loader deadline and content assertion budgets unchanged:
+[browser evaluation awaits returned promises](https://playwright.dev/docs/evaluating),
+while [assertions have a separate timeout](https://playwright.dev/docs/test-timeouts).
+
 Help search stores its query in the URL, restores it on browser Back, and offers
 clear, Escape, `/` focus, timeout and retry behavior. Keep static topics available
 when the search index fails. Article headings precede the mobile contents list;

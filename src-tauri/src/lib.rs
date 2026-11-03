@@ -32,6 +32,7 @@ mod easytier_discovery;
 pub mod events;
 pub mod favorites;
 mod google_drive;
+mod history_storage;
 mod integrations;
 mod linked_account;
 pub mod logger;
@@ -42,6 +43,7 @@ mod notifications;
 pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
+mod reception_host;
 pub mod recovery;
 mod routed_discovery;
 mod runtime_admission;
@@ -332,6 +334,7 @@ pub fn run_tauri_configured(
         .manage(settings_state)
         .manage(crate::screenshot_shortcuts::ScreenshotShortcutState::default())
         .manage(crate::events::NotificationContextState::default())
+        .manage(crate::reception_host::ReceptionHostState::default())
         .manage(trust_state)
         .manage(favorites_state)
         .manage(avatars_state)
@@ -342,7 +345,20 @@ pub fn run_tauri_configured(
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 crate::window_visibility::initial_presentation_ready,
                 owner_commands::owner_node_identity,
+                reception_host::owner_reception_page,
+                reception_host::owner_reception_ack,
                 owner_commands::owner_startup_identity,
+                owner_commands::owner_create_channel,
+                owner_commands::owner_personal_conversation_states,
+                owner_commands::owner_delete_left_channel,
+                owner_commands::owner_new_account_group_operation_id,
+                owner_commands::owner_submit_account_group_control,
+                owner_commands::owner_submit_account_group_text,
+                owner_commands::owner_submit_account_group_sticker,
+                owner_commands::owner_submit_account_group_file,
+                owner_commands::owner_account_group_operation_status,
+                owner_commands::owner_list_account_group_operations,
+                owner_commands::owner_cancel_account_group_operation,
                 owner_commands::owner_enqueue_text,
                 owner_commands::owner_reveal_message,
                 owner_commands::owner_reveal_image,
@@ -406,7 +422,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::history,
                 crate::chat_commands::account_id,
                 crate::chat_commands::publish_avatar,
-                crate::chat_commands::peer_avatars,
+                crate::chat_commands::peer_profile_avatar,
                 crate::chat_commands::send_to_account,
                 crate::chat_commands::account_history,
                 crate::chat_commands::start_linking,
@@ -424,7 +440,6 @@ pub fn run_tauri_configured(
                 crate::chat_commands::list_accounts,
                 crate::chat_commands::send_file_to_account,
                 crate::chat_commands::react_account,
-                crate::chat_commands::account_reactions,
                 crate::chat_commands::list_channels,
                 crate::chat_commands::create_channel,
                 crate::chat_commands::add_channel_member,
@@ -463,11 +478,10 @@ pub fn run_tauri_configured(
                 crate::chat_commands::read_media,
                 crate::chat_commands::react_dm,
                 crate::chat_commands::react_channel,
-                crate::chat_commands::reactions,
-                crate::chat_commands::channel_reactions,
                 crate::chat_commands::search,
                 crate::owner_commands::owner_search_recent,
                 crate::owner_commands::owner_search_context,
+                crate::owner_commands::owner_reaction_summaries,
                 crate::message_forwarding::owner_inspect_forward_messages,
                 crate::message_forwarding::owner_list_forward_batches,
                 crate::message_forwarding::owner_forward_messages,
@@ -513,6 +527,7 @@ pub fn run_tauri_configured(
                 crate::integrations::local_access::get_local_agent_access,
                 crate::integrations::local_access::set_local_agent_access,
                 crate::settings::get_app_settings,
+                crate::history_storage::history_storage_usage,
                 crate::settings::reconcile_account_settings,
                 crate::drafts::load_conversation_drafts,
                 crate::drafts::save_conversation_drafts,

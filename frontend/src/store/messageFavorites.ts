@@ -8,6 +8,7 @@ import {
 } from "@/lib/api/messageFavorites";
 import { errorMessage } from "@/lib/error";
 import { captureRuntimeOwner } from "./ownership";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 interface FavoriteState {
   items: MessageFavorite[];
@@ -86,11 +87,8 @@ export function createMessageFavoritesStore(
           const accumulated: MessageFavorite[] = [];
           let hasMore = false;
           do {
-            const page = await api.list(
-              lease.owner,
-              query,
-              offset + accumulated.length,
-              20,
+            const page = await readWithDeadline(() =>
+              api.list(lease.owner!, query, offset + accumulated.length, 20),
             );
             if (!lease.current() || epoch !== lifetime || sequence !== request)
               return;

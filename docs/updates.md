@@ -165,11 +165,31 @@ keeps manual-only publication; configuring only one fails the build. Local updat
 provide the same public-key environment value to compile the trust root into the host.
 
 Each platform publishes `mesh-talk-update_<tag>_<platform>.app.tar.gz`, `.nsis.exe` or `.AppImage`
-and its `.sig`. The same bytes are included in the platform ZIP and its checksum manifest. The
-existing cosign/provenance gate verifies that ZIP; the aggregate verifier requires a complete
-updater platform matrix and byte-for-byte equality between embedded and standalone assets.
+and its `.sig` as standalone assets. The platform ZIP contains native installers and a
+`SHA256SUMS` manifest for those installers, plus a small `UPDATER_SHA256SUMS` when updates
+are enabled. It never embeds canonical updater payloads, raw reconstruction targets,
+delta catalogs, patches or updater signatures. The updater manifest records hashes for every
+standalone updater role belonging to that platform. Manual checksum verification stays
+self-contained: `shasum -a 256 -c SHA256SUMS` checks only files in the downloaded ZIP.
+The existing Cosign/provenance gate authenticates the ZIP and both manifests.
+The aggregate verifier requires the complete updater platform matrix, the exact manifest role
+set and a matching hash for every standalone file, plus each file's exact-source provenance.
+Native installer/updater equivalence and incremental reconstruction checks remain required.
 Existing draft/source checks, immutability and explicit Stable publication remain required.
 The same signing key authenticates canonical full packages and optional incremental preparation; both reach the existing native installer.
+
+### Manual package size budgets
+
+Manual downloads carry no updater payload bytes. Their signed checksum manifests are limited
+to 64 KiB each, and their installer formats remain an exact platform-specific set. macOS DMGs and
+their outer ZIPs each have a 24 MiB limit, enforced independently before native inspection by
+`scripts/release/verify_assets.py`. The measured ARM64 DMG was about 15.8 MB when this budget
+was introduced; the limit leaves headroom for architecture variation and ordinary growth while
+rejecting the 61.6 MB ZIP that duplicated update representations. A highly compressible oversized
+DMG still fails its own limit. Future budget changes require a reviewed change to this owning
+rule and its regression tests; do not bypass acceptance or drop signature/provenance checks.
+These limits govern manual packages, not standalone raw targets, whose existing reconstruction
+limits remain unchanged. Binary-size optimization must separately preserve native behavior.
 
 ## Download verification and installation
 
@@ -183,7 +203,8 @@ runtime before the complete upgrade chain is considered verified. See Tauri's
 [AppImage compatibility guidance](https://v2.tauri.app/distribute/appimage/).
 
 The app saves the compatible ZIP to Downloads. The ZIP contains platform installers and
-`SHA256SUMS` (and updater payloads when enabled). The app streams it to a temporary file, checks the published size and SHA-256
+`SHA256SUMS` (plus `UPDATER_SHA256SUMS` when enabled), without duplicate updater payloads.
+The app streams it to a temporary file, checks the published size and SHA-256
 digest from GitHub's Releases API, and only then shows **Show in Downloads**. Canceling or
 failing a download removes the temporary file. An existing ZIP is reused only if its size and
 digest still match. Download requests re-fetch the exact selected release and enforce its channel,
@@ -211,6 +232,13 @@ An exhausted discovery bound is reported explicitly. Public download links are a
 artifact access or a GitHub login.
 
 ## Public website downloads
+
+Release notes lead with direct desktop ZIP links for each of the six platform/architecture
+targets, resolved against the exact repository and immutable release tag. Headless relay links
+and verification instructions are separate collapsible sections. Users choose their computer
+from the download table rather than finding installers among automatic-update and audit assets.
+The template owner is `.github/release-notes.md`; `scripts/release/render-notes.mjs` applies
+the existing source identity and Stable/Nightly rules to every link and verification command.
 
 The project site requests GitHub's latest Stable release metadata and presents
 its desktop ZIP packages directly. It accepts only published full releases,
@@ -244,6 +272,34 @@ or rate-limited, or JavaScript is disabled, ordinary release-page links remain
 available. Downloading and installing remain explicit visitor actions. Browser
 coverage is owned by `frontend/e2e/site-downloads.spec.ts`; these fixtures prove
 page selection and interaction, not native installation or release provenance.
+
+## Native release inspection
+
+[`scripts/release/sevenzip.py`](../scripts/release/sevenzip.py) owns the supported
+7-Zip version and official asset digests for native payload inspection. Native
+macOS/Windows producers and both Ubuntu acceptance jobs install that tool into a
+job-local directory. Downloads have size and time limits; checksum verification
+precedes extraction, and the installed version must match before its absolute
+path is exported as `MESH_TALK_SEVENZIP`. Windows uses its existing 7-Zip only to
+unpack the verified tool archive. It never installs the tool globally.
+
+The Python metadata and delta verifiers share this selection. An explicitly
+configured missing tool fails rather than falling back to another version.
+Local callers may use an available 7-Zip, but an NSIS decoder reporting `BadCmd`
+fails before payload acceptance. Unknown application/resource sizes remain an
+error; decoded payload bytes, plugin equivalence, signatures and provenance
+remain mandatory. Update the version and official digests together, then verify
+the native consumers before accepting a tool upgrade.
+
+The existing Linux portable health gate installs NSIS and runs
+`python scripts/release/test_native_nsis.py -v`. It compiles real Unicode
+installers with a plugin call, compressed and raw payloads, and an uninstaller;
+it proves complete payload equivalence and rejects altered application/resources
+without executing any installer. Bootstrap regressions also cover checksum,
+version, platform and explicit-path failures. These checks catch decoder drift
+before publication builds. All three portable health platforms also execute the
+bootstrap before merge, while actual signed six-platform artifacts and
+downloaded draft verification remain required release evidence.
 
 ## Publish Nightly builds
 
@@ -291,7 +347,11 @@ Prepare and review the intended next version using the [version lifecycle](#vers
 test the chosen main-branch source, and use the existing `vX.Y.Z` draft build and explicit
 **publish_release** process.
 A Nightly release is not promoted by changing its prerelease flag or renaming its assets. Stable
-publication retains its source-check, artifact-verification and container gates. Nightly tags
+publication retains its source-check, artifact-verification and container gates.
+Current-source acceptance includes ASan and mutation-runner contracts. Stable
+rechecks that same policy immediately before public container upload and final
+release publication, after all intervening verification/build preparation; a newly
+failed or pending source check prevents the corresponding public mutation. Nightly tags
 must never be made the repository's latest Stable release.
 
 Local validation selects the updater, frontend update store/browser flow and release-script

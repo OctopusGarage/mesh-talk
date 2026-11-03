@@ -41,6 +41,13 @@ for (const nightly of [false, true]) {
       changelog,
     });
     assert.match(notes, /mesh-talk_v0\.1\.6/);
+    const downloads = notes.split("### Downloads\n")[1].split("### Installation")[0];
+    const base = `https://github.com/${source.repository}/releases/download/${tag}`;
+    for (const platform of ["macos_arm64", "macos_x86_64", "windows_x86_64", "windows_arm64", "linux_x86_64", "linux_aarch64"]) {
+      assert.ok(downloads.includes(`](${base}/mesh-talk_${tag}_${platform}.zip)`), platform);
+      assert.ok(notes.includes(`](${base}/mesh-talk-post-office_${tag}_${platform}.zip)`), `relay ${platform}`);
+    }
+    assert.doesNotMatch(downloads, /from \*\*Assets\*\*|mesh-talk-update|mesh-talk-patch/);
     assert.ok(
       notes.includes(
         `--certificate-identity 'https://github.com/${source.repository}/.github/workflows/release.yml@${ref}'`,

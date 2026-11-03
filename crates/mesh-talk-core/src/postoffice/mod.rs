@@ -9,9 +9,11 @@
 //! (always-on) peer is the post office: the one with the lowest identity
 //! fingerprint. Full election with standbys and uptime detection is Phase 1.
 
+pub(crate) mod storage;
+
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId};
-use crate::eventlog::persist::PersistentEventLog;
+use crate::eventlog::persist::legacy::LegacyEventLog as PersistentEventLog;
 use crate::eventlog::store::AppendOutcome;
 use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
@@ -22,6 +24,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod indexed;
+mod maintenance;
+pub use indexed::{
+    IndexedPostOffice, IndexedRelayExportCursor, IndexedRelayHaveCursor, IndexedRelayView,
+};
 pub mod election;
 pub mod federation;
 pub mod gateway;
@@ -239,10 +246,9 @@ impl PostOffice {
             seen <= unix_seconds(now).saturating_sub(MAX_RELAY_AGE.as_secs())
                 || seen > unix_seconds(now).saturating_add(300)
         }) {
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "federated mailbox arrival is expired or invalid",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "federated mailbox arrival is expired or invalid".into(),
+            ));
         }
         if self
             .next_expiry_secs
@@ -541,28 +547,62 @@ impl PostOffice {
 }
 
 impl SyncStore for PostOffice {
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
-        self.log
-            .get(id)
-            .is_some_and(|e| e.conversation_id == *conversation)
-            && self.log.sync().is_ok()
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.log.requires_channel_v5(conversation))
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+    // Metadata probes must use the durable log's indexes/cache. Trait defaults
+    // export every ciphertext body just to discover supported event kinds.
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.log.requires_channel_v2(conversation))
+    }
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.log.requires_channel_v3(conversation))
+    }
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.log.requires_channel_v4(conversation))
+    }
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
+        Ok(self.log.fingerprint_and_len(conversation))
+    }
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
+        self.log.sync()?;
+        if !self
+            .log
+            .get(id)?
+            .is_some_and(|event| event.conversation_id == *conversation)
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
         SyncStore::event_ids(&self.log, conversation)
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         SyncStore::events_excluding(&self.log, conversation, have)
+    }
+    fn events_excluding_bounded(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+        event_budget: usize,
+        max_frames: usize,
+    ) -> Result<Vec<Event>, LogError> {
+        self.log
+            .events_excluding_bounded(conversation, have, event_budget, max_frames)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         if self.opaque_only && !opaque::envelope_shape(&event) {
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "post office requires an opaque envelope",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "post office requires an opaque envelope".into(),
+            ));
         }
         // Route through `record` so the relay-receive path is also retention-bounded.
         self.record(event)
@@ -598,6 +638,243 @@ mod tests {
             EventKind::Message,
             body.to_vec(),
         )
+    }
+
+    #[test]
+    fn owned_read_failure_aborts_durable_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let signer = DeviceIdentity::generate();
+        let event = Event::new(
+            &signer,
+            ConversationId::new([9; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"event".to_vec(),
+        );
+        relay.accept(event.clone()).unwrap();
+        relay.log.fail_reads(true);
+        assert!(
+            matches!(SyncStore::durable_have(&relay, &event.conversation_id, &event.id), Err(LogError::Io(error)) if error.to_string() == "injected event read failure")
+        );
+        relay.log.fail_reads(false);
+        assert!(SyncStore::durable_have(&relay, &event.conversation_id, &event.id).unwrap());
+    }
+
+    #[test]
+    fn bounded_mailbox_exports_clone_only_the_requested_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let author = DeviceIdentity::generate();
+        let body = vec![7; 32 * 1024];
+        let mut expected = Vec::new();
+        for seq in 1..=16 {
+            let event = message(&author, seq, vec![], seq, &body);
+            expected.push(event.id);
+            office.accept(event).unwrap();
+        }
+        let have = HashSet::from([expected.remove(0)]);
+        for max_frames in [0, 1, 2, 4] {
+            let page = office
+                .events_excluding_bounded(
+                    &conv(),
+                    &have,
+                    crate::transport::MAX_PLAINTEXT,
+                    max_frames,
+                )
+                .unwrap();
+            assert_eq!(
+                page.iter().map(|event| event.id).collect::<Vec<_>>(),
+                expected[..max_frames]
+            );
+        }
+        assert_eq!(
+            office.log.sync_metadata_observations(&conv()).1,
+            0,
+            "bounded mailbox pages must not export every retained ciphertext first"
+        );
+    }
+
+    #[test]
+    fn unknown_mailbox_probes_do_not_retain_fingerprint_cache_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let empty = crate::eventlog::sync::fingerprint(vec![]);
+        for index in 0u64..512 {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&index.to_le_bytes());
+            let conversation = ConversationId::new(bytes);
+            assert_eq!(
+                SyncStore::fingerprint_and_len(&office, &conversation).unwrap(),
+                (empty, 0)
+            );
+            assert_eq!(
+                office.log.sync_metadata_observations(&conversation),
+                (None, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn idle_sync_metadata_reuses_indexes_without_exporting_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let author = DeviceIdentity::generate();
+        let body = vec![7; 32 * 1024];
+        office
+            .accept(message(&author, 1, vec![], 1, &body))
+            .unwrap();
+        let expected = office.log.fingerprint_and_len(&conv());
+        // Reopening gives the relay a cold digest cache and retained ciphertext.
+        let (ed, x) = office.identity.secret_bytes();
+        drop(office);
+        let office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::from_secret_bytes(ed, x),
+        )
+        .unwrap();
+        assert_eq!(office.log.sync_metadata_observations(&conv()), (None, 0));
+        for _ in 0..8 {
+            assert!(!SyncStore::requires_channel_v2(&office, &conv()).unwrap());
+            assert!(!SyncStore::requires_channel_v3(&office, &conv()).unwrap());
+            assert!(!SyncStore::requires_channel_v4(&office, &conv()).unwrap());
+            assert!(!SyncStore::requires_channel_v5(&office, &conv()).unwrap());
+            assert_eq!(
+                SyncStore::fingerprint_and_len(&office, &conv()).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            office.log.sync_metadata_observations(&conv()),
+            (Some(expected), 0),
+            "idle metadata must warm the durable digest cache without exporting event bodies",
+        );
+    }
+
+    #[test]
+    fn sync_metadata_tracks_capabilities_append_expiry_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.log");
+        let identity = DeviceIdentity::generate();
+        let (ed, x) = identity.secret_bytes();
+        let author = DeviceIdentity::generate();
+        let start = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut office = PostOffice::open_at(&path, "pw", identity, start).unwrap();
+        let empty = SyncStore::fingerprint_and_len(&office, &conv()).unwrap();
+        assert_eq!(empty.1, 0);
+        for (index, kind) in [
+            EventKind::ChannelReplica,
+            EventKind::ChannelHistoryPolicy,
+            EventKind::ChannelAccountAuthority,
+            EventKind::ChannelMetadata,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let event = Event::new(
+                &author,
+                conv(),
+                index as u64 + 1,
+                vec![],
+                index as u64 + 1,
+                0,
+                kind,
+                vec![],
+            );
+            office.record_at(event.clone(), start).unwrap();
+            assert!(office.log.sync_metadata_observations(&conv()).0.is_none());
+            assert!(SyncStore::requires_channel_v2(&office, &conv()).unwrap());
+            assert_eq!(
+                SyncStore::requires_channel_v3(&office, &conv()).unwrap(),
+                index >= 1
+            );
+            assert_eq!(
+                SyncStore::requires_channel_v4(&office, &conv()).unwrap(),
+                index >= 2
+            );
+            assert_eq!(
+                SyncStore::requires_channel_v5(&office, &conv()).unwrap(),
+                index >= 3
+            );
+            let expected = office.log.fingerprint_and_len(&conv());
+            assert_eq!(
+                SyncStore::fingerprint_and_len(&office, &conv()).unwrap(),
+                expected
+            );
+            assert_eq!(expected.1, index + 1);
+            assert_ne!(expected.0, empty.0);
+            assert_eq!(
+                office.record_at(event, start).unwrap(),
+                AppendOutcome::Duplicate
+            );
+            assert_eq!(
+                office.log.sync_metadata_observations(&conv()).0,
+                Some(expected)
+            );
+        }
+        let retained = SyncStore::fingerprint_and_len(&office, &conv()).unwrap();
+        drop(office);
+        let mut reopened =
+            PostOffice::open_at(&path, "pw", DeviceIdentity::from_secret_bytes(ed, x), start)
+                .unwrap();
+        assert!(SyncStore::requires_channel_v2(&reopened, &conv()).unwrap());
+        assert!(SyncStore::requires_channel_v3(&reopened, &conv()).unwrap());
+        assert!(SyncStore::requires_channel_v4(&reopened, &conv()).unwrap());
+        assert!(SyncStore::requires_channel_v5(&reopened, &conv()).unwrap());
+        assert_eq!(
+            SyncStore::fingerprint_and_len(&reopened, &conv()).unwrap(),
+            retained
+        );
+        reopened.prune_expired_at(start + MAX_RELAY_AGE).unwrap();
+        assert!(reopened.log.sync_metadata_observations(&conv()).0.is_none());
+        assert_eq!(
+            SyncStore::fingerprint_and_len(&reopened, &conv()).unwrap(),
+            empty
+        );
+        assert!(!SyncStore::requires_channel_v2(&reopened, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v3(&reopened, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v4(&reopened, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v5(&reopened, &conv()).unwrap());
+        drop(reopened);
+        let expired = PostOffice::open_at(
+            &path,
+            "pw",
+            DeviceIdentity::from_secret_bytes(ed, x),
+            start + MAX_RELAY_AGE,
+        )
+        .unwrap();
+        assert_eq!(
+            SyncStore::fingerprint_and_len(&expired, &conv()).unwrap(),
+            empty
+        );
+        assert!(!SyncStore::requires_channel_v2(&expired, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v3(&expired, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v4(&expired, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v5(&expired, &conv()).unwrap());
     }
 
     #[test]
@@ -1076,7 +1353,7 @@ mod tests {
         let mut po =
             PostOffice::open(&dir.path().join("po.log"), "pw", DeviceIdentity::generate()).unwrap();
         // The post office is just another SyncStore.
-        reconcile(&mut alice_log, &mut po, conv());
+        reconcile(&mut alice_log, &mut po, conv()).unwrap();
         assert!(po.has(&ev.id));
     }
 
@@ -1126,12 +1403,12 @@ mod tests {
         let mut alice_log = EventLog::default();
         alice_log.append(dm_event.clone()).unwrap();
         let mut po = PostOffice::open(&dir.path().join("po.log"), "pw", po_identity).unwrap();
-        reconcile(&mut alice_log, &mut po, conv());
+        reconcile(&mut alice_log, &mut po, conv()).unwrap();
         assert!(po.has(&dm_event.id));
 
         // Bob comes online and syncs from the post office (Alice may now be offline).
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut po, conv());
+        reconcile(&mut bob_log, &mut po, conv()).unwrap();
         let received = bob_log.get(&dm_event.id).expect("bob received the event");
 
         // Bob opens it; the post office's own identity cannot. (That `open`
@@ -1182,7 +1459,7 @@ mod tests {
         assert!(po1.has(&x.id) && !po1.has(&y.id));
         assert!(po2.has(&y.id) && !po2.has(&x.id));
 
-        reconcile(&mut po1, &mut po2, conv());
+        reconcile(&mut po1, &mut po2, conv()).unwrap();
         assert_eq!(po1.held_ids(&conv()), po2.held_ids(&conv()));
         assert!(po1.has(&x.id) && po1.has(&y.id));
         assert!(po2.has(&x.id) && po2.has(&y.id));

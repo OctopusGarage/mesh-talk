@@ -58,13 +58,19 @@ export function ReplyPreview({
   return (
     <span className="flex min-w-0 items-center gap-2">
       {author}
-      <span className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded bg-foreground/5">
+      <span
+        className={
+          url && url !== failedUrl
+            ? "flex max-h-12 max-w-16 shrink-0 items-center justify-center overflow-hidden rounded"
+            : "flex h-12 w-16 shrink-0 items-center justify-center rounded bg-foreground/5"
+        }
+      >
         {url && url !== failedUrl ? (
           <img
             src={url}
             alt={file.name}
             onError={() => setFailedUrl(url)}
-            className="h-full w-full object-contain"
+            className="h-auto w-auto max-h-12 max-w-16 object-contain"
             draggable={false}
           />
         ) : (

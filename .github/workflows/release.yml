@@ -114,6 +114,17 @@ jobs:
         with:
           node-version: 22
 
+      - name: Setup Python for native release inspection
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned native inspection toolchain
+        if: runner.os != 'Linux'
+        shell: bash
+        run: python scripts/release/sevenzip.py install
+
       # 3️⃣ Install Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -123,7 +134,7 @@ jobs:
       # 3.6️⃣ Install protoc
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf zstd sevenzip
+        run: brew install protobuf zstd
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
         run: choco install protoc zstandard -y
@@ -228,21 +239,35 @@ jobs:
           cd release
           shopt -s nullglob dotglob
           files=()
+          updater_files=()
           for file in ./*; do
-            if [[ -f "$file" && ! -L "$file" && "$file" != './SHA256SUMS' ]]; then
-              files+=("$file")
+            if [[ -f "$file" && ! -L "$file" && "$file" != './SHA256SUMS' && "$file" != './UPDATER_SHA256SUMS' ]]; then
+              case "$file" in
+                ./mesh-talk-update_* | ./mesh-talk-update-raw_* | ./mesh-talk-patch_*) updater_files+=("$file") ;;
+                *) files+=("$file") ;;
+              esac
             fi
           done
           test "${#files[@]}" -gt 0
 
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${files[@]}" > SHA256SUMS
-            test -s SHA256SUMS
-            sha256sum -c SHA256SUMS
+          write_checksums() {
+            local manifest_name="$1"
+            shift
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$@" > "$manifest_name"
+              test -s "$manifest_name"
+              sha256sum -c "$manifest_name"
+            else
+              shasum -a 256 "$@" > "$manifest_name"
+              test -s "$manifest_name"
+              shasum -a 256 -c "$manifest_name"
+            fi
+          }
+          write_checksums SHA256SUMS "${files[@]}"
+          if [[ "${#updater_files[@]}" -gt 0 ]]; then
+            write_checksums UPDATER_SHA256SUMS "${updater_files[@]}"
           else
-            shasum -a 256 "${files[@]}" > SHA256SUMS
-            test -s SHA256SUMS
-            shasum -a 256 -c SHA256SUMS
+            rm -f UPDATER_SHA256SUMS
           fi
 
           echo "SHA256SUMS created:"
@@ -309,23 +334,30 @@ jobs:
 
           ZIP_NAME="release_zips/mesh-talk_${TAG}_${OS_NAME}_${ARCH}.zip"
 
-          case "$OS_NAME" in
-            macos)
-              zip -r "$ZIP_NAME" release/*.dmg release/SHA256SUMS
-              ;;
-            windows)
-              zip -r "$ZIP_NAME" release/*.exe release/*.msi release/SHA256SUMS
-              ;;
-            linux)
-              zip -r "$ZIP_NAME" release/*.AppImage release/*.deb release/*.rpm release/SHA256SUMS
-              ;;
-          esac
+          # Updaters share .exe/.AppImage suffixes with native installers.
+          # Select by role before format so those bytes cannot enter the ZIP.
+          installer_files=()
+          for file in release/*; do
+            [[ -f "$file" && ! -L "$file" ]] || continue
+            case "$file" in
+              release/mesh-talk-update_* | release/mesh-talk-update-raw_* | release/mesh-talk-patch_*) continue ;;
+            esac
+            case "$OS_NAME:$file" in
+              macos:*.dmg | windows:*.exe | windows:*.msi | linux:*.AppImage | linux:*.deb | linux:*.rpm)
+                installer_files+=("$file") ;;
+            esac
+          done
+          test "${#installer_files[@]}" -gt 0
+          # zip updates existing archives; start fresh to remove obsolete roles.
+          rm -f "$ZIP_NAME"
+          zip "$ZIP_NAME" "${installer_files[@]}" release/SHA256SUMS
 
-          # Bind standalone updater bytes and signatures to the same verified ZIP.
+          # UPDATER_SHA256SUMS inside the signed ZIP binds standalone updater roles.
+          # Keep their payloads out of the manual installer download.
           shopt -s nullglob
           updater_files=(release/mesh-talk-update_* release/mesh-talk-update-raw_* release/mesh-talk-patch_*)
           if [[ "${#updater_files[@]}" -gt 0 ]]; then
-            zip "$ZIP_NAME" "${updater_files[@]}"
+            zip "$ZIP_NAME" release/UPDATER_SHA256SUMS
             cp "${updater_files[@]}" release_zips/
           fi
 
@@ -405,7 +437,12 @@ jobs:
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned native inspection toolchain
+        run: python scripts/release/sevenzip.py install
       - uses: sigstore/cosign-installer@v4.1.2
       - uses: actions/download-artifact@v8
         with:
@@ -520,7 +557,12 @@ jobs:
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned native inspection toolchain
+        run: python scripts/release/sevenzip.py install
       - uses: sigstore/cosign-installer@v4.1.2
       - name: Reverify the actual draft against saved build evidence
         run: |
@@ -557,6 +599,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Recheck source immediately before container publication
+        run: node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
       - name: Publish verified multi-platform post-office image
         uses: docker/build-push-action@v7
         with:
@@ -572,7 +616,9 @@ jobs:
           provenance: true
           sbom: true
       - name: Publish only the verified draft
-        run: node scripts/release/release-state.mjs publish "$RELEASE_TAG"
+        run: |
+          node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
+          node scripts/release/release-state.mjs publish "$RELEASE_TAG"
       - name: Queue the reviewed next-development-target PR
         id: maintenance
         continue-on-error: true

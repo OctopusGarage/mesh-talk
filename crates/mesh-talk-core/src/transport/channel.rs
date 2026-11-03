@@ -374,6 +374,13 @@ impl SecureChannel<tokio::net::TcpStream> {
         socket2::SockRef::from(&self.stream).keepalive().unwrap()
     }
 
+    /// Observe inbound bytes without consuming any encrypted frame. Once data
+    /// is ready the owner leaves idle state before starting framed reception.
+    pub(crate) async fn inbound_frame_ready(&self) -> std::io::Result<()> {
+        let mut byte = [0u8; 1];
+        self.stream.peek(&mut byte).await.map(|_| ())
+    }
+
     pub(crate) fn tcp_peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
         self.stream.peer_addr()
     }

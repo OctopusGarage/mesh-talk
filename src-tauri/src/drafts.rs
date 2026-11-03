@@ -284,8 +284,12 @@ pub async fn publish_legacy_conversation_drafts(
                 .ok_or_else(|| CommandError::Validation("invalid draft owner".into()))?;
             let (texts, protections) = read_legacy_drafts(&path, runtime.restart_password())?;
             let mut known: std::collections::BTreeSet<_> =
-                runtime.known_account_names().into_keys().collect();
-            known.extend(runtime.known_account_ids());
+                runtime.known_account_names()?.into_keys().collect();
+            known.extend(
+                runtime
+                    .known_account_ids()
+                    .map_err(|e| CommandError::Internal(e.to_string()))?,
+            );
             known.insert(runtime.account_id().to_owned());
             seed_legacy_documents(&runtime.handle(), texts, protections, &known)
         })
@@ -345,7 +349,7 @@ fn seed_legacy_documents(
         let unambiguous = match &conversation {
             DocumentConversation::Account(id) => known_accounts.contains(id),
             DocumentConversation::Channel(id) => node
-                .list_channels()
+                .list_channels()?
                 .iter()
                 .any(|channel| hex::encode(channel.id.as_bytes()) == *id),
         };

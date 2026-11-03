@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 type MediaScrollProbe = {
   reads: Record<string, number>;
   pending: Array<() => void>;
@@ -85,7 +88,13 @@ test("image rows reserve their final geometry before bytes load", async ({
   await seedImages(page, 1);
   const row = page.locator('[data-message-id="scroll-message-0"]');
   await expect(row.getByRole("status")).toBeVisible();
-  const before = await row.boundingBox();
+  let before = 0;
+  await expect
+    .poll(async () => {
+      before = (await row.boundingBox())?.height ?? 0;
+      return before;
+    })
+    .toBeGreaterThan(0);
   await releaseImages(page);
   const image = row.getByTestId("file-image");
   await expect
@@ -93,8 +102,10 @@ test("image rows reserve their final geometry before bytes load", async ({
     .toBe(800);
   await expect
     .poll(
-      async () =>
-        Math.abs(((await row.boundingBox())?.height ?? 0) - before!.height),
+      async () => {
+        const box = await row.boundingBox();
+        return box ? Math.abs(box.height - before) : undefined;
+      },
       { message: "Loading must not resize a media row" },
     )
     .toBeLessThanOrEqual(1);
@@ -107,7 +118,12 @@ test("image rows reserve their final geometry before bytes load", async ({
 test("scrolling away and returning to latest reuses media without changing row height", async ({
   page,
 }) => {
-  await seedImages(page);
+  await seedImages(page, 60, {
+    width: 1600,
+    height: 200,
+    video: false,
+    invalid: false,
+  });
   await releaseImages(page);
   const row = page.locator('[data-message-id="scroll-message-59"]');
   await expect
@@ -116,8 +132,29 @@ test("scrolling away and returning to latest reuses media without changing row h
         .getByTestId("file-image")
         .evaluate((el) => (el as HTMLImageElement).naturalWidth),
     )
-    .toBe(800);
+    .toBe(1600);
   await expect(row).toBeVisible();
+  await expect
+    .poll(async () => {
+      const box = await row.getByTestId("file-image").boundingBox();
+      return box ? box.width / box.height : undefined;
+    })
+    .toBeCloseTo(8, 1);
+  const log = page.getByRole("log");
+  // The newest row can render before the virtualizer finishes its initial
+  // scroll. Establish the actual live-edge position before navigating history.
+  await expect
+    .poll(() => log.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      log.evaluate((element) =>
+        Math.abs(
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      ),
+    )
+    .toBeLessThanOrEqual(1);
   const initialHeight = await row.evaluate(
     (element) => element.getBoundingClientRect().height,
   );
@@ -125,18 +162,31 @@ test("scrolling away and returning to latest reuses media without changing row h
     () =>
       (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],
   );
-  const log = page.getByRole("log");
-  const bounds = (await log.boundingBox())!;
-  await page.mouse.move(
-    bounds.x + bounds.width / 2,
-    bounds.y + bounds.height / 2,
-  );
-  await page.mouse.wheel(0, -3000);
+  // This fixture owns a cache-remount boundary, not browser paging behavior.
+  // Let trusted input reach React's reader handler, then set that boundary in
+  // the same event task so queued layout corrections cannot consume the intent.
+  await log.focus();
+  await expect(log).toBeFocused();
+  await log.evaluate((scroller) => {
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.target !== scroller || event.key !== "Home") return;
+        event.preventDefault();
+        scroller.scrollTo({ top: 0, behavior: "instant" });
+      },
+      { once: true },
+    );
+  });
+  await log.press("Home");
+  await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBe(0);
   await expect(row).toHaveCount(0);
   await page.getByTestId("jump-to-latest").click();
   await expect(row.getByTestId("file-image")).toBeVisible();
+  // The virtualizer can replace this row after visibility but before geometry
+  // is read. A missing box is pending, never a successful height measurement.
   await expect
-    .poll(async () => (await row.boundingBox())!.height)
+    .poll(async () => (await row.boundingBox())?.height)
     .toBe(initialHeight);
   const readsAfter = await page.evaluate(
     () =>
@@ -150,17 +200,16 @@ test("scrolling away and returning to latest reuses media without changing row h
 for (const [label, width, height] of [
   ["portrait", 300, 900],
   ["panorama", 1600, 200],
+  ["square", 640, 640],
+  ["small", 48, 32],
 ] as const) {
-  test(`${label} images retain a stable contained frame in a short window`, async ({
+  test(`${label} images fit their original proportions in a short window`, async ({
     page,
   }) => {
     await page.setViewportSize({ width: 820, height: 620 });
     await seedImages(page, 1, { width, height, video: false, invalid: false });
     const row = page.locator('[data-message-id="scroll-message-0"]');
     await expect(row.getByRole("status")).toBeVisible();
-    const before = await row.evaluate(
-      (element) => element.getBoundingClientRect().height,
-    );
     await releaseImages(page);
     const image = row.getByTestId("file-image");
     await expect
@@ -168,10 +217,47 @@ for (const [label, width, height] of [
         image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
       )
       .toBe(width);
-    expect(
-      await row.evaluate((element) => element.getBoundingClientRect().height),
-    ).toBe(before);
+    const measurement = {
+      current: null as {
+        image: { width: number; height: number };
+        frame: { width: number; height: number };
+      } | null,
+    };
+    await expect
+      .poll(async () => {
+        // Keep image and frame geometry from the same visible, decoded instance.
+        measurement.current = await image.evaluate(
+          (element: HTMLImageElement, expectedWidth) => {
+            const box = element.getBoundingClientRect();
+            const frame = element.parentElement?.getBoundingClientRect();
+            if (
+              getComputedStyle(element).visibility !== "visible" ||
+              element.naturalWidth !== expectedWidth ||
+              box.width === 0 ||
+              box.height === 0 ||
+              !frame ||
+              frame.width === 0 ||
+              frame.height === 0
+            )
+              return null;
+            return {
+              image: { width: box.width, height: box.height },
+              frame: { width: frame.width, height: frame.height },
+            };
+          },
+          width,
+        );
+        const box = measurement.current?.image;
+        return box ? box.width / box.height : undefined;
+      })
+      .toBeCloseTo(width / height, 1);
+    const { image: box, frame } = measurement.current!;
+    expect(box.width).toBeLessThanOrEqual(Math.min(width, 320));
+    expect(box.height).toBeLessThanOrEqual(Math.min(height, 320));
+    expect(frame.width).toBeCloseTo(box.width, 0);
+    expect(frame.height).toBeCloseTo(box.height, 0);
     await expect(image).toHaveCSS("object-fit", "contain");
+    await page.screenshot({ path: test.info().outputPath(`${label}.png`) });
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,

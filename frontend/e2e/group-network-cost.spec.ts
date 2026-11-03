@@ -88,6 +88,7 @@ for (const viewport of [
 
     await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
     await page.getByTestId("members-trigger").click();
+    await page.getByTestId("group-settings-trigger").click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toContainText(
       viewport.cost === "unknown"

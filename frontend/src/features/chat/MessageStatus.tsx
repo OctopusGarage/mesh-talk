@@ -64,6 +64,7 @@ export function MessageStatus({
         )}
         <span className="sr-only">{label}</span>
       </button>
+      {/* Reserve the scroll track before WebKit measures the wrapped flex row. */}
       {open && (
         <div
           id={id}

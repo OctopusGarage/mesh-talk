@@ -162,7 +162,7 @@ pub fn save(
     let result = save_retained(dir, manifest.name(), manifest.size(), |archive| {
         node.save_directory_archive(file_conv, archive)
     })?;
-    node.complete_directory_save(file_conv);
+    node.complete_directory_save(file_conv)?;
     Ok(result)
 }
 

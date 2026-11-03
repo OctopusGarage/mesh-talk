@@ -67,70 +67,104 @@ function receptionIdentity(
   );
 }
 
-/** Exact identities, scoped to account by persistence. No author-time read watermark. */
+/** Immutable conversation maps share their enumeration and unread projections. */
+const conversationSnapshots = new WeakMap<
+  Record<string, ReceptionEntry>,
+  {
+    entries: [string, ReceptionEntry][];
+    unread: string[];
+    late: string[];
+  }
+>();
+function conversationSnapshot(entries: Record<string, ReceptionEntry>) {
+  let snapshot = conversationSnapshots.get(entries);
+  if (!snapshot) {
+    const rows = Object.entries(entries);
+    const unread = rows.filter(([, entry]) => !entry.seen && !entry.suppressed);
+    snapshot = {
+      entries: rows,
+      unread: unread.map(([id]) => id),
+      late: unread.filter(([, entry]) => entry.late).map(([id]) => id),
+    };
+    conversationSnapshots.set(entries, snapshot);
+  }
+  return snapshot;
+}
+
+/** Exact identities, scoped to account by persistence. Unread entries retain
+ * priority over viewed LRU entries without sorting/cloning the entire ledger. */
 export function boundLedger(ledger: ReceptionLedger): ReceptionLedger {
   const ordered = Object.entries(ledger);
-  // Viewed-only conversation caches yield before conversations with unread work.
   const conversations = ordered
-    .filter(
-      ([, entries]) =>
-        !Object.values(entries).some(
-          (entry) => !entry.seen && !entry.suppressed,
-        ),
-    )
+    .filter(([, entries]) => conversationSnapshot(entries).unread.length === 0)
     .concat(
-      ordered.filter(([, entries]) =>
-        Object.values(entries).some(
-          (entry) => !entry.seen && !entry.suppressed,
-        ),
+      ordered.filter(
+        ([, entries]) => conversationSnapshot(entries).unread.length > 0,
       ),
     )
     .slice(-LEDGER_CONVERSATIONS);
-  // Unread exceptions consume the budget before viewed LRU entries.
-  const candidates = conversations
-    .flatMap(([key, entries]) =>
-      Object.entries(entries).map(([id, entry]) => ({ key, id, entry })),
-    )
-    .reverse();
-  candidates.sort(
-    (a, b) =>
-      Number(Boolean(a.entry.seen || a.entry.suppressed)) -
-      Number(Boolean(b.entry.seen || b.entry.suppressed)),
+  const retained = new Map<string, [string, ReceptionEntry][]>(
+    conversations.map(([key]) => [key, []]),
   );
-  const result: ReceptionLedger = Object.fromEntries(
-    conversations.map(([key]) => [key, {}]),
-  );
-  let retained = 0;
+  let count = 0;
   let aliasBytes = 0;
-  const counts: Record<string, number> = {};
-  for (const { key, id, entry } of candidates) {
-    if (retained >= LEDGER_TOTAL) break;
-    if ((counts[key] ?? 0) >= LEDGER_IDENTITIES) continue;
-    const aliases = validMessageAliases(entry.messageAliases, id).filter(
-      (alias) => {
-        const bytes = JSON.stringify(alias).length + 1;
-        if (aliasBytes + bytes > LEDGER_ALIAS_BYTES) return false;
-        aliasBytes += bytes;
-        return true;
-      },
-    );
-    const { messageAliases: _aliases, ...metadata } = entry;
-    Object.defineProperty(result[key], id, {
-      value: aliases.length
-        ? { ...metadata, messageAliases: aliases }
-        : metadata,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-    counts[key] = (counts[key] ?? 0) + 1;
-    retained++;
+  // The old stable priority sort visited newest unread entries, then newest
+  // viewed entries. Two reverse passes preserve that eviction/alias policy.
+  for (const viewed of [false, true]) {
+    for (
+      let c = conversations.length - 1;
+      c >= 0 && count < LEDGER_TOTAL;
+      c--
+    ) {
+      const [key, entries] = conversations[c];
+      const rows = conversationSnapshot(entries).entries;
+      const kept = retained.get(key)!;
+      for (
+        let i = rows.length - 1;
+        i >= 0 && count < LEDGER_TOTAL && kept.length < LEDGER_IDENTITIES;
+        i--
+      ) {
+        const [id, entry] = rows[i];
+        if (Boolean(entry.seen || entry.suppressed) !== viewed) continue;
+        let value = entry;
+        if (entry.messageAliases !== undefined) {
+          const aliases = validMessageAliases(entry.messageAliases, id).filter(
+            (alias) => {
+              const bytes = JSON.stringify(alias).length + 1;
+              if (aliasBytes + bytes > LEDGER_ALIAS_BYTES) return false;
+              aliasBytes += bytes;
+              return true;
+            },
+          );
+          if (
+            !aliases.length ||
+            aliases.length !== entry.messageAliases.length ||
+            aliases.some(
+              (alias, index) => alias !== entry.messageAliases![index],
+            )
+          ) {
+            const { messageAliases: _aliases, ...metadata } = entry;
+            value = aliases.length
+              ? { ...metadata, messageAliases: aliases }
+              : metadata;
+          }
+        }
+        kept.push(value === entry ? rows[i] : [id, value]);
+        count++;
+      }
+    }
   }
   return Object.fromEntries(
-    Object.entries(result).map(([key, entries]) => [
-      key,
-      Object.fromEntries(Object.entries(entries).reverse()),
-    ]),
+    conversations.map(([key, entries]) => {
+      const kept = retained.get(key)!.reverse();
+      const original = conversationSnapshot(entries).entries;
+      const unchanged =
+        kept.length === original.length &&
+        kept.every(
+          ([id, entry], i) => id === original[i][0] && entry === original[i][1],
+        );
+      return [key, unchanged ? entries : Object.fromEntries(kept)];
+    }),
   );
 }
 export function emptyReception(
@@ -141,7 +175,8 @@ export function emptyReception(
   const bounded = boundLedger(ledger);
   const overflow = { ...overflowUnread };
   for (const [key, entries] of Object.entries(ledger)) {
-    const dropped = Object.entries(entries).filter(
+    if (bounded[key] === entries) continue;
+    const dropped = conversationSnapshot(entries).entries.filter(
       ([id, entry]) =>
         !entry.seen &&
         !entry.suppressed &&
@@ -161,18 +196,13 @@ export function emptyReception(
     unreadIds: Object.fromEntries(
       Object.entries(bounded).map(([key, entries]) => [
         key,
-        Object.keys(entries).filter(
-          (id) => !entries[id].seen && !entries[id].suppressed,
-        ),
+        conversationSnapshot(entries).unread,
       ]),
     ),
     lateUnreadIds: Object.fromEntries(
       Object.entries(bounded).map(([key, entries]) => [
         key,
-        Object.keys(entries).filter(
-          (id) =>
-            !entries[id].seen && !entries[id].suppressed && entries[id].late,
-        ),
+        conversationSnapshot(entries).late,
       ]),
     ),
     reception: {},

@@ -39,10 +39,11 @@ export function channelMemberAccounts(
       group.devices.find((device) => device.user_id === local.deviceId) ??
       group.devices[0];
   }
-  return [...groups.values()];
+  // Account ordering must not depend on which device supplied the roster.
+  return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** Invite one exact device per new account; existing accounts expose devices separately. */
+/** Choose a stable candidate per account; native invitation validates its identity. */
 export function channelInviteAccounts(peers: readonly PeerInfo[]): PeerInfo[] {
   const groups = new Map<string, PeerInfo>();
   for (const peer of peers) {

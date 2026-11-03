@@ -1,10 +1,59 @@
 use super::{
-    ChannelMemberInfo, ChannelMembersInfo, HistoryItem, NodeState, ReactionInfo, parse_channel_id,
-    parse_event_id, to_reaction_infos,
+    ChannelMemberInfo, ChannelMembersInfo, HistoryItem, NodeState, parse_channel_id, parse_event_id,
 };
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
 use tauri::Manager;
+
+/// Account permission and physical execution availability have separate meanings.
+#[derive(Serialize)]
+pub struct AccountGroupAccessInfo {
+    account_id: String,
+    role: mesh_talk_core::node::AccountGroupRole,
+    execution: AccountGroupExecutionInfo,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AccountGroupExecutionInfo {
+    Local,
+    ViaDevice { device_id: String },
+    WaitingForDevice,
+    RequiresUpgrade,
+    Reconciling,
+}
+
+impl AccountGroupAccessInfo {
+    fn read(
+        node: &mesh_talk_core::node::Node,
+        group: mesh_talk_core::eventlog::ConversationId,
+    ) -> Self {
+        use mesh_talk_core::node::{AccountGroupExecution, AccountGroupRole};
+        let Ok(access) = node.account_group_access(group) else {
+            // A failed observation must not fall back to cached positive device
+            // authority. Other groups remain available while this one reconciles.
+            return Self {
+                account_id: node.account_id(),
+                role: AccountGroupRole::Unknown,
+                execution: AccountGroupExecutionInfo::Reconciling,
+            };
+        };
+        let execution = match access.execution {
+            AccountGroupExecution::Local => AccountGroupExecutionInfo::Local,
+            AccountGroupExecution::ViaDevice(device) => AccountGroupExecutionInfo::ViaDevice {
+                device_id: device.user_id(),
+            },
+            AccountGroupExecution::WaitingForDevice => AccountGroupExecutionInfo::WaitingForDevice,
+            AccountGroupExecution::RequiresUpgrade => AccountGroupExecutionInfo::RequiresUpgrade,
+            AccountGroupExecution::Reconciling => AccountGroupExecutionInfo::Reconciling,
+        };
+        Self {
+            account_id: access.account_id,
+            role: access.role,
+            execution,
+        }
+    }
+}
 
 /// A channel as shown in the chat UI.
 #[derive(Serialize)]
@@ -20,10 +69,16 @@ pub struct ChannelInfo {
     pub owner_account_id: Option<String>,
     /// Verified for this running device, rather than inferred from UI presence.
     pub can_manage: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_access: Option<AccountGroupAccessInfo>,
+    /// Retained local history whose modern membership belongs to another account.
+    pub previous_account: Option<String>,
     /// Account-private display reference without a local membership/key grant.
     pub shared_reference: bool,
     pub legacy_membership: bool,
     pub reference_members_complete: bool,
+    /// A retained descriptive snapshot is awaiting causal reconciliation.
+    pub directory_reconciling: bool,
     pub archived: bool,
     pub dissolved: bool,
     pub left: bool,
@@ -40,12 +95,19 @@ pub async fn list_channels(
     admission
         .blocking(move |rt, _| {
             let node = rt.handle();
-            Ok(rt
-                .list_channels()
+            rt.list_channels()?
                 .into_iter()
+                .filter(|channel| {
+                    let personal = node.conversation_personal_state(
+                        &mesh_talk_core::node::DocumentConversation::Channel(hex::encode(
+                            channel.id.as_bytes(),
+                        )),
+                    );
+                    !(personal.hidden && personal.local_cleanup_complete)
+                })
                 .map(|c| {
                     let reference = node.channel_shared_reference(c.id);
-                    ChannelInfo {
+                    Ok(ChannelInfo {
                         metadata: node.channel_metadata(c.id).ok().map(|mut metadata| {
                             // The summary serves recent publication cards; detailed IPC retains the bounded history.
                             let remove = metadata.announcement_history.len().saturating_sub(20);
@@ -60,11 +122,16 @@ pub async fn list_channels(
                             .as_ref()
                             .and_then(|r| r.owner_account_id.clone())
                             .or_else(|| node.channel_owner_account_id(c.id)),
-                        can_manage: reference.is_none() && node.channel_can_manage(c.id),
+                        can_manage: reference.is_none() && node.channel_can_manage(c.id)?,
+                        account_access: Some(AccountGroupAccessInfo::read(&node, c.id)),
+                        previous_account: node.channel_previous_account(c.id)?,
                         shared_reference: reference.is_some(),
                         reference_members_complete: reference
                             .as_ref()
                             .is_none_or(|reference| reference.members_complete),
+                        directory_reconciling: reference
+                            .as_ref()
+                            .is_some_and(|r| r.directory_reconciling),
                         legacy_membership: reference.as_ref().map_or_else(
                             || node.channel_legacy_membership(c.id),
                             |reference| reference.legacy_membership,
@@ -74,9 +141,9 @@ pub async fn list_channels(
                         left: c.left,
                         pending_invite: c.pending_invite,
                         recovery: rt.channel_recovery(c.id),
-                    }
+                    })
                 })
-                .collect())
+                .collect()
         })
         .await
 }
@@ -115,7 +182,7 @@ pub async fn channel_members(
             let node = rt.handle();
             let reference = node.channel_shared_reference(channel);
             let own_account = rt.account_id();
-            let known_names = rt.known_account_names();
+            let known_names = rt.known_account_names()?;
             let pending: std::collections::HashSet<_> =
                 rt.channel_pending_members(channel).into_iter().collect();
             // Borrowed facts are projected here only. Core member queries and every
@@ -196,7 +263,14 @@ pub async fn channel_members(
                 )
                 .collect();
             Ok(ChannelMembersInfo {
-                history_policy: node.channel_history_policy(channel),
+                history_policy: match reference.as_ref().and_then(|r| r.observed_history_policy()) {
+                    Some(policy) => policy,
+                    None => node.channel_history_policy(channel)?,
+                },
+                history_policy_known: reference
+                    .as_ref()
+                    .is_none_or(|r| r.observed_history_policy().is_some()),
+                directory_reconciling: reference.as_ref().is_some_and(|r| r.directory_reconciling),
                 owner: reference
                     .as_ref()
                     .map(|r| r.owner.clone())
@@ -205,7 +279,8 @@ pub async fn channel_members(
                     .as_ref()
                     .and_then(|r| r.owner_account_id.clone())
                     .or_else(|| node.channel_owner_account_id(channel)),
-                can_manage: reference.is_none() && node.channel_can_manage(channel),
+                can_manage: reference.is_none() && node.channel_can_manage(channel)?,
+                account_access: Some(AccountGroupAccessInfo::read(&node, channel)),
                 members,
             })
         })
@@ -314,18 +389,22 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
     admission
         .with_runtime(move |runtime| {
             let node = runtime.handle();
-            Ok(ids
-                .into_iter()
-                .filter_map(|id| {
-                    let replicas = node.channel_custody_count(channel, id)?;
-                    let post_offices = node.channel_post_office_custody_count(channel, id)?;
-                    Some(ChannelCustodyInfo {
-                        id: id.to_hex(),
-                        replicas,
-                        post_offices,
-                    })
-                })
-                .collect())
+            let mut counts = Vec::new();
+            for id in ids {
+                let Some(replicas) = node.channel_custody_count(channel, id)? else {
+                    continue;
+                };
+                let Some(post_offices) = node.channel_post_office_custody_count(channel, id)?
+                else {
+                    continue;
+                };
+                counts.push(ChannelCustodyInfo {
+                    id: id.to_hex(),
+                    replicas,
+                    post_offices,
+                });
+            }
+            Ok(counts)
         })
         .await
 }
@@ -347,7 +426,7 @@ pub async fn channel_activity(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
-        .channel_activity(channel)
+        .channel_activity(channel)?
         .into_iter()
         .map(|entry| ChannelActivityInfo {
             kind: entry.kind.to_string(),
@@ -363,25 +442,15 @@ pub async fn create_channel(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     name: String,
-    member_ids: Vec<String>,
+    member_account_ids: Vec<String>,
 ) -> Result<String, CommandError> {
     let admission = RuntimeAdmission::capture_current(&app, &state)?;
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
-                let (node, members) = admission.checked(runtime, || {
-                    let rt = runtime;
-                    let mut members = Vec::new();
-                    for uid in &member_ids {
-                        let p = rt.channel_invitee_public(uid).ok_or_else(|| {
-                            CommandError::Validation(format!("unknown or ineligible peer: {uid}"))
-                        })?;
-                        members.push(p);
-                    }
-                    Ok((rt.handle(), members))
-                })?;
+                let node = admission.checked(runtime, || Ok(runtime.handle()))?;
                 let id = node
-                    .create_channel_invited_if(&name, members, |commit| {
+                    .create_account_channel_invited_if(&name, member_account_ids, |commit| {
                         admission.authorize_accept(runtime, commit)
                     })
                     .await
@@ -627,7 +696,7 @@ pub async fn channel_history<R: tauri::Runtime>(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let history = rt
-        .channel_history(id, limit)
+        .channel_history(id, limit)?
         .into_iter()
         .map(HistoryItem::from)
         .collect();
@@ -659,17 +728,6 @@ pub async fn react_channel(
             })
         })
         .await
-}
-
-#[tauri::command]
-pub async fn channel_reactions(
-    state: tauri::State<'_, NodeState>,
-    channel_id: String,
-) -> Result<Vec<ReactionInfo>, CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(to_reaction_infos(rt.channel_reactions(channel)))
 }
 
 #[cfg(test)]

@@ -8,6 +8,17 @@ import { ChannelHistorySettings } from "./ChannelHistorySettings";
 const api = vi.hoisted(() => ({
   channelMembers: vi.fn(),
   setChannelHistoryPolicy: vi.fn(),
+  groupOperations: {} as Record<string, unknown>,
+}));
+vi.mock("@/store/chat", () => ({
+  useChat: (select: (s: unknown) => unknown) =>
+    select({
+      myAccountId: "account",
+      runEpoch: 1,
+      identityEpoch: 1,
+      groupOperations: api.groupOperations,
+      setChannelHistoryPolicy: api.setChannelHistoryPolicy,
+    }),
 }));
 vi.mock("@/lib/api", () => ({ chat: api, auth: {} }));
 let host: HTMLDivElement;
@@ -23,8 +34,11 @@ beforeEach(() => {
     user: { id: "owner", username: "me", display_name: "Me" },
     generation: 1,
   });
+  api.groupOperations = {};
   api.channelMembers.mockReset().mockResolvedValue(info());
-  api.setChannelHistoryPolicy.mockReset().mockResolvedValue(undefined);
+  api.setChannelHistoryPolicy
+    .mockReset()
+    .mockResolvedValue({ kind: "committed" });
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -63,6 +77,7 @@ it("loads the owner policy and saves the selected history window", async () => {
   expect(host.querySelector("select")?.value).toBe(
     "last_ten_within_three_days",
   );
+  api.channelMembers.mockResolvedValue({ ...info(), history_policy: "off" });
   await change("off");
   expect(api.setChannelHistoryPolicy).toHaveBeenCalledWith("a", "off");
   expect(host.querySelector("select")?.value).toBe("off");
@@ -202,4 +217,97 @@ it("honors native denial even for a matching legacy owner device", async () => {
   api.channelMembers.mockResolvedValue({ ...info(), can_manage: false });
   await render();
   expect(host.querySelector("select")).toBeNull();
+});
+
+it("does not show a pending history policy as saved", async () => {
+  await render();
+  api.setChannelHistoryPolicy.mockResolvedValueOnce({
+    kind: "pending",
+    id: "op",
+    status: { phase: { kind: "waiting_for_executor" } },
+  });
+  await change("off");
+  expect(host.querySelector("select")?.value).toBe(
+    "last_ten_within_three_days",
+  );
+  expect(host.textContent).toContain("your linked devices");
+});
+
+it("refreshes rediscovered committed policy without a local draft", async () => {
+  await render();
+  api.channelMembers.mockResolvedValue({ ...info(), history_policy: "off" });
+  api.groupOperations = {
+    op: {
+      id: "op",
+      account_id: "account",
+      group: "a",
+      kind: "history_policy",
+      status: { phase: { kind: "committed" } },
+    },
+  };
+  await render();
+  expect(host.querySelector("select")?.value).toBe("off");
+});
+
+it("keeps an unobserved reference policy unknown instead of showing the local Off fallback", async () => {
+  api.channelMembers.mockResolvedValue({
+    ...info(),
+    history_policy: "off",
+    history_policy_known: false,
+  });
+  await render();
+  expect(host.querySelector("select")).toBeNull();
+  expect(host.textContent).toContain(
+    "The group history policy is not available yet",
+  );
+  expect(
+    Array.from(host.querySelectorAll("button")).some(
+      (button) => button.textContent === "Retry",
+    ),
+  ).toBe(true);
+});
+it("discloses reconciling details without revoking an account owner's policy controls", async () => {
+  api.channelMembers.mockResolvedValue({
+    ...info(),
+    history_policy_known: true,
+    directory_reconciling: true,
+  });
+  await render();
+  expect(host.querySelector("select")).not.toBeNull();
+  expect(host.textContent).toContain("Group details are being reconciled");
+});
+
+it("allows an account owner to queue policy changes without a local member device", async () => {
+  api.channelMembers.mockResolvedValue({
+    owner: "source-device",
+    members: [],
+    history_policy: "off",
+    history_policy_known: true,
+    account_access: {
+      account_id: "account",
+      role: "owner",
+      execution: { kind: "waiting_for_device" },
+    },
+  });
+  await act(async () =>
+    root.render(
+      createElement(ChannelHistorySettings, {
+        channelId: "a",
+        myId: "sibling-device",
+        dissolved: false,
+        channelOwner: "source-device",
+        selfAccepted: true,
+        canManage: true,
+      }),
+    ),
+  );
+  expect(host.querySelector("select")).not.toBeNull();
+  api.setChannelHistoryPolicy.mockResolvedValueOnce({
+    kind: "pending",
+    id: "policy-op",
+    status: { phase: { kind: "waiting_for_executor" } },
+  });
+  await change("last_ten");
+  expect(api.setChannelHistoryPolicy).toHaveBeenCalledWith("a", "last_ten");
+  expect(host.querySelector("select")?.value).toBe("off");
 });

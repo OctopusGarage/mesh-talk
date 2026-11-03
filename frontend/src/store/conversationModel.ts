@@ -86,6 +86,8 @@ export type SendPayload =
       protection?: import("@/lib/types").MessageProtection | null;
     };
 export interface SendIntent {
+  /** Logical account operation ID, distinct from the eventual public EventId. */
+  operationId?: string;
   conversation: Conversation;
   payload: SendPayload;
   message: ChatMessage;

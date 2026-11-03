@@ -10,10 +10,13 @@ import type {
 } from "../src/lib/api/accountDocuments";
 import { test as base, expect } from "@playwright/test";
 import type {
+  AccountGroupOperationKind,
+  AccountGroupOperationStatus,
   ChannelHistoryPolicy,
   ChannelMetadata,
   PeerInfo,
   PresenceInfo,
+  ReceptionScope,
 } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -416,7 +419,7 @@ export const test = base.extend({
       };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
-        id: `m${++mid}`,
+        id: (++mid).toString(16).padStart(64, "0"),
         from_me: false,
         who: BOB.device_id,
         text: "",
@@ -489,6 +492,18 @@ export const test = base.extend({
         string,
         Array<{ target: string; emoji: string; who: string[] }>
       > = {};
+
+      if (dataMode === "reactions-paged") {
+        reacts[`acc:${BOB.account_id}`] = Array.from(
+          { length: 200 },
+          (_, index) => ({
+            target: msgs[`acc:${BOB.account_id}`][0].id!,
+            emoji: `reaction-${index.toString().padStart(3, "0")}`,
+            who:
+              index === 199 ? [BOB.account_id, SELF.account] : [BOB.account_id],
+          }),
+        );
+      }
 
       const protectedBodies: Record<string, string> = {};
       const protectedModes: Record<string, string> = {};
@@ -660,7 +675,7 @@ export const test = base.extend({
 
       // --- Custom avatars (id -> data-URL) ----------------------------------
       const avatars: Record<string, string> = {};
-      // Avatars peers PROPAGATED to us, keyed by ACCOUNT id (what `peer_avatars` returns).
+      // Avatars peers propagated to us, selected by account ID through the profile IPC.
       // Bob set a photo → it must show wherever Bob appears, including the channel roster.
       const TINY_PNG =
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -1038,13 +1053,131 @@ export const test = base.extend({
 
       let backupConfirmed = false;
       let backupDestination = "local";
+      let nextGroupOperation = 0;
+      const groupOperations = new Map<
+        string,
+        { request: string; status: AccountGroupOperationStatus }
+      >();
+      function groupAccount(args: Record<string, unknown>) {
+        if (
+          nativeLocked ||
+          args.owner !== contactOwner ||
+          args.expectedAccount !== SELF.account
+        )
+          throw {
+            kind: "authorization",
+            message: "Account or session changed",
+          };
+      }
+      function submitGroupOperation(
+        args: Record<string, unknown>,
+        kind: AccountGroupOperationKind,
+        effect: () => string | null,
+      ) {
+        groupAccount(args);
+        const key = `${SELF.account}:${args.operationId}`;
+        const { progressKey: _progress, ...input } = args;
+        const request = JSON.stringify(input);
+        const previous = groupOperations.get(key);
+        if (previous) {
+          if (previous.request !== request)
+            throw { kind: "invalid-input", message: "Operation ID conflict" };
+          return structuredClone(previous.status);
+        }
+        const event = effect();
+        const committed_events = event ? [event] : [];
+        const status: AccountGroupOperationStatus = {
+          id: String(args.operationId),
+          account_id: SELF.account,
+          group: String(args.channelId),
+          kind,
+          ...(kind === "leave_account"
+            ? {
+                history_cleanup_complete: true,
+                delete_history: Boolean(
+                  (args.operation as { delete_history?: boolean })
+                    ?.delete_history,
+                ),
+              }
+            : {}),
+          phase: { kind: "committed" },
+          committed_events,
+          primary_event: event,
+          executions: [
+            {
+              device_id: SELF.device,
+              phase: { kind: "committed" },
+              committed_events,
+            },
+          ],
+        };
+        groupOperations.set(key, { request, status });
+        return structuredClone(status);
+      }
+      function memberAccount(device: string) {
+        return device === SELF.device
+          ? SELF.account
+          : peers.find((peer) => peer.user_id === device)?.account_id;
+      }
+      // Native delivery replays current profiles in bounded pages on renderer start.
+      // Live message scenarios still use __mockEmit; these pages contain profiles only.
+      let profileOffset = 0;
+      let profilePage = 0;
+      let pendingProfiles: { token: string; end: number } | null = null;
+      const receptionScope = (args: Record<string, unknown>) => {
+        const scope = args.scope as ReceptionScope;
+        if (
+          scope.owner !== "u_self" ||
+          scope.account_id !== SELF.account ||
+          scope.device_id !== SELF.device ||
+          scope.runtime_id !== `mock-runtime:${SELF.account}`
+        )
+          throw new Error("Runtime changed");
+        return scope;
+      };
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
             owner: a.owner,
             device_id: SELF.device,
             account_id: SELF.account,
+            supports_bounded_delivery: true,
+            runtime_id: `mock-runtime:${SELF.account}`,
           }),
+          owner_reception_page: (args) => {
+            const scope = receptionScope(args);
+            if (args.reset) {
+              profileOffset = 0;
+              pendingProfiles = null;
+            }
+            if (pendingProfiles) throw new Error("Reception page awaiting ACK");
+            const profiles = Object.entries(receivedAvatars);
+            const selected = profiles.slice(profileOffset, profileOffset + 16);
+            const end = profileOffset + selected.length;
+            const token = `mock-profile-page:${++profilePage}`;
+            pendingProfiles = { token, end };
+            const cursor = { epoch: "0".repeat(32), sequence: "0" };
+            return {
+              scope,
+              token,
+              after: cursor,
+              next: cursor,
+              through: cursor,
+              complete: end === profiles.length,
+              receipts: selected.map(([account_id, avatar]) => ({
+                kind: "profile",
+                event: { account_id, avatar },
+              })),
+            };
+          },
+          owner_reception_ack: (args) => {
+            receptionScope(args);
+            if (!pendingProfiles || args.token !== pendingProfiles.token)
+              throw new Error("Reception page changed");
+            profileOffset = pendingProfiles.end;
+            pendingProfiles = null;
+            return false;
+          },
           owner_reveal_image: (a) => {
             const reference = a.reference as { message_id: string };
             if (!protectedModes[reference.message_id])
@@ -1080,6 +1213,186 @@ export const test = base.extend({
               const status = delivery[String(a.account)]?.[id];
               return status ? [{ id, status }] : [];
             }),
+          owner_new_account_group_operation_id: (a) => {
+            groupAccount(a);
+            return (++nextGroupOperation).toString(16).padStart(64, "0");
+          },
+          owner_submit_account_group_text: (a) =>
+            submitGroupOperation(
+              a,
+              "text",
+              () => responses.owner_enqueue_channel_text(a) as string,
+            ),
+          owner_submit_account_group_sticker: (a) =>
+            submitGroupOperation(
+              a,
+              "sticker",
+              () => responses.owner_enqueue_channel_sticker(a) as string,
+            ),
+          owner_submit_account_group_file: (a) =>
+            submitGroupOperation(a, "file", () => {
+              // The existing file preparation mock owns the canonical manifest/history row.
+              const prepared = responses.owner_enqueue_channel_file(a) as {
+                id: string;
+                fileConv: string;
+              };
+              const row = msgs[`ch:${a.channelId}`].find(
+                (row) => row.id === prepared.id,
+              );
+              if (!row?.file || row.file.file_conv !== prepared.fileConv)
+                throw new Error(
+                  "File metadata must be durable before commitment",
+                );
+              return prepared.id;
+            }),
+          owner_submit_account_group_control: (a) => {
+            const operation = a.operation as Record<string, unknown>;
+            const kind =
+              operation.kind === "react"
+                ? "reaction"
+                : operation.kind === "set_history_policy"
+                  ? "history_policy"
+                  : operation.kind;
+            return submitGroupOperation(
+              a,
+              kind as AccountGroupOperationKind,
+              () => {
+                const channel = channels.find(
+                  (channel) => channel.channel_id === a.channelId,
+                );
+                if (!channel) throw new Error("Unknown channel");
+                switch (operation.kind) {
+                  case "rename":
+                    channel.name = String(operation.name);
+                    break;
+                  case "transfer_ownership": {
+                    const member = channelMembers.find(
+                      (member) =>
+                        memberAccount(member.user_id) ===
+                        operation.target_account_id,
+                    );
+                    if (!member) throw new Error("Unknown account member");
+                    channelOwner = member.user_id;
+                    channel.owner = channelOwner;
+                    break;
+                  }
+                  case "accept_invitation":
+                    channel.pending_invite = false;
+                    channelMembers[0].pending = false;
+                    break;
+                  case "decline_invitation":
+                    channel.pending_invite = false;
+                    channel.left = true;
+                    break;
+                  case "leave_account":
+                    channel.left = true;
+                    if (operation.delete_history === true) {
+                      clearConversation(`ch:${a.channelId}`);
+                      channels.splice(channels.indexOf(channel), 1);
+                    }
+                    break;
+                  case "dissolve":
+                    channel.dissolved = true;
+                    break;
+                  case "set_history_policy":
+                    channelHistoryPolicies[String(a.channelId)] =
+                      operation.policy as ChannelHistoryPolicy;
+                    break;
+                  case "invite": {
+                    const peer = peers.find(
+                      (peer) => peer.account_id === operation.target_account_id,
+                    );
+                    if (!peer) throw new Error("Unknown invited account");
+                    if (
+                      !channelMembers.some(
+                        (member) =>
+                          memberAccount(member.user_id) === peer.account_id,
+                      )
+                    )
+                      channelMembers.push({
+                        user_id: peer.user_id,
+                        name: peer.name,
+                        pending: true,
+                      });
+                    break;
+                  }
+                  case "remove_account": {
+                    for (
+                      let index = channelMembers.length - 1;
+                      index >= 0;
+                      index--
+                    )
+                      if (
+                        memberAccount(channelMembers[index].user_id) ===
+                        operation.target_account_id
+                      )
+                        channelMembers.splice(index, 1);
+                    channel.member_count = channelMembers.filter(
+                      (member) => !member.pending,
+                    ).length;
+                    break;
+                  }
+                  case "react":
+                    toggleReact(
+                      `ch:${a.channelId}`,
+                      String(operation.target),
+                      String(operation.emoji),
+                      Boolean(operation.remove),
+                      SELF.device,
+                    );
+                    break;
+                  case "recall":
+                    recallMessage(
+                      `ch:${a.channelId}`,
+                      String(operation.target),
+                    );
+                    break;
+                  default:
+                    throw new Error("Unsupported typed group operation");
+                }
+                return null;
+              },
+            );
+          },
+          owner_account_group_operation_status: (a) => {
+            groupAccount(a);
+            return structuredClone(
+              groupOperations.get(`${SELF.account}:${a.operationId}`)?.status ??
+                null,
+            );
+          },
+          owner_list_account_group_operations: (a) => {
+            groupAccount(a);
+            return [...groupOperations.values()]
+              .map((entry) => entry.status)
+              .filter(
+                (status) =>
+                  status.account_id === SELF.account &&
+                  (!a.channelId || status.group === a.channelId) &&
+                  (!a.pendingOnly ||
+                    !["committed", "rejected", "cancelled"].includes(
+                      status.phase.kind,
+                    )) &&
+                  (!a.after || status.id > String(a.after)),
+              )
+              .sort((left, right) => left.id.localeCompare(right.id))
+              .slice(0, Number(a.limit ?? 100))
+              .map((status) => structuredClone(status));
+          },
+          owner_cancel_account_group_operation: (a) => {
+            groupAccount(a);
+            const entry = groupOperations.get(
+              `${SELF.account}:${a.operationId}`,
+            );
+            if (!entry) throw new Error("Operation not admitted");
+            if (
+              !["committed", "rejected", "cancelled"].includes(
+                entry.status.phase.kind,
+              )
+            )
+              entry.status.phase = { kind: "cancellation_requested" };
+            return structuredClone(entry.status);
+          },
           owner_enqueue_channel_text: (a) => {
             recordSend(
               `ch:${a.channelId}`,
@@ -1227,17 +1540,28 @@ export const test = base.extend({
 
           // roster
           list_peers: () => peers.map((peer) => ({ ...peer })),
+          owner_personal_conversation_states: (a) => {
+            groupAccount(a);
+            return [];
+          },
           list_accounts: () => {
-            const deleted = deletedContacts().filter(
-              (id) => !presenceMap[id]?.online,
-            );
-            localStorage.setItem(deletedKey(), JSON.stringify(deleted));
+            const deleted = deletedContacts();
             return accounts
               .filter((account) => !deleted.includes(account.account_id))
               .map((account) => ({
                 ...account,
                 names: [...account.names],
               }));
+          },
+          owner_delete_left_channel: (a) => {
+            groupAccount(a);
+            const channel = channels.find(
+              (channel) => channel.channel_id === a.channelId,
+            );
+            if (!channel || (!channel.left && !channel.dissolved))
+              throw new Error("Leave this group before deleting the chat");
+            clearConversation(`ch:${a.channelId}`);
+            channels.splice(channels.indexOf(channel), 1);
           },
           list_channels: () =>
             channels.map((channel) => ({
@@ -1255,7 +1579,10 @@ export const test = base.extend({
               channelHistoryPolicies[String(a.channelId)] ??
               "last_ten_within_three_days",
             owner: channelOwner,
-            members: channelMembers,
+            members: channelMembers.map((member) => ({
+              ...member,
+              account_id: memberAccount(member.user_id) ?? null,
+            })),
           }),
           channel_activity: () => [],
 
@@ -1271,6 +1598,32 @@ export const test = base.extend({
           },
 
           // reactions
+          owner_reaction_summaries: (a) => {
+            const selected = new Set(a.targets as string[]);
+            if (selected.size > 64) throw new Error("reaction target limit");
+            const rows = (
+              reacts[`${a.kind === "account" ? "acc" : "ch"}:${a.target}`] ?? []
+            )
+              .filter((row) => selected.has(row.target))
+              .sort(
+                (left, right) =>
+                  left.target.localeCompare(right.target) ||
+                  left.emoji.localeCompare(right.emoji),
+              );
+            const offset = a.cursor ? Number(String(a.cursor).slice(5)) : 0;
+            return {
+              items: rows.slice(offset, offset + 128).map((row) => ({
+                target: row.target,
+                emoji: row.emoji,
+                count: row.who.length,
+                from_me:
+                  row.who.includes(SELF.account) ||
+                  row.who.includes(SELF.device),
+              })),
+              next: offset + 128 < rows.length ? `mock:${offset + 128}` : null,
+              pending: false,
+            };
+          },
           reactions: (a) => reacts[`dm:${a.peer}`] ?? [],
           account_reactions: (a) => reacts[`acc:${a.account}`] ?? [],
           channel_reactions: (a) => reacts[`ch:${a.channelId}`] ?? [],
@@ -1731,23 +2084,20 @@ export const test = base.extend({
           // Local contact deletion mirrors the native roster/history contract.
           delete_contact: (a) => {
             const account = String(a.account);
-            if (
-              a.owner !== contactOwner ||
-              account === SELF.account ||
-              presenceMap[account]?.online
-            )
+            if (a.owner !== contactOwner || account === SELF.account)
               throw new Error(
-                "Only another offline contact can be deleted by the current owner",
+                "Only another contact can be deleted by the current owner",
               );
-            clearConversation(`acc:${account}`);
+            if (a.clearHistory !== false) clearConversation(`acc:${account}`);
             localStorage.setItem(
               deletedKey(),
               JSON.stringify([...new Set([...deletedContacts(), account])]),
             );
-            localStorage.setItem(
-              `mock-erased-${contactOwner}`,
-              JSON.stringify([...new Set([...erasedHistory(), account])]),
-            );
+            if (a.clearHistory !== false)
+              localStorage.setItem(
+                `mock-erased-${contactOwner}`,
+                JSON.stringify([...new Set([...erasedHistory(), account])]),
+              );
             const key = `mock-hidden-${contactOwner}`;
             const contacts = (
               JSON.parse(localStorage.getItem(key) ?? "[]") as Array<{
@@ -1982,8 +2332,16 @@ export const test = base.extend({
             else avatars[id] = String(a.data_url);
             return null;
           },
-          // avatars peers propagated to us (none in the mock); publishing is a no-op
-          peer_avatars: () => receivedAvatars,
+          peer_profile_avatar: (args) => {
+            if (args.owner !== "u_self") throw new Error("Account changed");
+            const accountId = String(args.accountId);
+            return Object.prototype.hasOwnProperty.call(
+              receivedAvatars,
+              accountId,
+            )
+              ? { account_id: accountId, avatar: receivedAvatars[accountId] }
+              : null;
+          },
           publish_avatar: (args) => {
             documentScope(args);
             return null;
@@ -2099,6 +2457,7 @@ export const test = base.extend({
           suspend_screenshot_shortcuts: () => null,
           pause_screenshot_shortcuts: () => null,
           wake_screenshot_window: () => null,
+          history_storage_usage: () => ({ bytes: 0, complete: true }),
           reconcile_account_settings: () => appSettings,
           load_conversation_drafts: snapshotDrafts,
           save_conversation_drafts: (a) => {
@@ -2407,6 +2766,13 @@ export const test = base.extend({
           expires_at_ms?: number;
         },
       ) => {
+        if (conv.startsWith("acc:"))
+          localStorage.setItem(
+            deletedKey(),
+            JSON.stringify(
+              deletedContacts().filter((id) => id !== conv.slice(4)),
+            ),
+          );
         const entry = msg({ from_me: false, who, text, ...metadata });
         const history = (msgs[conv] ||= []);
         if (metadata?.index !== undefined)

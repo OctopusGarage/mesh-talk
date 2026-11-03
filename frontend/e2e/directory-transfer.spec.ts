@@ -6,6 +6,9 @@ import {
   BOB,
 } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 test("folder picker sends its path as an attachment", async ({ page }) => {
   await enterChat(page);
   await openBobDm(page);

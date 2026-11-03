@@ -27,6 +27,17 @@ fn start(root: &Path, owner: &str, name: &str, port: u16) -> (NodeRuntime, Recei
     (runtime, rx)
 }
 
+fn stop_and_close(runtime: NodeRuntime) {
+    tauri::async_runtime::block_on(async {
+        let retired = tokio::time::timeout(Duration::from_secs(15), runtime.stop_for_storage())
+            .await
+            .expect("Timed out joining retired runtime producers");
+        retired
+            .close()
+            .expect("Retired profile must close before reopen");
+    });
+}
+
 fn until(description: &str, check: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !check() {
@@ -95,7 +106,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         alice_rx.recv_timeout(Duration::from_secs(15)).unwrap().text,
         b"existing conversation before hide"
     );
-    let history_before_hide = alice_handle.account_history(&bob_account, 20);
+    let history_before_hide = alice_handle.account_history(&bob_account, 20).unwrap();
     let peers_before_hide: Vec<_> = alice
         .peers()
         .iter()
@@ -134,6 +145,9 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             get_hidden_contacts,
             set_contact_hidden,
             delete_contact,
+            crate::owner_commands::owner_personal_conversation_states,
+            crate::owner_commands::owner_delete_left_channel,
+            crate::chat_commands::list_channels,
             crate::chat_commands::search
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -176,6 +190,82 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             && hit["text"] == "existing conversation before hide"
             && hit["is_channel"] == false
     }));
+    // Online deletion with explicit keep-history is a real core personal
+    // control, independent from presence and from manual contact hiding.
+    let deleted_online = invoke(
+        "delete_contact",
+        serde_json::json!({
+            "owner":"alice", "expectedAccount":alice_account, "account":bob_account, "clearHistory":false,
+        }),
+    )
+    .unwrap();
+    assert_eq!(deleted_online.deleted, vec![bob_account.clone()]);
+    let personal_rows = invoke_raw(
+        "owner_personal_conversation_states",
+        serde_json::json!({"owner":"alice", "expectedAccount":alice_account}),
+    )
+    .unwrap()
+    .deserialize::<serde_json::Value>()
+    .unwrap();
+    let personal_row = personal_rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["conversation"]["id"] == bob_account)
+        .unwrap();
+    assert_eq!(personal_row["conversation"]["kind"], "account");
+    assert_eq!(personal_row["hidden"], true);
+    assert!(personal_row["history_floor"].is_null());
+    assert_eq!(personal_row["local_cleanup_complete"], true);
+    assert_eq!(
+        alice_handle.account_history(&bob_account, 20).unwrap(),
+        history_before_hide
+    );
+    announce(&bob, a_port);
+    assert_eq!(
+        invoke("get_hidden_contacts", serde_json::json!({"owner":"alice"}))
+            .unwrap()
+            .deleted,
+        vec![bob_account.clone()],
+        "signed presence must not reopen a personal deletion"
+    );
+    assert!(
+        invoke(
+            "set_contact_hidden",
+            serde_json::json!({
+                "owner":"alice", "account":bob_account, "hidden":false, "name":"",
+            })
+        )
+        .is_err(),
+        "a shared reopen requires a caller-captured root"
+    );
+    assert!(invoke("set_contact_hidden", serde_json::json!({
+        "owner":"alice", "expectedAccount":"00".repeat(16), "account":bob_account, "hidden":false, "name":"",
+    })).is_err(), "a stale-root restore cannot mutate this account");
+    assert!(
+        alice_handle
+            .conversation_personal_state(&mesh_talk_core::node::DocumentConversation::Account(
+                bob_account.clone()
+            ))
+            .hidden
+    );
+    assert_eq!(
+        alice_handle.account_history(&bob_account, 20).unwrap(),
+        history_before_hide
+    );
+    let restored_personal = invoke(
+        "set_contact_hidden",
+        serde_json::json!({
+            "owner":"alice", "expectedAccount":alice_account, "account":bob_account, "hidden":false, "name":"",
+        }),
+    )
+    .unwrap();
+    assert!(restored_personal.deleted.is_empty());
+    assert_eq!(
+        alice_handle.account_history(&bob_account, 20).unwrap(),
+        history_before_hide
+    );
+
     let hidden = invoke(
         "set_contact_hidden",
         serde_json::json!({
@@ -208,7 +298,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         "Hiding must not mutate the authentic raw roster"
     );
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide,
         "Hiding must preserve the existing conversation"
     );
@@ -278,7 +368,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         b"outbound while hidden"
     );
     until("durable account history contains both directions", || {
-        let history = alice_handle.account_history(&bob_account, 20);
+        let history = alice_handle.account_history(&bob_account, 20).unwrap();
         history
             .iter()
             .any(|e| !e.from_me && e.text == b"inbound while hidden")
@@ -287,18 +377,109 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
                 .any(|e| e.from_me && e.text == b"outbound while hidden")
     });
 
-    // Drop every handle before opening stores again, exactly as logout/relaunch does.
-    let before_restart = alice_handle.account_history(&bob_account, 20);
-    let old_node = Arc::downgrade(&alice_handle);
-    nodes.0.blocking_write().take();
-    drop(alice_handle);
-    until("old runtime tasks release their node and stores", || {
-        old_node.upgrade().is_none()
+    // Standalone group removal is a real public-member departure followed by
+    // guarded personal cleanup. Canonical membership remains available to core.
+    let group = tauri::async_runtime::block_on(bob_handle.create_channel(
+        "Personal removal native fixture",
+        vec![bob.peer_public(&alice_handle.user_id()).unwrap()],
+    ))
+    .unwrap();
+    until("real group membership reaches Alice", || {
+        alice_handle
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == group)
     });
-    drop((bob, bob_two, bob_handle));
+    let group_id = hex::encode(group.as_bytes());
+    let delete_body =
+        serde_json::json!({"owner":"alice", "expectedAccount":alice_account, "channelId":group_id});
+    assert!(
+        invoke_raw("owner_delete_left_channel", delete_body.clone()).is_err(),
+        "active membership must reject personal deletion"
+    );
+    tauri::async_runtime::block_on(
+        bob_handle.send_channel_message(group, b"synthetic group history before personal deletion"),
+    )
+    .unwrap();
+    until(
+        "original group message reaches Alice",
+        || match alice_handle.channel_history(group, 20) {
+            Ok(history) => history
+                .iter()
+                .any(|entry| entry.text == b"synthetic group history before personal deletion"),
+            Err(mesh_talk_core::node::NodeError::Log(
+                mesh_talk_core::eventlog::LogError::StaleCursor,
+            )) => false,
+            Err(error) => panic!("group history read failed: {error}"),
+        },
+    );
+    tauri::async_runtime::block_on(alice_handle.leave_channel(group)).unwrap();
+    let deleted = invoke_raw("owner_delete_left_channel", delete_body);
+    assert!(
+        deleted
+            .unwrap()
+            .deserialize::<serde_json::Value>()
+            .unwrap()
+            .is_null()
+    );
+    assert!(alice_handle.channel_history(group, 20).unwrap().is_empty());
+    assert!(
+        alice_handle
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == group),
+        "raw core membership/proof inventory must remain intact"
+    );
+    let visible_groups = invoke_raw("list_channels", serde_json::json!({}))
+        .unwrap()
+        .deserialize::<serde_json::Value>()
+        .unwrap();
+    assert!(
+        visible_groups
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["channel_id"] != group_id)
+    );
+    let personal_rows = invoke_raw(
+        "owner_personal_conversation_states",
+        serde_json::json!({"owner":"alice", "expectedAccount":alice_account}),
+    )
+    .unwrap()
+    .deserialize::<serde_json::Value>()
+    .unwrap();
+    let group_row = personal_rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            row["conversation"]["kind"] == "channel" && row["conversation"]["id"] == group_id
+        })
+        .expect("snapshot must retain the closed group control");
+    assert_eq!(group_row["hidden"], true);
+    assert_eq!(group_row["local_cleanup_complete"], true);
+    assert!(group_row["history_floor"].is_string());
+
+    // Join producers and close the exact profile before reopening, as the
+    // production retirement boundary does. A dead Weak<Node> alone can precede
+    // field destruction and does not prove the storage lease has been released.
+    let before_restart = alice_handle.account_history(&bob_account, 20).unwrap();
+    let old_node = Arc::downgrade(&alice_handle);
+    let retiring = nodes.0.blocking_write().take().unwrap();
+    drop(alice_handle);
+    stop_and_close(retiring);
+    assert!(old_node.upgrade().is_none());
+    drop(bob_handle);
+    stop_and_close(bob);
+    stop_and_close(bob_two);
     let (restarted, _) = start(root.path(), "alice", "Alice", a_port);
     assert_eq!(restarted.account_id(), alice_account);
-    assert_eq!(restarted.account_history(&bob_account, 20), before_restart);
+    assert_eq!(
+        restarted.account_history(&bob_account, 20).unwrap(),
+        before_restart
+    );
     assert_eq!(
         HiddenContactsState::new(root.path().to_owned())
             .get(Some("alice"), "alice")
@@ -361,26 +542,67 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     *nodes.0.blocking_write() = Some(restarted);
     let deleted = invoke(
         "delete_contact",
-        serde_json::json!({ "owner": "alice", "account": bob_account }),
+        serde_json::json!({ "owner": "alice", "expectedAccount":alice_account, "account": bob_account }),
     )
     .unwrap();
     assert_eq!(deleted.deleted, vec![bob_account.clone()]);
-    assert!(deletion_handle.account_history(&bob_account, 20).is_empty());
-    nodes.0.blocking_write().take();
+    assert!(
+        deletion_handle
+            .account_history(&bob_account, 20)
+            .unwrap()
+            .is_empty()
+    );
+    let personal_rows = invoke_raw(
+        "owner_personal_conversation_states",
+        serde_json::json!({"owner":"alice", "expectedAccount":alice_account}),
+    )
+    .unwrap()
+    .deserialize::<serde_json::Value>()
+    .unwrap();
+    let personal_row = personal_rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["conversation"]["id"] == bob_account)
+        .unwrap();
+    assert_eq!(personal_row["hidden"], true);
+    assert!(
+        personal_row["history_floor"]
+            .as_str()
+            .is_some_and(|floor| floor.split(':').count() == 3)
+    );
+    assert_eq!(personal_row["local_cleanup_complete"], true);
+    let retiring = nodes.0.blocking_write().take().unwrap();
     drop(deletion_handle);
-    until("deleted runtime releases stores", || {
-        deletion_weak.upgrade().is_none()
-    });
+    stop_and_close(retiring);
+    assert!(deletion_weak.upgrade().is_none());
     let (after_delete, _) = start(root.path(), "alice", "Alice", a_port);
     assert!(
-        after_delete.account_history(&bob_account, 20).is_empty(),
+        after_delete
+            .account_history(&bob_account, 20)
+            .unwrap()
+            .is_empty(),
         "deleted history must not return after restart"
     );
-    assert_eq!(
+    assert!(
         HiddenContactsState::new(root.path().to_owned())
             .get(Some("alice"), "alice")
             .unwrap()
-            .deleted,
-        vec![bob_account]
+            .deleted
+            .is_empty(),
+        "new account controls must not leave an unscoped legacy suppression"
     );
+    let personal = after_delete.handle().conversation_personal_state(
+        &mesh_talk_core::node::DocumentConversation::Account(bob_account),
+    );
+    assert!(
+        personal.known
+            && personal.hidden
+            && personal.clear_history
+            && personal.local_cleanup_complete
+    );
+    assert!(personal.floor.is_some());
+    // Every fixture participant must join its crypto/storage producers before
+    // the test process tears down SQLCipher's provider.
+    stop_and_close(after_delete);
 }

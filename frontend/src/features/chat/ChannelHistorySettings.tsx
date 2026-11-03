@@ -1,3 +1,6 @@
+import { useChat } from "@/store/chat";
+import { useGroupControlOperation } from "./useGroupControlOperation";
+import { GroupControlStatus } from "./GroupControlStatus";
 import { canManageChannel } from "./channelPermissions";
 import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -51,7 +54,22 @@ function HistoryPolicyControl({
   const id = useId();
   const [info, setInfo] = useState<ChannelMembersInfo | null>(null);
   const [error, setError] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const operation = useGroupControlOperation(channelId);
+  const busy = operation.busy;
+  const setPolicy = useChat((s) => s.setChannelHistoryPolicy);
+  const policyRevision = useChat((s) =>
+    Object.values(s.groupOperations ?? {})
+      .filter(
+        (ticket) =>
+          ticket.account_id === s.myAccountId &&
+          ticket.group === channelId &&
+          ticket.kind === "history_policy" &&
+          ticket.status?.phase.kind === "committed",
+      )
+      .map((ticket) => ticket.id)
+      .sort()
+      .join(","),
+  );
   const [retry, setRetry] = useState(0);
   const [lifetime] = useState(() => ({ live: true }));
   useEffect(() => {
@@ -74,27 +92,29 @@ function HistoryPolicyControl({
     return () => {
       live = false;
     };
-  }, [channelId, retry]);
+  }, [channelId, retry, policyRevision]);
   const self = info?.members.find((m) => m.user_id === myId);
   const editable =
     !dissolved &&
-    canManageChannel({ owner: channelOwner, can_manage: canManage }, myId) &&
+    info?.history_policy_known !== false &&
+    (canManage === true ||
+      canManageChannel({ owner: channelOwner, can_manage: canManage }, myId)) &&
     selfAccepted &&
     canManageChannel(info, myId) &&
-    !!self &&
-    !self.pending;
+    (info?.account_access !== undefined
+      ? info.account_access?.role === "owner"
+      : !!self && !self.pending);
   const save = async (policy: ChannelHistoryPolicy) => {
     if (!editable || busy || !info || !policies.includes(policy)) return;
-    setBusy(true);
     setError(false);
-    try {
-      await chat.setChannelHistoryPolicy(channelId, policy);
-      if (lifetime.live) setInfo({ ...info, history_policy: policy });
-    } catch {
-      if (lifetime.live) setError(true);
-    } finally {
-      if (lifetime.live) setBusy(false);
-    }
+    await operation.run(
+      () => setPolicy(channelId, policy),
+      () => {
+        if (!lifetime.live) return;
+        // Read the committed policy from its owner instead of publishing the draft.
+        setRetry((n) => n + 1);
+      },
+    );
   };
   return (
     <div className="space-y-2 border-t border-border pt-3">
@@ -107,8 +127,26 @@ function HistoryPolicyControl({
       <p className="text-xs text-muted-foreground">
         {t("members.historyHelp")}
       </p>
+      {info?.directory_reconciling && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {t("members.detailsReconciling")}
+        </p>
+      )}
       {info ? (
-        editable ? (
+        info.history_policy_known === false ? (
+          <div className="space-y-2">
+            <p role="status" className="text-sm text-muted-foreground">
+              {t("members.historyUnavailable")}
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setRetry((n) => n + 1)}
+            >
+              {t("members.historyRetry")}
+            </Button>
+          </div>
+        ) : editable ? (
           <select
             id={id}
             value={info.history_policy}
@@ -134,6 +172,10 @@ function HistoryPolicyControl({
           </p>
         )
       )}
+      <GroupControlStatus
+        outcome={operation.outcome}
+        cancelRequested={operation.cancelRequested}
+      />
       {busy && (
         <p role="status" className="text-xs text-muted-foreground">
           {t("members.historySaving")}
@@ -144,7 +186,7 @@ function HistoryPolicyControl({
           <p role="alert" className="text-sm text-destructive">
             {t("members.historyError")}
           </p>
-          {!info && (
+          {info?.history_policy_known !== false && (
             <Button
               variant="ghost"
               size="sm"

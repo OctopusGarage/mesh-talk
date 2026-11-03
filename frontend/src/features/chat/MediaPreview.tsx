@@ -4,6 +4,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
+  type SyntheticEvent,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -17,6 +19,7 @@ import {
   Maximize,
   Copy,
   Share2,
+  ImageOff,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { attachmentLabel } from "@/lib/directoryAttachment";
@@ -48,10 +51,14 @@ import {
   withinInlineCap,
 } from "./mediaFile";
 
+// Geometry follows the live Blob URL, so retirement cannot reuse another file's size.
+// Bound numeric metadata just like ordinary media reuse; no plaintext bytes are retained.
+const imageGeometry = new Map<string, { width: number; height: number }>();
+
 /** Inline preview for a received image or small video. Both are clickable to open a
- * full-size lightbox — an image shows large, a video autoplays with controls. Renders
- * nothing while the bytes are still loading. Bytes are fetched only when under the
- * relevant size cap. */
+ * full-size lightbox — an image shows large, a video autoplays with controls. Images
+ * retain a quiet status frame until the current source can display. Bytes are fetched
+ * only when under the relevant size cap. */
 export function MediaPreview({
   fileConv,
   name,
@@ -82,8 +89,6 @@ export function MediaPreview({
   const status = useFileStatus(savedPath ? undefined : fileConv);
   const available = !!savedPath || !!status?.ready;
   const video = isVideo(name);
-  // Keep the same responsive box through IPC reads, decode, failures and remounts.
-  const frameClass = `relative mb-1.5 w-80 max-w-full overflow-hidden rounded-lg bg-muted/40 ${video ? "aspect-video" : "aspect-[4/3]"}`;
   const withinCap = withinInlineCap(name, size);
   const url = useFileObjectUrl(
     fileConv,
@@ -91,6 +96,55 @@ export function MediaPreview({
     blobMime(name, mime),
     { reuse: true },
   );
+  const [decoded, setDecoded] = useState<{
+    url: string;
+    width: number;
+    height: number;
+  } | null>(null);
+  const geometry = url
+    ? decoded?.url === url
+      ? decoded
+      : imageGeometry.get(url)
+    : undefined;
+  const frameClass = `relative w-80 max-w-full overflow-hidden rounded-lg ${video ? "aspect-video bg-muted/40" : "aspect-[4/3] bg-card text-card-foreground ring-1 ring-inset ring-border"}`;
+  const imageFrameClass =
+    "relative block max-w-full overflow-hidden rounded-lg";
+  // A provisional 4:3 frame becomes the actual aspect ratio on the first decode.
+  // Reused URLs reserve the decoded geometry immediately on virtualized remounts.
+  const imageStyle: CSSProperties | undefined = geometry
+    ? {
+        width: Math.min(
+          geometry.width,
+          320,
+          (320 * geometry.width) / geometry.height,
+        ),
+        aspectRatio: `${geometry.width} / ${geometry.height}`,
+      }
+    : undefined;
+  const imageSource = useRef<{ fileConv: string; url: string | null } | null>(
+    null,
+  );
+  useLayoutEffect(() => {
+    imageSource.current = { fileConv, url };
+    return () => {
+      imageSource.current = null;
+    };
+  }, [fileConv, url]);
+  const imageLease = captureChatOwnership();
+  const currentImage = (image: HTMLImageElement) =>
+    !!url &&
+    imageSource.current?.fileConv === fileConv &&
+    imageSource.current.url === url &&
+    image.getAttribute("src") === url &&
+    imageLease.current();
+  const rememberImage = (event: SyntheticEvent<HTMLImageElement>) => {
+    const { naturalWidth: width, naturalHeight: height } = event.currentTarget;
+    if (!url || !currentImage(event.currentTarget) || !width || !height) return;
+    if (imageGeometry.size >= 64 && !imageGeometry.has(url))
+      imageGeometry.delete(imageGeometry.keys().next().value!);
+    imageGeometry.set(url, { width, height });
+    setDecoded({ url, width, height });
+  };
   const [lightbox, setLightbox] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -271,12 +325,19 @@ export function MediaPreview({
   };
   // Native video playback owns a composited surface. Keep it and its controls out
   // of shared-element projection; the backdrop still supplies the entry/exit fade.
-  const layoutId = motionOK && !video ? `media-${fileConv}` : undefined;
+  const layoutId =
+    motionOK && !video && geometry ? `media-${fileConv}` : undefined;
   const layoutTransition = { duration: motionOK ? 0.22 : 0.08, ease };
   const backdropTransition = { duration: motionOK ? 0.16 : 0.08, ease };
   // An inline image whose codec the webview can't decode (e.g. HEIC outside Safari) fires
   // <img onError>; we then degrade to the same "can't preview — Save" card as video.
-  const [imgFailed, setImgFailed] = useState(false);
+  const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
+  const imgFailed = !!url && failedImageUrl === url;
+  const failImage = (event: SyntheticEvent<HTMLImageElement>) => {
+    if (!url || !currentImage(event.currentTarget)) return;
+    imageGeometry.delete(url);
+    setFailedImageUrl(url);
+  };
 
   // Save the media to disk. The filename/size/download live here in the detail view (not
   // under every bubble) — the chat shows just the media.
@@ -360,10 +421,19 @@ export function MediaPreview({
   // never a dead end (no empty bubble, no broken-image icon).
   const unpreviewable = (msgKey: string, testid?: string) => (
     <div
-      className={`${frameClass} flex items-center gap-2 border px-3 py-2`}
+      className={`${frameClass} flex items-center gap-3 ${video ? "border px-3 py-2" : "flex-col justify-center p-5 text-center"}`}
       data-testid={testid}
     >
-      <p className="min-w-0 flex-1 text-xs text-muted-foreground">
+      {!video && (
+        <ImageOff
+          className="h-6 w-6 text-muted-foreground"
+          aria-hidden="true"
+        />
+      )}
+      <p
+        role={!video ? "status" : undefined}
+        className={`min-w-0 text-xs text-muted-foreground ${video ? "flex-1" : "max-w-full [overflow-wrap:anywhere]"}`}
+      >
         {t(msgKey)}
       </p>
       {!readOnly && (
@@ -403,6 +473,20 @@ export function MediaPreview({
   if (!video && imgFailed) {
     return unpreviewable("files.imageUnsupported", "file-image-unsupported");
   }
+  if (!video && (!available || !url))
+    return (
+      <div
+        className={`${frameClass} flex items-center justify-center p-5`}
+        title={displayName}
+      >
+        <ReceiveProgress
+          status={status}
+          presentation="image"
+          size={size}
+          preparing={available}
+        />
+      </div>
+    );
   if (!available)
     return (
       <div
@@ -534,41 +618,86 @@ export function MediaPreview({
     );
   }
 
-  // Read-only (history viewer): the image as-is, no click-to-enlarge, no lightbox.
+  // An available Blob URL is not yet a displayable image. Keep the same local
+  // surface until onLoad; cached geometry skips preparation on virtualized remounts.
+  const imageOpacity: CSSProperties = {
+    opacity: geometry ? 1 : 0,
+  };
+  const preparingImage = (
+    <div
+      aria-hidden={!!geometry}
+      className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg bg-card p-5 text-card-foreground ring-1 ring-inset ring-border"
+      style={{
+        // Reveal the fully painted image beneath one dissolving surface. Fading
+        // both layers would let the wallpaper bleed through halfway through.
+        opacity: geometry ? 0 : 1,
+        transition: `opacity ${motionOK ? 180 : 80}ms cubic-bezier(0.22, 1, 0.36, 1)`,
+      }}
+    >
+      {!geometry && (
+        <ReceiveProgress
+          status={status}
+          presentation="image"
+          size={size}
+          preparing
+        />
+      )}
+    </div>
+  );
+
+  // Read-only (history viewer): no click-to-enlarge, no play, no lightbox.
   if (readOnly) {
     return (
-      <div className={frameClass}>
+      <div
+        className={geometry ? imageFrameClass : frameClass}
+        style={imageStyle}
+      >
         <img
+          key={url}
           src={url}
           alt={displayName}
           data-testid="file-image"
-          onError={() => setImgFailed(true)}
+          onLoad={rememberImage}
+          onError={failImage}
           className="h-full w-full select-none object-contain"
+          style={imageOpacity}
         />
+        {preparingImage}
       </div>
     );
   }
 
   return (
     <>
-      <button
-        type="button"
-        ref={triggerRef}
-        onClick={() => setLightbox(true)}
-        title={t("files.viewFullSize")}
-        aria-label={t("files.viewFullSize")}
-        className={`${frameClass} block`}
+      <div
+        data-inline-image=""
+        className={geometry ? imageFrameClass : frameClass}
+        style={imageStyle}
       >
-        <motion.img
-          src={url}
-          alt={displayName}
-          layoutId={layoutId}
-          transition={layoutTransition}
-          data-testid="file-image"
-          onError={() => setImgFailed(true)}
-          className="h-full w-full select-none object-contain"
-        />
-      </button>
+        <button
+          type="button"
+          ref={triggerRef}
+          onClick={() => setLightbox(true)}
+          title={t("files.viewFullSize")}
+          aria-label={t("files.viewFullSize")}
+          disabled={!geometry}
+          className="block h-full w-full rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          <motion.img
+            key={url}
+            src={url}
+            alt={displayName}
+            layoutId={layoutId}
+            transition={layoutTransition}
+            data-testid="file-image"
+            onLoad={rememberImage}
+            onError={failImage}
+            className="h-full w-full select-none object-contain"
+            style={imageOpacity}
+          />
+        </button>
+        {preparingImage}
+      </div>
       <AnimatePresence>
         {lightbox && (
           <motion.div

@@ -37,6 +37,11 @@ test("owner can dissolve a channel and keep its history read-only", async ({
   ).toBeVisible();
   await expect(page.getByTestId("dissolve-channel-trigger")).toHaveCount(0);
   await expect(
+    page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete chat", exact: true }),
+  ).toBeVisible();
+  await expect(
     page.getByRole("dialog").getByRole("button", { name: "Leave channel" }),
   ).toHaveCount(0);
 });

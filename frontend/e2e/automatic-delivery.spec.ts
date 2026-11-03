@@ -9,6 +9,9 @@ import { seedMarketPacks } from "./helpers/packs";
 import { seedThemeBeforeLoad } from "./helpers/session";
 import type { Page } from "@playwright/test";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 async function observeLocalDelivery(page: Page) {
   await page.evaluate(() => {
     const scope = window as unknown as {
@@ -126,11 +129,30 @@ for (const viewport of [
       ),
     ).toBe(true);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
-    expect(
-      await details.evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
-      ),
-    ).toBe(true);
+    const layout = await details.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      width: element.getBoundingClientRect().width,
+      overflowingChildren: Array.from(element.querySelectorAll("*"))
+        .filter((child) => child.scrollWidth > child.clientWidth)
+        .map((child) => ({
+          tag: child.tagName,
+          left:
+            child.getBoundingClientRect().left -
+            element.getBoundingClientRect().left,
+          right:
+            child.getBoundingClientRect().right -
+            element.getBoundingClientRect().left,
+          classes: child.getAttribute("class"),
+          scrollWidth: child.scrollWidth,
+          clientWidth: child.clientWidth,
+          width: child.getBoundingClientRect().width,
+        })),
+    }));
+    expect(layout.scrollWidth, JSON.stringify(layout)).toBeLessThanOrEqual(
+      layout.clientWidth,
+    );
+    expect(layout.overflowingChildren, JSON.stringify(layout)).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath("delivery-details-open.png"),
     });
@@ -420,18 +442,50 @@ test("a native picker completed after conversation navigation cannot send to the
     )
     .toBe(true);
   await page.getByTestId("conversation-row-acc_carol_cccc3333").click();
-  const enqueues = await page.evaluate(async () => {
+  // Exact retired-picker completion is covered through ConversationView in conversationIntake.test.ts.
+  const enqueues = await page.evaluate(() => {
     const state = (
       window as unknown as {
         __pickerRace: { enqueues: number; release: (path: string) => void };
       }
     ).__pickerRace;
     state.release("/tmp/stale.txt");
-    await new Promise((resolve) => setTimeout(resolve, 0));
     return state.enqueues;
   });
   expect(enqueues).toBe(0);
   await expect(page.getByText("stale.txt")).toHaveCount(0);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __pickerRace: { entered: boolean } }
+    ).__pickerRace.entered = false;
+  });
+  await revealComposerTools(page);
+  await page.getByTestId("composer-attach").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __pickerRace: { entered: boolean } })
+            .__pickerRace.entered,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __pickerRace: { release: (path: string) => void } }
+    ).__pickerRace.release("/tmp/current.txt");
+  });
+  await expect(
+    page.getByRole("log").getByText("current.txt", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("conversation-header")).toContainText("carol");
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __pickerRace: { enqueues: number } })
+          .__pickerRace.enqueues,
+    ),
+  ).toBe(1);
 });
 
 test("a pending local text acceptance moves the submitted text out of the composer", async ({
@@ -772,4 +826,88 @@ test("linked-device channel history waits for copy confirmation before showing a
   await expect(bubble.locator("[data-status-count]")).toHaveText("1");
   await expect(bubble.getByTestId("message-status")).toHaveCount(0);
   await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
+});
+
+test("typed channel File stays pending until canonical metadata commits and original-ID replay stays singular", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __mockDeferNext(command: string): void;
+      __typedFileArgs?: Record<string, unknown>;
+    };
+    const original = host.__TAURI_INTERNALS__.invoke;
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "plugin:dialog|open")
+        return "/tmp/account-group-upload.bin";
+      if (command === "owner_submit_account_group_file")
+        host.__typedFileArgs = { ...args };
+      return original(command, args);
+    };
+    host.__mockDeferNext("owner_submit_account_group_file");
+  });
+  await revealComposerTools(page);
+  await page.getByTestId("composer-attach").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "account-group-upload.bin" });
+  await expect(bubble).toHaveCount(1);
+  await expect(
+    bubble.getByText("File details pending", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "The result is unconfirmed. Check this operation before retrying.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Check status", exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __mockReleaseDeferred(): void }
+    ).__mockReleaseDeferred(),
+  );
+  await expect(
+    bubble.getByText("File details pending", { exact: true }),
+  ).toHaveCount(0);
+  await expect(bubble.getByText("123 B", { exact: true })).toBeVisible();
+  const result = await page.evaluate(async () => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __typedFileArgs: Record<string, unknown>;
+    };
+    const args = host.__typedFileArgs;
+    const replay = (await host.__TAURI_INTERNALS__.invoke(
+      "owner_submit_account_group_file",
+      args,
+    )) as { phase: { kind: string }; primary_event: string };
+    const rows = (await host.__TAURI_INTERNALS__.invoke("channel_history", {
+      channelId: args.channelId,
+    })) as Array<{ id: string; file?: { file_conv: string } }>;
+    return {
+      operationId: args.operationId,
+      phase: replay.phase.kind,
+      canonical: rows.filter((row) => row.id === replay.primary_event),
+    };
+  });
+  expect(result.operationId).toMatch(/^[a-f0-9]{64}$/);
+  expect(result.phase).toBe("committed");
+  expect(result.canonical).toHaveLength(1);
+  expect(result.canonical[0].file?.file_conv).toMatch(/^fc_/);
+  await expect(bubble).toHaveCount(1);
 });

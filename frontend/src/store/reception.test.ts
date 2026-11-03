@@ -20,6 +20,32 @@ beforeEach(() => {
   });
 });
 afterEach(() => vi.unstubAllGlobals());
+it("retains unchanged conversation projections while receiving elsewhere", () => {
+  const before = receiveIdentity(emptyReception(), "channel:quiet", {
+    event_id: "unread",
+  });
+  const after = receiveIdentity(before, "channel:busy", { event_id: "new" });
+  expect(after.ledger["channel:quiet"]).toBe(before.ledger["channel:quiet"]);
+  expect(after.unreadIds["channel:quiet"]).toBe(
+    before.unreadIds["channel:quiet"],
+  );
+  expect(after.lateUnreadIds["channel:quiet"]).toBe(
+    before.lateUnreadIds["channel:quiet"],
+  );
+});
+it("drops malformed optional aliases while retaining the canonical receipt", () => {
+  const state = emptyReception({
+    "channel:a": {
+      message: {
+        seen: false,
+        late: false,
+        messageAliases: null as unknown as string[],
+      },
+    },
+  });
+  expect(state.unreadIds["channel:a"]).toEqual(["message"]);
+  expect(state.ledger["channel:a"].message.messageAliases).toBeUndefined();
+});
 it("deduplicates identities without treating focused conversations as viewed", () => {
   let s = receiveIdentity(emptyReception(), "channel:a", {
     event_id: "one",

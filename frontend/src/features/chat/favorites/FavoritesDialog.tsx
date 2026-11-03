@@ -330,7 +330,7 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
                       variant="link"
                       className="h-auto px-0 text-xs"
                       disabled={opening || expired(message)}
-                      onClick={() => void original(selected, message)}
+                      onClick={() => original(selected, message)}
                     >
                       {t("messageFavorites.viewOriginal")}
                     </Button>

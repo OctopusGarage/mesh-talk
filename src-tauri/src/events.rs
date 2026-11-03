@@ -9,6 +9,68 @@ use tauri_plugin_notification::NotificationExt;
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
 
+/// Native presentation starts on the main thread before acquiring session
+/// authority. The completion receiver lets bounded producers keep one queued
+/// batch until actual execution, including rejection of a retired authority.
+pub(crate) fn dispatch_runtime_presentation<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    authority: &crate::chat_commands::RuntimeAuthority,
+    present: impl FnOnce(&tauri::AppHandle<R>) + Send + 'static,
+) -> Result<PresentationCompletion, tauri::Error> {
+    let queued_app = app.clone();
+    queue_runtime_presentation(
+        authority.clone(),
+        move || present(&queued_app),
+        |task| app.run_on_main_thread(task),
+    )
+}
+
+type PendingPresentation = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+pub(crate) struct PresentationCompletion {
+    completion: tokio::sync::oneshot::Receiver<()>,
+    pending: PendingPresentation,
+}
+impl PresentationCompletion {
+    pub(crate) async fn wait(mut self) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        (&mut self.completion).await
+    }
+}
+impl Drop for PresentationCompletion {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.take();
+        }
+    }
+}
+
+fn queue_runtime_presentation<E>(
+    authority: crate::chat_commands::RuntimeAuthority,
+    present: impl FnOnce() + Send + 'static,
+    enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), E>,
+) -> Result<PresentationCompletion, E> {
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    let pending: PendingPresentation = Arc::new(std::sync::Mutex::new(Some(Box::new(
+        authority.queued_current(present),
+    ))));
+    let queued = Arc::downgrade(&pending);
+    enqueue(Box::new(move || {
+        // The runtime task owns the payload until actual execution. Cancelling
+        // that task frees it immediately, even while the main thread is busy.
+        let present = queued
+            .upgrade()
+            .and_then(|pending| pending.lock().ok()?.take());
+        if let Some(present) = present {
+            present();
+        }
+        let _ = finished.send(());
+    }))?;
+    Ok(PresentationCompletion {
+        completion,
+        pending,
+    })
+}
+
 #[derive(Clone, Default)]
 pub struct NotificationContextState(
     Arc<Mutex<NotificationContext>>,
@@ -177,6 +239,14 @@ pub(crate) fn emit_channel_changed<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     event: ChannelChangedEvent,
 ) {
+    if crate::reception_host::invalidate_identity(
+        app_handle,
+        &event.owner,
+        &event.account_id,
+        &event.device_id,
+    ) {
+        return;
+    }
     if crate::app_lock::app_locked(app_handle) {
         return;
     }
@@ -286,6 +356,8 @@ pub struct ProgressThrottle<R: Runtime> {
     app_handle: tauri::AppHandle<R>,
     file_conv: String,
     direction: &'static str,
+    reception_scope: Option<crate::reception_host::Scope>,
+    legacy_delivery: bool,
     last: std::time::Instant,
 }
 
@@ -299,10 +371,18 @@ impl<R: Runtime> ProgressThrottle<R> {
         direction: &'static str,
     ) -> Self {
         // Back-date so the first progress tick always emits.
+        let reception_scope = app_handle
+            .try_state::<crate::reception_host::ReceptionHostState>()
+            .and_then(|state| state.scope());
+        let legacy_delivery = app_handle
+            .try_state::<crate::reception_host::ReceptionHostState>()
+            .is_none();
         Self {
             app_handle,
             file_conv,
             direction,
+            reception_scope,
+            legacy_delivery,
             last: std::time::Instant::now() - Self::MIN_INTERVAL,
         }
     }
@@ -322,6 +402,13 @@ impl<R: Runtime> ProgressThrottle<R> {
             done,
             total,
         };
+        if let Some(scope) = &self.reception_scope {
+            crate::reception_host::progress(&self.app_handle, scope, event);
+            return;
+        }
+        if !self.legacy_delivery {
+            return;
+        }
         if let Err(e) = self.app_handle.emit(EVENT_FILE_PROGRESS, event) {
             log::error!("Failed to emit file-progress event: {e}");
         }
@@ -350,12 +437,8 @@ pub struct FileReceivedEvent {
     pub batch_size: usize,
 }
 
-/// Emit a received DM to the frontend (text decoded lossily for display).
-pub fn emit_dm_received<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    dm: mesh_talk_core::node::ReceivedDm,
-) {
-    let event = DmReceivedEvent {
+pub(crate) fn dm_event(dm: mesh_talk_core::node::ReceivedDm) -> DmReceivedEvent {
+    DmReceivedEvent {
         protection: dm.protection,
         message_id: dm.message_id.map(|id| id.to_hex()),
         from_account: dm.from_account,
@@ -367,32 +450,13 @@ pub fn emit_dm_received<R: Runtime>(
             String::from_utf8_lossy(&dm.text).into_owned()
         },
         reply_to: dm.reply_to.map(|id| hex::encode(id.as_bytes())),
-    };
-    notify_if_unfocused(
-        app_handle,
-        NotificationTarget::Dm(&event.from),
-        &event.from_name,
-        if event.protection.is_some() {
-            "Protected message"
-        } else {
-            &event.text
-        },
-    );
-    if crate::app_lock::app_locked(app_handle) {
-        return;
-    }
-    if let Err(e) = app_handle.emit(EVENT_DM_RECEIVED, event) {
-        log::error!("Failed to emit dm event: {e}");
     }
 }
 
-pub fn emit_channel_message<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    owner: &str,
+pub(crate) fn channel_event(
     msg: mesh_talk_core::node::ReceivedChannelMessage,
-) {
-    use crate::channel_reception::Alert;
-    let event = ChannelMessageEvent {
+) -> ChannelMessageEvent {
+    ChannelMessageEvent {
         protection: msg.protection,
         channel_id: hex::encode(msg.channel_id.as_bytes()),
         channel_name: msg.channel_name,
@@ -412,7 +476,84 @@ pub fn emit_channel_message<R: Runtime>(
         batch_complete: msg.batch_complete,
         batch_size: msg.batch_size,
         reception_only: msg.reception_only,
-    };
+    }
+}
+
+pub(crate) fn file_event(file: mesh_talk_core::node::ReceivedFile) -> FileReceivedEvent {
+    FileReceivedEvent {
+        protection: file.protection,
+        expires_at_ms: file.expires_at_ms,
+        conv: hex::encode(file.conv.as_bytes()),
+        is_channel: file.is_channel,
+        from: file.from,
+        name: if file.protection.is_some() {
+            "Protected image".into()
+        } else {
+            file.name
+        },
+        size: file.size,
+        mime: file.mime,
+        file_conv: hex::encode(file.file_conv.as_bytes()),
+        media: file.media,
+        event_id: file.event_id.to_hex(),
+        authored_at: file.authored_at,
+        received_at: file.received_at,
+        arrival_kind: file.arrival_kind,
+        own_device: file.own_device,
+        batch_id: file.batch_id,
+        batch_complete: file.batch_complete,
+        batch_size: file.batch_size,
+    }
+}
+
+/// Emit a received DM to the frontend (text decoded lossily for display).
+pub fn emit_dm_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    dm: mesh_talk_core::node::ReceivedDm,
+) {
+    publish_dm_received(app_handle, dm, true);
+}
+
+fn publish_dm_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    dm: mesh_talk_core::node::ReceivedDm,
+    publish: bool,
+) {
+    let event = dm_event(dm);
+    notify_if_unfocused(
+        app_handle,
+        NotificationTarget::Dm(&event.from),
+        &event.from_name,
+        if event.protection.is_some() {
+            "Protected message"
+        } else {
+            &event.text
+        },
+    );
+    if !publish || crate::app_lock::app_locked(app_handle) {
+        return;
+    }
+    if let Err(e) = app_handle.emit(EVENT_DM_RECEIVED, event) {
+        log::error!("Failed to emit dm event: {e}");
+    }
+}
+
+pub fn emit_channel_message<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    owner: &str,
+    msg: mesh_talk_core::node::ReceivedChannelMessage,
+) {
+    publish_channel_message(app_handle, owner, msg, true);
+}
+
+fn publish_channel_message<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    owner: &str,
+    msg: mesh_talk_core::node::ReceivedChannelMessage,
+    publish: bool,
+) {
+    use crate::channel_reception::Alert;
+    let event = channel_event(msg);
     let alert = app_handle
         .try_state::<NotificationContextState>()
         .and_then(|state| {
@@ -457,7 +598,7 @@ pub fn emit_channel_message<R: Runtime>(
         ),
         Alert::Silent => {}
     }
-    if !decision.emit || crate::app_lock::app_locked(app_handle) {
+    if !publish || !decision.emit || crate::app_lock::app_locked(app_handle) {
         return;
     }
     if let Err(e) = app_handle.emit(EVENT_CHANNEL_MESSAGE, event) {
@@ -487,31 +628,17 @@ pub fn emit_file_received<R: Runtime>(
     owner: &str,
     file: mesh_talk_core::node::ReceivedFile,
 ) {
+    publish_file_received(app_handle, owner, file, true);
+}
+
+fn publish_file_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    owner: &str,
+    file: mesh_talk_core::node::ReceivedFile,
+    publish: bool,
+) {
     use crate::channel_reception::Alert;
-    let event = FileReceivedEvent {
-        protection: file.protection,
-        expires_at_ms: file.expires_at_ms,
-        conv: hex::encode(file.conv.as_bytes()),
-        is_channel: file.is_channel,
-        from: file.from,
-        name: if file.protection.is_some() {
-            "Protected image".into()
-        } else {
-            file.name
-        },
-        size: file.size,
-        mime: file.mime,
-        file_conv: hex::encode(file.file_conv.as_bytes()),
-        media: file.media,
-        event_id: file.event_id.to_hex(),
-        authored_at: file.authored_at,
-        received_at: file.received_at,
-        arrival_kind: file.arrival_kind,
-        own_device: file.own_device,
-        batch_id: file.batch_id,
-        batch_complete: file.batch_complete,
-        batch_size: file.batch_size,
-    };
+    let event = file_event(file);
     let decision = app_handle
         .try_state::<NotificationContextState>()
         .and_then(|state| {
@@ -554,7 +681,7 @@ pub fn emit_file_received<R: Runtime>(
         ),
         Alert::Silent => {}
     }
-    if !decision.emit || crate::app_lock::app_locked(app_handle) {
+    if !publish || !decision.emit || crate::app_lock::app_locked(app_handle) {
         return;
     }
     if let Err(e) = app_handle.emit(EVENT_FILE_RECEIVED, event) {
@@ -566,6 +693,186 @@ pub fn emit_file_received<R: Runtime>(
 mod notification_policy_tests {
     use super::*;
     use tauri::Listener;
+
+    fn presentation_authority() -> (
+        crate::state::SessionState,
+        crate::chat_commands::NodeState,
+        crate::chat_commands::RuntimeAuthority,
+    ) {
+        let session = crate::state::SessionState::default();
+        let node = crate::chat_commands::NodeState::empty();
+        let lease = session.publish(
+            "fixture token".into(),
+            crate::services::user::User {
+                user_id: "fixture-owner".into(),
+                account_login_name: None,
+                name: "fixture".into(),
+                display_name: "Fixture".into(),
+                address: "fixture".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            },
+            "fixture password".into(),
+        );
+        let authority =
+            crate::chat_commands::RuntimeAuthority::request(session.clone(), lease, node.clone())
+                .unwrap();
+        (session, node, authority)
+    }
+
+    #[test]
+    fn notification_presentation_queues_without_waiting_for_the_main_thread_session_lock() {
+        use std::{sync::mpsc, thread, time::Duration};
+        let (session, _node, authority) = presentation_authority();
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = presented.clone();
+        let main_thread = thread::current().id();
+
+        // Model a main-thread owner command holding the real Session mutex.
+        // The runtime callback must enqueue and return while that guard is held,
+        // rather than acquiring Session first or waiting on window focus.
+        let (worker, queued, returned) = session
+            .with_owner(|owner| {
+                assert_eq!(owner, Some("fixture-owner"));
+                let worker = thread::spawn(move || {
+                    let completion = queue_runtime_presentation(
+                        authority,
+                        move || {
+                            assert_eq!(thread::current().id(), main_thread);
+                            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        },
+                        |task| queued_tx.send(task),
+                    )
+                    .unwrap();
+                    assert!(returned_tx.send(completion).is_ok());
+                });
+                let queued = queued_rx.recv_timeout(Duration::from_secs(2));
+                let returned = returned_rx.recv_timeout(Duration::from_secs(2));
+                Ok((worker, queued, returned))
+            })
+            .unwrap();
+        // Release the simulated command before joining, including on regression.
+        worker.join().unwrap();
+        assert!(
+            returned.is_ok(),
+            "runtime callback must not wait for main-thread execution"
+        );
+        let _completion = returned.unwrap();
+        assert!(!presented.load(std::sync::atomic::Ordering::SeqCst));
+        queued.expect("presentation must queue without acquiring the Session mutex")();
+        assert!(presented.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn notification_presentation_drops_queued_work_after_session_or_runtime_replacement() {
+        for replacement in ["logout", "same_owner_session", "runtime"] {
+            let (session, node, authority) = presentation_authority();
+            let mut queued = None;
+            let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = presented.clone();
+            let _completion = queue_runtime_presentation(
+                authority.clone(),
+                move || {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                },
+                |task| {
+                    queued = Some(task);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+            match replacement {
+                "logout" => session.clear(),
+                "same_owner_session" => {
+                    let info = session
+                        .matching(&authority.lease, |info| info.clone())
+                        .unwrap();
+                    session.publish(info.token, info.user, info.password);
+                }
+                _ => {
+                    crate::chat_commands::RuntimeAuthority::request(
+                        session.clone(),
+                        authority.lease.clone(),
+                        node,
+                    )
+                    .unwrap();
+                }
+            }
+            queued.unwrap()();
+            assert!(
+                !presented.load(std::sync::atomic::Ordering::SeqCst),
+                "stale {replacement} must not notify or emit private events"
+            );
+        }
+    }
+
+    #[test]
+    fn notification_presentation_completion_tracks_actual_execution_and_stale_rejection() {
+        use tokio::sync::oneshot::error::TryRecvError;
+        for retire in [false, true] {
+            let (session, _node, authority) = presentation_authority();
+            let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = presented.clone();
+            let mut queued = None;
+            let mut completion = queue_runtime_presentation(
+                authority,
+                move || observed.store(true, std::sync::atomic::Ordering::SeqCst),
+                |task| {
+                    queued = Some(task);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+            assert_eq!(completion.completion.try_recv(), Err(TryRecvError::Empty));
+            if retire {
+                session.clear();
+            }
+            queued.unwrap()();
+            assert_eq!(completion.completion.try_recv(), Ok(()));
+            assert_eq!(presented.load(std::sync::atomic::Ordering::SeqCst), !retire);
+        }
+    }
+
+    #[test]
+    fn notification_presentation_cancellation_releases_queued_payload_before_execution() {
+        let (_, _, authority) = presentation_authority();
+        let payload = Arc::new(vec![0u8; 8192]);
+        let retained = Arc::downgrade(&payload);
+        let mut queued = None;
+        let completion = queue_runtime_presentation(
+            authority,
+            move || {
+                drop(payload);
+                panic!("cancelled presentation must not execute");
+            },
+            |task| {
+                queued = Some(task);
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+        assert!(retained.upgrade().is_some());
+        drop(completion);
+        assert!(
+            retained.upgrade().is_none(),
+            "retired runtime releases payload while main thread remains blocked"
+        );
+        queued.unwrap()();
+    }
+
+    #[test]
+    fn notification_presentation_propagates_enqueue_failure() {
+        let (_, _, authority) = presentation_authority();
+        let result = queue_runtime_presentation(
+            authority,
+            || panic!("failed enqueue must not execute presentation"),
+            |_| Err("main thread unavailable"),
+        );
+        assert!(matches!(result, Err("main thread unavailable")));
+    }
 
     #[test]
     fn sticker_notification_uses_validated_label_and_preserves_protection() {
@@ -808,10 +1115,36 @@ pub(crate) fn emit_node_state_changed<R: Runtime>(
     app: &tauri::AppHandle<R>,
     event: NodeStateChangedEvent,
 ) {
+    if crate::reception_host::invalidate_identity(
+        app,
+        &event.owner,
+        &event.account_id,
+        &event.device_id,
+    ) {
+        return;
+    }
     if crate::app_lock::app_locked(app) {
         return;
     }
     if let Err(error) = app.emit("node-state-changed", event) {
         log::warn!("Failed to emit node state invalidation: {error}");
+    }
+}
+
+pub(crate) fn notify_reception<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    owner: &str,
+    receipt: mesh_talk_core::node::HostReception,
+) {
+    match receipt {
+        mesh_talk_core::node::HostReception::DirectMessage(dm) => {
+            publish_dm_received(app, dm, false)
+        }
+        mesh_talk_core::node::HostReception::ChannelMessage(message) => {
+            publish_channel_message(app, owner, message, false)
+        }
+        mesh_talk_core::node::HostReception::File(file) => {
+            publish_file_received(app, owner, file, false)
+        }
     }
 }

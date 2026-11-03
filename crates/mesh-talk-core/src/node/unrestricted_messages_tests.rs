@@ -112,11 +112,11 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
     let _ = bt.await;
     assert_eq!(message.text, text.as_bytes());
     assert_eq!(
-        b.account_history(&a.account_id(), 10)[0].text,
+        b.account_history(&a.account_id(), 10).unwrap()[0].text,
         text.as_bytes()
     );
-    assert!(!b.search("项目").is_empty());
-    assert!(!b.export_account_backfill().is_empty());
+    assert!(!b.search("项目").unwrap().is_empty());
+    assert!(!b.export_account_backfill().unwrap().is_empty());
     drop(b);
     let (reopened, _, _) = test_support::node_with_files(
         bd.path(),
@@ -125,7 +125,7 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
         &ap,
     );
     assert_eq!(
-        reopened.account_history(&a.account_id(), 10)[0].text,
+        reopened.account_history(&a.account_id(), 10).unwrap()[0].text,
         text.as_bytes()
     );
     let mut snapshot = Vec::new();
@@ -171,8 +171,8 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
     )
     .unwrap();
     assert_eq!(
-        restored.account_history(&a.account_id(), 10)[0].text,
+        restored.account_history(&a.account_id(), 10).unwrap()[0].text,
         text.as_bytes()
     );
-    assert!(!restored.search("项目").is_empty());
+    assert!(!restored.search("项目").unwrap().is_empty());
 }

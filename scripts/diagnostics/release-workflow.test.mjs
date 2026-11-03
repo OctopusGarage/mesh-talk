@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,6 +7,79 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
+
+test("manual packages exclude updater payloads while the signed manifest binds standalone roles", { skip: process.platform === "win32" }, () => {
+  const checksumStep = workflow.split(/^      - /m).find((step) => step.startsWith("name: Generate SHA256 checksums"));
+  const packageStep = workflow.split(/^      - /m).find((step) => step.startsWith("name: Package and sign artifacts"));
+  const commands = (step) => step.split("        run: |\n")[1].split("\n")
+    .filter((line) => /^ {10}/.test(line) || /^\s*$/.test(line)).map((line) => line.replace(/^ {10}/, "")).join("\n");
+  for (const [target, platform, extensions] of [
+    ["aarch64-apple-darwin", "macos_arm64", ["dmg"]],
+    ["x86_64-apple-darwin", "macos_x86_64", ["dmg"]],
+    ["aarch64-pc-windows-msvc", "windows_arm64", ["exe", "msi"]],
+    ["x86_64-pc-windows-msvc", "windows_x86_64", ["exe", "msi"]],
+    ["aarch64-unknown-linux-gnu", "linux_aarch64", ["AppImage", "deb", "rpm"]],
+    ["x86_64-unknown-linux-gnu", "linux_x86_64", ["AppImage", "deb", "rpm"]],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "mesh-talk-lean-package-"));
+    try {
+      mkdirSync(join(root, "release"));
+      const files = new Map(extensions.map((extension) => [`installer with spaces.${extension}`, Buffer.from(`native ${extension}`)]));
+      const suffix = platform.startsWith("macos_") ? "app.tar.gz" : platform.startsWith("windows_") ? "nsis.exe" : "AppImage";
+      const full = `mesh-talk-update_v0.1.5_${platform}.${suffix}`;
+      const raw = full.replace("mesh-talk-update_", "mesh-talk-update-raw_");
+      const standalone = [full, `${full}.sig`, ...(platform.startsWith("linux_") ? [] :
+        [`${full}.delta.json`, `${full}.delta.json.sig`, raw, `${raw}.sig`, `mesh-talk-patch_v0.1.5_${platform}_from-v0.1.4.zst`])];
+      for (const name of standalone) files.set(name, Buffer.from(`standalone ${name}`));
+      for (const [name, bytes] of files) writeFileSync(join(root, "release", name), bytes);
+      execFileSync("bash", ["-c", commands(checksumStep)], { cwd: root, stdio: "pipe" });
+      // Only the external OIDC signing service is replaced; execute the actual
+      // checksum and packaging commands against real files and ZIPs.
+      const packageScript = commands(packageStep).replaceAll("${{ matrix.target }}", target)
+        .replace('node scripts/release/sign-blob.mjs "$ZIP_NAME" "$BUNDLE_FILE"', 'test -s "$ZIP_NAME"');
+      execFileSync("bash", ["-c", packageScript], { cwd: root, env: { ...process.env, ARTIFACT_TAG: "v0.1.5" }, stdio: "pipe" });
+      const archive = join(root, "release_zips", `mesh-talk_v0.1.5_${platform}.zip`);
+      const members = execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/);
+      assert.deepEqual(members.sort(), [...extensions.map((extension) => `release/installer with spaces.${extension}`), "release/SHA256SUMS", "release/UPDATER_SHA256SUMS"].sort(), platform);
+      const manifest = execFileSync("unzip", ["-p", archive, "release/SHA256SUMS"], { encoding: "utf8" });
+      assert.equal(manifest.trim().split(/\r?\n/).length, extensions.length, "manual installer checksums must remain self-contained");
+      const updaterManifest = execFileSync("unzip", ["-p", archive, "release/UPDATER_SHA256SUMS"], { encoding: "utf8" });
+      const manual = join(root, "manual");
+      mkdirSync(manual);
+      execFileSync("unzip", ["-q", archive, "-d", manual]);
+      execFileSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: join(manual, "release"), stdio: "pipe" });
+      for (const name of standalone) {
+        assert.deepEqual(readFileSync(join(root, "release_zips", name)), files.get(name));
+        assert.ok(updaterManifest.includes(`${createHash("sha256").update(files.get(name)).digest("hex")}  ./${name}`), name);
+      }
+      execFileSync("zip", [archive, `release/${full}`], { cwd: root, stdio: "pipe" });
+      execFileSync("bash", ["-c", packageScript], { cwd: root, env: { ...process.env, ARTIFACT_TAG: "v0.1.5" }, stdio: "pipe" });
+      assert.deepEqual(execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/).sort(), members.sort(), "repackaging must discard stale ZIP entries");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("native release inspection uses the shared pinned toolchain and a real NSIS health regression", () => {
+  for (const job of ["build-release", "verify-release", "publish-release"]) {
+    const body = workflow.split(`  ${job}:\n`)[1]?.split(/^  [\w-]+:\n/m)[0];
+    assert.ok(body, job);
+    assert.match(body, /python scripts\/release\/sevenzip\.py install/, job);
+    assert.doesNotMatch(body, /apt-get install[^\n]*\b7zip\b/, "Ubuntu's package must not select the release decoder");
+  }
+  const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
+  const toolchain = health.split("      - name: Install pinned native inspection toolchain\n")[1]?.split("      - ")[0];
+  assert.ok(toolchain, "all three portable platforms must execute the tool bootstrap before merge");
+  assert.doesNotMatch(toolchain, /if:/);
+  assert.match(toolchain, /python scripts\/release\/sevenzip\.py install/);
+  const native = health.split("      - name: Native release inspection regression\n")[1]?.split("      - ")[0];
+  assert.ok(native, "portable health must exercise a genuine plugin installer");
+  assert.match(native, /if: runner\.os == 'Linux'/);
+  assert.match(native, /apt-get install[^\n]*\bnsis\b/);
+  const smoke = health.split("      - name: Verify native NSIS payload equivalence\n")[1]?.split("      - ")[0];
+  assert.match(smoke || "", /python scripts\/release\/test_native_nsis\.py -v/);
+});
 
 test("Linux release builds retain the Ubuntu 22.04 runtime baseline across architectures", () => {
   assert.equal(workflow.match(/runner: (\S+)\n\s+target: x86_64-unknown-linux-gnu/)?.[1], "ubuntu-22.04");
@@ -117,4 +190,41 @@ test("both release archive roles use the bounded signing owner before mandatory 
   const verifier = readFileSync(new URL("../release/verify-release.sh", import.meta.url), "utf8");
   assert.match(verifier, /cosign verify-blob --bundle/);
   assert.match(verifier, /--certificate-identity/);
+});
+
+
+test("Stable mutation commands cannot run after a newly unsuccessful source check", () => {
+  const steps = workflow.split("  publish-release:\n")[1].split(/^      - /m).slice(1);
+  const image = steps.find(step => step.startsWith("name: Recheck source immediately before container publication\n"));
+  const publication = steps.find(step => step.startsWith("name: Publish only the verified draft\n"));
+  assert.ok(image && publication);
+  const commands = step => {
+    const run = step.split("        run: ")[1];
+    return run.startsWith("|\n") ? run.slice(2).replace(/^          /gm, "") : run.trim();
+  };
+  const temporary = mkdtempSync(join(tmpdir(), "mesh-stable-source-"));
+  try {
+    const fixture = join(temporary, "source-check.mjs");
+    const source = new URL("../release/check-source-checks.mjs", import.meta.url).href;
+    const policy = new URL("../ci/required-checks.mjs", import.meta.url).href;
+    writeFileSync(fixture, `import {requireSourceChecks} from ${JSON.stringify(source)};\nimport {releaseSourceChecks} from ${JSON.stringify(policy)};\nconst checks=releaseSourceChecks.map((name,id)=>({name,id,app:{slug:"github-actions"},status:"completed",conclusion:"success"}));\nif(process.env.NEW_CHECK_STATE!=="success") checks.push({...checks[0],id:999,...JSON.parse(process.env.NEW_CHECK_STATE)});\nrequireSourceChecks(checks,[]);\n`);
+    const prelude = 'node() { if [ "$1" = scripts/release/check-source-checks.mjs ]; then "$REAL_NODE" "$CHECK_FIXTURE"; else printf "PUBLIC_MUTATION\\n"; fi; }\n';
+    for (const script of [commands(image) + '\nprintf "PUBLIC_MUTATION\\n"', commands(publication)]) {
+      const run = (script, state) => spawnSync("bash", ["-e", "-c", prelude + script], { encoding: "utf8", env: { ...process.env, REAL_NODE: process.execPath, CHECK_FIXTURE: fixture, NEW_CHECK_STATE: state, SOURCE_REPO: "fixture/repo", SOURCE_SHA: "a".repeat(40), RELEASE_TAG: "v1.2.3" } });
+      const healthy = run(script, "success");
+      assert.equal(healthy.status, 0, healthy.stderr);
+      assert.match(healthy.stdout, /PUBLIC_MUTATION/);
+      for (const state of [{ conclusion: "failure" }, { status: "queued", conclusion: null }, { status: "in_progress", conclusion: null }]) {
+        const blocked = run(script, JSON.stringify(state));
+        assert.notEqual(blocked.status, 0);
+        assert.doesNotMatch(blocked.stdout, /PUBLIC_MUTATION/);
+        // Negative control: removing the owning source check permits the mutation.
+        const old = run(script.replace(/^node scripts\/release\/check-source-checks\.mjs.*$/m, ""), JSON.stringify(state));
+        assert.equal(old.status, 0, old.stderr);
+        assert.match(old.stdout, /PUBLIC_MUTATION/);
+      }
+    }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
 });

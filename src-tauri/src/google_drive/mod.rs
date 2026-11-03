@@ -9,7 +9,9 @@ use crate::{
     state::{AppState, SessionState},
 };
 use client::{DriveArchive, DriveClient};
-use mesh_talk_core::{recovery::BackupPreview, storage::file_manager::FileManager};
+use mesh_talk_core::recovery::BackupPreview;
+#[cfg(test)]
+use mesh_talk_core::storage::file_manager::FileManager;
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -441,7 +443,6 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
     let auth = app_state.inner().clone();
     let node = node_state.inner().clone();
     let client = state.client()?;
-    let root = recovery::data_root(&node);
     // Own the scratch directory through snapshot completion, even if IPC is dropped
     // or the view disconnects. The existing snapshot worker must restart messaging.
     tokio::spawn(async move {
@@ -475,19 +476,16 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
             preview: backup.preview.clone(),
             archive_bytes: backup.archive_bytes,
         };
-        let session = auth.session().clone();
         // A failed status update does not invalidate a complete remote archive.
-        let _ = tokio::task::spawn_blocking(move || {
-            session.matching(&lease, |info| {
-                FileManager::new(root).write_encrypted_file(
-                    &info.user.name,
+        let _ =
+            recovery::setup::with_storage(&auth, &node, Some(lease.generation()), move |storage| {
+                storage.write(
                     "meta/backup_status.enc",
                     &status,
-                    info.password.trim(),
+                    "Could not record backup status",
                 )
             })
-        })
-        .await;
+            .await;
         connection.current()?;
         connection.phase("complete", backup.archive_bytes, backup.archive_bytes);
         Ok(backup)

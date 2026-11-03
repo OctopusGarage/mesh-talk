@@ -1,17 +1,26 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("separate browser stages isolate server ports, results and HTML reports", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "mesh-preflight-output-"));
+// Keep the real local runner closure together as its existing owners evolve.
+function browserFixture(prefix) {
+  const root = mkdtempSync(path.join(tmpdir(), prefix));
   try {
-    for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
-      mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
-      copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
+    for (const directory of ["validation", "pr-platform"])
+      cpSync(new URL(`../${directory}/`, import.meta.url), path.join(root, "scripts", directory), { recursive: true });
+    mkdirSync(path.join(root, "frontend/node_modules/playwright"), { recursive: true });
+    // Intentional timeout controls own a local supervisor, even when the test
+    // suite itself runs inside affected validation. Never abort that caller.
+    return { root, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } };
+  } catch (error) { rmSync(root, { recursive: true, force: true }); throw error; }
+}
+
+test("separate browser stages isolate server ports, results and HTML reports", () => {
+  const { root, env } = browserFixture("mesh-preflight-output-");
+  try {
     const trace = path.join(root, "trace.jsonl");
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), `
       const fs = require('node:fs');
@@ -20,7 +29,7 @@ test("separate browser stages isolate server ports, results and HTML reports", (
     `);
     for (let run = 0; run < 2; run++) {
       const result = spawnSync(process.execPath, [path.join(root, "scripts/validation/browser.mjs"), "full", "e2e/settings-recovery.spec.ts"], {
-        cwd: path.join(root, "frontend"), env: { ...process.env, PREFLIGHT_TRACE: trace }, encoding: "utf8", timeout: 15_000,
+        cwd: path.join(root, "frontend"), env: { ...env, PREFLIGHT_TRACE: trace }, encoding: "utf8", timeout: 15_000,
       });
       assert.equal(result.status, 0, result.stdout + result.stderr);
     }
@@ -48,15 +57,11 @@ test("separate browser stages isolate server ports, results and HTML reports", (
 
 // A process timeout must remain distinct from a UI assertion failure.
 test("browser wrapper exposes timeout diagnostics and never writes success evidence", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "mesh-browser-timeout-"));
+  const { root, env } = browserFixture("mesh-browser-timeout-");
   try {
-    for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
-      mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
-      copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), "setTimeout(() => {}, 3000);\n");
     const result = spawnSync(process.execPath, [path.join(root, "scripts/validation/browser.mjs"), "full"], {
-      cwd: path.join(root, "frontend"), env: { ...process.env, MESH_BROWSER_TIMEOUT_SECONDS: "1" }, encoding: "utf8", timeout: 10_000,
+      cwd: path.join(root, "frontend"), env: { ...env, MESH_BROWSER_TIMEOUT_SECONDS: "1" }, encoding: "utf8", timeout: 10_000,
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr + result.stdout, /execution budget.*1 second/i);

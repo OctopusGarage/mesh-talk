@@ -4,6 +4,7 @@ import { useAvatars } from "@/store/avatars";
 import { useChat } from "@/store/chat";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { subscribeSyncInvalidation } from "./syncInvalidation";
+import { readWithDeadline } from "./readDeadline";
 
 /** Only the explicit kept-source action attributes legacy overrides to an account. */
 export async function publishAvatarOverridesBeforeLink(owner: string) {
@@ -39,12 +40,8 @@ export function startLinkedAvatarOverrides(owner: string): () => void {
     }
     loading = true;
     try {
-      const page = await accountDocuments.list(
-        owner,
-        account!,
-        "avatar_override",
-        null,
-        1,
+      const page = await readWithDeadline(() =>
+        accountDocuments.list(owner, account!, "avatar_override", null, 1),
       );
       if (!current()) return;
       const next = JSON.stringify(page.digest);

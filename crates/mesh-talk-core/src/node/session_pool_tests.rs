@@ -132,6 +132,266 @@ async fn successful_sync_rounds_reuse_one_authenticated_tcp_connection() {
 }
 
 #[tokio::test]
+async fn accountless_signed_discovery_reuses_five_completed_generic_rounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    assert!(alice.privacy.state.read().unwrap().is_none());
+    assert!(bob.privacy.state.read().unwrap().is_none());
+    let expected = bob.identity.public();
+    let (addr, accepted, server) = counted_sync_peer(bob.clone()).await;
+    let proof = Announce::new(&bob.identity, "Accountless Bob", addr.port());
+    assert!(proof.valid_presence() && !proof.post_office);
+    assert_eq!(proof.public(), expected);
+    assert!(proof.account_id().is_none());
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, addr.ip(), &alice.user_id());
+    let peer = alice.routing_peer(&bob.user_id()).unwrap();
+    for _ in 0..5 {
+        alice
+            .deliver_direct(&peer, crate::eventlog::ConversationId::new([0x53; 32]))
+            .await
+            .unwrap();
+    }
+    let connections = accepted.load(Ordering::SeqCst);
+    alice.sessions.clear();
+    server.abort();
+    let _ = server.await;
+    assert_eq!(
+        connections, 1,
+        "a signed accountless discovery record must not discard a completed identity-authenticated generic sync session"
+    );
+}
+
+#[tokio::test]
+async fn accountless_cached_sync_preserves_identity_role_and_account_pins() {
+    for boundary in [
+        "unchanged",
+        "identity_x",
+        "account",
+        "relay",
+        "historical_pin",
+        "historical_pin_no_announce",
+        "linked_pin",
+        "linked_pin_no_announce",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, _) = node(&dir.path().join("alice"));
+        let (bob, _) = node(&dir.path().join("bob"));
+        alice
+            .configure_privacy(
+                &dir.path().join("alice"),
+                "pw",
+                &alice.signed_announce("Alice", 1),
+                Arc::new(DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+        let expected = bob.identity.public();
+        let (addr, accepted, server) = counted_sync_peer(bob.clone()).await;
+        let accountless = Announce::new(&bob.identity, "Bob", addr.port());
+        alice
+            .roster
+            .lock()
+            .unwrap()
+            .update(&accountless, addr.ip(), &alice.user_id());
+        let mut channel = alice.privacy_sync_dial(addr, &expected).await.unwrap();
+        assert!(channel.peer_announcement().is_none());
+        super::session::request_round(
+            &mut channel,
+            &alice.sync_store(&expected),
+            crate::eventlog::ConversationId::new([0x54; 32]),
+        )
+        .await
+        .unwrap();
+        alice.recycle_sync_channel(channel);
+        assert_eq!(alice.sessions.test_capacity_snapshot().3, Some(1));
+        let generation = alice.privacy.generation.load(Ordering::SeqCst);
+        let mut requested = expected.clone();
+        match boundary {
+            "identity_x" => {
+                let changed = DeviceIdentity::from_secret_bytes(
+                    bob.identity.secret_bytes().0,
+                    DeviceIdentity::generate().secret_bytes().1,
+                );
+                let proof = Announce::new(&changed, "Changed X", addr.port());
+                assert!(proof.valid_presence());
+                assert_eq!(proof.ed25519_pub, expected.ed25519_pub);
+                assert_ne!(proof.x25519_pub, expected.x25519_pub);
+                requested = proof.public();
+            }
+            "account" | "relay" => {
+                let proof = if boundary == "account" {
+                    bob.signed_announce("Account-bound Bob", addr.port())
+                } else {
+                    Announce::new_post_office(&bob.identity, "Relay Bob", addr.port())
+                };
+                assert!(proof.valid_presence());
+                alice
+                    .roster
+                    .lock()
+                    .unwrap()
+                    .update(&proof, addr.ip(), &alice.user_id());
+                assert_eq!(
+                    alice.roster.lock().unwrap().announcement(&expected),
+                    Some(&proof)
+                );
+            }
+            "historical_pin" | "historical_pin_no_announce" => {
+                let proof = bob.signed_announce("Pinned Bob", addr.port());
+                let mut state = alice.privacy.state.write().unwrap();
+                let proofs = &mut state.as_mut().unwrap().proofs;
+                proofs.record(&proof).unwrap();
+                assert_eq!(proofs.account_for(&expected), Some(bob.account_id()));
+                drop(state);
+                if boundary == "historical_pin_no_announce" {
+                    alice.roster.lock().unwrap().forget(&expected);
+                    assert!(
+                        alice
+                            .roster
+                            .lock()
+                            .unwrap()
+                            .announcement(&expected)
+                            .is_none()
+                    );
+                }
+            }
+            "linked_pin" | "linked_pin_no_announce" => {
+                let mut state = alice.privacy.state.write().unwrap();
+                let proofs = &mut state.as_mut().unwrap().proofs;
+                assert!(proofs.by_author(&expected.ed25519_pub).is_none());
+                proofs
+                    .authorize_linked_device(
+                        super::super::account_devices::AccountDevice {
+                            public: expected.clone(),
+                            certificate: alice.account.certify(&expected.ed25519_pub),
+                        },
+                        &alice.account_id(),
+                    )
+                    .unwrap();
+                assert!(proofs.by_author(&expected.ed25519_pub).is_none());
+                assert_eq!(proofs.account_for(&expected), Some(alice.account_id()));
+                assert!(!proofs.accepts_binding(&accountless));
+                drop(state);
+                if boundary == "linked_pin_no_announce" {
+                    alice.roster.lock().unwrap().authorize_linked_account(
+                        &expected,
+                        &alice.account.certify(&expected.ed25519_pub),
+                    );
+                    assert!(
+                        alice
+                            .roster
+                            .lock()
+                            .unwrap()
+                            .announcement(&expected)
+                            .is_none()
+                    );
+                }
+            }
+            "unchanged" => {}
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            alice.privacy.generation.load(Ordering::SeqCst),
+            generation,
+            "presence/pin assertions must not be masked by generation invalidation"
+        );
+        let reused = alice
+            .checkout_reusable_channel(
+                super::super::session_pool::SessionProtocol::Sync,
+                addr,
+                &requested,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reused.is_some(),
+            boundary == "unchanged",
+            "boundary={boundary}"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "checking a retained session must not manufacture a replacement handshake"
+        );
+        drop(reused);
+        alice.sessions.clear();
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn bare_noise_reuse_never_substitutes_for_an_unconfigured_durable_sibling_pin() {
+    for pinned in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, _) = node(&dir.path().join("alice"));
+        let (bob, _) = node(&dir.path().join("bob"));
+        let expected = bob.identity.public();
+        let (addr, accepted, server) = counted_sync_peer(bob).await;
+        let mut channel = alice.privacy_sync_dial(addr, &expected).await.unwrap();
+        assert!(channel.peer_announcement().is_none());
+        super::session::request_round(
+            &mut channel,
+            &alice.sync_store(&expected),
+            crate::eventlog::ConversationId::new([0x55; 32]),
+        )
+        .await
+        .unwrap();
+        alice.recycle_sync_channel(channel);
+        let generation = alice.privacy.generation.load(Ordering::SeqCst);
+        if pinned {
+            let certificate = alice.account.certify(&expected.ed25519_pub);
+            alice
+                .account_devices
+                .lock()
+                .unwrap()
+                .insert(super::super::account_devices::AccountDevice {
+                    public: expected.clone(),
+                    certificate: certificate.clone(),
+                })
+                .unwrap();
+            alice
+                .roster
+                .lock()
+                .unwrap()
+                .authorize_linked_account(&expected, &certificate);
+        }
+        assert!(alice.privacy.state.read().unwrap().is_none());
+        assert!(
+            alice
+                .roster
+                .lock()
+                .unwrap()
+                .announcement(&expected)
+                .is_none()
+        );
+        assert_eq!(alice.certified_sibling(&expected), pinned);
+        assert_eq!(alice.privacy.generation.load(Ordering::SeqCst), generation);
+        let reused = alice
+            .checkout_reusable_channel(
+                super::super::session_pool::SessionProtocol::Sync,
+                addr,
+                &expected,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reused.is_some(),
+            !pinned,
+            "durable sibling pin present={pinned}"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        drop(reused);
+        alice.sessions.clear();
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
 async fn outbound_handshakes_are_bounded_and_cancellation_releases_capacity() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));

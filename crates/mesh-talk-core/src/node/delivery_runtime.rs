@@ -2,6 +2,7 @@
 //! immutable snapshots; no delivery or ratchet guard crosses a transport await.
 use super::delivery_store::{DeliveryDestination, ReceiptDelivery};
 use super::delivery_store::{DeliveryStore, DeliveryTransaction, OutgoingDelivery};
+#[cfg(test)]
 use super::sentlog::SentEntry;
 use super::session::SessionError;
 use super::*;
@@ -38,6 +39,41 @@ struct ControlRoutes {
     peer: PublicIdentity,
     endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
     publicly_observed: bool,
+}
+
+/// Task IDs distinguish an aborted route owner from its same-key replacement.
+#[derive(Default)]
+struct ControlTaskOwners {
+    current: std::collections::HashMap<ControlWork, tokio::task::AbortHandle>,
+    owners: std::collections::HashMap<tokio::task::Id, ControlWork>,
+}
+impl ControlTaskOwners {
+    fn insert(&mut self, key: ControlWork, task: tokio::task::AbortHandle) {
+        self.owners.insert(task.id(), key.clone());
+        self.current.insert(key, task);
+    }
+    fn finished(&mut self, task: tokio::task::Id) -> Option<ControlWork> {
+        let key = self.owners.remove(&task)?;
+        if self
+            .current
+            .get(&key)
+            .is_some_and(|current| current.id() == task)
+        {
+            self.current.remove(&key);
+            Some(key)
+        } else {
+            None
+        }
+    }
+    fn cancel(&mut self, key: &ControlWork) {
+        if let Some(task) = self.current.remove(key) {
+            task.abort();
+        }
+    }
+    fn clear(&mut self) {
+        self.current.clear();
+        self.owners.clear();
+    }
 }
 
 impl ControlWork {
@@ -277,8 +313,15 @@ impl FileDeliveryScheduler {
         self.relay_cooldowns.retain(|(key, until, consent)| {
             *until > std::time::Instant::now()
                 && (!*consent
-                    || node.outgoing_file_consent_status(key.0, key.1)
-                        != Some(crate::eventlog::sync::FileConsentStatus::Accepted))
+                    || match node.outgoing_file_consent_status(key.0, key.1) {
+                        Ok(status) => {
+                            status != Some(crate::eventlog::sync::FileConsentStatus::Accepted)
+                        }
+                        Err(error) => {
+                            log::warn!("file consent retry observation failed: {error}");
+                            true
+                        }
+                    })
         });
         node.prune_outgoing_file_acks();
         FileScan {
@@ -500,7 +543,13 @@ impl Node {
             .sync()
             .map_err(NodeError::Log)?;
         store.begin(transaction).map_err(NodeError::Log)?;
-        let recovered = self.recover_delivery(store).is_ok();
+        let recovered = match self.recover_delivery(store) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("accepted outgoing delivery awaits local recovery: {error}");
+                false
+            }
+        };
         self.delivery_notify.notify_one();
         Ok(recovered)
     }
@@ -521,74 +570,86 @@ impl Node {
         {
             return Err(LogError::CorruptFile("invalid manifest device pair".into()));
         }
+        if self.files.lock().expect("files lock").processed(event.id)? {
+            return Ok(());
+        }
         let manifest = super::files::validated_manifest(&received.plaintext)
             .ok_or_else(|| LogError::CorruptFile("invalid file manifest".into()))?;
-        let logical = self.file_message_row_logical_id(&received);
+        let logical = self.file_message_row_logical_id(&received)?;
         if self
             .account_suppression
             .lock()
             .expect("account suppression lock")
-            .contains(received.conversation, logical)
+            .contains(received.conversation, logical)?
         {
             self.files
                 .lock()
                 .expect("files lock")
-                .mark_emitted(event.id);
+                .mark_processed(event.id)?;
             return Ok(());
         }
         if store.manifest_event_erased(event.id)
             || manifest.file_conv() == event.conversation_id
             || manifest.file_conv() == received.conversation
-            || self
+            || !self
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&manifest.file_conv())
-                .is_some_and(|existing| !super::files::same_file_transfer(existing, &manifest))
+                .accepts(&manifest)?
         {
             return Err(LogError::CorruptFile(
                 "conflicting immutable file manifest".into(),
             ));
         }
         {
-            let mut permitted_authors = self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .authors(manifest.file_conv());
-            permitted_authors.insert(event.author);
+            let file_book = self.files.lock().expect("files lock").clone();
             let log = self.log.lock().expect("log lock not poisoned");
-            let mut chunks = log.events(&manifest.file_conv());
-            chunks.sort_by_key(|chunk| chunk.seq);
-            let mut previous = None;
-            let mut chunk_author = None;
-            if chunks.iter().enumerate().any(|(index, chunk)| {
-                let mixed_authors = chunk_author.is_some_and(|author| author != chunk.author);
-                chunk_author = Some(chunk.author);
-                let malformed_chain = chunk.seq != index as u64 + 1
-                    || match previous {
-                        None => !chunk.parents.is_empty(),
-                        Some(id) => chunk.parents != [id],
-                    };
-                previous = Some(chunk.id);
-                malformed_chain
-                    || mixed_authors
-                    || chunk.kind != crate::eventlog::EventKind::Message
-                    || !permitted_authors.contains(&chunk.author)
-                    || chunk.seq == 0
-                    || chunk.seq > u64::from(manifest.chunk_count())
-                    || !chunk.verify_integrity()
-                    || !chunk.verify_signature()
-                    || crate::file::open_chunk_for(
-                        &manifest,
-                        (chunk.seq - 1) as u32,
-                        &chunk.ciphertext,
-                    )
-                    .is_err()
-            }) {
-                return Err(LogError::CorruptFile(
-                    "conflicting file chunk conversation".into(),
-                ));
+            let first = log
+                .headers_page(
+                    &manifest.file_conv(),
+                    None,
+                    crate::eventlog::repository::pages::PageBudget {
+                        rows: 1,
+                        bytes: std::mem::size_of::<crate::eventlog::repository::EventHeader>(),
+                    },
+                )?
+                .items
+                .into_iter()
+                .next();
+            if let Some(first) = first {
+                let count = log.repository()?.count(&manifest.file_conv())?;
+                if count > u64::from(manifest.chunk_count())
+                    || (first.author != event.author
+                        && !file_book.has_author(manifest.file_conv(), first.author)?)
+                {
+                    return Err(LogError::CorruptFile(
+                        "conflicting file chunk conversation".into(),
+                    ));
+                }
+                let mut chain = super::files::ChunkChain::default();
+                // The former collector sorted by sequence. Exact author/sequence
+                // seeks retain that rule, and missing or mixed-author slots fail.
+                for index in 0..count {
+                    let header = log
+                        .repository()?
+                        .authored_header(&manifest.file_conv(), first.author, index + 1)?
+                        .ok_or_else(|| {
+                            LogError::CorruptFile("conflicting file chunk conversation".into())
+                        })?;
+                    let chunk = log
+                        .get_bounded(&header.id, 4 * 1024 * 1024)?
+                        .ok_or_else(|| {
+                            LogError::CorruptFile("selected file chunk disappeared".into())
+                        })?;
+                    if !chain.accept(&chunk)
+                        || crate::file::open_chunk_for(&manifest, index as u32, &chunk.ciphertext)
+                            .is_err()
+                    {
+                        return Err(LogError::CorruptFile(
+                            "conflicting file chunk conversation".into(),
+                        ));
+                    }
+                }
             }
         }
         let payload = super::delivery_receipt::ReceiptPayload::prepare(
@@ -660,23 +721,92 @@ impl Node {
     }
     pub(in crate::node) fn persist_account_adoption<T>(
         &self,
-        account: &str,
+        account: &crate::identity::account::AccountPublic,
         save: impl FnOnce() -> Result<T, NodeError>,
+        reload: impl FnOnce() -> Result<crate::identity::account::AccountPublic, NodeError>,
     ) -> Result<T, NodeError> {
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
+        if self
+            .delivery_suspended
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(NodeError::Channel(
+                "account adoption requires runtime restart".into(),
+            ));
+        }
+        if account == &self.account.public() {
+            return save();
+        }
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         store
-            .prepare_profile_adoption(account)
+            .prepare_profile_adoption(&account.account_id())
             .map_err(NodeError::Log)?;
+        let database = self.storage.participant_database().ok_or_else(|| {
+            NodeError::Log(LogError::CorruptFile(
+                "participant bootstrap has not completed".into(),
+            ))
+        })?;
+        if let Err(error) = crate::storage::profile::participant::prepare_adoption(
+            database,
+            &self.account.public(),
+            account,
+        ) {
+            self.delivery_suspended
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(NodeError::Log(error));
+        }
         match save() {
             Ok(result) => {
                 self.delivery_suspended
                     .store(true, std::sync::atomic::Ordering::Release);
+                self.account_sync_notify.notify_one();
                 Ok(result)
             }
             Err(error) => {
-                if store.cancel_profile_adoption().is_err() {
-                    log::warn!("account adoption marker cleanup deferred");
+                // Durable replacement may have happened before a sync/save error.
+                // Only an authenticated reload of the exact old key permits cancel.
+                match reload() {
+                    Ok(loaded) if loaded == self.account.public() => {
+                        let cleanup = store
+                            .cancel_profile_adoption()
+                            .and_then(|()| {
+                                self.account_transitions
+                                    .lock()
+                                    .expect("account transition lock not poisoned")
+                                    .discard_pending(&self.identity.public(), &loaded.ed25519_pub)
+                            })
+                            .and_then(|()| {
+                                crate::storage::profile::participant::finish_adoption(
+                                    database, &loaded,
+                                )
+                            });
+                        if let Err(cleanup) = cleanup {
+                            self.delivery_suspended
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            return Err(NodeError::Channel(format!(
+                                "{error}; account adoption cleanup: {cleanup}"
+                            )));
+                        }
+                    }
+                    Ok(loaded) => {
+                        self.delivery_suspended
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        if &loaded != account {
+                            return Err(NodeError::Channel(format!(
+                                "{error}; account keystore has an unrelated identity"
+                            )));
+                        }
+                        return Err(NodeError::Channel(format!(
+                            "{error}; saved account changed; restart runtime to recover adoption"
+                        )));
+                    }
+                    Err(reload) => {
+                        self.delivery_suspended
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        return Err(NodeError::Channel(format!(
+                            "{error}; reload account keystore: {reload}"
+                        )));
+                    }
                 }
                 Err(error)
             }
@@ -719,7 +849,7 @@ impl Node {
         event: &Event,
         proof: &crate::discovery::Announce,
         store: &mut DeliveryStore,
-    ) -> Option<()> {
+    ) -> Result<Option<()>, LogError> {
         self.accept_dm_event_with_author(event, &proof.public(), Some(proof), store)
     }
 
@@ -729,18 +859,20 @@ impl Node {
         public: &PublicIdentity,
         proof: Option<&crate::discovery::Announce>,
         store: &mut DeliveryStore,
-    ) -> Option<()> {
+    ) -> Result<Option<()>, LogError> {
         let peer = public.clone();
         let sibling = self.certified_sibling(&peer);
         // Offline replay can use the already persisted exact sibling certificate.
         // Receipt and control processing still require the real signed announcement.
         if proof.is_none() && !sibling {
-            return None;
+            return Ok(None);
         }
         let own = self.identity.public();
         if event.conversation_id == super::delivery_receipt::delivery_conversation_id(&own, &peer) {
-            self.process_delivery_control(event, proof?, store);
-            return None;
+            if let Some(proof) = proof {
+                self.process_delivery_control(event, proof, store);
+            }
+            return Ok(None);
         }
         if event.conversation_id != super::conversation::dm_conversation_id(&own, &peer)
             || event.author.ed25519_pub() != &peer.ed25519_pub
@@ -749,22 +881,34 @@ impl Node {
             || event.ciphertext.len() > 256 * 1024
             || event.parents.len() > 1024
         {
-            return None;
+            return Ok(None);
+        }
+        if self
+            .received
+            .lock()
+            .expect("received mutex")
+            .processed(event.id)?
+        {
+            return Ok(Some(()));
         }
         if sibling && !self.device_sync_policy().history {
-            return None;
+            return Ok(None);
         }
-        store
-            .check_capacity(1, event.ciphertext.len() as u64)
-            .ok()?;
-        let (plain, prepared) = self
+        if !sibling && let Some(peer_account) = proof.and_then(|proof| proof.account_id()) {
+            self.prepare_live_personal_dm(&peer_account, store)
+                .map_err(delivery_log_error)?;
+        }
+        store.check_capacity(1, event.ciphertext.len() as u64)?;
+        let decrypted = self
             .dm_ratchet
             .lock()
             .expect("ratchet lock not poisoned")
-            .prepare_decrypt(&self.identity, &peer, &event.ciphertext)
-            .ok()?;
+            .prepare_decrypt(&self.identity, &peer, &event.ciphertext);
+        let Ok((plain, prepared)) = decrypted else {
+            return Ok(None);
+        };
         if plain.len() > 256 * 1024 {
-            return None;
+            return Ok(None);
         }
         let account = self.account_id();
         let sender_account = match proof {
@@ -772,7 +916,9 @@ impl Node {
             None => Some(account.clone()),
         };
         let (conversation, from) = if plain.starts_with(b"MTDE1") {
-            let env = DmEnvelope::decode(&plain)?;
+            let Some(env) = DmEnvelope::decode(&plain) else {
+                return Ok(None);
+            };
             let valid_account = |id: &str| {
                 id.len() == 32
                     && id
@@ -784,7 +930,7 @@ impl Node {
                 || sender_account.as_deref() != Some(env.route.sender_account.as_str())
                 || (env.route.sender_account != account && env.route.recipient_account != account)
             {
-                return None;
+                return Ok(None);
             }
             (
                 super::conversation::account_conversation_id(
@@ -814,14 +960,18 @@ impl Node {
             )
         });
         let receipt = if let Some(payload) = payload {
-            let proof = proof?;
+            let Some(proof) = proof else {
+                return Ok(None);
+            };
             if store.has_receipt_for(conversation, event.id) {
-                return None;
+                return Ok(None);
             }
-            let wire = payload.seal(&self.identity).ok()?;
+            let Ok(wire) = payload.seal(&self.identity) else {
+                return Ok(None);
+            };
             let log = self.log.lock().expect("log lock not poisoned");
             let conv = payload.conversation();
-            let (mut parents, lamport) = log.prepare(&conv).ok()?;
+            let (mut parents, lamport) = log.prepare(&conv)?;
             // The Ed-pair scope survives account adoption and local deletion.
             // Never make a fresh receipt depend on control ancestry that the
             // current profile cannot safely project to this exact account.
@@ -830,7 +980,7 @@ impl Node {
                 .lock()
                 .expect("control ids lock not poisoned");
             let mut eligible = std::collections::HashSet::new();
-            for previous in log.events(&conv) {
+            for previous in log.events(&conv)? {
                 let typed = (previous.author.ed25519_pub() == &own.ed25519_pub
                     && controls
                         .get(&previous.id)
@@ -839,7 +989,7 @@ impl Node {
                         &self.identity,
                         &account,
                         proof,
-                        previous,
+                        &previous,
                     )
                     .is_some();
                 if typed && previous.parents.iter().all(|id| eligible.contains(id)) {
@@ -849,7 +999,7 @@ impl Node {
             parents.retain(|id| eligible.contains(id));
             drop(controls);
             let author = crate::eventlog::Author::from_ed25519(own.ed25519_pub);
-            let seq = log.next_sequence(&conv, &author).ok()?;
+            let seq = log.next_sequence(&conv, &author)?;
             let control = Event::new(
                 &self.identity,
                 conv,
@@ -860,7 +1010,7 @@ impl Node {
                 crate::eventlog::EventKind::Message,
                 wire,
             );
-            log.sync().ok()?;
+            log.sync()?;
             let logical_id = DmEnvelope::decode(&received.plaintext)
                 .map_or(event.id, |env| EventId::new(env.msg_id));
             Some(Box::new(ReceiptDelivery {
@@ -878,35 +1028,30 @@ impl Node {
         } else {
             None
         };
-        self.log
-            .lock()
-            .expect("log lock not poisoned")
-            .sync()
-            .ok()?;
+        self.log.lock().expect("log lock not poisoned").sync()?;
         // Hold policy through durable acceptance; accepted WAL recovery remains unconditional.
         let policy = self
             .account_sync_policy
             .lock()
             .expect("account sync policy mutex not poisoned");
         if sibling && !policy.current().history {
-            return None;
+            return Ok(None);
         }
-        store
-            .begin(DeliveryTransaction::Incoming {
-                sender: peer.clone(),
-                original: Box::new(event.clone()),
-                ratchet: prepared,
-                received: Box::new(received),
-                receipt,
-            })
-            .ok()?;
+        if !sibling && let Some(peer_account) = proof.and_then(|proof| proof.account_id()) {
+            self.reopen_personal_after_live(&peer_account)
+                .map_err(delivery_log_error)?;
+        }
+        store.begin(DeliveryTransaction::Incoming {
+            sender: peer.clone(),
+            original: Box::new(event.clone()),
+            ratchet: prepared,
+            received: Box::new(received),
+            receipt,
+        })?;
         drop(policy);
-        if self.recover_delivery(store).is_err() {
-            log::warn!("accepted incoming delivery awaits local recovery");
-            return None;
-        }
+        self.recover_delivery(store)?;
         self.delivery_notify.notify_one();
-        Some(())
+        Ok(Some(()))
     }
     pub(in crate::node) fn recover_delivery(
         &self,
@@ -925,63 +1070,76 @@ impl Node {
         if store.pending_transactions().is_empty() {
             return Ok(());
         }
+        // Recovery may retire several bounded WAL intents. Their canonical
+        // refreshes share one allowance instead of resetting it per channel.
+        let mut control_budget = crate::eventlog::sync::network::PreparationBudget::default();
         loop {
-            let notification = store
-                .pending_transactions()
-                .first()
-                .and_then(|tx| match tx {
-                    DeliveryTransaction::Incoming {
-                        sender,
-                        original,
-                        received,
-                        ..
-                    } => Some((
-                        sender.clone(),
-                        original.conversation_id,
-                        (**received).clone(),
-                        false,
-                        true,
-                    )),
-                    DeliveryTransaction::IncomingManifest {
-                        sender,
-                        original,
-                        received,
-                        ..
-                    } => Some((
-                        sender.clone(),
-                        original.conversation_id,
-                        (**received).clone(),
-                        true,
-                        true,
-                    )),
-                    DeliveryTransaction::OutgoingManifest { received, .. } => Some((
-                        self.identity.public(),
-                        received.conversation,
-                        (**received).clone(),
-                        true,
-                        false,
-                    )),
-                    DeliveryTransaction::ChannelOutgoing { events, sent, .. }
-                        if events.last().is_some_and(|event| {
-                            event.kind == crate::eventlog::EventKind::FileManifest
-                        }) =>
-                    {
-                        Some((
+            let notification =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::Incoming {
+                            sender,
+                            original,
+                            received,
+                            ..
+                        } => Some((
+                            sender.clone(),
+                            original.conversation_id,
+                            (**received).clone(),
+                            false,
+                            true,
+                        )),
+                        DeliveryTransaction::IncomingManifest {
+                            sender,
+                            original,
+                            received,
+                            ..
+                        } => Some((
+                            sender.clone(),
+                            original.conversation_id,
+                            (**received).clone(),
+                            true,
+                            true,
+                        )),
+                        DeliveryTransaction::OutgoingManifest { received, .. } => Some((
                             self.identity.public(),
-                            sent.conversation,
-                            super::received_log::ReceivedEntry {
-                                event_id: tx.id(),
-                                conversation: sent.conversation,
-                                from: self.user_id(),
-                                wall_clock: sent.wall_clock,
-                                plaintext: sent.plaintext.clone(),
-                            },
+                            received.conversation,
+                            (**received).clone(),
                             true,
                             false,
-                        ))
-                    }
-                    _ => None,
-                });
+                        )),
+                        DeliveryTransaction::ChannelOutgoing { events, sent, .. }
+                            if events.last().is_some_and(|event| {
+                                event.kind == crate::eventlog::EventKind::FileManifest
+                            }) =>
+                        {
+                            Some((
+                                self.identity.public(),
+                                sent.conversation,
+                                super::received_log::ReceivedEntry {
+                                    event_id: tx.id(),
+                                    conversation: sent.conversation,
+                                    from: self.user_id(),
+                                    wall_clock: sent.wall_clock,
+                                    plaintext: sent.plaintext.clone(),
+                                },
+                                true,
+                                false,
+                            ))
+                        }
+                        _ => None,
+                    });
+            let prepared_file_scopes =
+                match store.pending_transactions().first().map(|tx| tx.body()) {
+                    Some(DeliveryTransaction::OutgoingManifest {
+                        message,
+                        received,
+                        file,
+                    }) => self.prepare_manifest_transaction_scopes(message, received, file)?,
+                    _ => Vec::new(),
+                };
             // Channel manifests already carry their complete plaintext in the WAL.
             // Retain their signed chunk scope before retiring that transaction; a
             // failed scope/sidecar write remains recoverable after acceptance.
@@ -990,7 +1148,7 @@ impl Node {
                     store.pending_transactions().first().map(|tx| tx.body()),
                     Some(DeliveryTransaction::ChannelOutgoing { .. })
                 )
-                && let Some(manifest) = crate::file::decode_manifest(&entry.plaintext)
+                && let Some(manifest) = super::files::validated_manifest(&entry.plaintext)
             {
                 self.remember_sent_manifest_scope(
                     manifest.file_conv(),
@@ -1006,12 +1164,20 @@ impl Node {
                     .is_some_and(|tx| match tx.body() {
                         DeliveryTransaction::Outgoing { .. }
                         | DeliveryTransaction::OutgoingManifest { .. }
-                        | DeliveryTransaction::ChannelOutgoing { .. } => true,
+                        | DeliveryTransaction::ChannelOutgoing { .. }
+                        | DeliveryTransaction::ChannelControl { .. }
+                        | DeliveryTransaction::AccountSelfControl { .. }
+                        | DeliveryTransaction::LegacyMemberLeave { .. }
+                        | DeliveryTransaction::AccountOwnerControl { .. }
+                        | DeliveryTransaction::ChannelMessageAction { .. } => true,
                         DeliveryTransaction::Incoming { sender, .. }
                         | DeliveryTransaction::IncomingManifest { sender, .. } => {
                             !self.certified_sibling(sender)
                         }
-                        DeliveryTransaction::Requested { .. } => false,
+                        DeliveryTransaction::Requested { .. }
+                        | DeliveryTransaction::GroupRequested { .. }
+                        | DeliveryTransaction::AccountGroupFile { .. }
+                        | DeliveryTransaction::AccountInvitation { .. } => false,
                     });
             let transaction_id = store.pending_transactions().first().map(|tx| tx.id());
             if let Some(
@@ -1046,19 +1212,55 @@ impl Node {
                         }
                         _ => None,
                     });
+            let control_channel =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelControl { events }
+                        | DeliveryTransaction::AccountSelfControl { events, .. }
+                        | DeliveryTransaction::LegacyMemberLeave { events, .. }
+                        | DeliveryTransaction::AccountOwnerControl { events, .. } => {
+                            events.first().map(|event| event.conversation_id)
+                        }
+                        _ => None,
+                    });
             let installed = {
                 let mut ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
                 let mut log = self.log.lock().expect("log lock not poisoned");
+                if let Some(tx) = store.pending_transactions().first() {
+                    store.validate_message_action_transaction(tx, &log, &self.identity)?;
+                }
                 let mut received = self.received.lock().expect("received lock not poisoned");
                 let mut sent = self.sentlog.lock().expect("sent lock not poisoned");
                 let mut files = self.received_files.lock().expect("files lock not poisoned");
-                store.recover_next_with_channels(
+                let recall = store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelMessageAction { recall, .. } => recall.clone(),
+                        _ => None,
+                    });
+                let mut complete =
+                    |operation: &super::account_group::operations::journal::OperationReference,
+                     events: &[Event]| {
+                        // Startup and running recovery use the same binding and
+                        // durable sidecar rule before completing the original ID.
+                        super::account_group::operations::persist_action_recall_completion(
+                            operation,
+                            recall.as_ref(),
+                            &mut self.recalls.lock().expect("recalls lock"),
+                        )?;
+                        self.complete_account_group_operation(operation, events)
+                    };
+                store.recover_next_with_group_operations(
                     &mut ratchet,
                     &mut log,
-                    &mut sent,
-                    &mut received,
-                    Some(&mut files),
+                    &mut *sent,
+                    &mut *received,
+                    Some(&mut *files),
                     Some(&mut self.channel_senders.lock().expect("sender store lock")),
+                    Some(&mut complete),
                 )
             };
             let removed = transaction_id.is_some_and(|id| {
@@ -1076,10 +1278,27 @@ impl Node {
                     .state_mut(&channel)
             {
                 for (epoch, bytes) in senders {
+                    if epoch != state.epoch() {
+                        continue;
+                    }
                     if let Some(key) = crate::channel::sender_key::SenderKey::deserialize(&bytes) {
                         state.import_my_sender(epoch, key);
                     }
                 }
+            }
+            if removed {
+                self.install_file_card_scopes(prepared_file_scopes);
+            }
+            if removed && let Some(channel) = control_channel {
+                // Finish short control tails after releasing projection guards.
+                // A larger tail keeps its existing runtime ticket without
+                // turning an installed effect into failed durable recovery.
+                // Terminal status never permits reading a stale projection.
+                match self.prepare_channel_admission(channel, &mut control_budget) {
+                    Ok(()) | Err(LogError::StaleCursor) => {}
+                    Err(error) => return Err(error),
+                }
+                self.account_sync_notify.notify_one();
             }
             if removed && wake_local {
                 self.note_account_local_change();
@@ -1087,39 +1306,24 @@ impl Node {
             if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
                 self.note_account_history_change();
                 if file {
-                    if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
-                        let fresh = {
-                            let mut book = self.files.lock().expect("files lock not poisoned");
-                            let fresh = !book.is_emitted(&entry.event_id);
-                            book.mark_emitted(entry.event_id);
-                            book.record_event(
-                                entry.event_id,
-                                crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
-                                manifest.clone(),
-                            );
-                            fresh
-                        };
+                    if incoming {
+                        self.note_reception_change();
+                    }
+                    if let Some(manifest) = super::files::validated_manifest(&entry.plaintext) {
                         self.remember_manifest_scope(
                             manifest.file_conv(),
                             original_conv,
                             crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
                             entry.event_id,
                         );
-                        if !incoming {
-                            self.install_file_card_scopes_for(store, Some(entry.event_id));
-                        }
                         if incoming
-                            && fresh
                             && !self.recipient_expired(
                                 &entry.plaintext,
                                 entry.event_id,
                                 entry.wall_clock,
                             )
                         {
-                            self.pending_files
-                                .lock()
-                                .expect("pending files lock not poisoned")
-                                .insert(manifest.file_conv());
+                            self.file_pull_notify.notify_one();
                             if !self.certified_sibling(&sender) {
                                 let _ = self.file_incoming.send(ReceivedFile {
                                     protection: manifest.protection(),
@@ -1136,7 +1340,7 @@ impl Node {
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
                                     media: super::media_store::manifest_is_media(&manifest),
-                                    event_id: self.file_message_row_logical_id(&entry),
+                                    event_id: self.file_message_row_logical_id(&entry)?,
                                     authored_at: entry.wall_clock,
                                     received_at: super::node::now_millis(),
                                     arrival_kind: "live",
@@ -1148,12 +1352,8 @@ impl Node {
                             }
                         }
                     }
-                } else if self
-                    .emitted
-                    .lock()
-                    .expect("emitted lock not poisoned")
-                    .insert(entry.event_id)
-                {
+                } else {
+                    self.note_reception_change();
                     let envelope = DmEnvelope::decode(&entry.plaintext);
                     let inner = envelope
                         .as_ref()
@@ -1213,21 +1413,23 @@ impl Node {
             .outgoing_file_acks
             .lock()
             .expect("outgoing file progress lock not poisoned");
-        let consent = if recipients.iter().any(|destination| {
-            destination.active
-                && self.outgoing_file_consent_status(id, destination.binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Declined)
-        }) {
-            Some(super::ReceiveDecision::Declined)
-        } else if recipients.iter().any(|destination| {
-            destination.active
-                && self.outgoing_file_consent_status(id, destination.binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Pending)
-        }) {
-            Some(super::ReceiveDecision::Pending)
-        } else {
-            None
-        };
+        let mut consent = None;
+        for destination in recipients.iter().filter(|destination| destination.active) {
+            match self.outgoing_file_consent_status(id, destination.binding.event_id) {
+                Ok(Some(crate::eventlog::sync::FileConsentStatus::Declined)) => {
+                    consent = Some(super::ReceiveDecision::Declined);
+                    break;
+                }
+                Ok(Some(crate::eventlog::sync::FileConsentStatus::Pending)) => {
+                    consent = Some(super::ReceiveDecision::Pending)
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("file progress consent observation failed: {error}");
+                    return None;
+                }
+            }
+        }
         let total = card.chunk_count.saturating_mul(recipients.len() as u32);
         let done = recipients.iter().fold(0u32, |sum, destination| {
             let confirmed = if destination.active {
@@ -1274,53 +1476,32 @@ impl Node {
         self.delivery_status_notify.notified().await;
     }
 
-    pub(in crate::node) fn raw_sent_history(
+    pub(in crate::node) fn sent_header_identity(
         &self,
-        conversation: ConversationId,
-    ) -> Vec<(EventId, SentEntry)> {
-        let store = self.delivery.lock().expect("delivery lock not poisoned");
-        let log = self.log.lock().expect("log lock not poisoned");
-        let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
-        let mut ids: std::collections::HashMap<_, _> = log
-            .events(&conversation)
-            .into_iter()
-            .filter(|e| e.kind == crate::eventlog::EventKind::Message && e.author == author)
-            .map(|e| (e.seq, e.id))
-            .collect();
-        let mut entries = self
-            .sentlog
-            .lock()
-            .expect("sent lock not poisoned")
-            .entries(&conversation);
-        for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx.body()
-                && sent.conversation == conversation
-            {
-                ids.insert(sent.seq, message.logical_id);
-                if !entries.iter().any(|e| e == sent) {
-                    entries.push(sent.clone());
-                }
-            }
-        }
-        let recovered_ids = self
+        header: &super::transcript_repository::TranscriptHeader,
+    ) -> Result<EventId, LogError> {
+        if let Some(id) = self
             .recovered_sent_ids
             .lock()
-            .expect("recovered sent ids mutex not poisoned");
-        entries
-            .into_iter()
-            .map(|e| {
-                (
-                    recovered_ids
-                        .as_ref()
-                        .and_then(|saved| saved.id_for(&e))
-                        .or_else(|| ids.get(&e.seq).copied())
-                        .unwrap_or(EventId::new([0; 32])),
-                    e,
-                )
-            })
-            .collect()
+            .expect("recovered identity mutex")
+            .as_ref()
+            .map(|r| r.id_for_header(header))
+            .transpose()?
+            .flatten()
+        {
+            return Ok(id);
+        }
+        let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
+        Ok(self
+            .log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .authored_header(&header.conversation, author, header.sequence)?
+            .filter(|h| h.kind == crate::eventlog::EventKind::Message)
+            .map(|h| h.id)
+            .unwrap_or(EventId::new([0; 32])))
     }
-
     #[cfg(test)]
     pub(in crate::node) fn sent_entries_for_history(
         &self,
@@ -1357,7 +1538,14 @@ impl Node {
         let canonical = store
             .logical_for_original(opened.original_event_id())
             .unwrap_or_else(|| opened.logical_id());
-        let Some(message) = self.immutable_delivery(store, canonical) else {
+        let message = match self.immutable_delivery(store, canonical) {
+            Ok(message) => message,
+            Err(error) => {
+                log::warn!("delivery receipt lookup deferred: {error}");
+                return;
+            }
+        };
+        let Some(message) = message else {
             return;
         };
         let Some(authenticated) = opened.authenticate(&message) else {
@@ -1388,15 +1576,23 @@ impl Node {
         }
     }
 
-    fn immutable_delivery(&self, store: &DeliveryStore, id: EventId) -> Option<OutgoingDelivery> {
+    fn immutable_delivery(
+        &self,
+        store: &DeliveryStore,
+        id: EventId,
+    ) -> Result<Option<OutgoingDelivery>, crate::eventlog::LogError> {
         if let Some(message) = store.message(id) {
-            return Some(message.clone());
+            return Ok(Some(message.clone()));
         }
-        let completed = store.completed_work(id)?;
+        let Some(completed) = store.completed_work(id) else {
+            return Ok(None);
+        };
         let log = self.log.lock().expect("log lock not poisoned");
         let mut destinations = Vec::with_capacity(completed.remaining.len());
         for reference in &completed.remaining {
-            let event = log.get(&reference.event_id)?;
+            let Some(event) = log.get(&reference.event_id)? else {
+                return Ok(None);
+            };
             if event.author.ed25519_pub() != &self.identity.public().ed25519_pub
                 || event.wall_clock != completed.wall_clock
                 || event.conversation_id
@@ -1407,23 +1603,23 @@ impl Node {
                 || !event.verify_integrity()
                 || !event.verify_signature()
             {
-                return None;
+                return Ok(None);
             }
             destinations.push(DeliveryDestination {
                 device: reference.device.clone(),
                 account: reference.account.clone(),
-                event: event.clone(),
+                event,
                 receipt_eligible: reference.receipt_eligible,
             });
         }
-        Some(OutgoingDelivery {
+        Ok(Some(OutgoingDelivery {
             logical_id: id,
             sender_account: self.account_id(),
             recipient_account: completed.recipient_account.clone(),
             conversation: completed.conversation,
             wall_clock: completed.wall_clock,
             destinations,
-        })
+        }))
     }
 
     /// Immediate best-effort transfer of an already accepted immutable intent.
@@ -1431,10 +1627,17 @@ impl Node {
     pub async fn flush_delivery(&self, id: EventId) {
         let message = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-            if self.recover_delivery(&mut store).is_err() {
+            if let Err(error) = self.recover_delivery(&mut store) {
+                log::warn!("delivery recovery deferred: {error}");
                 return;
             }
-            self.immutable_delivery(&store, id)
+            match self.immutable_delivery(&store, id) {
+                Ok(message) => message,
+                Err(error) => {
+                    log::warn!("delivery flush lookup deferred: {error}");
+                    return;
+                }
+            }
         };
         let Some(message) = message else {
             return;
@@ -1474,7 +1677,8 @@ impl Node {
     pub async fn flush_delivery_receipts(&self, limit: usize) {
         let receipts = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-            if self.recover_delivery(&mut store).is_err() {
+            if let Err(error) = self.recover_delivery(&mut store) {
+                log::warn!("delivery recovery deferred: {error}");
                 return;
             }
             store.retry_receipts(limit)
@@ -1536,7 +1740,7 @@ impl Node {
             }
             let exchange = async {
                 let store = self.sync_store(channel.peer_identity());
-                super::session::request_round(&mut channel, &store, conversation).await?;
+                super::session::request_round_paged(&mut channel, &store, conversation).await?;
                 if conversation != destination.event.conversation_id {
                     return Ok(false);
                 }
@@ -1838,6 +2042,31 @@ impl Node {
         }
     }
 
+    fn cancel_changed_delivery_routes(
+        &self,
+        active: &mut std::collections::HashMap<ControlWork, ControlRoutes>,
+        owners: &mut ControlTaskOwners,
+    ) {
+        let changed: Vec<_> = active
+            .iter()
+            .filter(|(_, routes)| self.control_routes(&routes.peer).endpoints != routes.endpoints)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in changed {
+            owners.cancel(&key);
+            active.remove(&key);
+            // A completed-but-unjoined old task may have moved its observation
+            // token out of its Drop guard. Remove only that exact destination.
+            if let ControlWork::Destination(event) = key {
+                self.delivery_observations
+                    .lock()
+                    .expect("delivery observations lock not poisoned")
+                    .retain(|_, destination| destination != event);
+                self.delivery_status_notify.notify_waiters();
+            }
+        }
+    }
+
     /// Shared by desktop, CLI and SDK accept-loop hosts. The future owns all
     /// cursors and network work, so dropping it cancels scheduling and dials.
     pub(in crate::node) async fn run_delivery_loop(self: std::sync::Arc<Self>) {
@@ -1853,6 +2082,7 @@ impl Node {
         // JoinSet aborts its tasks on drop: retiring the worker also retires
         // every control dial/exchange. Never detach work from this lifetime.
         let mut controls = tokio::task::JoinSet::new();
+        let mut control_owners = ControlTaskOwners::default();
         let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
             std::collections::HashMap::new();
         let mut retries = super::delivery_retry::RetrySchedule::default();
@@ -1878,6 +2108,7 @@ impl Node {
                     self.relay_retry_after.lock().expect("relay retry lock not poisoned").clear();
                     controls.shutdown().await;
                     self.clear_delivery_observations();
+                    control_owners.clear();
                     active.clear();
                     retries.clear();
                     self.channel_recovery_notify.notify_one();
@@ -1885,10 +2116,11 @@ impl Node {
                     self.bridge_notify.notify_one();
                     continue;
                 },
-                result = controls.join_next(), if !controls.is_empty() => {
+                result = controls.join_next_with_id(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((key, persistence_failed, progress, observation))) => {
-                            if let Some(routes) = active.remove(&key) {
+                        Some(Ok((task, (key, persistence_failed, progress, observation)))) => {
+                            if control_owners.finished(task).as_ref() == Some(&key)
+                                && let Some(routes) = active.remove(&key) {
                                 retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
@@ -1899,8 +2131,11 @@ impl Node {
                         // A panicked child cannot leave a permanently occupied
                         // lane. Retire this worker and cancel its remaining work.
                         Some(Err(error)) => {
-                            log::error!("automatic delivery control task failed: {error}");
-                            return;
+                            if let Some(key) = control_owners.finished(error.id()) { active.remove(&key); }
+                            if !error.is_cancelled() {
+                                log::error!("automatic delivery control task failed: {error}");
+                                return;
+                            }
                         }
                         None => {}
                     }
@@ -1910,15 +2145,7 @@ impl Node {
             // A new route for an active peer/eligible relay must not wait behind
             // an exchange still blocked on its old endpoint. Refresh timestamps
             // and unrelated peers do not invalidate the bounded control batch.
-            if active
-                .values()
-                .any(|routes| self.control_routes(&routes.peer).endpoints != routes.endpoints)
-            {
-                self.clear_delivery_observations();
-                controls.shutdown().await;
-                self.clear_delivery_observations();
-                active.clear();
-            }
+            self.cancel_changed_delivery_routes(&mut active, &mut control_owners);
             self.prune_delivery_observations();
             // Reading next_destination advances its per-message cursor. Only
             // select work when its lane can admit it, so busy lanes preserve
@@ -1936,52 +2163,68 @@ impl Node {
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
-            let snapshot = tokio::task::spawn_blocking(move || {
-                let _work = work;
-                #[cfg(test)]
-                if let Some(hook) = node.delivery_snapshot_hook.lock().unwrap().take() {
-                    hook();
+            let snapshot = work
+                .spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = node.delivery_snapshot_hook.lock().unwrap().take() {
+                        hook();
+                    }
+                    let mut store = node.delivery.lock().expect("delivery lock not poisoned");
+                    node.recover_delivery(&mut store)?;
+                    let next = destination_capacity
+                        .then(|| store.next_destination(destination_cursor))
+                        .flatten();
+                    let destination = if let Some((id, reference)) = next {
+                        let event = node
+                            .log
+                            .lock()
+                            .expect("log lock not poisoned")
+                            .get(&reference.event_id)?;
+                        let Some(event) = event else {
+                            return Ok::<_, crate::eventlog::LogError>(None);
+                        };
+                        Some((
+                            id,
+                            DeliveryDestination {
+                                device: reference.device,
+                                account: reference.account,
+                                event,
+                                receipt_eligible: reference.receipt_eligible,
+                            },
+                        ))
+                    } else {
+                        None
+                    };
+                    let receipt = if receipt_capacity {
+                        store
+                            .retry_receipts_after(receipt_cursor, 1)
+                            .into_iter()
+                            .next()
+                            .or_else(|| store.retry_receipts_after(None, 1).into_iter().next())
+                    } else {
+                        None
+                    };
+                    let (files, cursor) = file_scan.read(&store);
+                    Ok(Some((destination, receipt, files, cursor)))
+                })
+                .await
+                .map(|value| value.into_inner());
+            let (destination, receipt, files, cursor) = match snapshot {
+                Ok(Ok(Some(snapshot))) => snapshot,
+                Ok(Err(error)) => {
+                    log::warn!("delivery snapshot deferred: {error}");
+                    diagnostic.warn_if_due();
+                    continue;
                 }
-                let mut store = node.delivery.lock().expect("delivery lock not poisoned");
-                if node.recover_delivery(&mut store).is_err() {
-                    return None;
+                Err(error) => {
+                    log::warn!("delivery snapshot worker failed: {error}");
+                    diagnostic.warn_if_due();
+                    continue;
                 }
-                let next = destination_capacity
-                    .then(|| store.next_destination(destination_cursor))
-                    .flatten();
-                let destination = next.and_then(|(id, reference)| {
-                    let event = node
-                        .log
-                        .lock()
-                        .expect("log lock not poisoned")
-                        .get(&reference.event_id)?
-                        .clone();
-                    Some((
-                        id,
-                        DeliveryDestination {
-                            device: reference.device,
-                            account: reference.account,
-                            event,
-                            receipt_eligible: reference.receipt_eligible,
-                        },
-                    ))
-                });
-                let receipt = if receipt_capacity {
-                    store
-                        .retry_receipts_after(receipt_cursor, 1)
-                        .into_iter()
-                        .next()
-                        .or_else(|| store.retry_receipts_after(None, 1).into_iter().next())
-                } else {
-                    None
-                };
-                let (files, cursor) = file_scan.read(&store);
-                Some((destination, receipt, files, cursor))
-            })
-            .await;
-            let Ok(Some((destination, receipt, files, cursor))) = snapshot else {
-                diagnostic.warn_if_due();
-                continue;
+                Ok(Ok(None)) => {
+                    diagnostic.warn_if_due();
+                    continue;
+                }
             };
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
@@ -2015,7 +2258,8 @@ impl Node {
                         token: node.begin_delivery_observation(id, &destination),
                     };
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         // Move the entire Drop owner into the future. Capturing
                         // only its Copy token would drop the guard at admission.
                         let mut attempt = attempt;
@@ -2040,6 +2284,7 @@ impl Node {
                         let observation = attempt.token.take().map(|token| (token, reason));
                         (key, failed, progress, observation)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
             if let Some(receipt) = receipt {
@@ -2061,7 +2306,8 @@ impl Node {
                     };
                     let node = self.clone();
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         let progress = node.retry_one_destination(&receipt.destination).await;
                         let failed = progress
                             && node
@@ -2072,6 +2318,7 @@ impl Node {
                                 .is_err();
                         (key, failed, progress, None)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
             file_scheduler.admit(&self, files, cursor);
@@ -2119,10 +2366,12 @@ impl Node {
                     };
                     let node = self.clone();
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         let progress = node.reconcile_delivery_peer(&peer).await;
                         (key, false, progress, None)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
         }
@@ -2219,7 +2468,7 @@ impl Node {
                             .is_ok()
                     } else {
                         let store = self.pull_sync_store(channel.peer_identity());
-                        super::session::request_round(&mut channel, &store, conv)
+                        super::session::request_round_paged(&mut channel, &store, conv)
                             .await
                             .is_ok()
                     };
@@ -2326,15 +2575,40 @@ impl Node {
         tokio::pin!(direct, relay);
         // Both alternatives share the same bounded wall-clock window. Custody
         // cannot cancel recipient progress; exact recipient confirmation can.
-        let ((held, direct_elapsed, direct_timeout), (relay_held, relay_elapsed, relay_timeout)) = tokio::select! {
-            result = &mut direct => {
-                let still_pending = self.delivery.lock().expect("delivery lock not poisoned")
-                    .contains_work_event(destination.event.id);
-                if still_pending { (result, relay.await) }
-                else { (result, (false, started.elapsed(), false)) }
-            },
-            result = &mut relay => (direct.await, result),
+        let retired = async {
+            loop {
+                let changed = self.delivery_status_notify.notified();
+                tokio::pin!(changed);
+                // Register before checking durable state: notify_waiters does
+                // not retain a permit for a future subscriber.
+                changed.as_mut().enable();
+                if !self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .contains_work_event(destination.event.id)
+                {
+                    return;
+                }
+                changed.await;
+            }
         };
+        tokio::pin!(retired);
+        let mut direct_result = None;
+        let mut relay_result = None;
+        while direct_result.is_none() || relay_result.is_none() {
+            tokio::select! {
+                _ = &mut retired => break,
+                result = &mut direct, if direct_result.is_none() => direct_result = Some(result),
+                result = &mut relay, if relay_result.is_none() => relay_result = Some(result),
+            }
+        }
+        // Dropping an unfinished alternative releases its socket and peer lane.
+        // Custody or another destination's receipt leaves this event pending.
+        let (held, direct_elapsed, direct_timeout) =
+            direct_result.unwrap_or((false, started.elapsed(), false));
+        let (relay_held, relay_elapsed, relay_timeout) =
+            relay_result.unwrap_or((false, started.elapsed(), false));
         if started.elapsed() >= std::time::Duration::from_secs(10) {
             log::warn!(target: "mesh_talk::delivery",
                 "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
@@ -2353,63 +2627,100 @@ impl Node {
         )
     }
 
-    pub(in crate::node) fn install_file_card_scopes(&self, store: &DeliveryStore) {
-        self.install_file_card_scopes_for(store, None);
+    fn file_card_manifest_matches(
+        &self,
+        file: &super::delivery_store::FileCard,
+        entry: &super::received_log::ReceivedEntry,
+        original: Option<&Event>,
+    ) -> bool {
+        entry.conversation == file.conversation
+            && entry.from == self.user_id()
+            && super::files::eligible_manifest_row(entry, original, None).is_some_and(|manifest| {
+                manifest.file_conv() == file.file_conversation
+                    && manifest.chunk_count() == file.chunk_count
+            })
     }
 
-    fn install_file_card_scopes_for(&self, store: &DeliveryStore, current: Option<EventId>) {
-        let cards = if let Some(id) = current {
-            store.file_card(id).into_iter().collect::<Vec<_>>()
-        } else {
-            store.file_cards().collect::<Vec<_>>()
+    fn file_card_scope(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+        event: &Event,
+    ) -> Option<super::privacy_runtime::ManifestScope> {
+        (event.id == destination.binding.event_id
+            && event.kind == crate::eventlog::EventKind::FileManifest
+            && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
+            && event.conversation_id
+                == super::conversation::dm_conversation_id(
+                    &self.identity.public(),
+                    &destination.binding.device,
+                )
+            && event.conversation_id != file.file_conversation
+            && event.verify_signature()
+            && event.verify_integrity())
+        .then_some(super::privacy_runtime::ManifestScope {
+            parent: event.conversation_id,
+            author: event.author,
+            event: event.id,
+        })
+    }
+
+    /// The accepted WAL already owns complete signed destinations. Resolve and
+    /// validate this overlay before retirement, without a post-retirement read.
+    fn prepare_manifest_transaction_scopes(
+        &self,
+        message: &OutgoingDelivery,
+        entry: &super::received_log::ReceivedEntry,
+        file: &super::delivery_store::FileCard,
+    ) -> Result<Vec<(ConversationId, super::privacy_runtime::ManifestScope)>, LogError> {
+        let invalid = || {
+            LogError::CorruptFile(
+                "accepted manifest journal has incomplete or invalid scope material".into(),
+            )
         };
-        let scopes = {
-            let rows = self
-                .received_files
-                .lock()
-                .expect("file rows lock not poisoned");
-            let log = self.log.lock().expect("log lock not poisoned");
-            cards
-                .into_iter()
-                .filter(|file| {
-                    rows.entry(file.id).is_some_and(|entry| {
-                        entry.conversation == file.conversation
-                            && entry.from == self.user_id()
-                            && super::files::eligible_manifest_row(
-                                entry,
-                                log.get(&entry.event_id),
-                                None,
-                            )
-                            .is_some_and(|manifest| {
-                                manifest.file_conv() == file.file_conversation
-                                    && manifest.chunk_count() == file.chunk_count
-                            })
-                    })
-                })
-                .flat_map(|file| {
-                    file.destinations.iter().filter_map(|destination| {
-                        let event = log.get(&destination.binding.event_id)?;
-                        (event.kind == crate::eventlog::EventKind::FileManifest
-                            && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
-                            && event.conversation_id
-                                == super::conversation::dm_conversation_id(
-                                    &self.identity.public(),
-                                    &destination.binding.device,
-                                )
-                            && event.verify_signature()
-                            && event.verify_integrity())
-                        .then_some((
-                            file.file_conversation,
-                            event.conversation_id,
-                            event.author,
-                            event.id,
-                        ))
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        for (file, parent, author, event) in scopes {
-            self.remember_manifest_scope(file, parent, author, event);
+        // A personal file with no transport destinations has no external scopes.
+        // The delivery owner validates its local account/profile binding.
+        if message.destinations.is_empty() && file.destinations.is_empty() {
+            return Ok(Vec::new());
+        }
+        let events: std::collections::HashMap<_, _> = message
+            .destinations
+            .iter()
+            .map(|destination| (destination.event.id, destination))
+            .collect();
+        let original = events
+            .get(&entry.event_id)
+            .map(|destination| &destination.event);
+        if message.logical_id != file.id
+            || entry.event_id != file.id
+            || !self.file_card_manifest_matches(file, entry, original)
+        {
+            return Err(invalid());
+        }
+        let mut scopes = Vec::with_capacity(file.destinations.len());
+        for destination in &file.destinations {
+            let signed = events
+                .get(&destination.binding.event_id)
+                .ok_or_else(invalid)?;
+            if signed.device != destination.binding.device
+                || signed.account != destination.binding.account
+            {
+                return Err(invalid());
+            }
+            let scope = self
+                .file_card_scope(file, destination, &signed.event)
+                .ok_or_else(invalid)?;
+            scopes.push((file.file_conversation, scope));
+        }
+        Ok(scopes)
+    }
+
+    fn install_file_card_scopes(
+        &self,
+        scopes: Vec<(ConversationId, super::privacy_runtime::ManifestScope)>,
+    ) {
+        for (file, scope) in scopes {
+            self.remember_manifest_scope(file, scope.parent, scope.author, scope.event);
         }
     }
 
@@ -2451,8 +2762,13 @@ impl Node {
         destination: &super::delivery_store::FileDestination,
     ) -> bool {
         self.file_destination_current(file, destination)
-            && self.outgoing_file_consent_status(file.id, destination.binding.event_id)
-                != Some(crate::eventlog::sync::FileConsentStatus::Declined)
+            && match self.outgoing_file_consent_status(file.id, destination.binding.event_id) {
+                Ok(status) => status != Some(crate::eventlog::sync::FileConsentStatus::Declined),
+                Err(error) => {
+                    log::warn!("file custody deferred after consent read failure: {error}");
+                    false
+                }
+            }
     }
 
     pub(in crate::node) async fn retry_file_step(
@@ -2467,9 +2783,16 @@ impl Node {
             transfers.remove(&key);
             return false;
         }
-        if self.recipient_completed_file(file, destination) {
-            transfers.remove(&key);
-            return true;
+        match self.recipient_completed_file(file, destination) {
+            Ok(true) => {
+                transfers.remove(&key);
+                return true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("file completion observation deferred: {error}");
+                return false;
+            }
         }
         if !transfers.contains_key(&key) {
             if transfers.len() == MAX_FILE_TRANSFERS {
@@ -2751,7 +3074,7 @@ impl Node {
                 }
                 if !transfer.sticker_proof_attempted {
                     transfer.sticker_proof_attempted = true;
-                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation) {
+                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation)? {
                         match super::session::request_sticker_file_consent(
                             channel,
                             file.file_conversation,
@@ -2828,7 +3151,7 @@ impl Node {
             FilePhase::Chunks => {
                 let complete = transfer
                     .sync
-                    .step_burst(
+                    .step_burst_paged(
                         channel,
                         &store,
                         file.file_conversation,
@@ -3014,8 +3337,13 @@ impl Node {
         if !current() {
             return false;
         }
-        if self.recipient_completed_file(file, destination) {
-            return true;
+        match self.recipient_completed_file(file, destination) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("file completion observation deferred: {error}");
+                return false;
+            }
         }
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);
@@ -3079,7 +3407,7 @@ impl Node {
                 let store = self.sync_store(channel.peer_identity());
                 // Publish the manifest first so private recipients/relays can
                 // durably reconstruct chunk scope before any chunk disclosure.
-                if super::session::request_round(&mut channel, &store, manifest_conv)
+                if super::session::request_round_paged(&mut channel, &store, manifest_conv)
                     .await
                     .is_err()
                 {
@@ -3101,7 +3429,14 @@ impl Node {
                         };
                         channel = reconnected;
                     }
-                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation) {
+                    let headers = match self.sticker_chunk_proof(file.file_conversation) {
+                        Ok(headers) => headers,
+                        Err(error) => {
+                            log::warn!("sticker proof lookup deferred: {error}");
+                            return false;
+                        }
+                    };
+                    if let Some(headers) = headers {
                         match super::session::request_sticker_file_consent(
                             &mut channel,
                             file.file_conversation,
@@ -3148,9 +3483,13 @@ impl Node {
                                 return false;
                             };
                             channel = reconnected;
-                            if super::session::request_round(&mut channel, &store, manifest_conv)
-                                .await
-                                .is_err()
+                            if super::session::request_round_paged(
+                                &mut channel,
+                                &store,
+                                manifest_conv,
+                            )
+                            .await
+                            .is_err()
                             {
                                 return false;
                             }
@@ -3192,9 +3531,13 @@ impl Node {
                             {
                                 return false;
                             }
-                            if super::session::request_round(&mut channel, &store, manifest_conv)
-                                .await
-                                .is_err()
+                            if super::session::request_round_paged(
+                                &mut channel,
+                                &store,
+                                manifest_conv,
+                            )
+                            .await
+                            .is_err()
                             {
                                 return false;
                             }
@@ -3203,9 +3546,13 @@ impl Node {
                 }
                 #[cfg(test)]
                 phase.store(4, std::sync::atomic::Ordering::Relaxed);
-                if super::session::request_file_round(&mut channel, &store, file.file_conversation)
-                    .await
-                    .is_err()
+                if super::session::request_file_round_paged(
+                    &mut channel,
+                    &store,
+                    file.file_conversation,
+                )
+                .await
+                .is_err()
                 {
                     return false;
                 }
@@ -3249,7 +3596,8 @@ impl Node {
     pub(in crate::node) async fn flush_file_delivery(&self, id: EventId) {
         let file = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-            if self.recover_delivery(&mut store).is_err() {
+            if let Err(error) = self.recover_delivery(&mut store) {
+                log::warn!("delivery recovery deferred: {error}");
                 return;
             }
             store.file_card(id).cloned()
@@ -3276,8 +3624,185 @@ impl Node {
     }
 }
 
+// Keep local storage failures retryable at the wire delivery admission boundary.
+fn delivery_log_error(error: NodeError) -> LogError {
+    match error {
+        NodeError::Log(error) => error,
+        other => LogError::AdmissionRejected(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod diagnostic_tests {
+    #[tokio::test]
+    async fn cancelled_old_control_owner_cannot_remove_its_same_key_replacement() {
+        let key = super::ControlWork::Pull("fixture".into());
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut owners = super::ControlTaskOwners::default();
+        let old = tasks.spawn(std::future::pending::<()>());
+        let old_id = old.id();
+        owners.insert(key.clone(), old);
+        owners.cancel(&key);
+        let replacement = tasks.spawn(std::future::pending::<()>());
+        let replacement_id = replacement.id();
+        owners.insert(key.clone(), replacement);
+        let error = tasks.join_next_with_id().await.unwrap().unwrap_err();
+        assert!(error.is_cancelled());
+        assert_eq!(error.id(), old_id);
+        assert!(owners.finished(error.id()).is_none());
+        assert_eq!(owners.current[&key].id(), replacement_id);
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_pull_route_changes_preserve_slow_noise_delivery_and_its_observation() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob_account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (sender, _, _) = node_with_files(source_dir.path(), alice, aa, &bp);
+        let (recipient, _, _) = node_with_files(target_dir.path(), bob, bob_account, &ap);
+        let unrelated_identity = DeviceIdentity::generate();
+        let unrelated_account = Account::generate();
+        let unrelated =
+            Announce::new_with_account(&unrelated_identity, &unrelated_account, "Unrelated", 9);
+        sender.roster.lock().unwrap().update(
+            &unrelated,
+            "127.0.0.1".parse().unwrap(),
+            &sender.user_id(),
+        );
+        let logical = sender
+            .enqueue_to_account(&recipient.account_id(), b"synthetic slow delivery", None)
+            .await
+            .unwrap();
+        let destination = sender
+            .delivery
+            .lock()
+            .unwrap()
+            .message(logical)
+            .unwrap()
+            .destinations[0]
+            .clone();
+        let healthy = super::ControlWork::Destination(destination.event.id);
+        let changing = super::ControlWork::Pull(unrelated.user_id.clone());
+        let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let server_node = recipient.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Some((accepted, release_rx));
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    incoming = listener.accept() => {
+                        let (stream, _) = incoming.unwrap();
+                        let node = server_node.clone();
+                        let boundary = held.take();
+                        connections.spawn(async move {
+                            let channel = node.privacy_accept(stream).await.unwrap();
+                            if let Some((accepted, release)) = boundary {
+                                let _ = accepted.send(());
+                                release.await.unwrap();
+                            }
+                            node.serve_connection(channel).await;
+                        });
+                    }
+                    result = connections.join_next(), if !connections.is_empty() => { result.unwrap().unwrap(); }
+                }
+            }
+        });
+        let mut active = std::collections::HashMap::new();
+        let mut owners = super::ControlTaskOwners::default();
+        let mut controls = tokio::task::JoinSet::new();
+        active.insert(healthy.clone(), sender.control_routes(&bp.public()));
+        let attempt = super::ObservationAttempt {
+            node: sender.clone(),
+            token: sender.begin_delivery_observation(logical, &destination),
+        };
+        assert!(attempt.token.is_some());
+        let sending = Arc::clone(&sender);
+        let task = controls.spawn(async move {
+            let _attempt = attempt;
+            sending
+                .retry_one_destination_with_reason(&destination)
+                .await
+                .0
+        });
+        let healthy_task = task.id();
+        owners.insert(healthy.clone(), task);
+        tokio::time::timeout(Duration::from_secs(3), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        for port in 10..13 {
+            active.insert(changing.clone(), sender.control_routes(&unrelated.public()));
+            let pull = controls.spawn(std::future::pending::<bool>());
+            owners.insert(changing.clone(), pull);
+            let relocated = Announce::new_with_account(
+                &unrelated_identity,
+                &unrelated_account,
+                "Unrelated",
+                port,
+            );
+            sender.roster.lock().unwrap().update(
+                &relocated,
+                "127.0.0.1".parse().unwrap(),
+                &sender.user_id(),
+            );
+            sender.cancel_changed_delivery_routes(&mut active, &mut owners);
+            assert!(
+                active.contains_key(&healthy),
+                "an unrelated Pull route must not cancel the healthy destination"
+            );
+            assert_eq!(owners.current[&healthy].id(), healthy_task);
+            assert!(!owners.current[&healthy].is_finished());
+            assert!(
+                sender.account_delivery_observations(&recipient.account_id(), &[logical])[0]
+                    .2
+                    .is_some(),
+                "route churn for another owner cannot erase this exact destination's observation"
+            );
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match controls.join_next_with_id().await.unwrap() {
+                    Ok((task, progress)) => {
+                        assert_eq!(owners.finished(task), Some(healthy.clone()));
+                        assert!(progress);
+                        break;
+                    }
+                    Err(error) => {
+                        assert!(error.is_cancelled());
+                        assert!(owners.finished(error.id()).is_none());
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sender.delivery_status(logical),
+            Some(super::DeliveryStatus::Delivered),
+            "the original signed recipient receipt, rather than relay custody, must finish the delivery"
+        );
+        server.abort();
+        let _ = server.await;
+    }
     #[tokio::test]
     async fn bounded_relay_batches_eventually_visit_a_healthy_tail_after_four_failures() {
         use crate::discovery::Announce;
@@ -3382,41 +3907,110 @@ mod diagnostic_tests {
             .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
             .await
             .unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let server_node = b.clone();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            if let Ok(channel) = server_node.privacy_accept(stream).await {
-                server_node.serve_connection(channel).await;
-            }
+        let mut server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server TCP accept");
+            accepted_tx.send(()).expect("accepted TCP observer");
+            release_rx.await.expect("handshake release");
+            let channel = server_node
+                .privacy_accept(stream)
+                .await
+                .expect("server authenticated handshake");
+            server_node.serve_connection(channel).await;
         });
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
         let destination = card.destinations[0].clone();
         let mut scheduler = super::FileDeliveryScheduler::default();
         scheduler.admit(&a, vec![(card, destination)], None);
         let mut diagnostics = super::DeliveryDiagnosticThrottle::default();
-        let complete = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                scheduler.advance(&a);
-                if let Some(result) = scheduler.workers.join_next().await {
-                    scheduler.finish(&a, result, &mut diagnostics);
-                }
-                if a.outgoing_file_progress(id)
-                    .is_some_and(|progress| progress.delivered)
-                {
-                    break;
-                }
-                if scheduler.workers.is_empty() && scheduler.transfers.is_empty() {
-                    tokio::task::yield_now().await;
-                }
+        let dial_deadline = tokio::time::Instant::now() + super::FILE_EXCHANGE_TIMEOUT;
+        scheduler.advance(&a);
+        tokio::select! {
+            result = scheduler.workers.join_next() => panic!(
+                "Dial worker completed before TCP acceptance: {:?}",
+                result.map(|result| result.map(|(_, _, complete)| complete))
+            ),
+            result = &mut server => panic!("server exited before TCP acceptance: {result:?}"),
+            accepted = tokio::time::timeout_at(dial_deadline, accepted_rx) => {
+                accepted.expect("Dial TCP acceptance exceeded file exchange deadline")
+                    .expect("server dropped TCP acceptance signal");
             }
-        })
-        .await;
+        }
+        // Prove the scheduler retains a valid slow handshake independently of
+        // the later durable manifest, consent and chunk exchanges.
+        tokio::select! {
+            biased;
+            result = scheduler.workers.join_next() => panic!(
+                "Dial worker completed during held 600ms handshake: {:?}",
+                result.map(|result| result.map(|(_, _, complete)| complete))
+            ),
+            result = &mut server => panic!("server exited during held handshake: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(600)) => {}
+        }
+        release_tx
+            .send(())
+            .expect("server awaiting handshake release");
+        let result = tokio::select! {
+            result = &mut server => panic!("server exited during Dial: {result:?}"),
+            result = tokio::time::timeout_at(dial_deadline, scheduler.workers.join_next()) => {
+                result.expect("Dial exceeded original file exchange deadline")
+                    .expect("Dial worker missing").expect("Dial worker panicked")
+            }
+        };
+        scheduler.finish(&a, Ok(result), &mut diagnostics);
+        // Each phase gets one existing exchange budget, shared by all of its
+        // turns. Fixed phase order rejects redials and bounds total work.
+        for phase in [
+            super::FilePhase::Manifest,
+            super::FilePhase::ManifestCustody,
+            super::FilePhase::Consent,
+            super::FilePhase::InitialCustody,
+            super::FilePhase::Chunks,
+            super::FilePhase::FinalCustody,
+        ] {
+            let current = scheduler
+                .transfers
+                .values()
+                .next()
+                .unwrap_or_else(|| panic!("transfer missing before {phase:?}"));
+            assert_eq!(
+                std::mem::discriminant(&current.phase),
+                std::mem::discriminant(&phase),
+                "unexpected phase before {phase:?}: {:?}",
+                current.phase
+            );
+            let deadline = tokio::time::Instant::now() + super::FILE_EXCHANGE_TIMEOUT;
+            tokio::time::timeout_at(deadline, async {
+                loop {
+                    scheduler.advance(&a);
+                    let result = tokio::select! {
+                        // Final custody can release the socket in the same poll
+                        // that completes this worker, allowing a normal server EOF.
+                        biased;
+                        result = scheduler.workers.join_next() => result
+                            .unwrap_or_else(|| panic!("worker missing during {phase:?}"))
+                            .unwrap_or_else(|error| panic!("worker panicked during {phase:?}: {error}")),
+                        result = &mut server => panic!("server exited during {phase:?}: {result:?}"),
+                    };
+                    scheduler.finish(&a, Ok(result), &mut diagnostics);
+                    if scheduler.transfers.values().next().is_none_or(|transfer| {
+                        std::mem::discriminant(&transfer.phase) != std::mem::discriminant(&phase)
+                    }) {
+                        break;
+                    }
+                }
+            }).await.unwrap_or_else(|_| panic!("{phase:?} exceeded file exchange deadline"));
+        }
         server.abort();
-        let _ = server.await;
+        if let Err(error) = server.await {
+            assert!(error.is_cancelled(), "server panicked: {error}");
+        }
         assert!(
-            complete.is_ok(),
-            "scheduler fairness must not reject a healthy 600ms handshake"
+            a.outgoing_file_progress(id)
+                .is_some_and(|progress| progress.delivered),
+            "completed ordered exchanges must confirm delivery"
         );
         assert_eq!(b.read_file(file).unwrap(), b"valid slow route");
     }

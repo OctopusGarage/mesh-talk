@@ -83,7 +83,31 @@ static TEST_SECRETS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::LazyLock::new(Default::default);
 #[cfg(test)]
+type TestIoHook = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+static TEST_IO_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, &'static str), TestIoHook>>,
+> = std::sync::LazyLock::new(Default::default);
+#[cfg(test)]
+pub(crate) fn before_next_io(username: &str, operation: &'static str, hook: TestIoHook) {
+    TEST_IO_HOOKS
+        .lock()
+        .unwrap()
+        .insert((username.into(), operation), hook);
+}
+#[cfg(test)]
+fn test_io(username: &str, operation: &'static str) {
+    let hook = TEST_IO_HOOKS
+        .lock()
+        .unwrap()
+        .remove(&(username.into(), operation));
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+#[cfg(test)]
 pub fn save(username: &str, password: &str) -> bool {
+    test_io(username, "save");
     TEST_SECRETS
         .lock()
         .unwrap()
@@ -92,10 +116,12 @@ pub fn save(username: &str, password: &str) -> bool {
 }
 #[cfg(test)]
 pub fn load(username: &str) -> Option<String> {
+    test_io(username, "load");
     TEST_SECRETS.lock().unwrap().get(username).cloned()
 }
 #[cfg(test)]
 pub fn clear(username: &str) {
+    test_io(username, "clear");
     TEST_SECRETS.lock().unwrap().remove(username);
 }
 

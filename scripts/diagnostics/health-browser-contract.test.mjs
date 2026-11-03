@@ -17,7 +17,7 @@ test("health uses the CI worker budget without retrying failed UI scenarios", as
   assert.match(source, /browser-full.*--resource heavy.*scripts\/validation\/browser\.mjs full/);
   const browser = await readFile(new URL("../validation/browser.mjs", import.meta.url), "utf8");
   for (const flag of ["--project=chromium", "--workers=1", "--retries=0"]) assert(browser.includes(flag));
-  const workflow = await readFile(new URL("../../.github/workflows/e2e-ui.yml", import.meta.url), "utf8");
+  const workflow = await readFile(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
   assert.ok(workflow.includes("npx playwright test --workers=1 --retries=0"), "baseline CI must not turn flaky failures into successful checks");
   const config = await readFile(new URL("../../frontend/playwright.config.ts", import.meta.url), "utf8");
   assert.ok(config.includes('trace: "retain-on-failure"'), "the first failure must retain a trace without requiring a retry");

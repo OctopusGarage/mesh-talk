@@ -55,17 +55,6 @@ fn parse_event_id(hex_id: &str) -> Result<EventId, CommandError> {
     Ok(EventId::new(arr))
 }
 
-fn to_reaction_infos(views: Vec<mesh_talk_core::node::ReactionView>) -> Vec<ReactionInfo> {
-    views
-        .into_iter()
-        .map(|v| ReactionInfo {
-            target: v.target,
-            emoji: v.emoji,
-            who: v.who,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

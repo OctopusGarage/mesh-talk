@@ -80,6 +80,44 @@ it("passes only references and personal metadata to a durable save", async () =>
   await store.getState().save(source, metadata);
   expect(api.save).toHaveBeenCalledWith("owner", source, metadata);
 });
+it.each(["load", "save"] as const)(
+  "%s recovers from a stalled favorites read without losing durable acceptance",
+  async (operation) => {
+    vi.useFakeTimers();
+    const { api, store } = setup();
+    let finish!: (value: {
+      items: MessageFavorite[];
+      has_more: boolean;
+    }) => void;
+    api.list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const completed = vi.fn();
+    const pending = (
+      operation === "load"
+        ? store.getState().load("")
+        : store.getState().save(source, metadata)
+    ).then(completed);
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(completed).toHaveBeenCalledOnce();
+      if (operation === "save") expect(completed).toHaveBeenCalledWith(item);
+      expect(store.getState().loading).toBe(false);
+      expect(store.getState().error).toMatch(/timed out/i);
+      await store.getState().load("retry");
+      finish({ items: [], has_more: false });
+      await pending;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.getState().items).toEqual([item]);
+    } finally {
+      finish({ items: [], has_more: false });
+      await pending;
+      vi.useRealTimers();
+    }
+  },
+);
 it("preserves collection state after failed removal", async () => {
   const { api, store } = setup();
   await store.getState().load("");

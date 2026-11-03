@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { invokeSensitive } from "./sensitiveInvoke";
+import { readWithDeadline } from "../readDeadline";
 import type {
   LoginResult,
   SavedSessionStatus,
@@ -54,7 +55,8 @@ export const auth = {
   /** Forget the saved keychain session so the next launch won't auto-login. */
   clearSavedSession: () => invoke<void>("clear_saved_session"),
   lock: () => invoke<void>("lock_app"),
-  lockStatus: () => invoke<UserInfo | null>("lock_status"),
+  lockStatus: () =>
+    readWithDeadline(() => invoke<UserInfo | null>("lock_status")),
   unlock: (password?: string) =>
     invoke<void>("unlock_app", { password: password ?? null }),
   noteActivity: () => invoke<void>("note_activity"),

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readWithDeadline } from "@/lib/readDeadline";
 import { draftsApi } from "@/lib/api/drafts";
 import type { DraftChange, DraftVersion } from "@/lib/api/drafts";
 import type { MessageProtection } from "@/lib/types";
@@ -24,6 +25,7 @@ interface DraftState {
   ) => Promise<void>;
   refresh: () => Promise<void>;
   reset: () => void;
+  discard: (...args: Scope) => void;
   edit: (...args: [...Scope, text: string]) => void;
   setProtection: (
     ...args: [...Scope, protection: MessageProtection | undefined]
@@ -83,6 +85,23 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
       pending: {},
       loaded: false,
       error: null,
+      discard: (owner, generation, key) => {
+        if (get().owner !== owner || get().generation !== generation) return;
+        touch(key);
+        dirtyKeys.delete(key);
+        const { texts, protections, pending } = get();
+        const nextTexts = { ...texts };
+        delete nextTexts[key];
+        const nextProtections = { ...protections };
+        delete nextProtections[key];
+        const nextPending = { ...pending };
+        delete nextPending[key];
+        set({
+          texts: nextTexts,
+          protections: nextProtections,
+          pending: nextPending,
+        });
+      },
       reset: () => {
         epoch++;
         cancelTimers();
@@ -108,17 +127,26 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
         const run = epoch;
         set({ owner, generation });
         try {
-          const snapshot = await api.load(owner, currentAccount);
+          const snapshot = await readWithDeadline(() =>
+            api.load(owner, currentAccount),
+          );
           if (epoch !== run) return;
           if (snapshot.account_id && snapshot.account_id !== currentAccount)
             throw new Error("Draft account changed");
           session = snapshot.session;
           versions = snapshot.versions ?? {};
-          set({
-            texts: snapshot.drafts,
-            protections: snapshot.protections ?? {},
-            loaded: true,
-          });
+          const texts = { ...snapshot.drafts };
+          const protections = { ...(snapshot.protections ?? {}) };
+          for (const key of Object.keys(revisions)) {
+            // A touched key belongs to the current local view, including an
+            // absent key discarded while this initial snapshot was in flight.
+            if (get().texts[key]) texts[key] = get().texts[key];
+            else delete texts[key];
+            if (get().protections[key])
+              protections[key] = get().protections[key];
+            else delete protections[key];
+          }
+          set({ texts, protections, loaded: true });
         } catch {
           if (epoch === run) set({ error: "load" });
         }
@@ -126,10 +154,13 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
       refresh: async () => {
         const run = epoch;
         const request = ++refreshRequest;
+        const readRevisions = { ...revisions };
         const owner = get().owner;
         if (!owner || !get().loaded) return;
         try {
-          const snapshot = await api.load(owner, accountId);
+          const snapshot = await readWithDeadline(() =>
+            api.load(owner, accountId),
+          );
           if (
             epoch !== run ||
             request !== refreshRequest ||
@@ -143,6 +174,9 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
           for (const key of new Set([
             ...dirtyKeys,
             ...Object.keys(get().pending),
+            ...Object.keys(revisions).filter(
+              (key) => revisions[key] !== readRevisions[key],
+            ),
           ])) {
             if (get().texts[key]) texts[key] = get().texts[key];
             else delete texts[key];
@@ -262,9 +296,13 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
         const savedRevisions = { ...revisions };
         writes = writes.then(async () => {
           if (epoch !== run) return;
+          const currentKeys = keys.filter(
+            (key) => revisions[key] === savedRevisions[key],
+          );
+          if (!currentKeys.length) return;
           try {
             const changes: Record<string, DraftChange> = Object.fromEntries(
-              keys.map((key) => [
+              currentKeys.map((key) => [
                 key,
                 {
                   text: texts[key] ?? "",
@@ -282,7 +320,12 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
                   savedAccount,
                   changes,
                 )
-              : await api.save(owner, savedSession, texts, protections);
+              : await api.save(
+                  owner,
+                  savedSession,
+                  get().texts,
+                  get().protections,
+                );
             if (epoch === run) {
               if (snapshot?.versions)
                 for (const key of keys) {

@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
+import { pendingSuccessfulChecks, releaseSourceChecks } from "../ci/required-checks.mjs";
 import { execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 function pendingSourceChecks(checks, openAlerts) {
-  const pending = [];
   assert.ok(Array.isArray(openAlerts) && openAlerts.length === 0, "main has unresolved code scanning alerts");
-  for (const name of ["verify", "Playwright UI E2E", "Multi-process E2E", "Code Quality and Health Check (macos-latest)", "Code Quality and Health Check (windows-latest)", "scan", "Scorecard analysis", "Analyze (rust)", "Analyze (actions)", "Analyze (javascript-typescript)"]) {
-    const latest = checks.filter((check) => check.name === name && check.app?.slug === "github-actions").sort((a, b) => b.id - a.id)[0];
-    if (!latest || latest.status !== "completed") pending.push(name);
-    else assert.equal(latest.conclusion, "success", `required source check not successful: ${name}`);
-  }
+  const pending = pendingSuccessfulChecks(checks, releaseSourceChecks);
   return pending;
 }
 

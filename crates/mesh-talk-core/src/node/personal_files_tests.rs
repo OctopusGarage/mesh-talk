@@ -39,7 +39,7 @@ async fn personal_file_is_durable_without_siblings() {
         .await
         .unwrap();
     std::fs::remove_file(&source).unwrap();
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert!(history[0].from_me);
@@ -55,10 +55,10 @@ async fn personal_file_is_durable_without_siblings() {
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         Account::from_secret_bytes(account_secret),
     );
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
-    assert!(node.file_ready_to_save(file));
+    assert!(node.file_ready_to_save(file).unwrap());
     node.save_file(file, &dir.path().join("reopened.txt"))
         .unwrap();
     assert_eq!(
@@ -104,7 +104,7 @@ async fn personal_file_projection_failure_recovers_once() {
     );
     node.recover_delivery(&mut node.delivery.lock().unwrap())
         .unwrap();
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert_eq!(node.read_file(file).unwrap(), b"recovery");
@@ -124,8 +124,7 @@ async fn personal_file_unaccepted_wal_leaves_no_history() {
     let node = open(&profile, identity, account);
     let (manifest, _) = node.stage_file(&source, FileKind::File, |_| {}).unwrap();
     let host = super::super::conversation::account_conversation_id(&target, &target);
-    let proof_path = profile.join("account-file-proofs.log");
-    let before = std::fs::metadata(&proof_path).unwrap().len();
+    let before = node.account_file_proofs.lock().unwrap().revision().unwrap();
     // Use the record log's read-only append fault: Windows cannot rename a
     // directory containing the live log handles. Proof/chunk writes stay real.
     node.delivery
@@ -146,7 +145,7 @@ async fn personal_file_unaccepted_wal_leaves_no_history() {
         .unwrap()
         .fail_journal_appends_for_test(false)
         .unwrap();
-    assert!(std::fs::metadata(&proof_path).unwrap().len() > before);
+    assert!(node.account_file_proofs.lock().unwrap().revision().unwrap() > before);
     assert!(result.is_err());
     assert!(
         node.delivery
@@ -155,14 +154,14 @@ async fn personal_file_unaccepted_wal_leaves_no_history() {
             .pending_transactions()
             .is_empty()
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
     drop(node);
     let node = open(
         &profile,
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         Account::from_secret_bytes(account_secret),
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -185,7 +184,7 @@ async fn personal_file_signed_proof_binds_plaintext_and_host() {
         .unwrap()
         .get(&id)
         .unwrap()
-        .clone();
+        .unwrap();
     assert!(eligible_manifest_row(&row, Some(&proof), None).is_some());
     let mut forged = row.clone();
     // Alter only display metadata: transfer identity remains the same, but signed
@@ -233,7 +232,8 @@ async fn personal_file_signed_proof_binds_plaintext_and_host() {
         .unwrap()
         .record_file_alias_durable(&forged)
         .unwrap();
-    node.reseed_live_file_book(&node.delivery.lock().unwrap());
+    node.reseed_live_file_book(&node.delivery.lock().unwrap())
+        .unwrap();
     let file = validated_manifest(&row.plaintext).unwrap().file_conv();
     assert_eq!(node.files.lock().unwrap().manifest_events(file), vec![id]);
     let secret = node.identity.secret_bytes();
@@ -310,7 +310,7 @@ async fn personal_file_store_requires_bound_local_owner() {
 #[test]
 fn personal_file_compact_manifest_reserves_proof_and_expiry_frame_overhead() {
     let identity = DeviceIdentity::generate();
-    let mut prospective = FileManifestV3 {
+    let prospective = FileManifestV3 {
         v2: FileManifestV2 {
             name: "frame-boundary.bin".into(),
             size: CHUNK_SIZE as u64,
@@ -350,19 +350,39 @@ fn personal_file_compact_manifest_reserves_proof_and_expiry_frame_overhead() {
         event.ciphertext = vec![0; sealed_overhead + plaintext.len() + proof_overhead];
         super::super::session::event_fits_frame(&event)
     };
-    let mut boundary = None;
-    for count in 1..3000 {
-        prospective.v2.chunk_count = count;
-        prospective.v2.size = u64::from(count) * CHUNK_SIZE as u64;
+    let manifest_at = |count: u32| {
         let mut manifest = prospective.clone();
+        manifest.v2.chunk_count = count;
+        manifest.v2.size = u64::from(count) * CHUNK_SIZE as u64;
         manifest.v2.chunk_hashes = vec![[0; 32]; count as usize];
-        let plaintext = manifest.encode();
-        if fits(&plaintext, false) && !fits(&crate::expiry::wrap(&plaintext, Some(1)), true) {
-            boundary = Some(prospective.clone());
-            break;
+        manifest
+    };
+    let personal_fits = |count| {
+        let plaintext = manifest_at(count).encode();
+        fits(&crate::expiry::wrap(&plaintext, Some(1)), true)
+    };
+    // Encoded length grows with the hash count. Locate the same real frame
+    // boundary without serializing every shorter hash list quadratically.
+    assert!(personal_fits(1));
+    assert!(!personal_fits(2999));
+    let (mut lower, mut upper) = (1, 2999);
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        if personal_fits(middle) {
+            lower = middle + 1;
+        } else {
+            upper = middle;
         }
     }
-    let boundary = boundary.expect("a hash-list frame boundary must exist");
+    assert!(lower > 1 && personal_fits(lower - 1));
+    assert!(!personal_fits(lower));
+    let mut boundary = manifest_at(lower);
+    assert!(
+        fits(&boundary.encode(), false),
+        "the first personal overflow must still fit the ordinary frame"
+    );
+    // Keep the original prospective (not yet hashed) input to the selector.
+    boundary.v2.chunk_hashes.clear();
     assert!(
         compact_manifest_needed(&identity, &boundary).unwrap(),
         "choose MFM4 before personal proof/expiry wrappers overflow the frame"

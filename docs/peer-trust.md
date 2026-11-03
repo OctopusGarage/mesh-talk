@@ -144,6 +144,11 @@ compaction retains required parents and current leaves. Child-first opaque mailb
 pages defer the child until ordinary parent validation succeeds, without blocking
 messages and authenticated recipient receipts in the same mailbox.
 
+Successful outbound profile reconciliation projects any imported signed sibling
+profile before recording publication as complete. Durable event import alone does
+not update the current nickname, biography or avatar; publication must use the
+same authenticated projection owner as inbound exchanges.
+
 The runtime tracks successful profile revisions per present peer. Failed direct
 or relay attempts retry accepted events rather than appending duplicates. At most
 two profile deliveries run concurrently, with untouched peers ahead of retries.

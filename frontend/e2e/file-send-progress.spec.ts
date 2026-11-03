@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 for (const attachment of [
   { kind: "file", path: "/tmp/large.bin", button: "composer-attach" },
   { kind: "image", path: "/tmp/photo.png", button: "composer-image" },

@@ -38,6 +38,9 @@ pub struct AppState {
     auth_service: AuthService,
     badge_revision: Arc<Mutex<BadgeRevision>>,
     pub(crate) auth_operation: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes credential read/modify/write work without occupying session
+    /// or app-lock authority during key derivation and filesystem staging.
+    pub(crate) credential_storage: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -60,6 +63,7 @@ impl AppState {
             auth_service,
             badge_revision: Arc::new(Mutex::new(BadgeRevision::default())),
             auth_operation: Arc::new(tokio::sync::Mutex::new(())),
+            credential_storage: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

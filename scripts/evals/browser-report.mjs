@@ -10,6 +10,7 @@ import { inspectTrace } from "./trace-evidence.mjs";
 const EVIDENCE = ["portable-browser-evidence", "portable-browser-screenshot", "trace"];
 export function requiredBrowserPaths(tier) {
   const paths = [
+    ["browser-error-evidence.spec.ts", "browser evidence retains nested causes and preserves the strict error gate"],
     ["portable-core.spec.ts", "presence waits for node readiness without showing a startup failure"],
     ["portable-core.spec.ts", "chat startup does not import each preset image as a module"],
     ["portable-core.spec.ts", "portable authentication rejects the wrong password"],
@@ -37,6 +38,7 @@ export function requiredBrowserPaths(tier) {
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after rejection and navigation"],
     ["automatic-delivery.spec.ts", "channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator"],
     ["automatic-delivery.spec.ts", "linked-device channel history waits for copy confirmation before showing a check"],
+    ["automatic-delivery.spec.ts", "typed channel File stays pending until canonical metadata commits and original-ID replay stays singular"],
     ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
     ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],
@@ -44,8 +46,10 @@ export function requiredBrowserPaths(tier) {
     ["media-lifecycle.spec.ts", "ordinary media survives remount and is revoked on relogin and idle logout"],
     ["media-scroll.spec.ts", "image rows reserve their final geometry before bytes load"],
     ["media-scroll.spec.ts", "scrolling away and returning to latest reuses media without changing row height"],
-    ["media-scroll.spec.ts", "portrait images retain a stable contained frame in a short window"],
-    ["media-scroll.spec.ts", "panorama images retain a stable contained frame in a short window"],
+    ["media-scroll.spec.ts", "portrait images fit their original proportions in a short window"],
+    ["media-scroll.spec.ts", "panorama images fit their original proportions in a short window"],
+    ["media-scroll.spec.ts", "square images fit their original proportions in a short window"],
+    ["media-scroll.spec.ts", "small images fit their original proportions in a short window"],
     ["media-scroll.spec.ts", "unsupported image retains its loading geometry"],
     ["media-scroll.spec.ts", "unsupported video retains its loading geometry"],
     ["screenshot-portable.spec.ts", "Enter sends a staged screenshot after capture loses input focus"],
@@ -127,17 +131,11 @@ export function validateScenarioIdentity(evidence, result) {
   assert.equal(evidence.scenario, result.scenarioTitle, "Scenario title substitution");
 }
 
-async function main() {
-  const reportPath = resolve(process.argv[2] ?? "frontend/eval-results/portable/chromium/core/results.json");
+export async function validateBrowserEvidence(reportPath, { tier = "core", browser = "chromium", sourceSha, platform = process.platform, expectedPaths = requiredBrowserPaths(tier) } = {}) {
+  reportPath = resolve(reportPath);
   const root = await realpath(dirname(reportPath));
-  const tier = process.env.EVAL_TIER ?? "core", browser = process.env.EVAL_BROWSER ?? "chromium";
-  assert.ok(["core", "extended"].includes(tier), "Unsupported portable tier");
-  assert.ok(["chromium", "webkit", "firefox"].includes(browser), "Unsupported portable browser");
-  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   assert.match(sourceSha, /^[a-f0-9]{40}$/);
-  if (process.env.EVAL_SOURCE_SHA !== undefined) assert.equal(process.env.EVAL_SOURCE_SHA, sourceSha, "Source revision mismatch");
   const report = JSON.parse(await readFile(reportPath, "utf8"));
-  const expectedPaths = requiredBrowserPaths(tier);
   const results = validateBrowserReport(report, { count: expectedPaths.length, browser, expectedPaths });
   const scenarios = [];
   const canonicalFiles = new Set();
@@ -145,7 +143,7 @@ async function main() {
     const files = {};
     const digests = {};
     for (const name of EVIDENCE) {
-      const path = await realpath(result.attachments.find(attachment => attachment.name === name).path);
+      const path = await realpath(resolve(root, result.attachments.find(attachment => attachment.name === name).path));
       assert.ok(!canonicalFiles.has(path), "Evidence alias reused across scenarios");
       canonicalFiles.add(path);
       const local = relative(root, path);
@@ -156,7 +154,7 @@ async function main() {
     const evidence = JSON.parse(files["portable-browser-evidence"].toString("utf8"));
     validateScenarioIdentity(evidence, result);
     assert.equal(evidence.sourceSha, sourceSha, "Stale browser evidence");
-    assert.equal(evidence.platform, process.platform, "Wrong operating system evidence");
+    assert.equal(evidence.platform, platform, "Wrong operating system evidence");
     assert.equal(evidence.browser, browser, "Wrong browser evidence");
     assert.equal(evidence.mocked, true, "Browser IPC boundary must be disclosed");
     assert.equal(evidence.native, false, "Browser evidence cannot claim native coverage");
@@ -169,7 +167,17 @@ async function main() {
     const trace = inspectTrace(files.trace);
     scenarios.push({ scenario: evidence.scenario, scenarioPath: evidence.scenarioPath, passed: true, evidenceDigests: digests, screenshot: png, trace });
   }
-  await writeFile(resolve(root, "validated-report.json"), JSON.stringify({ schema: 1, sourceSha, platform: process.platform, browser, tier, native: false, mocked: true, scenarios }, null, 2));
-  console.log(`Validated ${scenarios.length} ${browser} ${process.platform} portable scenarios and their evidence`);
+  const validated = { schema: 1, sourceSha, platform, browser, tier, native: false, mocked: true, scenarios };
+  await writeFile(resolve(root, "validated-report.json"), JSON.stringify(validated, null, 2));
+  return validated;
+}
+async function main() {
+  const tier = process.env.EVAL_TIER ?? "core", browser = process.env.EVAL_BROWSER ?? "chromium";
+  assert.ok(["core", "extended"].includes(tier), "Unsupported portable tier");
+  assert.ok(["chromium", "webkit", "firefox"].includes(browser), "Unsupported portable browser");
+  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (process.env.EVAL_SOURCE_SHA !== undefined) assert.equal(process.env.EVAL_SOURCE_SHA, sourceSha, "Source revision mismatch");
+  const result = await validateBrowserEvidence(process.argv[2] ?? "frontend/eval-results/portable/chromium/core/results.json", { tier, browser, sourceSha });
+  console.log(`Validated ${result.scenarios.length} ${browser} ${process.platform} portable scenarios and their evidence`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

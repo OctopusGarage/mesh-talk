@@ -22,10 +22,12 @@ struct Chain {
     servers: Vec<Option<JoinHandle<()>>>,
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
+    let mut chain = tokio::time::timeout(Duration::from_secs(30), Chain::new())
+        .await
+        .expect("independent group hosts must initialize before the protocol window");
     tokio::time::timeout(Duration::from_secs(20), async {
-        let mut chain = Chain::new().await;
         let group = chain.nodes[0]
             .create_channel_invited("metadata", vec![chain.nodes[1].identity.public()])
             .await
@@ -49,7 +51,26 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
             .unwrap();
         chain.round(1, 0, group).await;
         chain.round(2, 1, group).await;
-        assert!(chain.nodes[2].channel_metadata(group).is_err());
+        let mut denied = false;
+        for _ in 0..128 {
+            match chain.nodes[2].channel_metadata(group) {
+                Err(_) => {
+                    denied = true;
+                    break;
+                }
+                Ok(value) => {
+                    assert!(
+                        value.query_pending,
+                        "unaccepted membership must not become readable"
+                    );
+                    assert!(value.cover.is_none());
+                    assert!(value.announcement.is_none());
+                    assert!(value.announcement_history.is_empty());
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(denied, "prepared metadata must deny unaccepted membership");
         chain.nodes[2].accept_channel_invite(group).await.unwrap();
         chain.round(1, 2, group).await;
         chain.servers[0].take().unwrap().abort();
@@ -60,19 +81,41 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
                 .announcement
                 .is_none()
         );
-        assert_eq!(chain.nodes[1].retry_group_metadata().unwrap(), vec![group]);
+        let mut released = Vec::new();
+        for _ in 0..128 {
+            released = chain.nodes[1].retry_group_metadata().unwrap();
+            if !released.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(released, vec![group]);
         chain.round(2, 1, group).await;
+        let mut metadata = None;
+        for _ in 0..128 {
+            let value = chain.nodes[2].channel_metadata(group).unwrap();
+            if !value.query_pending {
+                metadata = Some(value);
+                break;
+            }
+            assert!(value.announcement.is_none());
+            tokio::task::yield_now().await;
+        }
         assert_eq!(
-            chain.nodes[2]
-                .channel_metadata(group)
-                .unwrap()
+            metadata
+                .expect("selected metadata must finish")
                 .announcement
                 .unwrap()
                 .content
                 .as_deref(),
             Some("Current announcement")
         );
-        assert!(chain.nodes[2].channel_history(group, 100).is_empty());
+        assert!(
+            chain.nodes[2]
+                .channel_history(group, 100)
+                .unwrap()
+                .is_empty()
+        );
     })
     .await
     .expect("group metadata must converge over a reachable accepted holder");
@@ -99,14 +142,18 @@ impl Chain {
             let (dm, _) = mpsc::unbounded_channel();
             let (channel, _) = mpsc::unbounded_channel();
             let (file, _) = mpsc::unbounded_channel();
+            // Sidecars and managed media belong to the directory, not the log
+            // filename. Independent network peers must never share that store.
+            let node_dir = dir.path().join(i.to_string());
+            std::fs::create_dir(&node_dir).unwrap();
             let node = Node::open(
                 DeviceIdentity::generate(),
                 Arc::new(Mutex::new(Roster::default())),
                 dm,
                 channel,
                 file,
-                &dir.path().join(format!("{i}-events.log")),
-                &dir.path().join(format!("{i}-sent.log")),
+                &node_dir.join("events.log"),
+                &node_dir.join("sent.log"),
                 "pw",
             )
             .unwrap();
@@ -169,6 +216,42 @@ impl Chain {
         self.nodes[to].process_channel(channel);
     }
 
+    // No background recovery is running in this topology fixture. Advance only
+    // already-retained local work, never create an extra route across a partition.
+    async fn settle_retained(&self, index: usize, channel: ConversationId) {
+        let node = &self.nodes[index];
+        tokio::time::timeout(Duration::from_secs(5), async {
+            node.await_channel_metadata(channel).await.unwrap();
+            loop {
+                match node.process_channel_reception_inner(channel, "live") {
+                    Ok(()) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                    }
+                    Err(error) => panic!("retained channel work failed: {error}"),
+                }
+                node.process_channel_file_reception(channel, "live")
+                    .unwrap();
+                let pending: bool = node
+                    .storage
+                    .database()
+                    .read(|c| {
+                        c.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                            [channel.as_bytes().as_slice()],
+                            |row| row.get(0),
+                        )
+                        .map_err(Into::into)
+                    })
+                    .unwrap();
+                if !pending && node.pending_channel_file().is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bounded retained channel work must converge locally");
+    }
+
     async fn accepted_group(&self) -> ConversationId {
         let channel = self.nodes[0]
             .create_channel_invited(
@@ -185,6 +268,7 @@ impl Chain {
             assert!(
                 self.nodes[i]
                     .list_channels()
+                    .unwrap()
                     .iter()
                     .any(|c| c.id == channel && c.pending_invite)
             );
@@ -201,6 +285,7 @@ impl Chain {
         for node in &self.nodes[..6] {
             assert!(
                 node.list_channels()
+                    .unwrap()
                     .iter()
                     .any(|c| c.id == channel && !c.pending_invite)
             );
@@ -219,18 +304,21 @@ impl Chain {
         channel
     }
 
-    async fn recover(&self, index: usize) {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.nodes[index].pull_one_channel_from_member(0),
-        )
+    async fn recover_retained(&self, index: usize, channel: ConversationId) {
+        // The original recovery deadline includes deferred local processing.
+        // No worker or additional network route is introduced by this barrier.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.nodes[index].pull_one_channel_from_member(0).await;
+            self.settle_retained(index, channel).await;
+        })
         .await
-        .expect("bounded adjacent-member recovery");
+        .expect("bounded adjacent recovery and retained projection");
     }
 
     fn has_text(&self, index: usize, channel: ConversationId, text: &[u8]) -> bool {
         self.nodes[index]
             .channel_history(channel, 100)
+            .unwrap()
             .iter()
             .any(|entry| entry.text == text)
     }
@@ -245,15 +333,15 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         .await
         .unwrap();
     for i in 1..6 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
         assert!(
             chain.has_text(i, group, b"A to F through members"),
             "member {i} decrypts original author's event"
         );
     }
-    let original = chain.nodes[0].channel_history(group, 100)[0].id;
+    let original = chain.nodes[0].channel_history(group, 100).unwrap()[0].id;
     for node in &chain.nodes[1..6] {
-        assert_eq!(node.channel_history(group, 100)[0].id, original);
+        assert_eq!(node.channel_history(group, 100).unwrap()[0].id, original);
     }
     // A fully authenticated nonmember guesses the group id and bypasses the
     // local projection using a raw sync store: the serving member must deny it.
@@ -269,8 +357,8 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         "no group metadata, keys, or content disclosed to a nonmember"
     );
     // A second reconciliation does not duplicate the delivered message.
-    chain.recover(5).await;
-    assert_eq!(chain.nodes[5].channel_history(group, 100).len(), 1);
+    chain.recover_retained(5, group).await;
+    assert_eq!(chain.nodes[5].channel_history(group, 100).unwrap().len(), 1);
     // Removal rotates the epoch. Even a formerly accepted member cannot
     // recover the later sender key or ciphertext by guessing the group id.
     chain.nodes[0]
@@ -278,14 +366,14 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         .await
         .unwrap();
     for i in 1..5 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
     }
     chain.nodes[0]
         .send_channel_message(group, b"after F removal")
         .await
         .unwrap();
     for i in 1..5 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
     }
     assert!(chain.has_text(4, group, b"after F removal"));
     let mut removed_connection = chain.nodes[5]
@@ -338,26 +426,27 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
     chain.round(1, 0, group).await;
     chain.nodes[1].process_file_events(group);
     if kind == crate::file::FileKind::File {
-        assert_eq!(chain.nodes[1].file_progress(file).unwrap().done, 0);
+        assert_eq!(chain.nodes[1].file_progress(file).unwrap().unwrap().done, 0);
         chain.nodes[1].decide_attachment(file, true).unwrap();
     }
     chain.round(1, 0, file).await;
     let holder = &chain.nodes[1];
-    assert!(holder.file_progress(file).unwrap().done > 0);
-    let retained = holder.log.lock().unwrap().events(&file).len();
+    assert!(holder.file_progress(file).unwrap().unwrap().done > 0);
+    let retained = holder.log.lock().unwrap().events(&file).unwrap().len();
     let chunk_ids: std::collections::HashSet<_> = holder
         .log
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .iter()
         .map(|event| event.id)
         .collect();
-    let group_events = holder.log.lock().unwrap().events(&group).len();
+    let group_events = holder.log.lock().unwrap().events(&group).unwrap().len();
     let peer = chain.nodes[2].identity.public();
     let inbound = holder.serve_sync_store(&peer);
     let outbound = holder.sync_store(&peer);
-    assert!(!inbound.lock().unwrap().event_ids(&file).is_empty());
+    assert!(!inbound.lock().unwrap().event_ids(&file).unwrap().is_empty());
 
     holder.set_network_cost(NetworkCost::Restricted);
     for store in [&inbound, &outbound] {
@@ -365,6 +454,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         assert_eq!(
             store
                 .event_ids(&file)
+                .unwrap()
                 .into_iter()
                 .collect::<std::collections::HashSet<_>>(),
             chunk_ids,
@@ -373,29 +463,44 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         assert!(
             store
                 .events_excluding(&file, &Default::default())
+                .unwrap()
                 .is_empty()
         );
-        assert!(store.authorized_event_ids(&file).is_empty());
+        assert!(store.authorized_event_ids(&file).unwrap().is_empty());
         assert!(
             store
                 .authorized_event_page(&file, &chunk_ids, 50_000)
+                .unwrap()
                 .is_empty()
         );
         assert!(
-            !store.event_ids(&group).is_empty(),
+            !store.event_ids(&group).unwrap().is_empty(),
             "text and offers remain available"
         );
     }
     chain.round(2, 1, group).await;
-    chain.nodes[2].process_file_events(group);
+    chain.settle_retained(2, group).await;
     if kind == crate::file::FileKind::File {
         chain.nodes[2].decide_attachment(file, true).unwrap();
     }
     chain.round(2, 1, file).await;
-    assert_eq!(chain.nodes[2].file_progress(file).unwrap().done, 0);
-    assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
+    assert!(
+        chain.nodes[2]
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(chain.nodes[2].file_progress(file).unwrap().unwrap().done, 0);
+    assert!(!chain.nodes[2].file_ready_to_save(file).unwrap());
     assert_eq!(
-        holder.log.lock().unwrap().events(&group).len(),
+        holder.log.lock().unwrap().events(&file).unwrap().len(),
+        retained
+    );
+    assert_eq!(
+        holder.log.lock().unwrap().events(&group).unwrap().len(),
         group_events
     );
     assert!(holder.channel_replica_enabled(group, &holder.user_id()));
@@ -407,14 +512,15 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
             .lock()
             .unwrap()
             .event_ids(&file)
+            .unwrap()
             .is_empty()
     );
 
     holder.set_network_cost(NetworkCost::Unrestricted);
     chain.round(2, 1, file).await;
     assert_eq!(
-        chain.nodes[2].file_progress(file).unwrap().done,
-        holder.file_progress(file).unwrap().done
+        chain.nodes[2].file_progress(file).unwrap().unwrap().done,
+        holder.file_progress(file).unwrap().unwrap().done
     );
     holder.set_network_cost(NetworkCost::Restricted);
     let mut connection = holder
@@ -434,6 +540,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
             .lock()
             .unwrap()
             .events_excluding(&file, &Default::default())
+            .unwrap()
             .is_empty()
     );
     holder
@@ -446,13 +553,24 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
                 .lock()
                 .unwrap()
                 .events_excluding(&file, &Default::default())
+                .unwrap()
                 .is_empty(),
             "a temporary network exception must not override the saved sharing preference"
         );
     }
-    assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
+    assert_eq!(
+        holder.log.lock().unwrap().events(&file).unwrap().len(),
+        retained
+    );
     let outsider = holder.serve_sync_store(&chain.nodes[6].identity.public());
-    assert!(outsider.lock().unwrap().event_ids(&group).is_empty());
+    assert!(
+        outsider
+            .lock()
+            .unwrap()
+            .event_ids(&group)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -467,8 +585,8 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
         .send_channel_message(group, b"held behind C")
         .await
         .unwrap();
-    chain.recover(1).await;
-    chain.recover(2).await;
+    chain.recover_retained(1, group).await;
+    chain.recover_retained(2, group).await;
     assert!(
         chain.has_text(2, group, b"held behind C"),
         "share off still receives its own copy"
@@ -477,18 +595,18 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
     // A local send must not smuggle the retained A message as causal ancestry.
     // With this append-only DAG it waits downstream until a sharing holder can
     // supply those missing parents; the local send remains durably accepted.
-    let held = chain.nodes[0].channel_history(group, 100)[0].id;
+    let held = chain.nodes[0].channel_history(group, 100).unwrap()[0].id;
     chain.nodes[2]
         .send_channel_message(group, b"C while not sharing")
         .await
         .unwrap();
     for i in 3..6 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
     }
     for i in 3..6 {
         assert!(!chain.has_text(i, group, b"held behind C"));
         assert!(
-            !chain.nodes[i].log.lock().unwrap().has(&held),
+            !chain.nodes[i].log.lock().unwrap().has(&held).unwrap(),
             "not even retained user-message ciphertext crosses the barrier"
         );
         assert!(
@@ -500,19 +618,19 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
         .set_channel_replica_enabled(group, true)
         .await
         .unwrap();
-    chain.nodes[3].process_channel(group);
+    chain.settle_retained(3, group).await;
     assert!(chain.has_text(3, group, b"held behind C"));
     // D stops serving before E copies the event. No other cross-site edge exists.
     let server = chain.servers[3].take().unwrap();
     server.abort();
     let _ = server.await;
-    chain.recover(4).await;
-    chain.recover(5).await;
+    chain.recover_retained(4, group).await;
+    chain.recover_retained(5, group).await;
     assert!(!chain.has_text(5, group, b"held behind C"));
     let listener = TcpListener::bind(chain.addresses[3]).await.unwrap();
     chain.servers[3] = Some(Chain::serve(Arc::clone(&chain.nodes[3]), listener));
-    chain.recover(4).await;
-    chain.recover(5).await;
+    chain.recover_retained(4, group).await;
+    chain.recover_retained(5, group).await;
     assert!(chain.has_text(5, group, b"held behind C"));
     assert!(
         chain.has_text(5, group, b"C while not sharing"),
@@ -539,8 +657,8 @@ async fn unprocessed_durable_group_never_exposes_events_to_nonmember() {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     for event in signed {
         chain.nodes[5].log.lock().unwrap().append(event).unwrap();
@@ -554,32 +672,43 @@ async fn unprocessed_durable_group_never_exposes_events_to_nonmember() {
             .is_none()
     );
     let store = chain.nodes[5].serve_sync_store(&chain.nodes[6].identity.public());
-    let store = store.lock().unwrap();
-    assert_eq!(
-        store.fingerprint_and_len(&group),
-        (crate::eventlog::sync::fingerprint(Vec::new()), 0)
-    );
-    assert!(!store.requires_channel_v2(&group));
-    assert!(store.event_ids(&group).is_empty());
-    assert!(
-        store
-            .events_excluding(&group, &Default::default())
-            .is_empty()
-    );
-    drop(store);
+    {
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store.fingerprint_and_len(&group).unwrap(),
+            (crate::eventlog::sync::fingerprint(Vec::new()), 0)
+        );
+        assert!(!store.requires_channel_v2(&group).unwrap());
+        assert!(store.event_ids(&group).unwrap().is_empty());
+        assert!(
+            store
+                .events_excluding(&group, &Default::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
     let peer = chain.nodes[4].identity.public();
     let member_store = chain.nodes[5].serve_sync_store(&peer);
-    let before = member_store.lock().unwrap().fingerprint_and_len(&group);
+    let before = member_store
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&group)
+        .unwrap();
     assert!(
         before.1 > 0,
         "authorized invitation ancestry still bootstraps before book refresh"
     );
     chain.nodes[5].process_channel(group);
+    chain.nodes[5].await_channel_metadata(group).await.unwrap();
     let replays = chain.nodes[5]
         .channel_projection_replays
         .load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
-        member_store.lock().unwrap().fingerprint_and_len(&group),
+        member_store
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&group)
+            .unwrap(),
         before
     );
     assert_eq!(
@@ -605,10 +734,13 @@ async fn public_group_idle_metadata_is_reused_across_fresh_peer_scoped_stores() 
     let node = &chain.nodes[0];
     let before = node.channel_projection_replays.load(Ordering::Relaxed);
     let first = node.serve_sync_store(&chain.nodes[2].identity.public());
-    let fp = first.lock().unwrap().fingerprint_and_len(&group);
-    assert!(first.lock().unwrap().requires_channel_v2(&group));
+    let fp = first.lock().unwrap().fingerprint_and_len(&group).unwrap();
+    assert!(first.lock().unwrap().requires_channel_v2(&group).unwrap());
     let fresh = node.serve_sync_store(&chain.nodes[2].identity.public());
-    assert_eq!(fresh.lock().unwrap().fingerprint_and_len(&group), fp);
+    assert_eq!(
+        fresh.lock().unwrap().fingerprint_and_len(&group).unwrap(),
+        fp
+    );
     assert_eq!(
         node.channel_projection_replays.load(Ordering::Relaxed) - before,
         1,
@@ -629,7 +761,8 @@ async fn public_group_history_capability_metadata_is_cached_and_principal_scoped
         .serve_sync_store(&member)
         .lock()
         .unwrap()
-        .fingerprint_and_len(&group);
+        .fingerprint_and_len(&group)
+        .unwrap();
     node.set_channel_history_policy(group, HistoryPolicy::LastTen)
         .await
         .unwrap();
@@ -637,9 +770,9 @@ async fn public_group_history_capability_metadata_is_cached_and_principal_scoped
     for _ in 0..2 {
         let store = node.serve_sync_store(&member);
         let store = store.lock().unwrap();
-        assert!(store.requires_channel_v3(&group));
-        assert!(!store.requires_channel_v2(&group));
-        assert_ne!(store.fingerprint_and_len(&group), original);
+        assert!(store.requires_channel_v3(&group).unwrap());
+        assert!(!store.requires_channel_v2(&group).unwrap());
+        assert_ne!(store.fingerprint_and_len(&group).unwrap(), original);
     }
     assert_eq!(
         node.channel_projection_replays.load(Ordering::Relaxed) - before,
@@ -647,8 +780,8 @@ async fn public_group_history_capability_metadata_is_cached_and_principal_scoped
     );
     let outsider = node.serve_sync_store(&chain.nodes[6].identity.public());
     let outsider = outsider.lock().unwrap();
-    assert!(!outsider.requires_channel_v3(&group));
-    assert!(outsider.event_ids(&group).is_empty());
+    assert!(!outsider.requires_channel_v3(&group).unwrap());
+    assert!(outsider.event_ids(&group).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -667,8 +800,8 @@ async fn public_group_metadata_invalidates_for_authority_history_and_privacy_cha
         let store = node.serve_sync_store(peer);
         let store = store.lock().unwrap();
         (
-            store.fingerprint_and_len(&group),
-            store.requires_channel_v2(&group),
+            store.fingerprint_and_len(&group).unwrap(),
+            store.requires_channel_v2(&group).unwrap(),
         )
     }
     let chain = Chain::new().await;
@@ -705,6 +838,7 @@ async fn public_group_metadata_invalidates_for_authority_history_and_privacy_cha
     assert!(before_book_refresh.0.1 > 0);
     assert!(before_book_refresh.1);
     node.process_channel(group);
+    node.await_channel_metadata(group).await.unwrap();
     assert_eq!(
         metadata(node, &member, group).0.1,
         0,
@@ -786,7 +920,10 @@ async fn public_group_metadata_cache_is_bounded_under_distinct_authenticated_pri
     for _ in 0..160 {
         let outsider = DeviceIdentity::generate().public();
         let store = chain.nodes[0].serve_sync_store(&outsider);
-        assert_eq!(store.lock().unwrap().fingerprint_and_len(&group).1, 0);
+        assert_eq!(
+            store.lock().unwrap().fingerprint_and_len(&group).unwrap().1,
+            0
+        );
     }
     assert_eq!(
         chain.nodes[0]
@@ -799,7 +936,7 @@ async fn public_group_metadata_cache_is_bounded_under_distinct_authenticated_pri
     let member = chain.nodes[1].identity.public();
     let store = chain.nodes[0].serve_sync_store(&member);
     assert!(
-        store.lock().unwrap().fingerprint_and_len(&group).1 > 0,
+        store.lock().unwrap().fingerprint_and_len(&group).unwrap().1 > 0,
         "eviction cannot change member authority"
     );
     assert!(
@@ -824,7 +961,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
         .send_channel_message(group, b"legitimate group content")
         .await
         .unwrap();
-    let original = chain.nodes[0].channel_history(group, 100)[0].id;
+    let original = chain.nodes[0].channel_history(group, 100).unwrap()[0].id;
     let attacker = &chain.nodes[6];
     // Valid signature and self-consistent metadata do not confer authority over
     // an existing conversation id. A lower Lamport makes the rival root replay
@@ -852,7 +989,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
     let forged_id = forged.id;
     chain.nodes[0].log.lock().unwrap().append(forged).unwrap();
     let authorized = chain.nodes[0].serve_sync_store(&chain.nodes[2].identity.public());
-    let ids = authorized.lock().unwrap().event_ids(&group);
+    let ids = authorized.lock().unwrap().event_ids(&group).unwrap();
     assert!(
         !ids.contains(&forged_id),
         "a competing root cannot replace established channel authority"
@@ -863,7 +1000,12 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
     );
     let unauthorized = chain.nodes[0].serve_sync_store(&attacker.identity.public());
     assert_eq!(
-        unauthorized.lock().unwrap().fingerprint_and_len(&group).1,
+        unauthorized
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&group)
+            .unwrap()
+            .1,
         0
     );
     assert!(
@@ -871,6 +1013,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
             .lock()
             .unwrap()
             .events_excluding(&group, &Default::default())
+            .unwrap()
             .is_empty()
     );
     // Manual account permission in Invisible mode still cannot grant the
@@ -898,7 +1041,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
         .unwrap();
     owner.set_invisible(true).await.unwrap();
     let private_member = owner.serve_sync_store(&chain.nodes[2].identity.public());
-    let ids = private_member.lock().unwrap().event_ids(&group);
+    let ids = private_member.lock().unwrap().event_ids(&group).unwrap();
     assert!(ids.contains(&original));
     assert!(!ids.contains(&forged_id));
     let private_attacker = owner.serve_sync_store(&attacker.identity.public());
@@ -907,49 +1050,617 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .is_empty()
     );
 }
 
-#[tokio::test]
+#[derive(Default)]
+struct GossipReadReceipts {
+    canonical: Option<crate::eventlog::EventId>,
+    completed: [Option<std::time::Instant>; 5],
+}
+impl GossipReadReceipts {
+    fn record(
+        &mut self,
+        slot: usize,
+        id: crate::eventlog::EventId,
+        completed: std::time::Instant,
+        deadline: std::time::Instant,
+    ) {
+        if completed > deadline || self.canonical.is_some_and(|known| known != id) {
+            return;
+        }
+        self.canonical.get_or_insert(id);
+        self.completed[slot].get_or_insert(completed);
+    }
+
+    fn all_timely(&self) -> bool {
+        self.completed.iter().all(Option::is_some)
+    }
+}
+
+fn read_gossip_history(
+    node: &Node,
+    group: ConversationId,
+) -> Result<(Option<crate::eventlog::EventId>, std::time::Instant), super::NodeError> {
+    let rows = node.channel_history(group, 100)?;
+    let id = rows
+        .iter()
+        .find(|row| row.text == b"notification-driven background gossip")
+        .map(|row| row.id);
+    // Capture actual successful read/extraction completion on this admitted
+    // blocking worker, before either async owner needs to be scheduled again.
+    Ok((id, std::time::Instant::now()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gossip_history_receipts_distinguish_read_completion_from_delayed_delivery() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("events.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    node.set_post_office_enabled(false);
+    let group = node
+        .create_channel("Read completion witness", vec![])
+        .await
+        .unwrap();
+    node.send_channel_message(group, b"notification-driven background gossip")
+        .await
+        .unwrap();
+    let expected = read_gossip_history(&node, group).unwrap().0.unwrap();
+    let mut receipts = GossipReadReceipts::default();
+
+    // The real read finishes before the cutoff, but this task deliberately
+    // withholds delivery until the observation timeout has fired.
+    let cutoff = std::time::Instant::now() + Duration::from_secs(8);
+    let (read_tx, read_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let queried = node.clone();
+    let mut owner = tokio::spawn(async move {
+        let result = queried
+            .account_blocking(move |node| read_gossip_history(&node, group))
+            .await;
+        let _ = read_tx.send(());
+        let _ = release_rx.await;
+        result
+    });
+    let read_arrived =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), read_rx).await;
+    let observed =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), &mut owner).await;
+    let delayed = observed.is_err();
+    let _ = release_tx.send(());
+    let result = match observed {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(15), owner)
+            .await
+            .expect("the delayed read owner must join"),
+    }
+    .expect("the delayed read owner must not panic");
+    let (id, completed) = result.expect("the real pre-deadline read must succeed");
+    assert!(
+        matches!(read_arrived, Ok(Ok(()))),
+        "the actual read must qualify before the cutoff"
+    );
+    assert!(
+        delayed,
+        "the task delivery must remain held through the cutoff"
+    );
+    assert_eq!(id, Some(expected));
+    receipts.record(0, expected, completed, cutoff);
+    assert_eq!(receipts.completed[0], Some(completed));
+
+    // Now hold the admitted blocking closure before its real history read.
+    // The same durable row arriving after the cutoff must not count.
+    let cutoff = std::time::Instant::now() + Duration::from_secs(8);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let queried = node.clone();
+    let mut owner = tokio::spawn(async move {
+        queried
+            .account_blocking(move |node| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+                read_gossip_history(&node, group)
+            })
+            .await
+    });
+    let entered = tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), entered_rx).await;
+    let observed =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), &mut owner).await;
+    let delayed = observed.is_err();
+    let _ = release_tx.send(());
+    let result = match observed {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(15), owner)
+            .await
+            .expect("the late read owner must join"),
+    }
+    .expect("the late read owner must not panic");
+    node.runtime_work.close();
+    node.runtime_work.drain().await;
+    let (id, completed) = result.expect("the real post-deadline read must succeed");
+    assert!(
+        matches!(entered, Ok(Ok(()))),
+        "the held read must be admitted before the cutoff"
+    );
+    assert!(
+        delayed,
+        "the actual read must remain held through the cutoff"
+    );
+    assert_eq!(id, Some(expected));
+    assert!(completed > cutoff);
+    receipts.record(1, expected, completed, cutoff);
+    assert!(
+        receipts.completed[1].is_none(),
+        "late actual completion must never count"
+    );
+    assert!(
+        !receipts.all_timely(),
+        "missing receiver reads remain a failure"
+    );
+}
+
+// These independent hosts use synchronous durable storage. Match the production
+// multithread executor. Excluding periodic repair proves notification causality
+// directly; elapsed propagation remains observable under a functional watchdog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes() {
     let mut chain = Chain::new().await;
     let group = chain.accepted_group().await;
-    // Switch the prepared, fully accepted membership to the complete production
-    // accept/recovery runtime. No manual recovery calls occur after this point.
+    // Setup copied the signed controls without a recovery worker. Complete only
+    // that retained work before measuring propagation of a new message.
+    for index in 0..6 {
+        chain.settle_retained(index, group).await;
+        let projection = chain.nodes[index].account_group_projection(group).unwrap();
+        let state = projection.state.as_ref().unwrap();
+        for member in &chain.nodes[..6] {
+            assert!(state.is_accepted_member(&member.user_id()));
+        }
+    }
+    let mut recovery_before = Vec::with_capacity(6);
+    // Stop every old endpoint before any replacement can dial a neighbor.
+    // Otherwise a one-shot setup exchange can hit a listener being retired.
     for index in 0..6 {
         let previous = chain.servers[index].take().unwrap();
         previous.abort();
         let _ = previous.await;
-        let listener = TcpListener::bind(chain.addresses[index]).await.unwrap();
+        chain.nodes[index].sessions.clear();
+        recovery_before.push(chain.nodes[index].channel_recovery(group));
+    }
+    let initialized = Arc::new(Mutex::new([false; 6]));
+    let maintenance_active = Arc::new(Mutex::new([false; 6]));
+    let initial_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let initial_started = std::time::Instant::now();
+    let fixture_peers = Arc::new(
+        chain.nodes[..6]
+            .iter()
+            .map(|node| node.identity.public())
+            .collect::<Vec<_>>(),
+    );
+    let mut listeners = Vec::with_capacity(6);
+    for index in 0..6 {
+        let node = &chain.nodes[index];
+        let previous = node.account_client_test_hook.lock().unwrap().clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let initialized = initialized.clone();
+            let maintenance_active = maintenance_active.clone();
+            let node = Arc::downgrade(node);
+            let trace = initial_trace.clone();
+            let fixture_peers = fixture_peers.clone();
+            let completed =
+                format!("channel_recovery_group_done channel={group:?} checked=true clean=true");
+            move |peer, phase| {
+                let peer_index = fixture_peers.iter().position(|known| *known == peer);
+                if let Some(previous) = &previous {
+                    previous(peer, phase.clone());
+                }
+                if phase == completed {
+                    let mut initialized = initialized.lock().unwrap();
+                    if !initialized[index] {
+                        node.upgrade()
+                            .expect("the recovery worker owns its node")
+                            .channel_recovery_periodic_disabled
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        initialized[index] = true;
+                    }
+                }
+                match phase.as_str() {
+                    "channel_recovery_maintenance_begin" => {
+                        maintenance_active.lock().unwrap()[index] = true;
+                    }
+                    "channel_recovery_maintenance_done" => {
+                        maintenance_active.lock().unwrap()[index] = false;
+                    }
+                    _ => {}
+                }
+                if phase.starts_with("channel_recovery_") {
+                    let mut trace = trace.lock().unwrap();
+                    if trace.len() == 64 {
+                        trace.pop_front();
+                    }
+                    trace.push_back((
+                        initial_started.elapsed().as_millis(),
+                        index,
+                        peer_index,
+                        phase,
+                    ));
+                }
+            }
+        }));
+        // Cold setup retains ordinary bounded retry after a failed first exchange.
+        // The exact first clean completion disables this node's periodic work.
+        node.schedule_channel_recovery(group);
+        listeners.push(TcpListener::bind(chain.addresses[index]).await.unwrap());
+    }
+    // Bind all endpoints before spawning any recovery owner. An authenticated
+    // completion from the new worker is proof even within the same clock tick.
+    for (index, listener) in listeners.into_iter().enumerate() {
         chain.servers[index] = Some(tokio::spawn(
             chain.nodes[index].clone().run_accept_loop(listener),
         ));
     }
-    // Let startup and its immediately-ready interval tick finish before sending.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Cold setup uses normal recovery, then drains already-started maintenance.
+    // The unchanged post-send window starts with periodic work disabled on all nodes.
+    let prepared = tokio::time::timeout(Duration::from_secs(30), async {
+        while !initialized.lock().unwrap().iter().all(|ready| *ready)
+            || maintenance_active
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|active| *active)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if let Err(error) = prepared {
+        let completed = *initialized.lock().unwrap();
+        let maintenance = *maintenance_active.lock().unwrap();
+        let trace = initial_trace
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let current = chain.nodes[..6]
+            .iter()
+            .map(|node| node.channel_recovery(group))
+            .collect::<Vec<_>>();
+        panic!(
+            "prepared adjacent endpoints must finish their initial background exchange: {error}; completed={completed:?}; maintenance_active={maintenance:?}; before={recovery_before:?}; current={current:?}; trace={trace:?}"
+        );
+    }
+    assert!(chain.nodes[..6].iter().all(|node| {
+        node.channel_recovery_periodic_disabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }));
+    let periodic_work = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let route_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let route_started = std::time::Instant::now();
+    for (index, node) in chain.nodes[..6].iter().enumerate() {
+        let observed_route = route_trace.clone();
+        let observed_periodic_work = periodic_work.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if matches!(
+                phase.as_str(),
+                "channel_recovery_fallback_begin"
+                    | "channel_recovery_custody_begin"
+                    | "channel_recovery_maintenance_periodic_begin"
+            ) {
+                observed_periodic_work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Include the pooled-session path, which has no dial_* callbacks.
+            if !phase.starts_with("channel_recovery_") && !phase.starts_with("dial_") {
+                return;
+            }
+            let mut trace = observed_route.lock().unwrap();
+            if trace.len() == 512 {
+                trace.pop_front();
+            }
+            trace.push_back((
+                route_started.elapsed().as_millis(),
+                index,
+                peer.user_id(),
+                tokio::task::try_id(),
+                phase,
+            ));
+        }));
+    }
+    // Register independent UI observation before send; never consume the
+    // recovery Notify whose causality this scenario measures.
+    let mut ui_changes = chain.nodes[1..6]
+        .iter()
+        .map(|node| node.subscribe_ui_changes())
+        .collect::<Vec<_>>();
     chain.nodes[0]
         .send_channel_message(group, b"notification-driven background gossip")
         .await
         .unwrap();
+    let send_returned_ms = route_started.elapsed().as_millis();
     let sender = chain.servers[0].take().unwrap();
     sender.abort();
     let _ = sender.await;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !chain.has_text(5, group, b"notification-driven background gossip") {
+    let deadline_start_ms = route_started.elapsed().as_millis();
+    let deadline_started = std::time::Instant::now();
+    let deadline = Duration::from_secs(8);
+    let cutoff = deadline_started + deadline;
+    let mut receipts = GossipReadReceipts::default();
+    let mut history_reads = [0_u64; 5];
+    let mut stale_reads = [0_u64; 5];
+    let mut polls = 0_u64;
+    let mut poll_us = 0_u128;
+    let mut max_poll_us = 0_u128;
+    let mut query_needed = [false; 5];
+    let mut generation_changes = [0_u64; 5];
+    let mut query_trace = std::collections::VecDeque::with_capacity(64);
+    // Retain the owner even if the common deadline cancels its await. Join the
+    // one outstanding read before failure diagnostics or fixture retirement.
+    let mut pending_query = None;
+    // A live worker can invalidate a read checkpoint between polling turns.
+    // Only that typed pending state is retried, within the original deadline;
+    // no manual projection or network recovery is driven by these pure reads.
+    // This fixture has no erasure, recall, or roster change after the send. Each
+    // receiver needs one successful durable read, not repeated hydration after
+    // it has already proved receipt of the same canonical message.
+    let received = tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), async {
+        loop {
+            let poll_started = std::time::Instant::now();
+            polls = polls.saturating_add(1);
+            for index in 1..6 {
+                let slot = index - 1;
+                if receipts.completed[slot].is_some() {
+                    continue;
+                }
+                if ui_changes[slot]
+                    .has_changed()
+                    .expect("the receiver keeps its UI publisher alive")
+                {
+                    // Acknowledge BEFORE the query. A generation published during
+                    // the admitted read remains observable on the next turn.
+                    let _generation = *ui_changes[slot].borrow_and_update();
+                    generation_changes[slot] = generation_changes[slot].saturating_add(1);
+                    query_needed[slot] = true;
+                }
+                if !query_needed[slot] {
+                    continue;
+                }
+                // Do not admit another observation after the common cutoff,
+                // even if Tokio resumes this task before polling its timer.
+                if std::time::Instant::now() >= cutoff {
+                    return;
+                }
+                history_reads[slot] = history_reads[slot].saturating_add(1);
+                if query_trace.len() == 64 {
+                    query_trace.pop_front();
+                }
+                query_trace.push_back((route_started.elapsed().as_millis(), index, "query_begin"));
+                let node = chain.nodes[index].clone();
+                pending_query = Some((
+                    slot,
+                    tokio::spawn(async move {
+                        node.account_blocking(move |node| read_gossip_history(&node, group))
+                            .await
+                    }),
+                ));
+                let history = (&mut pending_query.as_mut().unwrap().1)
+                    .await
+                    .expect("the history observation owner must not panic");
+                let _ = pending_query.take();
+                if query_trace.len() == 64 {
+                    query_trace.pop_front();
+                }
+                query_trace.push_back((route_started.elapsed().as_millis(), index, "query_end"));
+                match history {
+                    Ok((id, completed)) => {
+                        query_needed[slot] = false;
+                        if query_trace.len() == 64 {
+                            query_trace.pop_front();
+                        }
+                        query_trace.push_back((
+                            completed.duration_since(route_started).as_millis(),
+                            index,
+                            "read_completed",
+                        ));
+                        if let Some(id) = id {
+                            receipts.record(slot, id, completed, cutoff);
+                        }
+                    }
+                    Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                        stale_reads[slot] = stale_reads[slot].saturating_add(1);
+                        // A durable publication can precede its final read-ready
+                        // checkpoint. Only that typed pending state is retried.
+                        query_needed[slot] = true;
+                    }
+                    Err(error) => panic!("background history read failed: {error}"),
+                }
+            }
+            let all_received = receipts.all_timely();
+            let elapsed = poll_started.elapsed().as_micros();
+            poll_us = poll_us.saturating_add(elapsed);
+            max_poll_us = max_poll_us.max(elapsed);
+            if all_received {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
-    for index in 1..6 {
-        assert!(chain.has_text(index, group, b"notification-driven background gossip"));
+    })
+    .await;
+    let deadline_elapsed = deadline_started.elapsed();
+    let deadline_elapsed_ms = deadline_elapsed.as_millis();
+    if let Some((slot, query)) = pending_query.take() {
+        // Join only the read admitted before the cutoff. Its immutable completion
+        // stamp may prove timely work despite late async delivery; a late read
+        // can never count. No new observation runs during this cleanup.
+        match tokio::time::timeout(Duration::from_secs(15), query)
+            .await
+            .expect("outstanding history observation must retire before its fixture")
+            .expect("history observation cleanup must join its owner")
+        {
+            Ok((id, completed)) => {
+                if query_trace.len() == 64 {
+                    query_trace.pop_front();
+                }
+                query_trace.push_back((
+                    completed.duration_since(route_started).as_millis(),
+                    slot + 1,
+                    "read_completed_during_join",
+                ));
+                if let Some(id) = id {
+                    receipts.record(slot, id, completed, cutoff);
+                }
+            }
+            Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+            Err(error) => panic!("background history observation retirement failed: {error}"),
+        }
     }
+    let first_visible_ms = receipts
+        .completed
+        .map(|at| at.map(|at| at.duration_since(route_started).as_millis()));
+    let within_two_seconds = receipts.all_timely()
+        && receipts
+            .completed
+            .iter()
+            .flatten()
+            .all(|at| *at <= deadline_started + Duration::from_secs(2));
+    let all_timely = receipts.all_timely();
+    let original = receipts.canonical;
+    for node in &chain.nodes[..6] {
+        *node.account_client_test_hook.lock().unwrap() = None;
+    }
+    if received.is_err()
+        || deadline_elapsed > deadline
+        || std::env::var("MESH_TALK_TEST_TIMING").as_deref() == Ok("1")
+    {
+        eprintln!(
+            "gossip observer send_returned_ms={send_returned_ms} deadline_start_ms={deadline_start_ms} deadline_elapsed_ms={deadline_elapsed_ms} within_two_seconds={within_two_seconds} first_visible_ms={first_visible_ms:?} history_reads={history_reads:?} stale_reads={stale_reads:?} generation_changes={generation_changes:?} query_trace={query_trace:?} polls={polls} poll_us={poll_us} max_poll_us={max_poll_us}"
+        );
+    }
+    if !all_timely {
+        // Preserve already-collected route evidence before any fallible read.
+        let phases = route_trace.try_lock().ok().map(|trace| trace.clone());
+        eprintln!("bounded recovery phases={phases:?}");
+        // These additional snapshot reads occur only after the deadline;
+        // do not consume Notify permits or invoke recovery here.
+        let (sender_original, sender_history_state, sender_history_count) =
+            match chain.nodes[0].channel_history(group, 10) {
+                Ok(rows) => (
+                    rows.iter()
+                        .find(|row| row.text == b"notification-driven background gossip")
+                        .map(|row| row.id),
+                    "ready",
+                    Some(rows.len()),
+                ),
+                Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                    (None, "pending", None)
+                }
+                Err(_) => (None, "error", None),
+            };
+        let original = original.or(sender_original);
+        let observations: Vec<_> = chain
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let (events, present) = {
+                    let log = node.log.lock().unwrap();
+                    (
+                        log.events(&group).unwrap().len(),
+                        original.is_some_and(|id| log.get(&id).unwrap().is_some()),
+                    )
+                };
+                let (history_state, history_count, surfaced) = match node.channel_history(group, 10)
+                {
+                    Ok(rows) => (
+                        "ready",
+                        Some(rows.len()),
+                        original.map(|id| rows.iter().any(|row| row.id == id)),
+                    ),
+                    Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                        ("pending", None, None)
+                    }
+                    Err(_) => ("error", None, None),
+                };
+                let queued = node
+                    .channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .contains(&group);
+                let recovery = node.channel_recovery.lock().unwrap().get(&group).cloned();
+                (
+                    index,
+                    events,
+                    present,
+                    history_state,
+                    history_count,
+                    surfaced,
+                    queued,
+                    recovery,
+                    node.sessions.test_capacity_snapshot(),
+                )
+            })
+            .collect();
+        eprintln!(
+            "background group gossip metadata original={original:?} sender_history_state={sender_history_state} sender_history_count={sender_history_count:?} observations={observations:?}"
+        );
+    }
+    assert_eq!(
+        periodic_work.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "periodic or discovery fallback must not rescue notification-only propagation"
+    );
+    assert!(
+        all_timely,
+        "all five exact-message history reads must finish within the original functional watchdog; observer resumed after {deadline_elapsed:?}"
+    );
+    let original = original.expect("all receivers proved one canonical message");
+    assert!(
+        chain.nodes[0]
+            .channel_history(group, 100)
+            .unwrap()
+            .iter()
+            .any(|row| row.id == original && row.text == b"notification-driven background gossip"),
+        "the received canonical message must match the sender's durable history"
+    );
 }
 
 #[tokio::test]
 async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
+    async fn finish_progress(node: &Node, group: ConversationId) {
+        use futures_util::FutureExt;
+        // This fixture has no recovery worker. Finish its admitted setup/message
+        // continuations before testing idle rounds, consuming their progress wake.
+        for _ in 0..128 {
+            node.process_channel_reception_inner(group, "live").unwrap();
+            if node
+                .channel_checkpoints
+                .next_runtime(None)
+                .unwrap()
+                .is_none()
+            {
+                let _ = node.channel_recovery_notify.notified().now_or_never();
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("fixture reception must finish its bounded continuation");
+    }
     let chain = Chain::new().await;
     let group = chain.accepted_group().await;
     let receiver = &chain.nodes[1];
+    finish_progress(receiver, group).await;
     assert!(
         tokio::time::timeout(
             Duration::from_millis(20),
@@ -969,6 +1680,7 @@ async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
     )
     .await
     .expect("validated received message signals the dedicated recovery notification");
+    finish_progress(receiver, group).await;
     for _ in 0..3 {
         receiver.process_channel(group);
     }
@@ -981,5 +1693,104 @@ async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
         .await
         .is_err(),
         "already surfaced messages and empty anti-entropy rounds must not self-wake"
+    );
+}
+
+#[tokio::test]
+async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() {
+    let chain = Chain::new().await;
+    let group = chain.accepted_group().await;
+    let source = chain._dir.path().join("reclamation.png");
+    let mut bytes = vec![7; crate::file::CHUNK_SIZE + 31];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    std::fs::write(&source, &bytes).unwrap();
+    let file = chain.nodes[0]
+        .send_file_channel(group, &source, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    chain.round(1, 0, group).await;
+    chain.nodes[1].process_file_events(group);
+    chain.round(1, 0, file).await;
+    let receiver = &chain.nodes[1];
+    receiver
+        .set_channel_replica_enabled(group, false)
+        .await
+        .unwrap();
+    receiver
+        .media
+        .store_bytes(file, "reclamation.png", &bytes)
+        .unwrap();
+    let path = receiver.media.path(file).unwrap();
+    let encrypted_before = std::fs::read(&path).unwrap();
+    let chunks_before = receiver.log.lock().unwrap().events(&file).unwrap().len();
+    assert!(chunks_before > 0);
+    assert_eq!(receiver.completion_candidates(file).unwrap().len(), 1);
+    // Current group reception reserves completion evidence. The fallback still
+    // has to preserve older/imported cards that lack this optional binding.
+    assert_eq!(
+        receiver
+            .delivery
+            .lock()
+            .unwrap()
+            .omit_file_completion_binding_for_test(file),
+        1
+    );
+    assert!(
+        receiver.completion_candidates(file).unwrap().is_empty(),
+        "legacy group reception uses the untracked fallback"
+    );
+    let mut reached_completion = false;
+    let result =
+        receiver.save_file_progress(file, &chain._dir.path().join("export.png"), |progress| {
+            if progress.done == progress.total {
+                reached_completion = true;
+                receiver.log.lock().unwrap().fail_reads(true);
+            }
+        });
+    assert!(
+        reached_completion,
+        "arm failure only after the final chunk read"
+    );
+    assert!(matches!(
+        result,
+        Err(super::NodeError::Log(crate::eventlog::LogError::Io(_)))
+    ));
+    // Inspect durable state only after the simulated storage outage has ended.
+    // Indexed reads correctly observe the same failure as the failed reclaim.
+    receiver.log.lock().unwrap().fail_reads(false);
+    assert_eq!(
+        receiver.log.lock().unwrap().events(&file).unwrap().len(),
+        chunks_before
+    );
+    assert!(
+        std::fs::read(&path).unwrap() == encrypted_before,
+        "failed reclaim must preserve encrypted managed bytes"
+    );
+    assert!(
+        receiver.media.read(file).unwrap() == bytes,
+        "retained media must decrypt to complete original bytes"
+    );
+    let checks_before_retry = receiver
+        .untracked_chunk_validations
+        .load(std::sync::atomic::Ordering::Relaxed);
+    receiver
+        .save_file(file, &chain._dir.path().join("export-retry.png"))
+        .unwrap();
+    assert!(
+        receiver
+            .untracked_chunk_validations
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > checks_before_retry,
+        "a real untracked retry must verify retained chunk ancestry"
+    );
+    assert!(
+        receiver
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty(),
+        "successful share-off reclaim removes the same chunks after storage recovers"
     );
 }

@@ -68,6 +68,29 @@ pub fn read_account<T: DeserializeOwned + Default>(path: &Path) -> T {
 }
 
 pub fn write_account<T: Serialize>(path: &Path, value: &T) -> Result<(), CommandError> {
+    prepare_account_write(path, value)?.commit()
+}
+
+/// Serialization and durable staging can run without session authority. Only
+/// the atomic replacement needs the caller's exact-session commit guard.
+pub(crate) struct PreparedAccountWrite {
+    temporary: tempfile::NamedTempFile,
+    destination: PathBuf,
+}
+
+impl PreparedAccountWrite {
+    pub(crate) fn commit(self) -> Result<(), CommandError> {
+        self.temporary
+            .persist(self.destination)
+            .map_err(|e| CommandError::Io(e.to_string()))?;
+        Ok(())
+    }
+}
+
+pub(crate) fn prepare_account_write<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<PreparedAccountWrite, CommandError> {
     use std::io::Write;
     let parent = path
         .parent()
@@ -98,10 +121,10 @@ pub fn write_account<T: Serialize>(path: &Path, value: &T) -> Result<(), Command
         .as_file()
         .sync_all()
         .map_err(|e| CommandError::Io(e.to_string()))?;
-    temporary
-        .persist(path)
-        .map_err(|e| CommandError::Io(e.to_string()))?;
-    Ok(())
+    Ok(PreparedAccountWrite {
+        temporary,
+        destination: path.to_owned(),
+    })
 }
 
 /// `<app config dir>/<filename>`, or `None` if there is no app config dir.
@@ -264,6 +287,26 @@ mod account_tests {
     use crate::services::{auth_service::AuthService, user::User};
     use mesh_talk_core::{identity::manager::IdentityManager, storage::file_manager::FileManager};
     use std::sync::Arc;
+
+    #[test]
+    fn prepared_account_write_changes_nothing_until_commit_and_cleans_up_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("favorites.json");
+        write_account(&path, &serde_json::json!({"old": true})).unwrap();
+        let staged = prepare_account_write(&path, &serde_json::json!({"new": true})).unwrap();
+        assert_eq!(
+            read_account::<serde_json::Value>(&path),
+            serde_json::json!({"old": true})
+        );
+        drop(staged);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        let staged = prepare_account_write(&path, &serde_json::json!({"new": true})).unwrap();
+        staged.commit().unwrap();
+        assert_eq!(
+            read_account::<serde_json::Value>(&path),
+            serde_json::json!({"new": true})
+        );
+    }
 
     #[test]
     fn contact_preferences_are_isolated_by_host_account() {

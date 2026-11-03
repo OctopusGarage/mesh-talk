@@ -9,7 +9,11 @@ use crate::{
 use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
 
+mod group_operations;
+mod reactions;
 mod search;
+pub use group_operations::*;
+pub use reactions::*;
 pub use search::*;
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
@@ -35,6 +39,8 @@ pub struct NodeIdentity {
     account_id: String,
     history_revision: u64,
     supports_push_state: bool,
+    supports_bounded_delivery: bool,
+    runtime_id: Option<String>,
 }
 
 /// Atomically observes Session + runtime identity, including installation authority.
@@ -54,6 +60,8 @@ pub async fn owner_node_identity(
                 display_name: runtime.display_name(),
                 history_revision: runtime.account_history_revision(),
                 supports_push_state: true,
+                supports_bounded_delivery: runtime.handle().bounded_delivery(),
+                runtime_id: node.installed_runtime_id(admission.lease())?,
             })
         })
         .await
@@ -430,7 +438,7 @@ pub async fn owner_account_history<R: tauri::Runtime>(
     let history = admission
         .with_runtime(|runtime| {
             Ok(runtime
-                .account_history(&account, limit.min(500))
+                .account_history(&account, limit.min(500))?
                 .into_iter()
                 .map(HistoryItem::from)
                 .collect())
@@ -681,6 +689,7 @@ mod tests {
                     crate::chat_commands::set_channel_cover,
                     crate::chat_commands::set_channel_announcement,
                     crate::chat_commands::list_channels,
+                    crate::chat_commands::get_presence,
                     crate::chat_commands::channel_members,
                     crate::chat_commands::channel_custody_statuses,
                     crate::chat_commands::add_channel_member,
@@ -712,8 +721,20 @@ mod tests {
                     crate::chat_commands::save_file,
                     crate::chat_commands::save_file_to_dir,
                     crate::chat_commands::write_temp_file,
+                    super::owner_create_channel,
+                    super::owner_new_account_group_operation_id,
+                    super::owner_personal_conversation_states,
+                    super::owner_delete_left_channel,
+                    super::owner_submit_account_group_control,
+                    super::owner_submit_account_group_text,
+                    super::owner_submit_account_group_sticker,
+                    super::owner_submit_account_group_file,
+                    super::owner_account_group_operation_status,
+                    super::owner_list_account_group_operations,
+                    super::owner_cancel_account_group_operation,
                     super::owner_search_recent,
                     super::owner_search_context,
+                    super::owner_reaction_summaries,
                     super::owner_reveal_message,
                     super::owner_reveal_image,
                     crate::message_favorites::owner_list_message_favorites,
@@ -790,6 +811,31 @@ mod tests {
             body: serde_json::Value,
         ) -> Result<serde_json::Value, serde_json::Value> {
             invoke(&self.webview, command, body)
+        }
+
+        // Search limits need a realistic signed/persisted corpus, not hundreds
+        // of repeated IPC admissions and best-effort network flushes. Keep the
+        // registered send/search wiring in the calling tests with one IPC send.
+        fn seed_channel_search_corpus(
+            &self,
+            channel: &serde_json::Value,
+            text: &str,
+            count: usize,
+        ) {
+            let channel =
+                crate::chat_commands::parse_channel_id(channel.as_str().unwrap()).unwrap();
+            let handle = self.node.0.blocking_read().as_ref().unwrap().handle();
+            for _ in 0..count {
+                handle
+                    .enqueue_channel_message_reply_expiring_if(
+                        channel,
+                        text.as_bytes(),
+                        None,
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+            }
         }
 
         fn offline_peer(&self) -> String {
@@ -954,7 +1000,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Search channel", "memberIds":[]}),
+                serde_json::json!({"name":"Search channel", "memberAccountIds":[]}),
             )
             .unwrap();
         fixture
@@ -1070,6 +1116,471 @@ mod tests {
             "authorization"
         );
         *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn registered_account_group_operation_reads_preserve_account_scope() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let operation_id = "12".repeat(32);
+        let status = fixture.invoke(
+            "owner_account_group_operation_status",
+            serde_json::json!({"owner":"alice", "expectedAccount":account, "operationId":operation_id}),
+        ).expect("typed operation status must be a registered owner-scoped command");
+        assert_eq!(status, serde_json::Value::Null);
+        assert_eq!(fixture.invoke(
+            "owner_list_account_group_operations",
+            serde_json::json!({"owner":"alice", "expectedAccount":account, "pendingOnly":true, "limit":20}),
+        ).unwrap(), serde_json::json!([]));
+        assert_eq!(
+            fixture
+                .invoke(
+                    "owner_personal_conversation_states",
+                    serde_json::json!({"owner":"alice", "expectedAccount":account})
+                )
+                .unwrap(),
+            serde_json::json!([])
+        );
+        for (command, body) in [
+            (
+                "owner_new_account_group_operation_id",
+                serde_json::json!({}),
+            ),
+            (
+                "owner_account_group_operation_status",
+                serde_json::json!({"operationId":operation_id}),
+            ),
+            (
+                "owner_list_account_group_operations",
+                serde_json::json!({"pendingOnly":true, "limit":20}),
+            ),
+            (
+                "owner_submit_account_group_control",
+                serde_json::json!({"operationId":operation_id, "channelId":"34".repeat(32), "operation":{"kind":"rename","name":"Wrong account"}}),
+            ),
+            (
+                "owner_cancel_account_group_operation",
+                serde_json::json!({"operationId":operation_id}),
+            ),
+            (
+                "owner_delete_left_channel",
+                serde_json::json!({"channelId":"34".repeat(32)}),
+            ),
+            ("owner_personal_conversation_states", serde_json::json!({})),
+        ] {
+            let mut body = body;
+            body["owner"] = serde_json::json!("alice");
+            body["expectedAccount"] = serde_json::json!("00".repeat(16));
+            assert_eq!(
+                fixture.invoke(command, body).unwrap_err()["kind"],
+                "authorization",
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_owner_channel_creation_checks_account_and_session() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let created = fixture.invoke("owner_create_channel", serde_json::json!({
+            "owner":"alice", "expectedAccount":account, "name":"Scoped creation", "memberAccountIds":[],
+        })).expect("group creation must expose an explicit owner/account command");
+        let id = created.as_str().unwrap();
+        assert_eq!(id.len(), 64);
+        let rows = fixture
+            .invoke("list_channels", serde_json::json!({}))
+            .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["channel_id"] == id)
+            .unwrap();
+        assert_eq!(row["account_access"]["account_id"], account);
+        assert_eq!(row["account_access"]["role"], "owner");
+        let count = rows.as_array().unwrap().len();
+        for (owner, expected_account) in [
+            ("other", account.as_str()),
+            ("alice", "00000000000000000000000000000000"),
+        ] {
+            let error = fixture.invoke("owner_create_channel", serde_json::json!({
+                "owner":owner, "expectedAccount":expected_account, "name":"Must not create", "memberAccountIds":[],
+            })).unwrap_err();
+            assert_eq!(error["kind"], "authorization");
+        }
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .list_channels()
+                .unwrap()
+                .len(),
+            count
+        );
+    }
+
+    #[test]
+    fn registered_account_group_operation_id_mint_is_scoped_and_has_no_admission() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let body = serde_json::json!({"owner":"alice", "expectedAccount":account});
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let value = fixture
+                .invoke("owner_new_account_group_operation_id", body.clone())
+                .expect("operation ID minting must be a registered owner-scoped command");
+            let id =
+                mesh_talk_core::node::AccountGroupOperationId::from_hex(value.as_str().unwrap())
+                    .unwrap();
+            assert!(
+                fixture
+                    .node
+                    .0
+                    .blocking_read()
+                    .as_ref()
+                    .unwrap()
+                    .handle()
+                    .account_group_operation_status(&account, id)
+                    .unwrap()
+                    .is_none(),
+                "minting an ID must not admit an operation"
+            );
+            ids.push(id);
+        }
+        assert_ne!(ids[0], ids[1]);
+        let error = fixture
+            .invoke(
+                "owner_new_account_group_operation_id",
+                serde_json::json!({"owner":"alice", "expectedAccount":"00".repeat(16)}),
+            )
+            .unwrap_err();
+        assert_eq!(error["kind"], "authorization");
+    }
+
+    #[test]
+    fn registered_account_group_file_checks_account_before_reading_path() {
+        let fixture = Fixture::new();
+        let error = fixture
+            .invoke(
+                "owner_submit_account_group_file",
+                serde_json::json!({
+                    "owner": "alice", "expectedAccount": "00".repeat(16),
+                    "operationId": "12".repeat(32), "channelId": "34".repeat(32),
+                    "path": "/missing-must-not-read", "media": false,
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(error["kind"], "authorization");
+        assert!(error.to_string().contains("account changed"));
+    }
+
+    #[test]
+    fn registered_account_group_operations_reject_queued_logout() {
+        for command in [
+            "owner_create_channel",
+            "owner_delete_left_channel",
+            "owner_personal_conversation_states",
+            "owner_new_account_group_operation_id",
+            "owner_submit_account_group_control",
+            "owner_submit_account_group_text",
+            "owner_submit_account_group_sticker",
+            "owner_submit_account_group_file",
+            "owner_account_group_operation_status",
+            "owner_list_account_group_operations",
+            "owner_cancel_account_group_operation",
+        ] {
+            let fixture = Fixture::new();
+            let account = fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .account_id()
+                .to_owned();
+            let mut body = serde_json::json!({"owner":"alice", "expectedAccount":account});
+            match command {
+                "owner_create_channel" => {
+                    body["name"] = serde_json::json!("Must not create");
+                    body["memberAccountIds"] = serde_json::json!([]);
+                }
+
+                "owner_delete_left_channel" => {
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                }
+                "owner_new_account_group_operation_id" | "owner_personal_conversation_states" => {}
+                "owner_submit_account_group_control" => {
+                    body["operationId"] = serde_json::json!("12".repeat(32));
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                    body["operation"] =
+                        serde_json::json!({"kind":"rename","name":"Must not admit"});
+                }
+                "owner_submit_account_group_file" => {
+                    body["operationId"] = serde_json::json!("12".repeat(32));
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                    body["path"] = serde_json::json!("/missing-must-not-read");
+                    body["media"] = serde_json::json!(false);
+                }
+                "owner_submit_account_group_text" | "owner_submit_account_group_sticker" => {
+                    body["operationId"] = serde_json::json!("12".repeat(32));
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                    if command == "owner_submit_account_group_text" {
+                        body["text"] = serde_json::json!("Must not admit");
+                    } else {
+                        body["stickerId"] = serde_json::json!("1f602");
+                        body["fallback"] = serde_json::json!("😂");
+                    }
+                }
+                "owner_list_account_group_operations" => {
+                    body["pendingOnly"] = serde_json::json!(true);
+                    body["limit"] = serde_json::json!(20);
+                }
+                _ => body["operationId"] = serde_json::json!("12".repeat(32)),
+            }
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+            let lifecycle = fixture.node.0.blocking_write();
+            let webview = fixture.webview.clone();
+            let pending = std::thread::spawn(move || invoke(&webview, command, body));
+            let captured = entered_rx.recv_timeout(std::time::Duration::from_secs(2));
+            fixture.app_state.session().clear();
+            drop(lifecycle);
+            let result = pending.join().unwrap();
+            assert!(
+                captured.is_ok(),
+                "{command} must capture authority before waiting"
+            );
+            assert_eq!(result.unwrap_err()["kind"], "authorization", "{command}");
+            assert!(
+                fixture
+                    .node
+                    .0
+                    .blocking_read()
+                    .as_ref()
+                    .unwrap()
+                    .handle()
+                    .account_group_operation_status(
+                        &account,
+                        mesh_talk_core::node::AccountGroupOperationId::new([0x12; 32])
+                    )
+                    .unwrap()
+                    .is_none(),
+                "retired {command} cannot create an operation"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_account_group_access_keeps_owner_role_when_its_source_is_offline() {
+        use mesh_talk_core::{
+            channel::{ChannelMeta, new_channel_id},
+            eventlog::{Event, EventKind, PersistentEventLog},
+            identity::{account::Account, account_keystore, device::DeviceIdentity, keystore},
+            node::{
+                AccountDocumentDomain, AccountDocumentKey, AccountGroupRole, DocumentConversation,
+                NodeRuntime,
+            },
+        };
+        let id = new_channel_id();
+        let source_device = DeviceIdentity::generate();
+        let external = DeviceIdentity::generate();
+        let account = Account::generate();
+        let fixture = Fixture::create_prepared(false, |root, owner| {
+            let source_root = tempfile::tempdir().unwrap();
+            let source_dir = source_root.path().join("accounts/source");
+            let target_dir = root.join("accounts").join(owner);
+            std::fs::create_dir_all(&source_dir).unwrap();
+            std::fs::create_dir_all(&target_dir).unwrap();
+            keystore::save(&source_dir.join("identity.keystore"), "pw", &source_device).unwrap();
+            account_keystore::save(&source_dir.join("account.keystore"), "pw", &account).unwrap();
+            account_keystore::save(&target_dir.join("account.keystore"), "pw", &account).unwrap();
+            let mut log = PersistentEventLog::open(&source_dir.join("messages.log"), "pw").unwrap();
+            log.append_durable(Event::new(
+                &source_device,
+                id,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "Account owner fixture".into(),
+                    members: vec![source_device.public(), external.public()],
+                    epoch: 0,
+                    owner: source_device.public().user_id(),
+                }
+                .encode(),
+            ))
+            .unwrap();
+            drop(log);
+            let reservation = reserve_discovery_port();
+            let source = tauri::async_runtime::block_on(NodeRuntime::start(
+                source_root.path(),
+                "source",
+                "Source",
+                "pw",
+                reservation.local_addr().unwrap().port(),
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            ))
+            .unwrap();
+            drop(reservation);
+            tauri::async_runtime::block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while source
+                        .handle()
+                        .account_documents(AccountDocumentDomain::GroupControl, None, 64)
+                        .unwrap()
+                        .items
+                        .is_empty()
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    source.handle().account_group_access(id).unwrap().role,
+                    AccountGroupRole::Owner
+                );
+                source
+                    .handle()
+                    .set_channel_history_policy(id, mesh_talk_core::channel::HistoryPolicy::LastTen)
+                    .await
+                    .unwrap();
+                source
+                    .handle()
+                    .put_account_document_if(
+                        AccountDocumentKey::Draft {
+                            conversation: DocumentConversation::Account(account.account_id()),
+                        },
+                        b"synthetic policy observation wake".to_vec(),
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let published = source
+                            .handle()
+                            .account_documents(AccountDocumentDomain::GroupInventory, None, 64)
+                            .unwrap()
+                            .items;
+                        if published.iter().any(|meta| {
+                            source
+                                .handle()
+                                .account_document(&meta.key)
+                                .unwrap()
+                                .is_some_and(|document| {
+                                    serde_json::from_slice::<serde_json::Value>(document.payload())
+                                        .unwrap()["directory"]["history_policy"]
+                                        == "last_ten"
+                                })
+                        }) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                source.stop().await;
+            });
+            fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+                if from.is_dir() {
+                    std::fs::create_dir_all(to).unwrap();
+                    for entry in std::fs::read_dir(from).unwrap() {
+                        let entry = entry.unwrap();
+                        copy_tree(&entry.path(), &to.join(entry.file_name()));
+                    }
+                } else {
+                    std::fs::copy(from, to).unwrap();
+                }
+            }
+            for entry in std::fs::read_dir(&source_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("account-document")
+                {
+                    copy_tree(&entry.path(), &target_dir.join(entry.file_name()));
+                }
+            }
+        });
+        let rows = fixture
+            .invoke("list_channels", serde_json::json!({}))
+            .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["channel_id"] == hex::encode(id.as_bytes()))
+            .unwrap();
+        assert_eq!(row["owner"], source_device.public().user_id());
+        assert_eq!(row["shared_reference"], true);
+        assert_eq!(row["account_access"]["account_id"], account.account_id());
+        assert_eq!(row["account_access"]["role"], "owner");
+        assert_eq!(
+            row["account_access"]["execution"]["kind"],
+            "waiting_for_device"
+        );
+        let members = fixture
+            .invoke(
+                "channel_members",
+                serde_json::json!({"channelId": hex::encode(id.as_bytes())}),
+            )
+            .unwrap();
+        assert_eq!(members["account_access"], row["account_access"]);
+        assert_eq!(row["directory_reconciling"], false);
+        assert_eq!(members["directory_reconciling"], false);
+        assert_eq!(members["history_policy_known"], true);
+        assert_eq!(
+            members["history_policy"], "last_ten",
+            "reference displays the source's observed policy, not an invented local Off default"
+        );
+        // Observation projects account permission without inventing a public
+        // membership for this device or routing an action through an old API.
+        assert_eq!(row["can_manage"], false);
+        assert!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .channel_members(id)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1222,6 +1733,7 @@ mod tests {
             .unwrap();
         assert_eq!(reference["name"], "Account inventory fixture");
         assert_eq!(reference["shared_reference"], true);
+        assert!(reference.get("previous_account").unwrap().is_null());
         assert_eq!(reference["legacy_membership"], true);
         assert_eq!(reference["archived"], true);
         assert_eq!(reference["can_manage"], false);
@@ -1231,6 +1743,13 @@ mod tests {
         assert_eq!(members["owner"], legacy_owner.public().user_id());
         assert_eq!(members["members"].as_array().unwrap().len(), 2);
         assert_eq!(members["can_manage"], false);
+        let presence = fixture
+            .invoke("get_presence", serde_json::json!({}))
+            .unwrap();
+        let group_presence = &presence[hex::encode(id.as_bytes())];
+        assert_eq!(group_presence["member_count"], 1);
+        assert_eq!(group_presence["unbound_member_count"], 1);
+        assert_eq!(group_presence["online_count"], 1);
         for (command, extra) in [
             (
                 "set_channel_history_policy",
@@ -1350,6 +1869,54 @@ mod tests {
                 .unwrap_err()["kind"],
             "authorization"
         );
+    }
+
+    #[test]
+    fn registered_group_control_requires_typed_access_for_every_generic_document_command() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let key = serde_json::json!({
+            "kind":"group_control",
+            "channel":"22".repeat(32),
+            "source_device":"44".repeat(16),
+        });
+        for command in [
+            "get_account_documents",
+            "get_account_document_meta",
+            "read_account_document",
+            "put_account_document",
+            "remove_account_document",
+        ] {
+            let result = fixture.invoke(
+                command,
+                serde_json::json!({
+                    "owner":"alice",
+                    "expectedAccount":account,
+                    "domain":"group_control",
+                    "key":key,
+                    "after":null,
+                    "limit":64,
+                    "payloadBase64":"e30=",
+                    "expected":{
+                        "revision":1,
+                        "writer_device":"44".repeat(16),
+                        "content_hash":vec![0u8;32],
+                    },
+                }),
+            );
+            assert_eq!(
+                result.unwrap_err()["kind"],
+                "authorization",
+                "private group controls require the typed facade: {command}",
+            );
+        }
     }
 
     #[test]
@@ -1954,6 +2521,60 @@ mod tests {
     }
 
     #[test]
+    fn registered_reaction_summaries_are_selected_bounded_and_account_owned() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice","account":account,"text":"selected reaction"}),
+            )
+            .unwrap();
+        fixture
+            .invoke(
+                "react_account",
+                serde_json::json!({"account":account,"target":id,"emoji":"👍","remove":false}),
+            )
+            .unwrap();
+        let mut request = serde_json::json!({"owner":"alice","kind":"account","target":account,"targets":[id],"cursor":null});
+        let mut completed = None;
+        for _ in 0..128 {
+            let response = fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap();
+            assert!(serde_json::to_vec(&response).unwrap().len() <= 1024 * 1024);
+            if response["pending"] == false {
+                completed = Some(response);
+                break;
+            }
+            assert_eq!(response["items"], serde_json::json!([]));
+            assert!(response["next"].is_string());
+            request["cursor"] = response["next"].clone();
+        }
+        let response = completed.expect("finite selected reaction projection completes");
+        assert_eq!(
+            response["items"],
+            serde_json::json!([{"target":id,"emoji":"👍","count":1,"from_me":true}])
+        );
+        assert_eq!(response["next"], serde_json::Value::Null);
+        request["owner"] = serde_json::json!("bob");
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        request["owner"] = serde_json::json!("alice");
+        request["targets"] = serde_json::json!(vec![id; 65]);
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request)
+                .unwrap_err()["kind"],
+            "invalid-input"
+        );
+    }
+
+    #[test]
     fn registered_search_validates_inputs_and_explicit_owner() {
         let fixture = Fixture::new();
         for kind in ["account", "channel", "legacy-device"] {
@@ -2015,55 +2636,77 @@ mod tests {
 
     #[test]
     fn registered_search_caps_hits_and_context_serialized_bytes() {
+        let started = std::time::Instant::now();
+        struct SearchFixtureFinished(std::time::Instant);
+        impl Drop for SearchFixtureFinished {
+            fn drop(&mut self) {
+                eprintln!(
+                    "search cap fixture phase=finished elapsed_ms={}",
+                    self.0.elapsed().as_millis()
+                );
+            }
+        }
+        // Declared before Fixture so this observes its unchanged natural teardown.
+        let _finished = SearchFixtureFinished(started);
+        let phase = |phase: &str, corpus_rows: usize| {
+            eprintln!(
+                "search cap fixture phase={phase} corpus_rows={corpus_rows} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+        };
+        phase("start", 0);
         let fixture = Fixture::new();
+        phase("init", 0);
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Caps", "memberIds":[]}),
+                serde_json::json!({"name":"Caps", "memberAccountIds":[]}),
             )
             .unwrap();
-        for _ in 0..201 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":"cap token"}),
-                )
-                .unwrap();
-        }
+        phase("create", 0);
+        fixture
+            .invoke(
+                "send_channel_message",
+                serde_json::json!({"channelId":channel,"text":"cap token"}),
+            )
+            .unwrap();
+        phase("registered_send", 1);
+        fixture.seed_channel_search_corpus(&channel, "cap token", 200);
+        phase("search1_begin", 201);
         let results = fixture
             .invoke(
                 "owner_search_recent",
                 serde_json::json!({"owner":"alice","query":"cap token"}),
             )
             .unwrap();
+        phase("search1_returned", 201);
         assert_eq!(results["hits"].as_array().unwrap().len(), 200);
         assert_eq!(results["coverage"]["truncated"], true);
         let text = "oversize token ".to_owned() + &"x".repeat(60_000);
-        for _ in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-        }
+        phase("large_sends_begin", 201);
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
+        phase("search2_begin", 221);
         let results = fixture
             .invoke(
                 "owner_search_recent",
                 serde_json::json!({"owner":"alice","query":"oversize token"}),
             )
             .unwrap();
+        phase("search2_returned", 221);
         let reference = results["hits"][0]["reference"].clone();
+        phase("context_begin", 221);
         let response = fixture
             .invoke(
                 "owner_search_context",
                 serde_json::json!({"owner":"alice","reference":reference}),
             )
             .unwrap();
+        phase("context_returned", 221);
         assert_eq!(
             response,
             serde_json::json!({"status":"unavailable","reference":reference,"messages":[],"newer_entries":null})
         );
+        phase("assert_complete", 221);
     }
 
     #[test]
@@ -2072,18 +2715,11 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Bytes", "memberIds":[]}),
+                serde_json::json!({"name":"Bytes", "memberAccountIds":[]}),
             )
             .unwrap();
         let text = "byte cap token ".to_owned() + &"x".repeat(60_000);
-        for _ in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-        }
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
         let results = fixture
             .invoke(
                 "owner_search_recent",
@@ -2219,7 +2855,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Retry images","memberIds":[]}),
+                serde_json::json!({"name":"Retry images","memberAccountIds":[]}),
             )
             .unwrap();
         for protection in [serde_json::Value::Null, serde_json::json!("click")] {
@@ -2281,7 +2917,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Protected images","memberIds":[]}),
+                serde_json::json!({"name":"Protected images","memberAccountIds":[]}),
             )
             .unwrap();
         let path = fixture.root.path().join("protected.png");
@@ -2367,7 +3003,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Protected", "memberIds":[]}),
+                serde_json::json!({"name":"Protected", "memberAccountIds":[]}),
             )
             .unwrap();
         let id = fixture.invoke("owner_enqueue_channel_text", serde_json::json!({"owner":"alice","channelId":channel,"text":"channel protected secret","protection":"click"})).unwrap();
@@ -2517,6 +3153,10 @@ mod tests {
         for change in ["relogin", "logout", "lock"] {
             for (command, body) in [
                 (
+                    "owner_reaction_summaries",
+                    serde_json::json!({"owner":"alice","kind":"account","target":"01".repeat(16),"targets":["01".repeat(32)],"cursor":null}),
+                ),
+                (
                     "owner_search_recent",
                     serde_json::json!({"owner":"alice","query":"secret"}),
                 ),
@@ -2618,7 +3258,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            rt.history(&legacy_device.public(), 10)[0].id
+            rt.history(&legacy_device.public(), 10).unwrap()[0].id
         });
         let status = fixture.invoke("owner_delivery_statuses", serde_json::json!({"owner":"alice", "account":legacy_account.account_id(), "ids":[hex::encode(legacy_id.as_bytes())]})).unwrap();
         assert_eq!(status, serde_json::json!([]));
@@ -2687,6 +3327,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .account_history(remote.account_id(), 10)
+                    .unwrap()
                     .is_empty()
                 {
                     tokio::task::yield_now().await;
@@ -2748,7 +3389,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Acceptance", "memberIds":[]}),
+                serde_json::json!({"name":"Acceptance", "memberAccountIds":[]}),
             )
             .unwrap();
         let path = fixture.root.path().join("photo.png");
@@ -2987,6 +3628,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .account_history(&account, 10)
+                .unwrap()
                 .len(),
             3
         );
@@ -3025,6 +3667,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .account_history(&account, 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -3071,13 +3714,38 @@ mod tests {
     #[test]
     fn registered_channel_metadata_preserves_versions_and_owner_admission() {
         use tauri::Manager;
+        let started = std::time::Instant::now();
+        eprintln!(
+            "metadata IPC phase=fixture-start elapsed={:?}",
+            started.elapsed()
+        );
         let fixture = Fixture::new();
-        let channel = fixture
-            .invoke(
-                "create_channel",
-                serde_json::json!({"name":"Group metadata", "memberIds":[]}),
-            )
-            .unwrap();
+        eprintln!(
+            "metadata IPC phase=fixture-ready elapsed={:?}",
+            started.elapsed()
+        );
+        let invoke = |command: &str, body: serde_json::Value| {
+            eprintln!(
+                "metadata IPC phase=invoke-start command={command} elapsed={:?}",
+                started.elapsed()
+            );
+            let result = fixture.invoke(command, body);
+            eprintln!(
+                "metadata IPC phase=invoke-finished command={command} ok={} elapsed={:?}",
+                result.is_ok(),
+                started.elapsed()
+            );
+            result
+        };
+        let channel = invoke(
+            "create_channel",
+            serde_json::json!({"name":"Group metadata", "memberAccountIds":[]}),
+        )
+        .unwrap();
+        eprintln!(
+            "metadata IPC phase=account-read elapsed={:?}",
+            started.elapsed()
+        );
         let account = fixture
             .node
             .0
@@ -3088,36 +3756,49 @@ mod tests {
             .to_owned();
         let args =
             serde_json::json!({"owner":"alice", "expectedAccount":account, "channelId":channel});
-        let initial = fixture.invoke("channel_metadata", args.clone()).unwrap();
+        // A successful mutation returns one bounded read. Resume that same
+        // registered getter while it explicitly reports unfinished indexing,
+        // just as the metadata settings UI does after saving.
+        let settled = |mut value: serde_json::Value| {
+            for _ in 0..128 {
+                if !value["query_pending"].as_bool().unwrap() {
+                    return value;
+                }
+                assert!(value["cover"].is_null());
+                assert!(value["announcement"].is_null());
+                assert!(value["announcement_history"].as_array().unwrap().is_empty());
+                value = invoke("channel_metadata", args.clone()).unwrap();
+            }
+            panic!("registered metadata query must finish its bounded continuation");
+        };
+        let initial = settled(invoke("channel_metadata", args.clone()).unwrap());
         assert!(initial["announcement"].is_null());
         let mut publish = args.clone();
         publish["content"] = "Welcome".into();
         publish["expectedRevision"] = serde_json::Value::Null;
-        let saved = fixture
-            .invoke("set_channel_announcement", publish.clone())
-            .unwrap();
+        let saved = settled(invoke("set_channel_announcement", publish.clone()).unwrap());
         assert_eq!(saved["announcement"]["content"], "Welcome");
         assert!(
-            fixture
-                .invoke("set_channel_announcement", publish.clone())
-                .is_err(),
+            invoke("set_channel_announcement", publish.clone()).is_err(),
             "a stale editor cannot overwrite a published version"
         );
         let mut wrong = args.clone();
         wrong["expectedAccount"] = "another-account".into();
         assert_eq!(
-            fixture.invoke("channel_metadata", wrong).unwrap_err()["kind"],
+            invoke("channel_metadata", wrong).unwrap_err()["kind"],
             "authorization"
         );
         publish["expectedRevision"] = saved["announcement"]["revision"].clone();
         publish["content"] = serde_json::Value::Null;
-        let cleared = fixture
-            .invoke("set_channel_announcement", publish.clone())
-            .unwrap();
+        let cleared = settled(invoke("set_channel_announcement", publish.clone()).unwrap());
         assert!(cleared["announcement"]["content"].is_null());
         assert_ne!(
             cleared["announcement"]["revision"],
             saved["announcement"]["revision"]
+        );
+        eprintln!(
+            "metadata IPC phase=lock-start elapsed={:?}",
+            started.elapsed()
         );
         crate::app_lock::lock_app(
             fixture.webview.state::<AppState>(),
@@ -3125,15 +3806,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            fixture.invoke("channel_metadata", args).unwrap_err()["kind"],
+            invoke("channel_metadata", args).unwrap_err()["kind"],
             "authorization"
         );
         assert_eq!(
-            fixture
-                .invoke("set_channel_announcement", publish)
-                .unwrap_err()["kind"],
+            invoke("set_channel_announcement", publish).unwrap_err()["kind"],
             "authorization"
         );
+        eprintln!(
+            "metadata IPC phase=retire-start elapsed={:?}",
+            started.elapsed()
+        );
+        drop(fixture);
+        eprintln!("metadata IPC phase=retired elapsed={:?}", started.elapsed());
     }
 
     #[test]
@@ -3143,7 +3828,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"History settings", "memberIds":[]}),
+                serde_json::json!({"name":"History settings", "memberAccountIds":[]}),
             )
             .unwrap();
         for policy in [
@@ -3192,7 +3877,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .handle()
-                .channel_history_policy(channel_id),
+                .channel_history_policy(channel_id)
+                .unwrap(),
             mesh_talk_core::channel::HistoryPolicy::LastTenWithinThreeDays
         );
     }
@@ -3202,7 +3888,39 @@ mod tests {
         use tauri::Manager;
         let fixture = Fixture::new();
         let channel = "11".repeat(32);
+        let expected_account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
         let cases = [
+            (
+                "owner_create_channel",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "name":"Must not create", "memberAccountIds":[]}),
+            ),
+            (
+                "owner_new_account_group_operation_id",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account}),
+            ),
+            (
+                "owner_account_group_operation_status",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "operationId":"12".repeat(32)}),
+            ),
+            (
+                "owner_list_account_group_operations",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "pendingOnly":true, "limit":20}),
+            ),
+            (
+                "owner_submit_account_group_control",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "operationId":"12".repeat(32), "channelId":channel, "operation":{"kind":"rename","name":"Must not admit"}}),
+            ),
+            (
+                "owner_cancel_account_group_operation",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "operationId":"12".repeat(32)}),
+            ),
             (
                 "write_temp_file",
                 serde_json::json!({"bytes":[],"ext":"png"}),
@@ -3214,7 +3932,7 @@ mod tests {
             ),
             (
                 "create_channel",
-                serde_json::json!({"name":"must not create", "memberIds":[]}),
+                serde_json::json!({"name":"must not create", "memberAccountIds":[]}),
             ),
             (
                 "rename_channel",
@@ -3375,6 +4093,7 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .list_channels()
+                        .unwrap()
                         .is_empty()
                 );
             }
@@ -3966,32 +4685,36 @@ mod tests {
         };
         let before = metadata();
         let policy = node.privacy_snapshot();
-        // Discovery may publish our signed profile while this probe waits. Check
-        // every other event kind without mistaking those independent public
-        // profile writes for work accepted from the rejected owner command.
+        // This fresh fixture has accepted no non-profile work. Inspect signed
+        // event IDs through the supported archive boundary after logout has
+        // retired runtime producers, while retaining this Node's profile lease.
         let event_ids = || {
-            let snapshot = tempfile::tempdir().unwrap();
-            let path = snapshot.path().join("messages.log");
-            std::fs::copy(directory.join("messages.log"), &path).unwrap();
-            let log = mesh_talk_core::eventlog::persist::PersistentEventLog::open(
-                &path,
-                "password-owner",
-            )
-            .unwrap();
+            use mesh_talk_core::recovery::{
+                archive,
+                key::RecoveryKey,
+                snapshot::{SnapshotRecordV1, read_snapshot},
+            };
+            let key = RecoveryKey::generate();
+            let mut encrypted = Vec::new();
+            node.write_encrypted_recovery_archive(&mut encrypted, &key, 0)
+                .unwrap();
+            let mut plaintext = Vec::new();
+            archive::read_archive(encrypted.as_slice(), &mut plaintext, key.as_bytes()).unwrap();
             let mut profiles = 0;
-            let other = log
-                .all_event_ids()
-                .into_iter()
-                .filter(|id| {
-                    let profile = log.get(id).unwrap().kind
-                        == mesh_talk_core::eventlog::event::EventKind::Profile;
-                    profiles += usize::from(profile);
-                    !profile
-                })
-                .collect::<std::collections::BTreeSet<_>>();
+            let mut other = std::collections::BTreeSet::new();
+            read_snapshot(plaintext.as_slice(), |record| {
+                if let SnapshotRecordV1::SignedEvent { event } = record {
+                    if event.kind == mesh_talk_core::eventlog::EventKind::Profile {
+                        profiles += 1;
+                    } else {
+                        other.insert(event.id);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
             (other, profiles)
         };
-        let (before_log, before_profiles) = event_ids();
         let work = || {
             [
                 "sent.log",
@@ -4115,9 +4838,9 @@ mod tests {
         let metadata_unchanged = metadata() == before;
         let policy_unchanged = node.privacy_snapshot() == policy;
         let (after_log, after_profiles) = event_ids();
-        let non_profile_log_unchanged = after_log == before_log;
+        let non_profile_log_unchanged = after_log.is_empty();
         let staged = staged.load(Ordering::SeqCst);
-        let history_empty = node.account_history(&account, 10).is_empty();
+        let history_empty = node.account_history(&account, 10).unwrap().is_empty();
         let work_unchanged = work() == before_work;
         drop(node);
         // The registered logout child has completed its real retirement barrier.
@@ -4136,10 +4859,10 @@ mod tests {
         ))
         .unwrap();
         let reopened_policy = reopened.handle().privacy_snapshot();
-        let reopened_empty = reopened.account_history(&account, 10).is_empty();
+        let reopened_empty = reopened.account_history(&account, 10).unwrap().is_empty();
         tauri::async_runtime::block_on(reopened.stop());
         eprintln!(
-            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_before={before_profiles}, profiles_after={after_profiles}"
+            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_after={after_profiles}"
         );
         assert!(authorized && published && logged_out && replaced);
         assert_eq!(
@@ -4247,7 +4970,7 @@ mod tests {
             let mut guard = fixture.node.0.write().await;
             let old = guard.take().unwrap();
             assert!(
-                old.account_history(&account, 10).is_empty(),
+                old.account_history(&account, 10).unwrap().is_empty(),
                 "changed owner must reject the staged card before WAL acceptance"
             );
             drop(guard);

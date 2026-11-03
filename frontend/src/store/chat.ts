@@ -1,3 +1,14 @@
+import {
+  reception as receptionApi,
+  type HostReception,
+} from "@/lib/api/reception";
+import { createReceptionDelivery } from "./receptionDelivery";
+import {
+  loadReceptionSnapshot,
+  saveReceptionSnapshot,
+} from "@/lib/receptionSnapshot";
+import type { PersonalConversationState } from "@/lib/types";
+import { useDrafts } from "./drafts";
 import { usePacks } from "./packs";
 import { stickerById } from "@/lib/stickerPacks";
 import { snapshotSticker } from "@/lib/stickerMedia";
@@ -20,16 +31,13 @@ import { contactPolicy, favorites as favoritesApi } from "@/lib/api/contacts";
 import { errorMessage } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import {
-  saveUnread,
-  savePendingUnread,
   loadPendingUnread,
   loadUnread,
+  queueReceptionPersistence,
+  flushReceptionPersistence,
   loadReceptionLedger,
-  saveReceptionLedger,
   loadUnreadOverflow,
-  saveUnreadOverflow,
   loadFullHistoryBaselines,
-  saveFullHistoryBaselines,
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
@@ -47,6 +55,7 @@ import {
   applyChatCallSignal,
   applyChatFileProgress,
   applyChatProfile,
+  finishChatAvatarIdentity,
   resetChatFileAvailability,
   resetChatFiles,
   stopChatCalls,
@@ -63,11 +72,17 @@ import {
   beginSendIntent,
   dispatchIntent,
   refreshDeliveryStatuses,
+  refreshGroupOperationIntents,
+  cancelGroupOperationIntent,
+  settleGroupSendIntents,
+  submitGroupControlIntent,
 } from "./outgoingIntent";
+import type { GroupOperationOutcome } from "./accountGroupOperations";
 import {
   type ConversationHistoryState,
   emptyConversationHistory,
   reloadConversation,
+  requestConversationReload,
   revealConversationIdentity,
   scanConversationHistory,
 } from "./conversationHistory";
@@ -88,6 +103,9 @@ import type {
   FavoriteInfo,
   FileReceivedEvent,
   PeerInfo,
+  ReactionInfo,
+  ReceptionCursor,
+  ReceptionScope,
 } from "@/lib/types";
 
 import type {
@@ -142,16 +160,28 @@ function applyVerifiedIdentity(
     account_id: string;
     device_id: string;
     history_revision?: number;
+    supports_bounded_delivery?: boolean;
+    runtime_id?: string;
   },
   ready: boolean,
 ) {
   const owner = identity.owner;
   const acct = identity.account_id;
-  const persistedUnread = loadUnread(owner, acct);
-  const persistedPendingUnread = loadPendingUnread(owner, acct);
+  const committed =
+    identity.supports_bounded_delivery && identity.runtime_id
+      ? loadReceptionSnapshot({
+          owner,
+          account_id: acct,
+          device_id: identity.device_id,
+          runtime_id: identity.runtime_id,
+        })
+      : null;
+  const persistedUnread = committed?.unread ?? loadUnread(owner, acct);
+  const persistedPendingUnread =
+    committed?.pendingUnknownUnread ?? loadPendingUnread(owner, acct);
   const persistedReception = emptyReception(
-    loadReceptionLedger(owner, acct),
-    loadUnreadOverflow(owner, acct),
+    committed?.ledger ?? loadReceptionLedger(owner, acct),
+    committed?.overflowUnread ?? loadUnreadOverflow(owner, acct),
   );
   set((state) => {
     const sameScope = state.unreadOwner === owner && state.myAccountId === acct;
@@ -188,7 +218,10 @@ function applyVerifiedIdentity(
             ...reception,
             accountSeen: reception.accountSeen,
             historyBaselines: Object.keys(persistedReception.ledger),
-            historyFullBaselines: loadFullHistoryBaselines(owner, acct),
+            historyFullBaselines:
+              committed?.historyFullBaselines ??
+              loadFullHistoryBaselines(owner, acct),
+            ...(committed ? { reception: committed.reception } : {}),
           }
         : {}),
       identityEpoch: invalidateScope
@@ -200,6 +233,9 @@ function applyVerifiedIdentity(
       unread,
       pendingUnknownUnread,
       unreadOwner: owner,
+      deliveryRuntime: identity.supports_bounded_delivery
+        ? (identity.runtime_id ?? null)
+        : null,
       ready,
       bootFailed: false,
     };
@@ -268,8 +304,14 @@ async function pollUntilReady(
       applyVerifiedIdentity(set, identity, true);
       const acct = identity.account_id;
       setPushStateSupport(identity.supports_push_state ? owner : null);
-      syncChatAvatarIdentity(acct, () => !isCancelled());
-      await get().refreshRoster();
+      syncChatAvatarIdentity(
+        acct,
+        () => !isCancelled(),
+        !!identity.supports_bounded_delivery,
+      );
+      // Identity completes boot. Roster/history hydration owns its separate
+      // bounded lane and must not extend the startup deadline or hold bootBusy.
+      void get().refreshRoster();
       return true;
     } catch {
       if (superseded()) return false;
@@ -333,17 +375,37 @@ async function pollUntilReady(
   return false;
 }
 
+/** Invalidate every history projection after durable account-personal deletion. */
+function deletedChatState(state: ChatState, key: string): Partial<ChatState> {
+  const without = <T>(values: Record<string, T>): Record<string, T> =>
+    Object.fromEntries(Object.entries(values).filter(([id]) => id !== key));
+  return {
+    ...clearConversationMessages(state, key),
+    reactions: without(state.reactions),
+    unread: without(state.unread),
+    unreadIds: without(state.unreadIds),
+    lateUnreadIds: without(state.lateUnreadIds),
+    overflowUnread: without(state.overflowUnread),
+    ledger: without(state.ledger),
+    reception: without(state.reception),
+    ...(state.accountSeen ? { accountSeen: without(state.accountSeen) } : {}),
+    cacheOrder: state.cacheOrder.filter((id) => id !== key),
+    historyBaselines: state.historyBaselines.filter((id) => id !== key),
+    historyFullBaselines: state.historyFullBaselines.filter((id) => id !== key),
+    historyScanQueue: state.historyScanQueue.filter(
+      (conversation) => convKey(conversation) !== key,
+    ),
+  };
+}
+
 // --- per-conversation API dispatch ----------------------------------------
 
-function reactFor(
-  c: Conversation,
-  target: string,
-  emoji: string,
-  remove: boolean,
-) {
-  return c.kind === "account"
-    ? chat.reactAccount(c.id, target, emoji, remove)
-    : chat.reactChannel(c.id, target, emoji, remove);
+/** Native account ownership is authoritative, including certified sibling devices. */
+export function reactionFromMe(
+  reaction: ReactionInfo,
+  _selfId?: string,
+): boolean {
+  return reaction.from_me;
 }
 /** Whether this conversation is a channel (drives the `is_channel` flag on the lifecycle
  * commands; 1:1 chats are account-addressed). */
@@ -355,9 +417,12 @@ export interface ChatState
   bootRequest: number;
   /** Native startup ticket; distinct from the frontend run and account identity. */
   startupId: string | null;
+  deliveryRuntime: string | null;
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
+  personalConversationStates: Record<string, PersonalConversationState>;
+  personalHistoryFloors: Record<string, string>;
   myAccountId: string;
   expiryNow: number;
   peers: PeerInfo[];
@@ -379,6 +444,8 @@ export interface ChatState
   bootFailed: boolean; // identity did not resolve within the latest boot window
 
   resetForLock: () => void;
+  cancelGroupOperation: (id: string) => Promise<GroupOperationOutcome>;
+  refreshGroupOperations: () => Promise<void>;
   start: () => () => void;
   retryBoot: (background?: boolean) => void;
   loadFavorites: () => Promise<void>;
@@ -389,7 +456,8 @@ export interface ChatState
   clearError: () => void;
   refreshRoster: () => Promise<void>;
   refreshChannels: (channelId?: string | null) => Promise<void>;
-  deleteContact: (account: string) => Promise<boolean>;
+  deleteContact: (account: string, clearHistory?: boolean) => Promise<boolean>;
+  deleteLeftChannel: (channelId: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
   markConversationRead: (key: string) => void;
@@ -430,7 +498,11 @@ export interface ChatState
     onAccepted?: () => void,
   ) => Promise<"refused" | "failed" | "accepted">;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
-  toggleReaction: (target: string, emoji: string) => Promise<void>;
+  toggleReaction: (
+    target: string,
+    emoji: string,
+    remove?: boolean,
+  ) => Promise<void>;
   /** Delete one message from this device only (local). */
   deleteMessage: (target: string) => Promise<void>;
   /** Recall (unsend) one of my own messages within the 2-minute window. */
@@ -448,6 +520,8 @@ export interface ChatState
 function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
   return {
     accountSeen: undefined,
+    personalConversationStates: {},
+    personalHistoryFloors: {},
     ...emptyConversationHistory(),
     historyRevision: state.historyRevision,
     activeRequest: state.activeRequest,
@@ -459,6 +533,8 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
     members: [],
     channelOwner: "",
     statusBusy: false,
+    groupOperations: {},
+    groupOperationIssue: undefined,
   };
 }
 
@@ -466,13 +542,18 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
 function emptySessionData() {
   return {
     accountSeen: undefined,
+    personalConversationStates: {},
+    personalHistoryFloors: {},
     ...emptyConversationHistory(),
     expiryNow: Date.now(),
     identityEpoch: 0,
     bootBusy: false,
     bootRequest: 0,
     startupId: null,
+    deliveryRuntime: null,
     statusBusy: false,
+    groupOperations: {},
+    groupOperationIssue: undefined,
     rosterRequest: 0,
     favoritesRequest: 0,
     ready: false,
@@ -499,7 +580,16 @@ function emptySessionData() {
 const channelRefresh = createChannelRefresh({
   read: () => useChat.getState(),
   write: (patch) => {
-    useChat.setState(patch);
+    useChat.setState((state) => {
+      const next = patch(state);
+      if (next.channels)
+        next.channels = next.channels.filter((channel) => {
+          const personal =
+            state.personalConversationStates[`channel:${channel.channel_id}`];
+          return !(personal?.hidden && personal.local_cleanup_complete);
+        });
+      return next;
+    });
     refreshChannelRecovery(useChat.setState, useChat.getState);
   },
   capture: () => captureChat(useChat.getState),
@@ -512,6 +602,85 @@ const rosterRefresh = createRosterRefresh({
     refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending),
 });
 
+/** Apply explicit local-complete floors before archive work can refill deleted caches. */
+function applyPersonalConversationStates(
+  rawSet: Set,
+  get: Get,
+  lease: ReturnType<typeof captureChat>,
+  rows: PersonalConversationState[] | null,
+): { changed: boolean; reloadActive: boolean } {
+  if (
+    !lease.current() ||
+    !lease.owner ||
+    !Array.isArray(rows) ||
+    rows.some(
+      (row) =>
+        !row ||
+        !["account", "channel"].includes(row.conversation?.kind) ||
+        typeof row.conversation.id !== "string" ||
+        typeof row.hidden !== "boolean" ||
+        typeof row.local_cleanup_complete !== "boolean" ||
+        (row.history_floor !== null && typeof row.history_floor !== "string"),
+    )
+  )
+    return { changed: false, reloadActive: false };
+  const states = Object.fromEntries(
+    rows.map((row) => [convKey({ ...row.conversation, name: "" }), row]),
+  );
+  if (
+    JSON.stringify(states) === JSON.stringify(get().personalConversationStates)
+  )
+    return { changed: false, reloadActive: false };
+  let reloadActive = false;
+  rawSet((state) => {
+    let next = {
+      ...state,
+      personalConversationStates: states,
+      personalHistoryFloors: { ...state.personalHistoryFloors },
+    };
+    for (const [key, personal] of Object.entries(states)) {
+      if (!personal.local_cleanup_complete) continue;
+      if (
+        personal.history_floor &&
+        next.personalHistoryFloors[key] !== personal.history_floor
+      ) {
+        reloadActive ||=
+          !personal.hidden && !!next.active && convKey(next.active) === key;
+        useDrafts.getState().discard(lease.owner!, lease.generation, key);
+        next = { ...next, ...deletedChatState(next, key) };
+        next.personalHistoryFloors[key] = personal.history_floor;
+      }
+      if (personal.hidden) {
+        const { kind, id } = personal.conversation;
+        if (kind === "account")
+          next.accounts = next.accounts.filter(
+            (account) => account.account_id !== id,
+          );
+        else
+          next.channels = next.channels.filter(
+            (channel) => channel.channel_id !== id,
+          );
+        const unread = { ...next.unread };
+        delete unread[key];
+        next.unread = unread;
+        if (next.active && convKey(next.active) === key)
+          next = {
+            ...next,
+            active: null,
+            members: [],
+            channelOwner: "",
+            searchTarget: null,
+            historyError: null,
+            activeRequest: next.activeRequest + 1,
+            loading: false,
+          };
+      }
+    }
+    return next;
+  });
+  return { changed: true, reloadActive };
+}
+
 async function refreshRosterSnapshot(
   rawSet: Set,
   get: Get,
@@ -520,7 +689,7 @@ async function refreshRosterSnapshot(
   const lease = captureChat(get);
   const set = guardedSet(rawSet, lease.current);
   if (!lease.current()) return;
-  if (!get().ready || get().historyScanBusy) return;
+  if (!get().ready) return;
   const request = get().rosterRequest + 1;
   set({ rosterRequest: request });
   try {
@@ -532,10 +701,13 @@ async function refreshRosterSnapshot(
         set({ ready: false });
       return;
     }
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     if (
       identity.device_id !== get().myId ||
-      identity.account_id !== get().myAccountId
+      identity.account_id !== get().myAccountId ||
+      (identity.runtime_id !== undefined &&
+        identity.runtime_id !== get().deliveryRuntime)
     ) {
       // Runtime/account replacement can happen without a host logout. Invalidate
       // old in-flight conversation work; the run's owned ticker performs fresh boot.
@@ -557,13 +729,30 @@ async function refreshRosterSnapshot(
           ? { ...state.user, display_name: identity.display_name! }
           : null,
       }));
-    const [peers, accounts] = await Promise.all([
+    const [peers, listedAccounts, personal] = await Promise.all([
       readWithDeadline(() => chat.listPeers()),
       readWithDeadline(() => chat.listAccounts()),
+      readWithDeadline(() =>
+        chat.personalConversationStates(lease.owner!, identity.account_id),
+      ).catch(() => null),
     ]);
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
+    const personalEffects = applyPersonalConversationStates(
+      rawSet,
+      get,
+      lease,
+      personal,
+    );
+    const accounts = listedAccounts.filter((account) => {
+      const personal =
+        get().personalConversationStates[`account:${account.account_id}`];
+      return !(personal?.hidden && personal.local_cleanup_complete);
+    });
     setPushStateSupport(identity.supports_push_state ? lease.owner : null);
-    const channelWork = channelRefresh.ifDue();
+    const channelWork = personalEffects.changed
+      ? channelRefresh.invalidate()
+      : channelRefresh.ifDue();
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
     const previous = get();
@@ -587,9 +776,13 @@ async function refreshRosterSnapshot(
       });
     }
     await channelWork;
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     const channels = get().channels;
     refreshChannelRecovery(rawSet, get);
+    if (personalEffects.reloadActive && get().active) await get().reload();
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     if (identity.history_revision !== undefined) {
       await scanConversationHistory(
         rawSet,
@@ -616,7 +809,8 @@ async function refreshRosterSnapshot(
         identity.history_revision,
         () => lease.current() && get().rosterRequest === request,
       );
-      if (!lease.current() || get().rosterRequest !== request) return;
+      if (!lease.current() || get().rosterRequest !== request || hasPending())
+        return;
     }
   } catch {
     // node may still be starting; ignore
@@ -628,6 +822,40 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   runEpoch: 0,
 
   clearError: () => rawSet({ error: null }),
+  cancelGroupOperation: (id) => cancelGroupOperationIntent(rawSet, get, id),
+  refreshGroupOperations: () => refreshGroupOperationIntents(rawSet, get),
+  onGroupOperationTerminal: (status) => {
+    const lease = captureChat(get);
+    const accountId = get().myAccountId;
+    if (!lease.current() || accountId !== status.account_id) return;
+    settleGroupSendIntents(rawSet, get, status);
+    if (!lease.current() || status.phase.kind !== "committed") return;
+    const active = get().active;
+    const activeGroup =
+      active?.kind === "channel" && active.id === status.group;
+    const messageOperation = ["text", "sticker", "file"].includes(status.kind);
+    if (
+      activeGroup &&
+      (messageOperation ||
+        status.kind === "reaction" ||
+        status.kind === "recall")
+    )
+      void get()
+        .reload()
+        .then(() => {
+          if (lease.current() && get().myAccountId === accountId)
+            settleGroupSendIntents(rawSet, get, status);
+        })
+        .catch(() => {});
+    if (
+      !messageOperation &&
+      status.kind !== "reaction" &&
+      status.kind !== "recall"
+    )
+      void get()
+        .reconcileCommitted(status)
+        .catch(() => {});
+  },
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
@@ -647,7 +875,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const request = get().favoritesRequest + 1;
     set({ favoritesRequest: request });
     try {
-      const list = await favoritesApi.get(lease.owner!);
+      const list = await readWithDeadline(() => favoritesApi.get(lease.owner!));
       if (!lease.current() || get().favoritesRequest !== request) return;
       const map: Record<string, FavoriteInfo> = {};
       for (const f of list) map[f.id] = f;
@@ -835,6 +1063,163 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set({ bootFailed: true });
     })();
 
+    let delivery: ReturnType<
+      typeof createReceptionDelivery<HostReception>
+    > | null = null;
+    let deliveryRuntime: string | null = null;
+    let receiptCursor: ReceptionCursor | null = null;
+    let receiptScope: ReceptionScope | null = null;
+    let receiptPending = false;
+    const snapshot = (cursor: ReceptionCursor) => {
+      const state = get();
+      return {
+        cursor,
+        ledger: state.ledger,
+        overflowUnread: state.overflowUnread,
+        unread: state.unread,
+        pendingUnknownUnread: state.pendingUnknownUnread,
+        historyFullBaselines: state.historyFullBaselines,
+        reception: state.reception,
+      };
+    };
+    const failReception = (error: unknown) => {
+      const message = `Couldn't save received messages: ${errorMessage(error)}`;
+      if (lease.current() && get().error !== message) set({ error: message });
+    };
+    const synchronizeDelivery = () => {
+      const state = get();
+      const runtime = state.ready ? state.deliveryRuntime : null;
+      if (runtime === deliveryRuntime) return;
+      delivery?.stop();
+      delivery = null;
+      deliveryRuntime = runtime;
+      receiptCursor = null;
+      receiptScope = null;
+      receiptPending = false;
+      if (!runtime || !lease.current() || !lease.owner) return;
+      const scope: ReceptionScope = {
+        owner: lease.owner,
+        account_id: state.myAccountId,
+        device_id: state.myId,
+        runtime_id: runtime,
+      };
+      try {
+        receiptCursor = loadReceptionSnapshot(scope)?.cursor ?? null;
+        receiptScope = scope;
+        let firstPull = true;
+        let avatarIdentityLoaded = false;
+        delivery = createReceptionDelivery({
+          scope,
+          cursor: receiptCursor,
+          current: () =>
+            lease.current() &&
+            get().ready &&
+            get().deliveryRuntime === runtime &&
+            get().myAccountId === scope.account_id &&
+            get().myId === scope.device_id,
+          pull: async (after, through) => {
+            try {
+              const page = await receptionApi.pull(
+                scope,
+                after,
+                through,
+                firstPull,
+              );
+              firstPull = false;
+              return page;
+            } catch (error) {
+              // The host may have reserved a page whose IPC reply was lost.
+              // No page was applied, so replace that reservation on retry.
+              firstPull = true;
+              throw error;
+            }
+          },
+          apply: (page) => {
+            receiptPending = true;
+            if (receiptCursor === null) {
+              // Establish recovery state before the first effects can touch
+              // older per-field persistence, including legacy rows without IDs.
+              saveReceptionSnapshot(scope, snapshot(page.after));
+              receiptCursor = page.after;
+            }
+            for (const receipt of page.receipts) {
+              switch (receipt.kind) {
+                case "dm":
+                  get_handleDm(set, get, receipt.event);
+                  break;
+                case "channel":
+                  get_handleChannel(set, get, receipt.event);
+                  break;
+                case "file":
+                  get_handleFile(set, get, receipt.event);
+                  break;
+                case "profile":
+                  applyChatProfile(receipt.event);
+                  break;
+                case "call":
+                  applyChatCallSignal(receipt.event);
+                  break;
+                case "progress":
+                  applyChatFileProgress(receipt.event);
+                  break;
+                case "state":
+                  void get().refreshRoster();
+                  void get().refreshChannels();
+                  void get().refreshStatuses(undefined, true);
+                  notifySyncInvalidation({ owner: scope.owner, kind: "state" });
+                  break;
+              }
+            }
+            if (page.complete && !avatarIdentityLoaded) {
+              avatarIdentityLoaded = true;
+              finishChatAvatarIdentity(
+                () =>
+                  lease.current() &&
+                  get().deliveryRuntime === runtime &&
+                  get().myAccountId === scope.account_id &&
+                  get().myId === scope.device_id,
+              );
+            }
+          },
+          persist: (cursor) => {
+            saveReceptionSnapshot(scope, snapshot(cursor));
+            receiptCursor = cursor;
+            receiptPending = false;
+          },
+          acknowledge: (page) => receptionApi.acknowledge(scope, page),
+          failed: failReception,
+        });
+        void delivery.wake();
+      } catch (error) {
+        failReception(error);
+      }
+    };
+    const stopReceptionObservation = useChat.subscribe((state, previous) => {
+      synchronizeDelivery();
+      if (
+        receiptScope &&
+        receiptCursor &&
+        !receiptPending &&
+        lease.current() &&
+        (state.ledger !== previous.ledger ||
+          state.overflowUnread !== previous.overflowUnread ||
+          state.unread !== previous.unread ||
+          state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
+          state.historyFullBaselines !== previous.historyFullBaselines ||
+          state.reception !== previous.reception)
+      ) {
+        try {
+          saveReceptionSnapshot(receiptScope, snapshot(receiptCursor));
+        } catch (error) {
+          failReception(error);
+        }
+      }
+    });
+    const wakeReception = () => {
+      synchronizeDelivery();
+      void delivery?.wake();
+    };
+    synchronizeDelivery();
     const expiryWallStart = Date.now();
     const expiryMonotonicStart = performance.now();
     const expire = () => {
@@ -859,9 +1244,24 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         notifyIncomingFileDismissed(file.fileConv);
     };
     const expiry = setInterval(expire, 1000);
-    if (typeof window !== "undefined") window.addEventListener("focus", expire);
-    if (typeof document !== "undefined")
+    const resumeReception = () => {
+      if (
+        typeof document === "undefined" ||
+        document.visibilityState !== "hidden"
+      )
+        wakeReception();
+    };
+    const flushReceipts = () => flushReceptionPersistence();
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", flushReceipts);
+      window.addEventListener("focus", expire);
+      window.addEventListener("focus", resumeReception);
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener?.("visibilitychange", flushReceipts);
       document.addEventListener?.("visibilitychange", expire);
+      document.addEventListener?.("visibilitychange", resumeReception);
+    }
 
     let rosterBusy = false;
     let rosterDirty = false;
@@ -887,9 +1287,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const roster = setInterval(() => {
       if (lease.current() && get().ready) {
         bootFailureObserved = false;
+        void refreshGroupOperationIntents(rawSet, get);
         const now = performance.now();
         if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
           nextRosterFallback = now + 30000;
+          wakeReception();
           void refreshRoster();
         }
         if (!supportsPushState(lease.owner) || now >= nextStatusFallback) {
@@ -913,6 +1315,16 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
+      onReceptionWake: (scope) => {
+        if (
+          lease.current() &&
+          scope.owner === lease.owner &&
+          scope.account_id === get().myAccountId &&
+          scope.device_id === get().myId &&
+          scope.runtime_id === get().deliveryRuntime
+        )
+          wakeReception();
+      },
       onStateChanged: (e) => {
         const state = get();
         if (
@@ -924,6 +1336,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         )
           return;
         notifySyncInvalidation({ owner: e.owner, kind: e.kind });
+        if (["state", "roster", "delivery", "files"].includes(e.kind))
+          void refreshGroupOperationIntents(rawSet, get);
         if (e.kind === "state" || e.kind === "roster") void refreshRoster(true);
         if (e.kind === "delivery" || e.kind === "files")
           void state.refreshStatuses(undefined, true);
@@ -942,7 +1356,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           return;
         // Outgoing delegated sends do not count as inbound notifications. Fetch
         // their content through the same guarded history path as ordinary sends.
-        void state.reload();
+        void requestConversationReload(rawSet, get);
       },
 
       onDm: (e) => {
@@ -959,6 +1373,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         )
           return;
         void state.refreshChannels(e.channel_id);
+        void refreshGroupOperationIntents(rawSet, get);
       },
       onChannelMessage: (e) => {
         if (lease.current()) get_handleChannel(set, get, e);
@@ -994,40 +1409,72 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
     return () => {
       cancelled = true;
+      delivery?.stop();
+      stopReceptionObservation();
+      flushReceptionPersistence();
+      if (typeof window !== "undefined")
+        window.removeEventListener("pagehide", flushReceipts);
+      if (typeof document !== "undefined")
+        document.removeEventListener?.("visibilitychange", flushReceipts);
       clearInterval(roster);
       clearInterval(expiry);
-      if (typeof window !== "undefined")
+      if (typeof window !== "undefined") {
         window.removeEventListener("focus", expire);
-      if (typeof document !== "undefined")
+        window.removeEventListener("focus", resumeReception);
+      }
+      if (typeof document !== "undefined") {
         document.removeEventListener?.("visibilitychange", expire);
+        document.removeEventListener?.("visibilitychange", resumeReception);
+      }
       unlisten();
       if (get().runEpoch === lease.run) {
         stopChatCalls();
-        rawSet((s) => ({ runEpoch: s.runEpoch + 1, ready: false }));
+        rawSet((s) => ({
+          runEpoch: s.runEpoch + 1,
+          ready: false,
+          groupOperations: {},
+          groupOperationIssue: undefined,
+        }));
       }
     };
   },
 
-  deleteContact: async (account) => {
+  deleteContact: async (account, clearHistory = true) => {
     const lease = captureChat(get);
+    const expectedAccount = get().myAccountId;
     if (
       !lease.current() ||
       !lease.owner ||
       !get().ready ||
-      account === get().myAccountId
+      !expectedAccount.trim() ||
+      account === expectedAccount
     )
       return false;
     try {
-      await contactPolicy.delete(lease.owner, account);
-      if (!lease.current()) return false;
+      await contactPolicy.delete(
+        lease.owner,
+        expectedAccount,
+        account,
+        clearHistory,
+      );
+      if (!lease.current() || get().myAccountId !== expectedAccount)
+        return false;
+      if (clearHistory)
+        useDrafts
+          .getState()
+          .discard(lease.owner, lease.generation, `account:${account}`);
       rawSet((state) => {
         const unread = { ...state.unread };
         delete unread[`account:${account}`];
         const closing =
           state.active?.kind === "account" && state.active.id === account;
         return {
-          ...clearConversationMessages(state, `account:${account}`),
-          reactions: { ...state.reactions, [`account:${account}`]: [] },
+          ...(clearHistory
+            ? deletedChatState(state, `account:${account}`)
+            : {}),
+          ...(clearHistory
+            ? { reactions: { ...state.reactions, [`account:${account}`]: [] } }
+            : {}),
           accounts: state.accounts.filter((a) => a.account_id !== account),
           unread,
           rosterRequest: state.rosterRequest + 1,
@@ -1042,6 +1489,47 @@ export const useChat = create<ChatState>((rawSet, get) => ({
             : {}),
         };
       });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  deleteLeftChannel: async (channelId) => {
+    const lease = captureChat(get);
+    const account = get().myAccountId;
+    if (!lease.current() || !lease.owner || !account || !get().ready)
+      return false;
+    try {
+      await chat.deleteLeftChannel(lease.owner, account, channelId);
+      if (!lease.current() || get().myAccountId !== account) return false;
+      const key = `channel:${channelId}`;
+      useDrafts.getState().discard(lease.owner, lease.generation, key);
+      rawSet((state) => {
+        const unread = { ...state.unread };
+        delete unread[key];
+        const closing =
+          state.active?.kind === "channel" && state.active.id === channelId;
+        return {
+          ...deletedChatState(state, key),
+          channels: state.channels.filter((c) => c.channel_id !== channelId),
+          rosterRequest: state.rosterRequest + 1,
+          reactions: { ...state.reactions, [key]: [] },
+          unread,
+          ...(closing
+            ? {
+                active: null,
+                members: [],
+                channelOwner: "",
+                searchTarget: null,
+                historyError: null,
+                activeRequest: state.activeRequest + 1,
+                loading: false,
+              }
+            : {}),
+        };
+      });
+      void channelRefresh.invalidate();
       return true;
     } catch {
       return false;
@@ -1078,7 +1566,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       try {
         const baseline = get().members;
         const ownerBaseline = get().channelOwner;
-        const info = await chat.channelMembers(c.id);
+        const info = await readWithDeadline(() => chat.channelMembers(c.id));
         if (!lease.current() || get().activeRequest !== request) return;
         // A newer active-view refresh wins; a background avatar-only update
         // from before navigation must not discard this navigation's details.
@@ -1188,17 +1676,36 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   revealUnread: (key, id) => revealConversationIdentity(rawSet, get, key, id),
 
-  reload: () => reloadConversation(rawSet, get),
+  reload: async () => {
+    const lease = captureChat(get);
+    const accountId = get().myAccountId;
+    const loaded = await reloadConversation(rawSet, get);
+    if (!loaded || !lease.current() || get().myAccountId !== accountId)
+      return loaded;
+    const active = get().active;
+    // A terminal receipt may precede canonical history or conversation reopening.
+    // Reuse its exact public identity after history supplies the source metadata.
+    if (active?.kind === "channel")
+      for (const ticket of Object.values(get().groupOperations ?? {})) {
+        if (!lease.current()) break;
+        if (
+          ticket.account_id === accountId &&
+          ticket.group === active.id &&
+          ticket.status?.phase.kind === "committed"
+        )
+          settleGroupSendIntents(rawSet, get, ticket.status);
+      }
+    return loaded;
+  },
   refreshStatuses: (conversation, invalidate) =>
     refreshDeliveryStatuses(rawSet, get, conversation, invalidate),
 
   send: async (text, replyTo) => {
     const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return;
-    await sendIntent(set, get, c, { kind: "text", text, replyTo });
+    await sendIntent(rawSet, get, c, { kind: "text", text, replyTo });
   },
 
   // The composer needs an immediate admission answer so it never clears a draft that
@@ -1208,18 +1715,13 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return false;
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return false;
-    const dispatch = beginSendIntent(
-      guardedSet(rawSet, lease.current),
-      get,
-      c,
-      {
-        kind: "text",
-        text,
-        replyTo,
-        expiresAtMs,
-        protection,
-      },
-    );
+    const dispatch = beginSendIntent(rawSet, get, c, {
+      kind: "text",
+      text,
+      replyTo,
+      expiresAtMs,
+      protection,
+    });
     if (!dispatch) return false;
     void dispatch;
     return true;
@@ -1233,7 +1735,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!get().ready || !c || !text.trim()) return false;
     return (
       beginSendIntent(
-        guardedSet(rawSet, lease.current),
+        rawSet,
         get,
         c,
         {
@@ -1282,7 +1784,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         ),
       },
     }));
-    await dispatchIntent(set, get, { ...intent, message: pending });
+    await dispatchIntent(rawSet, get, { ...intent, message: pending });
   },
 
   admitImage: async (path, protection, expiresAtMs, onAccepted) => {
@@ -1290,7 +1792,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const c = get().active;
     if (!lease.current() || !get().ready || !c) return "refused";
     const admission = beginSendIntent(
-      guardedSet(rawSet, lease.current),
+      rawSet,
       get,
       c,
       { kind: "file", path, media: true, expiresAtMs, protection },
@@ -1302,29 +1804,44 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
   sendFile: async (path, media, expiresAtMs) => {
     const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(set, get, c, { kind: "file", path, media, expiresAtMs });
+    await sendIntent(rawSet, get, c, {
+      kind: "file",
+      path,
+      media,
+      expiresAtMs,
+    });
   },
 
-  toggleReaction: async (target, emoji) => {
+  toggleReaction: async (target, emoji, remove) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
-    // Reaction `who` is keyed by account id for account conversations, device user-id for
-    // channels — so "did I already react?" must compare against the matching id, or an
-    // account-conversation reaction can never be detected as ours (never toggles off).
+    // Native channel ownership includes certified siblings, even when they are offline.
     const selfId = c.kind === "account" ? get().myAccountId : get().myId;
     const mine = (get().reactions[key] ?? []).find(
-      (r) => r.target === target && r.emoji === emoji && r.who.includes(selfId),
+      (r) =>
+        r.target === target && r.emoji === emoji && reactionFromMe(r, selfId),
     );
     try {
-      await reactFor(c, target, emoji, Boolean(mine));
+      if (c.kind === "channel") {
+        const outcome = await submitGroupControlIntent(rawSet, get, c.id, {
+          kind: "react",
+          target,
+          emoji,
+          remove: remove ?? Boolean(mine),
+        });
+        if (outcome.kind === "not_admitted") throw outcome.error;
+        if (outcome.kind === "capacity")
+          throw new Error("Too many pending group actions.");
+        return;
+      }
+      await chat.reactAccount(c.id, target, emoji, remove ?? Boolean(mine));
       // Only reload if still on this conversation (matches send/sendFile).
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();
@@ -1361,7 +1878,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!c) return;
     const key = convKey(c);
     try {
-      await chat.recallMessage(c.id, target, isChannelConv(c));
+      if (c.kind === "channel") {
+        const outcome = await submitGroupControlIntent(rawSet, get, c.id, {
+          kind: "recall",
+          target,
+        });
+        if (outcome.kind === "not_admitted") throw outcome.error;
+        if (outcome.kind === "capacity")
+          throw new Error("Too many pending group actions.");
+        return;
+      }
+      await chat.recallMessage(c.id, target, false);
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();
     } catch (e) {
@@ -1445,7 +1972,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           convKey(get().active!) !== convKey(c)
         )
           return;
-        const sending = beginSendIntent(set, get, c, {
+        const sending = beginSendIntent(rawSet, get, c, {
           kind: "file",
           path: stagedPath,
           media: true,
@@ -1468,7 +1995,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       }
       return;
     }
-    await sendIntent(set, get, c, {
+    await sendIntent(rawSet, get, c, {
       kind: "sticker",
       stickerId,
       fallback,
@@ -1481,6 +2008,23 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     write: rawSet,
     capture: () => captureChat(get),
     commands: chat,
+    deleteCommittedHistory: (group) => {
+      const lease = captureChat(get);
+      if (!lease.current() || !lease.owner) return;
+      const key = `channel:${group}`;
+      useDrafts.getState().discard(lease.owner, lease.generation, key);
+      rawSet((state) => ({
+        ...deletedChatState(state, key),
+        reactions: { ...state.reactions, [key]: [] },
+        channels: state.channels.filter(
+          (channel) => channel.channel_id !== group,
+        ),
+        rosterRequest: state.rosterRequest + 1,
+      }));
+      void channelRefresh.invalidate();
+    },
+    submitControl: (group, operation) =>
+      submitGroupControlIntent(rawSet, get, group, operation),
     refreshRoster: async () => {
       await get().refreshChannels();
       await get().refreshRoster();
@@ -1643,7 +2187,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // Compatibility for event providers predating logical DM identities.
     bump(set, key, isActive && isConversationVisible());
   }
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
@@ -1684,7 +2228,7 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
       ),
     );
   } else if (!e.own_device) bump(set, key, isActive && isConversationVisible());
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
@@ -1752,44 +2296,35 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   }
   const isActive = get().active !== null && convKey(get().active!) === key;
   if (!e.event_id && !own) bump(set, key, isActive && isConversationVisible());
-  if (isActive && !knownIdentity) void get().reload();
+  if (isActive && !knownIdentity) void requestConversationReload(set, get);
 }
 
 useChat.subscribe((state, previous) => {
-  if (state.unreadOwner && state.myAccountId) {
-    if (state.unread !== previous.unread)
-      saveUnread(state.unreadOwner, state.myAccountId, state.unread);
-    if (state.pendingUnknownUnread !== previous.pendingUnknownUnread)
-      savePendingUnread(
-        state.unreadOwner,
-        state.myAccountId,
-        state.pendingUnknownUnread,
-      );
-  }
   if (
-    state.ledger !== previous.ledger &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.unreadOwner !== previous.unreadOwner ||
+    state.myAccountId !== previous.myAccountId ||
+    state.runEpoch !== previous.runEpoch
   )
-    saveReceptionLedger(state.unreadOwner, state.myAccountId, state.ledger);
+    flushReceptionPersistence();
+  if (!state.unreadOwner || !state.myAccountId) return;
+  queueReceptionPersistence(state.unreadOwner, state.myAccountId, {
+    ...(state.unread !== previous.unread ? { unread: state.unread } : {}),
+    ...(state.pendingUnknownUnread !== previous.pendingUnknownUnread
+      ? { pendingUnknownUnread: state.pendingUnknownUnread }
+      : {}),
+    ...(state.ledger !== previous.ledger ? { ledger: state.ledger } : {}),
+    ...(state.overflowUnread !== previous.overflowUnread
+      ? { overflowUnread: state.overflowUnread }
+      : {}),
+    ...(state.historyFullBaselines !== previous.historyFullBaselines
+      ? { historyFullBaselines: state.historyFullBaselines }
+      : {}),
+  });
+});
+useAuth.subscribe((state, previous) => {
   if (
-    state.overflowUnread !== previous.overflowUnread &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.user?.id !== previous.user?.id ||
+    state.generation !== previous.generation
   )
-    saveUnreadOverflow(
-      state.unreadOwner,
-      state.myAccountId,
-      state.overflowUnread,
-    );
-  if (
-    state.historyFullBaselines !== previous.historyFullBaselines &&
-    state.unreadOwner &&
-    state.myAccountId
-  )
-    saveFullHistoryBaselines(
-      state.unreadOwner,
-      state.myAccountId,
-      state.historyFullBaselines,
-    );
+    flushReceptionPersistence();
 });

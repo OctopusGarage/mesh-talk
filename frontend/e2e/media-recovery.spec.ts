@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 type Diagnostic = {
   available: boolean;
   calls: Array<{ cmd: string; available: boolean; rejected: boolean }>;
@@ -139,7 +142,7 @@ test("received media recovers when bytes become available with stable fileConv",
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await expect(
-    page.getByRole("progressbar", { name: "Receiving file…" }),
+    page.getByRole("progressbar", { name: "Receiving image" }),
   ).toHaveAttribute("aria-valuenow", "50");
   const messageRow = page.locator(
     '[data-message-id="early-media-stable-message"]',
@@ -181,6 +184,14 @@ test("received media recovers when bytes become available with stable fileConv",
         },
       )
       .toBe(true);
+    // The 1200×900 fixture and provisional frame are both 4:3: decoding keeps
+    // the row stable while fitting the original image within the 320px cap.
+    await expect
+      .poll(async () => {
+        const thumbnail = await page.getByTestId("file-image").boundingBox();
+        return { width: thumbnail?.width, height: thumbnail?.height };
+      })
+      .toEqual({ width: 320, height: 240 });
     await expect
       .poll(() =>
         messageRow.evaluate((row) => row.getBoundingClientRect().height),

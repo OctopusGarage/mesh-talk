@@ -28,24 +28,265 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+## Completion and retirement evidence
+
+Readiness and completion must name the operation, source generation and owning
+scope being observed. A delay, an empty queue, an unchanged counter or the
+absence of a stale effect does not prove that its asynchronous consumer finished.
+Retain and await the actual task before making authoritative no-effect assertions.
+When a browser seam exposes only a transport resolver, pair its integration
+scenario with a component test that captures the real handler or effect task;
+select both through the owning validation contract. Preserve browser interaction,
+current-operation success, native-bridge identity, visual and strict error checks.
+
+Favorites navigation, initial App presentation and ConversationView attachment
+acquisition follow this paired contract. Hold consumer progress independently of
+transport completion, retire its owner, then release and await that exact task.
+Verify that the stale effect remains absent after settlement. A replacement task
+finishing first cannot stand in for the retired task. Qualify changes with a
+temporary guard-bypass control that fails the stale-effect assertion, then restore
+the guard. Fake-time advancement can demonstrate why an old elapsed-time sample
+was insufficient; it must not become the completion witness.
+
+Process execution follows the same rule: a command leader exiting does not prove
+its descendants retired. Shared runners use the validation stage's process owner
+rather than creating an independent nested process group. On POSIX, the outer
+owner retains termination escalation and resource leases through verified group
+retirement, including ignored-stdio descendants and ordinary leader exit.
+Nested cancellation notifies that owner. Windows commands join a private native
+job at process creation, before the first target instruction, with no breakaway
+or inherited job handle. The owning adapter preserves argv, environment, working
+directory and byte streams; its private control pipe never reaches target stdin.
+Retirement requires an empty job, a signaled retained leader handle and drained
+output. The parent accepts only the current invocation's nonce-bound receipt;
+helper exit or kill-on-close containment alone cannot certify cleanup.
+Ordinary leader exit starts
+owned-scope retirement. Retire remaining descendants and verify cleanup before
+returning the leader's exit status or releasing resources. This accommodates
+compiler auxiliary processes without process-name exceptions or breakaway.
+Record forced retirement separately from command status; it never substitutes
+for selected test counts, business assertions or complete output evidence.
+A Windows job-termination request also closes an empty job; the recorded flag
+does not by itself indicate leaked work.
+Job retirement, output drain and error recovery share one bounded cleanup budget
+inside the parent's missing-receipt backstop. Cancelled or unverifiably retired work
+cannot admit another suite, fallback build or transport operation, or create a
+successful reusable receipt. Platform evidence must distinguish cancellation from
+an incomplete or mismatched test inventory; success still requires every selected
+step and its positive test counts.
+
+Keep stdout and stderr distinct through command capture. Cargo JSON, test
+inventories and executed-case summaries consume complete stdout; the interleaved
+log remains diagnostic output. Both raw channel captures share one byte budget,
+and truncation invalidates machine evidence. Preserve original launch,
+cancellation and cleanup errors when capture validation also fails. Fixture
+program bodies stay static; pass paths, module URLs and configuration as argv or
+environment data rather than interpolating serialized values into program text.
+
+Intentional timeout, cancellation and output-limit fixtures declare their own
+execution scope so their faults cannot cancel the real validation caller.
+Verify these fixtures beneath a real managed supervisor as well as directly;
+require positive executed-case counts, since a nested test-driver context can
+otherwise suppress execution while returning success.
+
+Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
+state polling, termination grace periods and tests of time-dependent behavior.
+Their expiry signals failure or triggers escalation; elapsed time alone never
+certifies readiness, task completion or cleanup. Process-state probes and pauses
+consume one monotonic retirement deadline; per-probe timeouts must not multiply
+the total cleanup budget. Preserve documented performance
+assertions separately from harness watchdogs. Fix an incorrect observation or
+work owner before considering a budget change, and use same-source phase evidence
+to justify any deliberate change to a latency contract.
+
+## Browser integration evidence
+
 Changes to configured portable browser specs and the portable configuration
 select the `portable-browser-reporting` diagnostic. It compares both core and extended
 inventories with Playwright discovery without launching browsers. Register new
 scenarios in `requiredBrowserPaths` and additional spec files in the owning
 validation contract. Discovery checks do not replace executed browser evidence.
 
-Portable browser acceptance runs through `scripts/evals/portable-runner.mjs`.
-Windows uses four sequential Playwright shards with separate browser/dev-server
-lifetimes; other platforms use one. Each shard writes a unique nested evidence
+Portable evidence captures bounded browser-side stacks and nested causes before
+browser protocols can discard them; failures also print a bounded cause sample
+in job logs. A secondary-page control proves early error
+and rejection capture, navigation/disposal retention, limits and rejection by the
+shared strict error gate; the primary page still enters the real React app.
+Captured causes are diagnostics: a recovered React error still fails acceptance,
+and richer evidence alone does not establish a product fix.
+
+PR Chromium portable core acceptance reuses the complete full-suite execution on
+each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
+core scenario paths from each of four shards, copies and validates screenshots,
+success traces and raw scenario metadata, then validates the exact once-only
+union using the current source/run/attempt/platform identity. Missing, failed,
+flaky or skipped portable scenarios fail acceptance.
+
+Portable specs must explicitly enable `trace: "on"` under the full-suite
+configuration, which otherwise retains traces only on failure. Validate changed
+portable scenarios through the full configuration and evidence extraction as
+well as standalone portable execution; its global trace setting can hide a
+missing spec-level declaration.
+
+Windows uses the same `windows-latest` runner as the full suite; Chromium context
+settings match the standalone portable configuration. The collector reopens evidence on Linux with
+an explicit expected source platform, rather than trusting a producer verdict.
+Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
+Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
+and Health, so late desktop scheduling cannot delay that merge. Portable collection
+and final UI acceptance still require both complete groups. One optional job
+renders all three HTML reports outside acceptance.
+Desktop browser shards start after Health completes, limiting the initial runner
+burst. Portable Health and independent backend jobs use the standard
+`macos-26-intel` pool. All browser suites, the Rust workspace and real native
+desktop acceptance retain `macos-latest` Apple Silicon execution. Measure both
+queue and execution before moving a workload: Intel qualification substantially
+increased full Chromium execution time, and cold WebKit startup left too little
+of the existing scenario budget for its assertions. Vite warmup did not show a
+repeatable improvement in fresh-server comparisons and is not enabled.
+Staging desktop admission keeps full Chromium out of the initial ARM burst. Intel is a
+[standard hosted runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+not a larger-runner purchase; both pools still require measured queue and execution
+evidence. Keep artifact consumers and app-bound required check names aligned when
+changing labels.
+The full suite keeps its existing harness budgets: Linux 90 seconds when collecting
+browser coverage, Windows 90 seconds and macOS 30 seconds; standalone portable uses
+Linux/macOS 30 seconds and Windows 120 seconds. These are harness watchdogs, not
+product latency assertions. Chromium's device and timezone are aligned; the
+Windows image is the full suite's `windows-latest`, not the former standalone
+`windows-2022` image.
+
+For transient message highlights, start `helpers/message-highlight.ts` observation
+before navigation. Its browser-side predicate captures the visible exact target
+and rejects competing highlights within the existing assertion budget. Keep
+subsequent navigation/context assertions and the production highlight lifetime;
+controller round trips must not determine whether short-lived feedback occurred.
+Recovery-batch fixtures send ordered events in one browser call and yield a render
+turn between deliveries. Preserve every payload and completion marker, and verify
+intermediate unread counts; a synchronous burst changes the scenario being tested.
+
+The browser harness still relies on Vite source-module imports, explicit lazy
+module failure routes and an unbundled media harness. A built-preview replacement
+must first supply equivalent bundled test seams, preserve negative controls and
+validate source-mapped coverage. Changing only the server command drops those
+contracts and is not a qualified optimization.
+
+Dedicated WebKit and Firefox core run on ordinary PR, main and merge candidates
+through `scripts/evals/portable-runner.mjs`. Scheduled/manual extended runs add
+Chromium and Firefox extended inventories. Firefox uses the same complete evidence
+validator and existing job budget in both modes; browser-specific core regressions
+must be detected before source acceptance, rather than first by the next scheduled run.
+Windows derives sequential process count from the actual inventory, retaining at
+least four processes and at most 20 scenarios per process; other platforms use one.
+Browser/dev-server lifetimes remain separate. Each shard writes a unique nested evidence
 root and must exit successfully. The runner merges every outcome and validates
 the unchanged full scenario inventory before the existing screenshot/trace
 validator runs. Missing, duplicate, skipped, flaky or failed cases remain failures.
-The current 76-case core and 77-case extended inventories keep each Windows
-process to at most 20 scenarios; discovery regressions verify this bound and the
-exact once-only union. Two 38-case processes exceeded the 20-minute hosted job
+The current 80-case core uses four Windows processes and the 81-case extended
+inventory uses five; discovery regressions verify the per-process bound and exact
+once-only union. The full Chromium workflow retains its separate four-shard contract. Two 38-case processes exceeded the 20-minute hosted job
 deadline after 75 of 76 scenarios passed, with later page loads slowing down.
 Four processes reduce that accumulation without increasing the job deadline,
 retrying failed scenarios or establishing a product latency guarantee.
+
+A media-cache/virtualization fixture must establish both reader intent and the
+observed navigation boundary. Its trusted Home key reaches React's reader handler
+before a one-shot window bubble listener prevents default and sets the history
+start in the same event task. This fixture owns that cache-remount boundary;
+it does not assert browser paging semantics. Large wheel deltas are normalized,
+Home behavior differs across platforms, and requiring every PageUp to make
+monotonic progress adds an unrelated native-navigation assumption. A bare
+programmatic scroll can instead be treated as layout correction. The missing-reader
+negative control must fail. Retain explicit live-edge setup, exact history-start
+position, unmount, return-to-latest, row geometry and media URL reuse assertions.
+
+Geometry polling treats an unavailable bounding box as pending. Poll callbacks
+must return that unavailable state rather than dereference it or invent zero-sized
+geometry; callback exceptions abort polling. Capture a positive baseline and keep
+accepted image/frame rectangles from one visible decoded instance, as in the reply
+preview fixture. A temporary disappearance must recover within the existing assertion
+budget, while a permanently missing row must still fail the same geometry assertion.
+
+Presence expiry fixtures observe consumption of the distinctive lease source
+before failing subsequent reads. Deleted-contact fixtures await the post-change
+roster refresh before asserting absence. A sleep shorter or longer than a polling
+period proves neither of those operation boundaries; delayed-consumption and
+paused-polling controls must still exercise expiry, recovery and reappearance.
+
+Custody propagation fixtures first observe the newly created channel's signed
+inventory/control heads, reciprocal exact-peer capabilities and an authenticated
+settled Custody-domain sweep in each direction. The completion must be enabled,
+have no continuation and match the nonzero remote digest to the committed local
+scope. A fixture-local observation epoch clears on a new Custody attempt, so
+failure or cancellation cannot reuse an earlier success. Readiness observed before
+channel creation does not cover that new work. Hold a real authenticated inventory
+response to verify that setup remains pending until release; accept authenticated
+superseding heads so an obsolete captured version cannot strand the fixture.
+The Optional bootstrap must also be currently settled in both directions: a new
+pass clears that observation, and only full UpToDate completion restores it. A
+completed Custody page can precede unfinished DmRecall work and its backoff in the
+same lane. Hold a real authenticated DmRecall response after a prior empty baseline
+to prove the earlier setup predicates cannot admit the observation window. A
+paid GroupActivity continuation on that same Optional lane must also keep setup
+pending while its real response is held; release it before admitting the window.
+The channel-specific heads establish post-create freshness; do not require an extra
+periodic bootstrap pass or manually warm the data path.
+Aggregate document status includes independent lanes and is not this setup proof.
+After actual startup, a held Directory/DeviceHostname update must allow setup and
+fresh message/custody progress without releasing the unrelated handler. Capture and
+authenticate the channel's immutable inventory/control bootstrap floor before
+arming that hold, and retain the same floor afterward. Later descriptive inventory
+publications must not move an already satisfied barrier into the held Directory
+lane. A controlled post-hold profile display update through the owning inventory
+publisher must leave latest-head setup pending while the captured-floor setup
+completes immediately, with the handler still actively held. Retire the
+external holder after its real receipt so a direct query cannot replace proof of
+the source-authored sibling import.
+Keep the existing custody observation budget, real network exchange, offline-holder
+and restart assertions. This setup boundary does not establish a production latency
+guarantee or a dependency between independent mandatory/optional worker lanes.
+
+Forwarding fixtures await the first nonempty authenticated export from the real
+background publisher while peer reads remain held. Durable admission does not
+await publication. Assert the exact first-leg contents immediately on that first
+export; polling until the expected contents appear could conceal an invalid leg.
+
+Keep intentional blob corruption separate from automatic custody propagation.
+A real sibling read during a missing-blob interval can change its protocol retry
+state even after the source repairs the blob. The storage-repair fixture uses a
+real external holder and awaited encrypted delivery/recheck, with no autonomous
+source worker during corruption. It proves unknown rather than zero, repair
+without signed metadata churn and durable readability after reopen. Automatic
+propagation retains its original deadline with the external holder already
+offline, without an explicit pull or prior custody warmup. Controlled fault-path
+evidence does not by itself identify the cause of a historical timeout; matching
+sanitizer execution remains required.
+
+Explicit-file result fixtures establish authenticated File capabilities in both
+directions before admitting their first request. A forward role view does not
+prove that the executor can fetch the sender's prepared assets: document import
+can wake work before its authenticated capability receipt is installed. Hold a
+real reverse Control response to verify this setup boundary, then retain the
+original operation deadlines, matching-retry and byte assertions. Deliberate
+capability-refusal scenarios must preserve their missing-capability state.
+
+Both the initial requester and the fresh result requester finish cold capability
+setup before invoking the unchanged three-second signed-role proof. Running nodes
+observe their existing producers. The fresh requester intentionally has no
+background worker before retry admission, so its cold phase drives the required
+Control exchange and retains the shared owner's cursor, authenticated interruption
+classification and admission backoff. Do not start its worker early: that would
+erase the result-adoption race. A real fresh Control response held beyond the role
+budget must complete through cold setup before the original matching-retry and
+byte assertions. Static phase markers distinguish initial and fresh setup failures.
+
+Dialog-to-menu regressions distinguish fixture state from actual focus ownership.
+Hold the real deferred close-focus callback, remove the old dialog, open the next
+menu through a real click, and release the callback. The new menu must retain its
+focus and open state. Waiting for an animation alone would hide this production
+handoff bug. Preserve ordinary/nested close restoration and custom handlers;
+[the shared dialog owner](module-boundaries.md#dialog-focus-ownership) defines the
+contract. Observe expanded/open menu attributes in navigation helpers.
 
 ## Validation stages and agent responsibilities
 
@@ -94,6 +335,10 @@ For every new requirement, the implementation owner follows this sequence:
 4. Add independent assertions derived from the requirement or a historical
    failure. For a reproducible bug, show the regression failing before the fix.
    Run affected checks while editing and replan when scope changes.
+   When a confirmed defect exposes a reusable failure pattern, update the
+   [AI coding reliability guide](ai-coding-reliability.md#keep-the-guide-useful-as-defects-are-found)
+   with its trigger, owning contract and regression evidence; keep incident logs
+   in ignored output or PR/CI artifacts.
 5. Run `make standards-check` and `make verify-changed`. Report the tested source,
    observed outcomes and outstanding obligations in the PR. Complete the existing
    protected CI checks before claiming merge readiness; comprehensive local
@@ -149,6 +394,202 @@ selection omissions. Missing data stays unknown. Investigate newly slow or flaky
 checks before adding retries or global obligations. A policy change needs an
 explicit rationale and review; this process does not automatically rewrite rules,
 relax thresholds or infer a speedup or zero omissions from a small sample.
+
+Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. The generic History-off/signed-provenance functional fixture uses a thirty-second watchdog around source and requester commitment, exact effect IDs and durable private projections. This is a functional completion bound, not an eight-second business latency guarantee. Dedicated request/result and held-traffic performance fixtures retain their independent eight-second assertions. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
+
+Selected-source fixtures retain the eight-second foreground receipt assertion.
+The two-executor fixture keeps A's repeated public status polling. B's timed
+observer reads its retained receipt for one submitted demand, without generating
+retry nonces and additional signed publications; both public status APIs must
+then return that same committed event. This isolates preemption evidence and does
+not claim throughput for repeated B retry queries.
+After releasing held traffic, complete public fanout, signed background rows and
+both preserved comparisons under the existing thirty-second recovery watchdog.
+Require exact continuation replay and pair retirement throughout this recovery;
+paid background pages retain their ordinary cross-peer scheduling priority.
+Silent join-history loopbacks use a thirty-second functional receive watchdog
+while preserving authority, protected-content filtering and provenance checks.
+Background departure retries use a thirty-second functional watchdog,
+allowing the existing fifteen-second peer exchange and bounded local continuation.
+Independent simulated hosts use four Tokio workers. Discovery-triggered peer
+history recovery keeps one original five-second absolute deadline across content,
+batch completion and the first ready history snapshot; exact `StaleCursor` may
+defer that snapshot, but a ready result is asserted immediately. The offline
+author, discovery-only trigger, exact event and batch identities, catch-up
+provenance, original-push and retirement guards, and foreground-operation
+deadlines remain unchanged. The departure watchdog is not a new end-to-end
+latency guarantee.
+The dedicated notification-driven gossip fixture excludes both periodic recovery
+clocks and expired fallback work in its existing worker, then requires all five
+receivers to expose the same canonical message within an eight-second functional
+watchdog. Setup queues its channel before the worker starts; no post-send manual
+recovery, resend, or roster change is allowed. The fixture also rejects fallback
+or custody-tick work during propagation. Its recorded two-second comparison is a
+performance observation, not an end-to-end latency SLA; disabling periodic rescue
+proves notification-driven progress directly instead of inferring it from timing.
+Timestamp each canonical history read on its admitted blocking worker after the
+read and exact-ID extraction finish, against the same absolute eight-second
+cutoff. Async resumption after that cutoff cannot change the immutable completion
+witness. Cleanup may join and inspect only the original pending read; it cannot
+start another read or accept a completion after the cutoff. Real-history controls
+must accept timely reads with delayed result delivery and reject late actual reads.
+All listeners must be bound before cold exchanges start. Initial authenticated
+recovery has a separate thirty-second setup watchdog, accommodating the existing
+fifteen-second peer exchange; it does not consume or extend the post-send window.
+Keep the bounded phase trace with elapsed time and fixture peer indices so a
+setup failure identifies the unfinished exchange without logging identities.
+
+Mixed indexed/legacy TCP compatibility fixtures prepare both complete durable
+inventories before their one shared sixty-second exchange watchdog. Preserve the
+1501-event inventory that crosses the 1500-ID Have chunk, both request directions,
+durable Have and convergence assertions. Record setup separately from exchange
+time and join or cancel all server tasks before dropping profile leases. This
+functional exchange bound does not impose a durable fixture-ingestion SLA.
+Local recovery scheduling requires a real authenticated peer response held after
+its exact group fingerprint request. Append a different signed group only after
+that hold enters, notify the existing producer once, and require multiple bounded
+local turns, source-authenticated Directory publication and exact sibling import
+within the original eight-second watchdog. Keep the peer held throughout; peer
+timeout, completion, manual preparation and optional-history transfer cannot
+satisfy the test. Join every owned task before reporting a failure. Pair this
+regression with quiet/deduplication, network wake/backoff, maintenance isolation,
+plaintext storage-failure and custody-denial coverage.
+Verify completion handoff with two queued identities, repeated completion of a
+missing identity and an empty queue. A coalesced wake consumed by a completed
+identity must continue the remaining durable work without creating an idle loop.
+The federation notification fixture observes a completed empty exchange and
+quiescence before ingesting its twenty preconstructed envelopes. Disable idle
+fallback for that invocation, then require a new dirty turn, a full mailbox
+batch, a drained continuation and every exact target ID under one thirty-second
+functional watchdog. A fixed startup sleep or a shorter wall-clock timeout does
+not prove notification ownership. Removing mail-change scheduling must fail this
+oracle; keep ordinary jitter and continuation pacing in the other fixtures.
+
+Post-create custody setup requires the selected channel's authenticated inventory
+and control head floors plus exact bidirectional device capabilities within its
+thirty-second watchdog, with the current whole-Optional bootstrap complete in
+both directions. A same-lane DmRecall or GroupActivity hold keeps setup pending.
+An independent Directory hold may keep aggregate document status catching up;
+its later display-only heads do not replace the authenticated bootstrap floor.
+Before taking a real holder offline or changing its certificate binding, observe
+the exact positive source custody count within a separate thirty-second setup
+watchdog. A send makes one bounded attempt and does not promise custody; the
+existing peer exchange may itself use fifteen seconds. This setup observer uses
+only custody-change notifications and reads, without manual recovery or warmup.
+An authenticated custody-response hold keeps the exact source observation absent
+on the sibling until the real holder has stopped and drained; the sibling has no
+independent holder route. Release that hold only at the offline cut, then require
+the source's valid signed observation at the captured or newer order under the
+original custody deadline. Independent held document lanes stay held throughout.
+The custody scenario's independent eight-second assertions remain unchanged.
+The group-forwarding loopback completes profile and signed-membership setup
+under a thirty-second setup watchdog before its existing twenty-second
+content-operation watchdog; fixture retirement has a separate fifteen-second
+watchdog that retains the original failure phase. Independent hosts
+use the production multithread executor; all original ordered-text, archive,
+exact-history and consent assertions remain. Failure reports retain the last
+operation phase, and every exit joins admitted fixture producers before teardown.
+
+The mandatory account-wake fixture also separates its synchronous SQL observer
+from the two simulated hosts with two protocol workers. Its first five-second
+window still starts before group creation, and its second starts before either
+Appearance policy write. A held fresh source inventory header must cause the
+first window to fail even after Owner access arrives. Qualify the exact new key,
+positive source head and missing receiver document, then release and join before
+asserting. Keep bounded local-publication and actual header/completion timing;
+executor alignment alone does not prove a historical timeout mechanism.
+
+When a reference-device fixture requires a synchronous capability-cache override
+and admission on one current-thread runtime, keep that requester and its watchers
+there. Run the other simulated devices' complete accept/background owners on
+independent owned current-thread runtimes. Transfer listeners through standard
+sockets before registering them on the owning reactor; release all server start
+gates together without warmup traffic. Preserve each explicitly scoped functional
+or performance deadline, resource budgets and signed-provenance assertions. Post-commit public network observations
+run on the observing device's runtime. Shutdown closes admission, cancels and joins
+producers, clears idle sessions, drains admitted writers and joins every owned
+thread, including panic cleanup. A same-source topology comparison diagnoses a
+fixture constraint; it does not establish the cause of every CI timing failure.
+
+Modern self-control fixtures allow thirty seconds for cold, bidirectional
+capability and role readiness before admission, matching the existing owner-rename
+setup boundary. This is a bounded setup watchdog, not an operation latency claim:
+retain every full-identity capability and signed-provenance predicate, record
+setup duration and complete/capacity diagnostics, and keep the independent
+admitted-action deadline at eight seconds. The archive-marker setup and dedicated
+held-traffic latency assertions also retain their existing eight-second bounds.
+Cold authentication and control exchanges keep their production network limits.
+
+Reference self-control fixtures hold requester-side public membership recovery
+for the selected group through the remote action proof. Disabling account History
+does not disable that recovery owner; it can otherwise create a ready local
+executor during setup. Use an instance-scoped test gate before privacy and
+membership locks, retain real private role/capability exchanges and release the
+gate on every exit. Assert the admitted executor's full identity and derive its
+diagnostic label from admission, rather than assuming the setup peer was chosen.
+
+Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
+
+Pagination fixtures distinguish a completed comparison sweep from a settled full
+scope. A selected signed row can advance after its completion digest was captured;
+`pending == false` alone does not prove `up_to_date`. Start a fresh comparison
+through the existing cursor owner after a completed mismatch, retain partial
+continuations and the original total pull bound, and require both full settlement
+and the complete exact source metadata set. Failure diagnostics should report
+body-free cursor flags and metadata-class differences rather than message bodies.
+
+Growing-history fixtures observe exact durable IDs through the existing admitted
+blocking-work owner. Lossy `try_lock` polling can miss short writer gaps even
+when the original prefix is durable; synchronous reads can block the current-thread
+network runtime behind storage. A held-writer regression must keep the observation
+pending while an async timer remains live, then require the exact durable prefix
+after release. Run the final public history projection through the same blocking
+owner and retain its exact original-ID assertion within the same watchdog.
+Preserve the original corpus, source appends, continuation-page requirement and
+legacy protocol coverage. Forward progress through a changing archive does not
+require its moving digest to settle.
+
+Explicit custody-page fixtures follow the production cursor's local-admission
+contract. A typed local-capacity rejection exchanges no bytes: preserve the same
+cursor and continuation, wait for its existing retry time, and retry within the
+functional fixture's thirty-second watchdog. Two typed local-admission failures
+can legitimately require two five-second deferrals before a signed page completes;
+retain real admission and authenticated-page checks rather than clearing cooldowns. An early successful no-op while admission is still
+deferred does not prove a completed exchange. Other errors fail immediately;
+History-off, exact signed negative versions and repaired-positive assertions stay
+unchanged. Do not clear cooldowns, create a new cursor or warm the connection to
+avoid this boundary.
+
+File retry fixtures that require the initial best-effort attempt to fail can
+accept the real privacy handshake and immediately close before any application
+frame. Keep the original sending API, durable pending work, relay custody,
+consent and complete-byte assertions. Borrow the fixture listener only during
+that setup call; drop its responder before starting the normal production accept
+owner. This models an actual authenticated transport failure without spending
+unrelated handshake deadlines at an unserviced listening socket.
+
+For manifest frame boundaries, binary search a monotonic encoded-size predicate
+within the original range. Check the immediately preceding fitting case, the
+first protected overflow and ordinary-frame compatibility, then pass the original
+prospective manifest shape to the production selector. Keep real serialization,
+proof/expiry overhead and frame limits.
+
+Mutation timing comparisons must retain the actual package/workspace command,
+test inventory and process count. A package-only baseline does not establish
+that a larger workspace mutation run fits the same deadline. Improve measured
+fixture overhead without narrowing test scope. Budget the full inventory from
+observed work and runner variance; retain process isolation and per-test hang
+detection when correcting a whole-suite budget.
+A resource-bound argument may explain an equivalent surviving guard mutation;
+it cannot turn an interrupted or timed-out run into a completed advisory survivor.
+
+The development profile gives the protocol core optimization level 1 because
+its callers instantiate generic authenticated-encryption loops. Dependency-only
+crypto optimization does not optimize all of those loops. Tests and mutations
+inherit this setting while retaining debug assertions, overflow checks, complete
+inventories and existing worker/deadline limits. Release settings are independent.
+Compare execution time separately from initial and incremental compilation cost
+when assessing this tradeoff; a focused speedup does not certify a full baseline.
 
 ## Change-aware development plans
 
@@ -297,6 +738,153 @@ and release obligations remain unchanged. Compare median/p95 feedback latency,
 compile time, resource queue time, first-attempt failures and defects caught only
 by broader tests before claiming a speedup.
 
+### Cold fixture preparation versus measured progress
+
+Account-group Noise latency fixtures share the existing test owner's bounded
+30-second `cold_account_setup` for reciprocal capability establishment and the
+first authenticated response that creates a controlled hold. These waits happen
+before operation admission or before the external custody source starts. They
+establish the fixture's real connection state; they are not an eight-second
+operation or custody latency assertion, and they do not drive extra RPCs, warm
+session pools, retry submissions or suppress background workers.
+An authenticated socket closed before its first application request does not
+qualify as a stalled public response. Consecutive-control fixtures may tolerate
+the existing typed retryable transport errors at that boundary only. They still
+require a real public request and the same live response hold before and after
+the second committed operation under its original deadline. A controlled unused
+authenticated dial must not substitute for that qualified hold.
+
+Notification-only group gossip keeps ordinary periodic recovery during cold
+connection preparation. Each node disables that test clock after its first real
+clean exchange; preparation also retires already-started maintenance. The measured
+propagation phase begins only after all nodes have disabled periodic work and
+retains its original deadline, exact message evidence and zero periodic-work
+assertion. A failed cold connection must not silently remove the fixture's only
+remaining preparation path.
+
+Account-group setup uses the shared test-local `cold_account_control_setup` to
+finish cold capability observation before invoking the three-second signed-role
+page helpers. Each caller retains its exact full peer identities, directional
+operation-kind requirements and any stronger document-settlement predicate inside
+one existing cold budget. Autonomous fixtures observe their existing background
+producers. The inbound-only incoming-Wake fixture drives its existing two setup
+directions inside that budget before observing readiness; a passive wait there
+would have no producer to satisfy it. No extra warmup exchange is added.
+
+Reference Text/Sticker, owner rename and private policy/dissolve scenarios use the
+same ordering. Keep role-bootstrap protocol tests and deliberate capability-refusal
+cases focused on their original acceptance boundary rather than warming them.
+First public-fanout fault arrival also belongs to the cold owner: canonical
+publication-order tests still inspect the exact committed result and signed
+metadata at the first connection while fanout is pending. Consecutive-control
+tests retain both original eight-second commit/progress assertions, establishing
+the real live held response between them before admitting the second operation.
+
+Recovered-fanout fixtures observe the actual first local-turn completion before
+its durable fanout page is installed by the parent. The exact recovered target
+must still have its stale inventory and original journal revision, with no public
+exchange started. Only then release that handoff and start the unchanged refresh,
+retry and authenticated-receipt bounds. The owner-specific fixture runs the
+production account-history producer and real authenticated member server;
+unrelated recovery and delivery owners retain their full-runtime coverage.
+Capture both success and panic before releasing gates, closing admission, joining
+tasks and draining actual filesystem work. If retirement is unverified, retain the
+private store instead of deleting files beneath an admitted blocking publisher.
+
+`selected_source_cold_capability_setup_precedes_role_page_budget` holds the real
+first authenticated Control responses beyond the role-page budget in a two-device
+bootstrap fixture. It then requires reciprocal capabilities and the exact signed
+source role through the same shared phase owner. The original held-operation
+fixture retains its separate eight-second operation, receipt and recovery proofs.
+Both fault controllers belong to their fixture task sets, with drop guards that
+release held responses and cleanup that joins tasks and drains admitted writers.
+
+Queued-source fixtures retain the independent eight-second private operation
+receipt assertion. After that receipt and release of A, replay of all 66 signed
+rows, real public receipt and actual B comparison-pair retirement use the shared
+thirty-second functional convergence watchdog from the message-action fixture
+owner. This is an explicit correction of the original queued fixture's auxiliary
+eight-second recovery bound, not a product latency relaxation: after paid
+prefix/resume credit and terminal operation, the two retained comparisons follow
+ordinary cross-peer fairness. The product requires both scans to finish without
+combining checkpoints; it does not promise full-corpus convergence in eight
+seconds. Keep every recovery predicate, signature, continuation and lifetime
+check. The original selected-source recovery, other checkpoint/archive progress,
+Wake deadlines and production read clocks retain their existing bounds. Paused
+time controls require all recovery observations, allow convergence after eight
+seconds, and fail when pair retirement is absent at thirty seconds.
+
+Capture account document health before closing runtime admission or stopping
+peers. The test-local `capture_account_sync_before_cleanup` owns that observation
+boundary while still awaiting all caller-owned cleanup before the assertion.
+Never clear errors or wait for them to disappear. Validate the captured statuses
+with the unchanged no-document-error predicate; diagnostics follow the
+[sensitive diagnostic rules](../specifications/development_conventions.md#sensitive-diagnostics).
+`account_fixture_health_snapshot_precedes_real_peer_shutdown` holds an acknowledged
+real document request, stops its peer and observes the resulting real sync error;
+it verifies that teardown cannot replace the previously captured health evidence.
+
+Modern self-control fixtures observe validated Directory and Control scope
+completions in both directions for the selected full peer identities. These
+observations reset before final requester enrollment. The aggregate device sync
+phase includes unrelated lanes and is not a prerequisite for group admission.
+Keep the original role, capability and retained-membership proofs alongside these
+scope completions; the observations neither issue requests nor stop workers.
+
+Same-source partial-page fixtures prepare their immutable signed prefix before
+arming the held request. Every participating node must hold the exact current
+metadata and have consumed every prefix row through the normal verified operation
+input owner; `operation_input_consumed_for_test` binds that evidence to each
+current content hash. Require current directional operation capabilities and no
+outstanding comparison pair as separate facts. Possessing rows alone cannot pay
+comparison debt or certify their processing.
+
+Do not require full Control digest equality in every direction to establish this
+local preparation. The canonical owner can already hold all prefix rows while a
+replica is still empty; that valid comparison cannot make the whole views equal.
+Later imports intentionally do not send a publisher Wake back to the owner, so a
+redundant reverse completion may never occur. Use the current canonical and
+processed-input evidence rather than simultaneous idle workers or historical
+remote-scope observations. Add no bootstrap RPCs, synthetic completions or cache
+marks. Only then add the controlled tail through the existing source owner.
+A natural origin and an unprotected dispatch do not imply an unpaired task.
+Preserve the complete corpus, exact live-request checks and checkpoint repayment
+assertions when moving this preparation outside the operation budget.
+If a real Wake retires that preparation request, a later eligible comparison may
+advance the same signed tail key within the existing setup bound. Stop preparation
+once a live hold is captured; never retry the measured operation. The fault
+regression must prove cancellation, retirement and capture of a distinct live
+request before admission.
+
+Queued-source fixtures that publish a real head to retire an old natural request
+must invalidate the earlier empty-source settlement before publication. Reuse the
+shared `ColdControlScope` observation: every new Control task invalidates prior
+settlement, and a completed prefix cannot pay outstanding comparison-pair debt.
+Before capturing the next unpaired natural hold, require the exact published
+source key on the requester, current Control settlement, pair retirement and
+rejection of the retired callback by its exact request identity and child lifetime.
+Carry the captured hold's task identity through setup and verify that child is
+still live when the canonical partial-page corpus is published. These observations
+stay within the existing cold budget and issue no extra requests; preserve the
+real signed exchange, protected-resume checks and operation/recovery deadlines.
+
+Except for the explicitly classified queued post-receipt functional convergence
+phase above, once the original operation is admitted, or the external possession
+proof starts, the existing eight-second progress assertions remain unchanged. The same applies
+to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
+Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
+work drains. The overall nextest per-test 60-second and mutation 360-second
+limits remain authoritative; stage bounds do not add together into a larger test
+budget. Only waits with this specific pre-admission/controlled-hold purpose use
+the cold helper; do not replace unrelated eight-second waits by matching their
+numeric duration.
+
+Projection-work regressions distinguish root membership-control reconstruction
+from nested legacy parent-cut proof validation. Keep the original root-control
+counts and observe nested work separately. Content-only additions, including
+content after a real departure, must leave both counts unchanged; do not pin a
+particular nested count or hide nested work from total-work assertions.
+
 ## Structured development feedback
 
 Every affected execution writes a unique JSON report under
@@ -390,10 +978,16 @@ not a claim of hermetic execution or transferable signed evidence.
 No local receipt replaces a protected GitHub check. Local receipts are trusted
 workspace acceleration, not signed attestations against a hostile local user.
 
+Running-stage heartbeats exclude queue time, matching the structured execution
+duration rather than counting resource waits as test runtime.
+
 Heavy local stages share a resource lock across Git worktrees, preventing browser,
 coverage and Rust compilation workloads from competing. Node unit tests default
-to two workers and Rust tests to one thread; explicit `VITEST_MAX_WORKERS` and
-`RUST_TEST_THREADS` values override those defaults and invalidate matching evidence.
+to two workers. Cargo owns Rust test concurrency through `.cargo/config.toml`
+(four threads); the supervisor does not inject a competing default into aggregate
+stages or their Cargo children. Explicit `RUST_TEST_THREADS` values remain
+authoritative for serial Windows/sanitizer checks and invalidate matching
+evidence. Direct test-binary callers must supply their intended thread budget.
 Each browser stage owns an available port and private results/report directory.
 The full browser process has a two-hour ceiling; selected/portable processes have
 30 minutes. `MESH_BROWSER_TIMEOUT_SECONDS` can set an explicit 1–7200 second
@@ -414,17 +1008,26 @@ retains resource ownership through descendant-process cleanup. Nested POSIX
 stage commands share the outer managed group and its single escalation owner;
 nested leases are not released before group termination. Subsequent waiters
 recover locks whose nested owner was terminated.
+Before admitting detached POSIX work, persist that its leases require retirement
+proof, then publish the actual owned process group. An interrupted publication
+leaves unknown ownership and cannot be recovered from PID death alone. A known
+group permits dead-owner recovery only after that group's work has stopped.
 POSIX cleanup confirms that the managed group has no runnable descendants after
 escalation; unreaped zombies do not count as running work. Dead nested owners
 cannot release a lease while their group still runs. If process-state inspection
-is unavailable or Windows `taskkill /T /F` fails, termination is unverified:
+is unavailable or the Windows owner cannot provide verified retirement,
+termination is unverified:
 the cancelled attempt produces no successful receipt and its locks remain
 quarantined. Inspect the attempt log and the lock's `owner.json`, establish that
 all descendants have stopped, and remove only those quarantined lock directories
-to recover. Automatic dead-owner recovery never clears quarantine. A Windows
-taskkill success is OS process-tree evidence, not a native UI acceptance test.
-It relies on the OS command's result; it does not independently enumerate and
-verify every terminated Windows descendant.
+to recover. Automatic dead-owner recovery never clears quarantine. Windows locks
+also retain `windowsRetirementRequired`; a dead owner PID cannot release them
+without proof. Establish retirement from native evidence or an OS restart before
+removing only the affected lock directories. Native job tests use a real native
+leader: Node/libuv's own child-job cleanup can conceal an inherited-descendant
+defect. Portable receipt-rejection tests prove the parent protocol, not Windows
+kernel retirement or native UI acceptance. Declared-input receipt identities
+include all three Windows adapter source files on Windows.
 Tool versions and mutable configuration digests are rechecked after queueing,
 before reuse and after execution; changes invalidate evidence rather than
 publishing success under the earlier identity.
@@ -447,34 +1050,93 @@ settings; browser timeouts must not be masked by a retry after idle sleep.
 
 ## CI ownership and browser sharding
 
-The standalone `scripts/check-health.sh` still runs the full local gate before
-requesting review. Hosted workflows divide the same responsibilities so that
+For decisions about adding, reusing, splitting or retiring CI work, follow
+[CI maintenance](ci-maintenance.md). This section owns the current execution
+arrangement; the measurement section below owns timing commands and interpretation.
+
+The standalone `scripts/check-health.sh` runs the full local gate when comprehensive
+local verification is requested. Hosted workflows divide the responsibilities so that
 independent checks run concurrently and heavy suites are not repeated by health.
 
-| Owner                                 | Checks                                                                                                                                                                                                                 |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, dependency audits on Linux/macOS/Windows                                                                                                      |
-| `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
-| `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage, Linux multi-process coverage and eval smoke |
-| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, optional-pack checks, portable browser matrices and scheduled extended scenarios                                                                       |
-| Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
+| Owner                                 | Checks                                                                                                                                                                                                                                                                |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
+| `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                                                                 |
+| `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
+| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                 |
+| Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                                                                       |
 
-Every existing protected health name now requires both the source scanner job
-and the complete platform static matrix. A failed, cancelled or skipped dependency
-fails the gate. Health runs for every PR base so moving source checks out of CI
-does not leave non-main PRs without them. CI retains the weekly Rust run formerly
-provided by scheduled full health; UI E2E runs the full browser matrices daily.
-A manual health workflow dispatch runs static checks; dispatch CI and UI E2E too
-when complete hosted verification is needed. The local full-health command is
-unchanged. Required CI, health, UI E2E and backend check names remain stable.
-The protected `Full Linux UI regression` name now belongs to the coverage merge
-job, which explicitly fails when its browser shard matrix is unsuccessful.
+Health is called by the UI workflow for every PR base and merge candidate, with
+its own weekly/manual entry points. Direct source and platform checks are required
+individually; no new VM is allocated merely to copy their aggregate result. The
+replacement policy and source-release consumers share
+`scripts/ci/required-checks.mjs`, including current-source ASan and mutation-runner
+acceptance for release; migrate administrator branch protection only
+after current-source replacement checks pass, as described in
+[quality gates](quality-gates.md). CI retains its weekly Rust run; UI runs full
+browser matrices daily. Dispatch CI and UI when complete hosted verification is
+needed. A manual Health dispatch runs its portable/static responsibilities.
+The protected `Full Linux UI regression` name remains the coverage merge job,
+which rejects failed, skipped or incomplete dependencies.
+
+Each CodeQL matrix job validates the local SARIF directory returned by its actual
+analysis action after uploading results. Upload success alone does not certify
+zero unresolved findings. Reject unknown or changed findings at every severity,
+analysis errors, and missing or malformed reports. The finite
+`.github/codeql/reviewed-findings.json` inventory binds previously reviewed false
+positives to their exact rule, path, primary-line fingerprint and normalized
+data-flow evidence, including the actual checked-out source spans, with the
+existing alert review and rationale. Moving an
+unchanged finding to another line does not change its identity; changing its
+rule, sink fingerprint or modeled flow does. New findings cannot enter the
+inventory automatically: review their actual source and flow before changing
+this policy through a PR. Remove obsolete entries when their false-positive
+model is fixed. No new alert dismissals or query exclusions are introduced.
+Disable diff-informed queries so PR and main use the same full analysis and
+reviewed-finding gate. Keep Rust, JavaScript/TypeScript and Actions analysis,
+uploads and reviewed query configuration. This enforces the release owner's
+zero-open-alert policy before merge without extra API permissions. Hosted full
+analysis and zero unresolved main alerts remain required; raw SARIF may still
+contain individually reviewed false positives.
+
+Portable validation reuses Health's existing Node, Python and frontend dependency
+setup. Native CI no longer waits for frontend unit tests, help audits or diagnostic
+regressions before starting Clippy and workspace builds. Health uploads frontend
+coverage from Linux; macOS and Windows run the same complete Vitest inventory
+without collecting unused duplicate reports. Linux still enforces the configured
+coverage thresholds and supplies the same-run browser line map. Test deadlines
+and assertions are identical in both modes. CI uploads Rust coverage from each
+platform. Both workflows remain protected, including strict
+coverage upload failures. Native CI has a 90-minute job budget; Health portable
+jobs have a 25-minute budget. These are execution bounds, not latency promises.
+Compare hosted queue, execution and all-required-check completion after deployment.
 
 Full Chromium tests use four Playwright shards per OS, with one worker and zero
 retries per runner. This keeps the existing per-machine rendering budget while
 running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.
+
+Disposable GitHub-hosted Ubuntu CI, mutation, browser and native UI runners
+prepare their APT sources before dependency installation.
+`scripts/ci/ubuntu-apt-source.mjs` replaces only the exact Azure Ubuntu archive URI
+with the official HTTPS Ubuntu archive, including URI entries in the referenced
+`/etc/apt/apt-mirrors.txt` runner mirror list. It preserves suites, components,
+signing keys, security repositories, other origins and mirror priorities. The
+helper rejects other host environments, unsupported Azure URIs, unrecognized
+mirror-list references and symlinks. It validates all candidate files before
+writing and preserves file ownership and permissions. This avoids a slow
+runner-image mirror consuming the existing job budget; browser workers, retries,
+test inventories and deadlines are unchanged.
+
+The Windows workspace producer runs `scripts/ci/windows-native-deps.mjs` before
+Cargo. It probes installed Perl executables for native `MSWin32` execution and
+the `IPC::Cmd` / `Locale::Maketext::Simple` modules, then pins the validated
+absolute path through `OPENSSL_SRC_PERL` and `PERL`. This avoids Git Bash's partial
+MSYS Perl during vendored OpenSSL configuration without changing vendoring,
+compiler settings or test gates. Missing or incomplete native installations
+fail the dependency step. Portable probe fixtures do not replace the hosted
+Windows build.
 
 Windows full-regression runners expand the IPv4 TCP client port pool to
 10000–65534 before browser execution. Repeated fresh contexts load Vite's module
@@ -493,28 +1155,118 @@ one browser LCOV upload. It prefixes filenames so reports from different runners
 cannot overwrite each other and clears old output only after validating every
 input. Unit coverage artifacts are attempt-bound: use **Re-run all jobs** for this
 workflow when retrying a failed attempt, so producer and shards belong to the
-same attempt. The extra producer job adds setup/queue/transfer cost; benchmark
-its net latency and runner-minute effect before claiming a speedup.
-The final UI gate requires successful browser, coverage, merged-report,
-optional-pack and portable jobs, plus Firefox when selected. Blob reports and failure
+same attempt. Health's existing Linux job produces this artifact; no additional
+unit-test runner is allocated. Include artifact transfer and consumer validation
+costs when measuring the benefit of reuse.
+The final UI gate requires successful browser, coverage, optional-pack and
+portable jobs and Firefox core (or the complete extended Firefox inventory when selected).
+HTML report rendering runs independently
+and is not a merge acceptance dependency; each test shard still requires its raw
+blob/trace evidence upload to succeed. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
+
+Successful shard uploads contain the raw Playwright blob (including its
+attachments) and structured JSON results, without a second copy of
+`test-results/`. Failed or interrupted UI execution additionally retains raw
+attachments under `ui-failure-attachments-*`, so incomplete blobs do not discard
+available diagnostics. Portable evidence extraction and its verified collector
+remain separate consumers. The actual Playwright round-trip in
+`scripts/diagnostics/playwright-artifacts.test.mjs` removes raw output before
+rebuilding JSON/HTML and verifies passed and failed case attachments byte for byte.
 
 The Rust build cache maps the workspace root to `target/`, matching
 `cargo metadata --no-deps --format-version 1`. The CI cache has its own build
 configuration key; native release, mutation and sanitizer caches stay separate.
 Cached build output never replaces executing checks on the current revision.
+Verification jobs restore caches on all selected events, while only `main` writes
+Rust caches. This avoids accumulating PR-private compiled copies that other PRs
+cannot reuse. A PR changing dependencies may rebuild them until its lockfile lands
+on main; normal main checks refresh the shared baseline. Existing caches are not
+deleted by this policy. See [GitHub cache scope](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache).
 
-Mutation testing retains one rotating workspace sample across four runners. Its
-120-minute job budget covers setup, the unmutated baseline and the complete sample;
-it does not extend the 60-second per-test or 240-second per-suite deadlines. The
-October 25 sample selected 16–17 mutants per runner, with builds up to 130 seconds
-and successful suites around 180–217 seconds. A 60-minute job canceled unfinished
-shards despite passing baselines. Reassess this budget from selected counts and
-build/test timings as the workspace grows; incomplete reports still fail the gate.
+The protected `mutants` check verifies the pinned runner on PRs, merge groups
+and main pushes using real tiny-crate caught, survivor, baseline-failure, hanging
+and empty-selection scenarios. Broad workspace mutation sampling is daily/manual
+assurance, outside merge acceptance; it is not claimed as PR mutation coverage.
+The gate requires runner-contract success on every event. It requires complete
+successful deep shards on daily/manual runs and an explicitly skipped deep job
+on other events; unexpected missing, cancelled or failed work never passes.
+Daily failures remain visible in Actions and require owner triage before the next
+scheduled run. Dispatch Mutation Testing after a critical invariant change when
+immediate deep evidence is needed. This policy keeps all ordinary platform,
+security, unit, integration and coverage acceptance gates in place.
+
+Mutation runners list their exact rotating/diff selection before installing native
+system libraries, restoring compiled caches or building the frontend. An empty
+selection skips those execution costs; listing errors fail the runner. Nonempty
+selections still execute their own unmodified baseline and strict outcome validation.
+The preflight does not narrow the sample or certify any test result. Pinned-tool
+smoke tests cover empty and nonempty selections without compiling a failing fixture.
+
+Daily/manual mutation testing retains one rotating workspace sample across four runners and
+four isolated test processes per runner. The 180-minute job budget covers setup,
+the baseline and the observed sample of up to 17 mutants. Each complete workspace
+suite has a 360-second bound; individual tests retain the 60-second hang detector
+and five-second termination grace. Failed or interrupted reports still fail the gate.
+
+Run 40922461468 exposed a budget mismatch: the package baseline ran 2,228 tests
+and took 223 seconds on the slower runner, while every mutation ran 2,829 tests.
+The baseline core work plus observed host work already exceeds a 240-second
+four-process budget, even before the remaining workspace tests.
+At cancellation, the active tests were only milliseconds to ten seconds old;
+none had reached the individual hang limit. Other shards completed the same full
+inventory in 183–209 seconds, confirming runner variance rather than a universal
+hang. The six-minute suite budget includes the larger inventory and variance;
+it does not reclassify those interrupted runs as successes or change test scope.
+Reassess budgets using actual commands, inventories and build/test timings as the
+workspace grows, rather than comparing a package baseline with a workspace run.
+
+The pinned cargo-mutants 27.1.0 baseline selects only packages containing the
+selected mutations, even with `--workspace --test-workspace true`; individual
+mutations still run the complete workspace. Record both actual commands and test
+inventories. A package-only baseline is not a measured workspace baseline, and
+its wall time must not be compared directly with a larger mutation run. Acceptance
+also requires the separate complete workspace CI gate; no mutation baseline is
+skipped or reported as broader than it ran.
+
+The mutation runner explicitly sets `CARGO_INCREMENTAL=1` for both tool child
+processes because rust-cache exports `0` through the job environment. The real-tool
+smoke regression starts from that disabled parent environment and checks actual
+Rust incremental query-cache output. The existing fifteen-second UDP gateway
+proof-withdrawal fixture has higher scheduling priority only in the mutation
+profile, so its three refreshes can overlap other tests. The in-memory stalled
+policy-write fixture completes its original Noise handshake before pausing Tokio
+time, proves the real send owns the guard, and checks it remains pending at
+9.999 seconds, then the unchanged ten-second production timer must complete before
+the original twelve-second outer bound and release that guard. Paused time
+auto-drives the awaited timer, including Tokio's millisecond tick rounding. No real
+UDP clock is accelerated. Test inventory, four
+processes and the sixty-second per-test limit remain unchanged; the complete
+workspace uses the 360-second suite budget described above.
+Scheduling estimates are not completed-run evidence; validate the full unchanged
+workspace inventory on the current candidate before claiming a timing improvement.
+
+The real Cargo retention fixture compiles its disarmed build script before
+starting the lock probe. An explicit `rerun-if-env-changed` input then arms that
+compiled script inside a new Cargo process, preserving actual Cargo/cleanup lock
+interoperability in both directions. Cold compilation has a separate five-minute
+setup bound; probe readiness and reverse lock contention each use a fifteen-second
+bound. No cleanup assertion is skipped when Windows linking is slow.
+
 Loopback UDP reply fixtures connect their receiving socket to their own listener
 so concurrent discovery traffic cannot masquerade as a reply. Tests must still
 reject extra replies from that listener after a refresh.
+
+Nickname publication fixtures seed the existing signed account profile alongside
+the account key before starting a sibling, then install reciprocal device certificates. A key-only clone creates a new local
+profile and can race the intended edit with a newer host-name card. Assert this
+starting state explicitly; nickname updates retain their existing deadlines and
+preservation checks. Successful outbound profile reconciliation must project any
+newer sibling events it pulls before marking publication complete. The loopback
+regression `publishing_profile_projects_newer_sibling_profile_pulled_in_same_round`
+verifies durable event import and immediate signed profile/avatar projection
+without a reverse connection or background runtime masking the result.
 
 Registered desktop IPC fixtures wait for their signed peer to appear and repeat
 its UDP announcement within the existing setup deadline. A successful UDP send is
@@ -524,7 +1276,6 @@ in `owner_commands::tests` exercises this setup path. Shared-fixture changes kee
 the existing `desktop-session` selector over all owner-command tests and require
 their consumers to run; they do not change production discovery guarantees.
 
-
 To assess performance after deployment, compare at least several unchanged-scope
 runs with warm caches and a cold-cache run. Record time from PR update to all
 required checks passing, queue delay, slowest browser shard, native build/test
@@ -533,7 +1284,187 @@ sample had 27–38 minute health jobs and a 31.5 minute full Linux UI job. These
 baseline observations, not promised speedups; hosted runs must establish the new
 latency and reliability.
 
+### Windows workspace archives and slow fixtures
+
+Ordinary workspace and backend CI use Cargo's `line-tables-only` debug information
+for the built-in dev/test profiles. This retains application stack file/line
+locations while avoiding type/variable debug data. Local development defaults,
+optimization, assertions, overflow checks, production KDFs, and the independently
+owned sanitizer, mutation and release profiles remain unchanged. The actual-tool
+`scripts/ci/rust-profile.test.mjs` compares source-line coverage against full debug
+information and checks panic diagnostics, debug assertions and overflow handling;
+its no-debug negative control distinguishes stack locations from panic headers.
+See [Cargo debug profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+
+Linux/macOS coverage runs the desktop Host package with pinned Nextest in separate
+case processes, retaining the exact metadata IPC watchdog. The remaining default
+workspace targets run with Cargo and expose test output immediately, so one stuck
+case cannot hide another case's panic until suite completion. Both passes accumulate
+into one workspace report, with doctests checked separately. This bounds case failure
+and improves diagnostics;
+it does not establish the cause of a previously observed Host hang. The real-tool
+`scripts/ci/native-host-coverage.test.mjs` checks both partitions and failure propagation.
+
+The Windows producer runs structural checks, frontend compilation, Clippy,
+an ordinary workspace build and separate doctests. It builds the instrumented
+workspace test binaries once with pinned cargo-nextest 0.9.148 and
+cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
+extract that archive and run independent hash partitions. Each consumer runs
+one test at a time without retries; network/disk fixtures do not compete with
+another test on that machine. Each consumer has a ninety-minute aggregate budget
+for its serial partition and evidence export; the producer retains sixty minutes.
+These job budgets do not extend case deadlines or omit slow tests. Nextest uses a
+fresh process per test, so tests
+must not depend on another test's process-local state.
+The registered channel-metadata IPC regression has a sixty-second isolated
+watchdog and command/lifecycle phase diagnostics. A stuck command fails that
+case instead of consuming the complete serial shard; it does not produce a
+successful or complete execution receipt. Longer existing core fixtures retain
+their own budgets. The incoming-DM reconnect regression has a separate five-minute
+process watchdog and static lifecycle phases after a prior case remained unfinished
+for fifty minutes; its observed successful Windows duration was 32.47 seconds.
+This supervision does not extend its internal observation deadlines.
+The producer retains the former Windows workspace cache namespace through an
+explicit shared key. Only the cache step normalizes the inherited color/thread
+environment to its previous key inputs; actual tests keep serial execution and
+plain diagnostic output. Pull requests restore caches; only main publishes them.
+
+The owning `scripts/ci/windows-coverage.mjs` helper validates every default Cargo test target, the full inventory,
+default ignored markers and the exact disjoint union of all four runnable partitions.
+Producer and consumers must match source/run/attempt, compiler, Cargo, dev/test
+profile environment, feature
+resolution, lock/config/helper hashes, platform and the original absolute checkout
+root. The archive digest is verified before extraction. Fixed paths preserve
+compiled `CARGO_BIN_EXE` and manifest references. Source is checked out at the
+workflow SHA even if main advances during execution. Unqualified build-directory
+layouts fail explicitly; see the helper's upstream compatibility reference.
+
+Consumers have no dependency cache, frontend rebuild or test compilation. Reused
+official binary/Cargo metadata and offline reporting must work from a fresh Cargo
+home. Execution receipts verify each selected test starts and passes exactly
+once; missing, duplicate, failed or skipped selected cases fail the check.
+Each consumer validates and uploads its partial LCOV plus source/inventory/digest
+receipts. All four consumer checks and the producer are directly required; a skipped
+consumer after a failed build cannot certify acceptance. Diagnostic timing keeps
+machine-readable events separate from successful-test phase output.
+
+Consumers persist expected inventory before extraction, validated selected
+inventory before execution, and timestamped child phases plus streamed output
+during listing, execution and reporting. Cancellation preserves this partial
+diagnostic evidence and terminates the owned child tree. Only successful complete
+execution and coverage validation produce an acceptance receipt; partial output
+never certifies a shard. Each output stream remains bounded to 128 MiB.
+
+The producer executes a tiny real archive/consumer CLI regression before expensive
+workspace compilation or accepting the full archive. Its local Git fixture, both partitions, runtime and compiled
+helper paths, default ignored case, clean source, offline LCOV and captured timing
+exercise the same helper. Run its tests with the pinned nextest/coverage tools and
+LLVM tools matching rustc; portable Health does not install those tools.
+
+Linux CI produces both strict backend scenario evidence and instrumented
+coverage in the same execution, including the separate ignored bridge and
+large-folder acceptance. macOS and Windows keep their real backend executions.
+Accumulation uses `--no-report` between executions; combining it with `--no-clean`
+is invalid. The real CLI regression first writes a normal unit report, executes
+ignored scenarios and the workflow's exact filtered large-folder integration command,
+then verifies the final report retains distinct coverage from all three executions.
+Its second prefix-matching integration case must remain unexecuted. Positional test-name filtering
+uses the explicit `cargo llvm-cov test` subcommand. Production builds,
+native desktop acceptance and sanitizer checks remain distinct.
+All three large-folder gates validate the exact successful scenario and Cargo
+summary from saved stdout and stderr, preserving the Cargo failure through `tee`.
+A renamed filter that selects zero tests cannot silently pass. The dedicated
+`--test large_directory_enqueue` target uses `--locked` and exact ignored-case
+selection, avoiding compilation of the entire inline library test harness for
+this separate acceptance step. Its real 110 MiB fixture decrypts the exact returned
+event from the persisted log after dropping the Node writer and requires a V4
+manifest with matching file identity, directory metadata and more than 2,000
+chunks. It proves enqueue and staging; recipient transfer retains separate backend
+coverage. The small compact-manifest policy case remains in the ordinary unit suite,
+while the disk fixture stays an explicit escalation in the owning validation contract.
+
+Measure fixture preparation, protocol phases and teardown before changing a
+network deadline. HTTP expiry regressions establish real TCP admission and observe
+shutdown readiness before advancing Tokio's unchanged 30-second production clock.
+They retain structured timeout responses and connection/handler slot release.
+Search limit regressions
+prepare most events through the real signing/persistence/indexing owner and keep
+registered send/search wiring. Delivery timing spans distinguish card preparation
+from restart fairness and transfer completion. These changes must retain timeout,
+resource-release, identity and immutable-byte assertions.
+
+Inbound-only Control fixtures explicitly drive their already-required real
+exchange under the existing cold setup watchdog before the warm signed-role
+proof. Readiness requires the same full authenticated source's access and
+operation capabilities; an already-proven source adds no RPC. Keep the same
+cursor and precise interruption/backpressure classification during preparation.
+The warm role proof and admitted operation retain their original deadlines.
+A held real SessionReady response plus virtual-clock stimulus distinguishes cold
+preparation from the warm role clock; stage traces retain only bounded body-free
+negotiation, Ready and completion diagnostics.
+
+Control scheduling fixtures bind each authenticated request nonce to its exact
+client task, immutable dispatch attributes and a non-owning lifetime witness.
+Live hold gates reject completed or cancelled tasks; the latest peer-level trace
+is diagnostic history, not evidence that a particular request is still active.
+Check the intended held task again inside the operation-admission callback, then
+retain the scenario's permitted preemption, continuation and receipt assertions.
+Natural origin, protection and wake hints remain independent attributes.
+Bounded observation ledgers retire inactive history before live task evidence.
+If every retained entry still belongs to a live task, new evidence is refused;
+capacity pressure cannot certify retirement or authorize a synthetic hold.
+The local-maintenance isolation fixture holds the requester at an existing
+publication boundary outside shared journal, document, member and log guards before genuine operation admission. It requires
+the exact demand's child request preparation while that boundary is held, then
+retains the original authenticated receipt, signature and checkpoint assertions.
+This proves scheduler independence from unrelated local work; it does not identify
+the cause of a historical hosted timeout. The same absolute receipt deadline
+bounds the witness, and drop-safe release and actual runtime drain precede any
+failure assertion. Attachment handoff and fanout-cursor tests separately cover
+capacity changes, durable skipped work and concurrent retry-floor rewinds.
+The operation-head overlap fixture coordinates actual runtime publishers around
+an older captured projection, commits the original signed request through the
+source owner without publishing, and requires the final signed head to retain
+that current terminal. Publication contention is an observed unit-lock
+`WouldBlock`, not a claim of FIFO queueing. A guard-disabled control must expose
+the higher-revision stale head; publication-unit poison tests keep underlying
+journal and document owners unpoisoned.
+Lifetime observation is scoped to synchronous test hooks and expires on return,
+abort or panic without calling fixture code during destruction. The delayed-server
+regression uses a real signed sibling publication to retire an older request and
+requires a fresh live request before measuring the existing receipt deadline.
+
+### Protocol fixture response epochs
+
+Wire-scope fixtures that require exact digest equality own a stable provider
+epoch and validate the received signed headers and payloads through the canonical
+store. A later source publication belongs to another epoch; comparing its live
+digest with an earlier completion is not response-integrity evidence. The v5
+access-only scope fixtures use an inbound-only authenticated provider and retain
+positive-role and operation-exclusion checks. Separate live-provider tests retain
+mid-page mutation, retry and re-comparison coverage. Provider teardown closes
+admission, aborts its owned connections and drains actual work under one watchdog.
+Preparation of the queued-source fixture uses an instance-scoped test-only
+client gate after the genuine authenticated acknowledgement and before read
+clocks begin. The exact request nonce receives an explicit server hold or pass
+decision; cancellation and dropped decisions release pending preparation. The
+gate opens permanently before operation admission. A real protocol control
+advances the test clock beyond the unchanged read budget to distinguish an
+ordinary timed-out read from a preparation hold followed by a fresh read.
+The production read deadlines and eight-second operation receipt bound remain
+unchanged.
+
 ## Measure feedback before tuning capacity
+
+For hosted CI, run `node scripts/ci/timing-report.mjs OWNER/REPO COMMIT_SHA --history 30`, or add `--json` to preserve the raw API snapshot
+in ignored output. It reads all current-attempt jobs and current-source checks
+without triggering or changing runs. Runner minutes sum known execution, not
+billing. Job creation-to-start intervals may include upstream dependencies and
+must not be labeled exact runnable queue time. The latest completing job is an
+observed tail, not a reconstructed critical path. Historical P50/P95 describe
+bounded API run spans for first attempts of the same workflow/event; configuration
+and runner changes are uncontrolled. Incomplete snapshots and missing durations
+remain explicit, and timings never establish acceptance.
 
 Use the measurement entry point with local attempt history, an offline snapshot,
 or a read-only GitHub sample:
@@ -629,6 +1560,15 @@ consider paused virtual time only after checking every clock source; mixed
 reconciliation sleep with an observed completed round when that round is the
 actual invariant. Preserve real loopback, restart, expiry and concurrency budgets;
 neither reducing delays nor increasing Windows workers is a default speed fix.
+
+The slow-route file scheduler fixture acknowledges TCP acceptance before holding
+the handshake for 600 ms and rejects a worker that finishes during that hold.
+Its original 15-second Dial budget includes the hold; each subsequent ordered
+phase shares one existing exchange budget across all of its turns. Unexpected
+phases, redials, missing workers and server failures fail explicitly. Delivery
+confirmation and exact received bytes remain required. A negative control that
+cancels the actual Dial worker at 400 ms must fail the held-handshake assertion;
+a whole-transfer wall-clock limit is not a substitute for that regression oracle.
 
 Patch line coverage follows the frontend unit-coverage exclusions: registered
 `.test.ts` files and `.d.ts` declarations do not enter its production denominator.
@@ -917,6 +1857,20 @@ actionable failure and runner minutes per merged PR. Classify failures as code,
 scenario/fixture, platform/environment or external service before deciding
 whether an earlier check or a harness correction is appropriate. Retain the
 existing cancellation, sharding and comprehensive CI gates.
+
+## Production frontend startup
+
+React hooks and the renderer must resolve to one production runtime. The
+`react-singleton.test.mjs` diagnostic builds with the real Vite configuration
+and deliberately duplicated dependency trees; both React and React DOM must
+remain singletons. The diagnostic runs with the existing Node diagnostics gate.
+Development-server browser checks do not exercise production module resolution.
+
+Install deployment dependencies with `npm ci`, reusing the package manager's
+download cache rather than copying or merging `node_modules`. Matching lockfiles
+alone do not prove an installed dependency tree is intact. Native installation
+acceptance must verify the production frontend renders its expected screen
+without the display-error boundary; a process and visible window are insufficient.
 
 ## Explicit physical network acceptance
 

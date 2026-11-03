@@ -260,6 +260,58 @@ it.each(["onAttach", "onAttachDirectory", "onImage"] as const)(
     expect(useChat.getState().sendFile).not.toHaveBeenCalled();
   },
 );
+it("awaits the real ConversationView picker consumer after its transport resolves and navigation retires it", async () => {
+  vi.useFakeTimers();
+  const transport = deferred<string>();
+  const delivery = deferred<void>();
+  let delivered = false;
+  let settled = false;
+  let pending!: Promise<void>;
+  const enqueues: Array<{ path: string; destination: unknown }> = [];
+  useChat.setState({
+    sendFile: vi.fn(async (path) => {
+      enqueues.push({ path, destination: useChat.getState().active });
+    }),
+  });
+  native.open.mockImplementation(async () => {
+    const path = await transport.promise;
+    delivered = true;
+    await delivery.promise;
+    return path;
+  });
+  try {
+    await act(async () => {
+      pending = (composer.onAttach!() as unknown as Promise<void>).finally(
+        () => {
+          settled = true;
+        },
+      );
+    });
+    await switchConversation();
+    await act(async () => transport.resolve("/native/stale.txt"));
+    expect(delivered).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(enqueues).toEqual([]);
+    expect(settled).toBe(false); // An elapsed-time zero count does not prove task completion.
+    await act(async () => {
+      delivery.resolve();
+      await pending;
+    });
+    expect(settled).toBe(true);
+    expect(enqueues).toEqual([]);
+    expect(useChat.getState().active?.id).toBe("bob");
+    expect(
+      native.invoke.mock.calls.filter(([cmd]) => cmd === "owner_enqueue_file"),
+    ).toEqual([]);
+  } finally {
+    await act(async () => {
+      transport.resolve("/native/stale.txt");
+      delivery.resolve();
+      await pending;
+    });
+    vi.useRealTimers();
+  }
+});
 it("keeps native paths and directory/media intent without byte staging", async () => {
   native.open.mockResolvedValue("/native/photo.png");
   await act(async () => {
@@ -1521,6 +1573,48 @@ it.each([
     await act(async () => useChat.setState({ channels: [channel] }));
     expect(intake.screenshotBytes).toBeNull();
     expect(intake.dragOver).toBe(false);
+  },
+);
+
+it.each(["member", "owner"] as const)(
+  "allows certified reference-only %s File intake through existing handoff",
+  async (role) => {
+    let intake!: ReturnType<typeof useAttachmentIntake>;
+    function Probe() {
+      intake = useAttachmentIntake(i18n.t);
+      return null;
+    }
+    await act(async () => root.render(createElement(Probe)));
+    await act(async () =>
+      useChat.setState({
+        active: { kind: "channel", id: "team", name: "Team" },
+        channels: [
+          {
+            channel_id: "team",
+            name: "Team",
+            owner: "sibling",
+            member_count: 1,
+            shared_reference: true,
+            account_access: {
+              account_id: useChat.getState().myAccountId,
+              role,
+              execution: { kind: "waiting_for_device" },
+            },
+          },
+        ],
+      }),
+    );
+    await act(async () =>
+      native.drop!({ payload: { type: "over", paths: [] } }),
+    );
+    expect(intake.dragOver).toBe(true);
+    await act(async () =>
+      native.drop!({ payload: { type: "drop", paths: ["/native/file"] } }),
+    );
+    expect(useChat.getState().sendFile).toHaveBeenCalledWith(
+      "/native/file",
+      false,
+    );
   },
 );
 

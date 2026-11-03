@@ -17,6 +17,7 @@ import { createSettingsDialogSession } from "../settingsDialogSession";
 import type { SettingsCategory } from "./model";
 import { DEFAULT_SCREENSHOT_SHORTCUTS } from "@/lib/screenshotShortcuts";
 import { captureOwner } from "@/store/ownership";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 interface SettingError {
   kind: "load" | "save" | "refresh";
@@ -186,7 +187,7 @@ export function useSettingsController(open: boolean) {
         }
         // Presets are normalized by the backend; never duplicate that policy in each page.
         try {
-          return await settingsApi.get();
+          return await readWithDeadline(() => settingsApi.get());
         } catch (error) {
           throw new SavedRefreshError(errorMessage(error));
         }
@@ -202,7 +203,7 @@ export function useSettingsController(open: boolean) {
       async () => {
         await settingsApi.setAutostart(on);
         try {
-          return await settingsApi.autostartEnabled();
+          return await readWithDeadline(() => settingsApi.autostartEnabled());
         } catch (error) {
           throw new AutostartRefreshError(errorMessage(error));
         }

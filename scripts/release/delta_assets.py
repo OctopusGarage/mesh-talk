@@ -6,10 +6,11 @@ import io
 import json
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tarfile
+
+from sevenzip import sevenzip_tool
 
 MAX_TARGET = 256 * 1024**2
 MAX_BASE = 128 * 1024**2
@@ -28,14 +29,20 @@ def mac_tar(path):
 
 
 def nsis_files(path):
-    tool = shutil.which("7zz") or shutil.which("7z")
+    tool = sevenzip_tool()
     require(tool, "7-Zip required for NSIS equivalence")
     listing = subprocess.check_output([tool, "l", "-slt", str(path)], text=True, timeout=60)
     require(len(listing) <= 4 * 1024**2 and "Type = Nsis" in listing, "invalid NSIS listing")
+    entries = [dict(line.split(" = ", 1) for line in block.splitlines() if " = " in line)
+               for block in re.split(r"\r?\n\s*\r?\n", listing)]
+    headers = [entry for entry in entries if entry.get("Type") == "Nsis"]
+    require(len(headers) == 1, "invalid NSIS listing header")
+    header = headers[0]
+    require("BadCmd=" not in header.get("SubType", ""),
+            "NSIS decoder could not inspect the complete installer; use the pinned release 7-Zip toolchain")
     files = {}
     total = 0
-    for block in re.split(r"\r?\n\s*\r?\n", listing):
-        fields = dict(line.split(" = ", 1) for line in block.splitlines() if " = " in line)
+    for fields in entries:
         name = fields.get("Path", "").replace("\\", "/")
         if not name or "Type" in fields or fields.get("Folder") == "+":
             continue

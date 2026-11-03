@@ -29,6 +29,13 @@ async function dictionary(locale: Locale): Promise<Record<string, string>> {
 
 async function expectLanguage(page: Page, locale: Locale) {
   const strings = await dictionary(locale);
+  await page.waitForFunction(() => "MeshTalkLocale" in window);
+  await page.evaluate(() => {
+    const owner = (
+      window as unknown as { MeshTalkLocale: { ready: Promise<void> } }
+    ).MeshTalkLocale;
+    return owner.ready;
+  });
   await expect(page.locator("html")).toHaveAttribute("lang", locale);
   await expect(page.locator("#site-language")).toHaveValue(locale);
   await expect(page.locator(".hero h1")).toContainText(
@@ -100,6 +107,61 @@ for (const locale of locales) {
     await expectLanguage(page, locale);
   });
 }
+
+test("cold dictionary completion owns readiness before language content assertions", async ({
+  page,
+}) => {
+  const traditional = await dictionary("zh-Hant");
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let requested!: () => void;
+  const requestArrived = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
+  let finished!: () => void;
+  const responseFinished = new Promise<void>((resolve) => {
+    finished = resolve;
+  });
+  let requests = 0;
+  await page.route("**/locales/zh-Hant.json", async (route) => {
+    requests++;
+    requested();
+    await held;
+    try {
+      await route.fulfill({ json: traditional });
+    } finally {
+      finished();
+    }
+  });
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  let clockInstalled = false;
+  try {
+    const start = Date.now();
+    await page.clock.install({ time: start });
+    clockInstalled = true;
+    await page.goto(`${hosted.url}?lang=en`);
+    await page.clock.pauseAt(start + 60_000);
+    await page.locator("#site-language").selectOption("zh-Hant");
+    await requestArrived;
+    await expect(page.locator("#language-status")).toHaveText(
+      "Loading language…",
+    );
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+    // Hold the real response beyond the Node-side assertion's five seconds.
+    // Pause browser deadlines so setup scheduling cannot consume the margin;
+    // the separate deadline case verifies the unchanged eight-second abort.
+    releaseTimer = setTimeout(release, 6000);
+    await expectLanguage(page, "zh-Hant");
+    expect(requests).toBe(1);
+  } finally {
+    clearTimeout(releaseTimer);
+    release();
+    if (requests) await responseFinished;
+    if (clockInstalled) await page.clock.resume();
+  }
+});
 
 test("a chosen language persists across reload with query and hash preserved", async ({
   page,
@@ -186,11 +248,51 @@ test("failed dictionaries preserve the previous language and can be retried", as
   await expect(page.locator("#language-status")).toHaveText(
     japanese["This language couldn’t load. Try choosing it again."],
   );
-  await expect(page.locator("html")).toHaveAttribute("lang", "ja");
-  await expect(page.locator(".hero__sub")).toHaveText(japanese[subtitle]);
+  await expectLanguage(page, "ja");
   await page.unroute("**/locales/es.json");
   await page.locator("#site-language").selectOption("es");
   await expectLanguage(page, "es");
+});
+
+test("the loader deadline settles failure without certifying translation", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let finished!: () => void;
+  const responseFinished = new Promise<void>((resolve) => {
+    finished = resolve;
+  });
+  let requested = false;
+  await page.route("**/locales/es.json", async (route) => {
+    requested = true;
+    await held;
+    try {
+      await route.abort();
+    } finally {
+      finished();
+    }
+  });
+  try {
+    await page.goto(`${hosted.url}?lang=en`);
+    await page.clock.install();
+    const requestArrived = page.waitForRequest("**/locales/es.json");
+    await page.locator("#site-language").selectOption("es");
+    await requestArrived;
+    await expect(page.locator("#language-status")).toHaveText(
+      "Loading language…",
+    );
+    await page.clock.fastForward(8000);
+    await expectLanguage(page, "en");
+    await expect(page.locator("#language-status")).toHaveText(
+      "This language couldn’t load. Try choosing it again.",
+    );
+  } finally {
+    release();
+    if (requested) await responseFinished;
+  }
 });
 
 test("an incomplete dictionary cannot leave a partially translated page", async ({
@@ -206,10 +308,7 @@ test("an incomplete dictionary cannot leave a partially translated page", async 
   await expect(page.locator("#language-status")).toHaveText(
     japanese["This language couldn’t load. Try choosing it again."],
   );
-  await expect(page.locator(".hero h1")).toContainText(
-    japanese["Your conversations."],
-  );
-  await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+  await expectLanguage(page, "ja");
 });
 
 test("the latest choice wins when a previous dictionary arrives late", async ({
@@ -219,21 +318,67 @@ test("the latest choice wins when a previous dictionary arrives late", async ({
   const held = new Promise<void>((resolve) => {
     releaseDictionary = resolve;
   });
+  let requestedJapanese!: () => void;
+  const japaneseRequested = new Promise<void>((resolve) => {
+    requestedJapanese = resolve;
+  });
+  let releaseSpanish!: () => void;
+  const spanishHeld = new Promise<void>((resolve) => {
+    releaseSpanish = resolve;
+  });
+  let requestedSpanish!: () => void;
+  const spanishRequested = new Promise<void>((resolve) => {
+    requestedSpanish = resolve;
+  });
   const japanese = await dictionary("ja");
+  const spanish = await dictionary("es");
   await page.route("**/locales/ja.json", async (route) => {
+    requestedJapanese();
     await held;
     await route.fulfill({ json: japanese });
   });
+  await page.route("**/locales/es.json", async (route) => {
+    requestedSpanish();
+    await spanishHeld;
+    await route.fulfill({ json: spanish });
+  });
   await page.goto(`${hosted.url}?lang=en`);
   await page.locator("#site-language").selectOption("ja");
-  await page.locator("#site-language").selectOption("es");
-  await expectLanguage(page, "es");
-  releaseDictionary();
-  await expectLanguage(page, "es");
-  expect(new URL(page.url()).searchParams.get("lang")).toBe("es");
-  expect(
-    await page.evaluate((key) => localStorage.getItem(key), storageKey),
-  ).toBe("es");
+  await japaneseRequested;
+  const previous = await page.evaluateHandle(() => ({
+    pending: (window as unknown as { MeshTalkLocale: { ready: Promise<void> } })
+      .MeshTalkLocale.ready,
+  }));
+  try {
+    await page.locator("#site-language").selectOption("es");
+    await spanishRequested;
+    expect(
+      await page.evaluate(async ({ pending: earlier }) => {
+        const current = (
+          window as unknown as { MeshTalkLocale: { ready: Promise<void> } }
+        ).MeshTalkLocale.ready;
+        let settled = false;
+        void current.then(() => {
+          settled = true;
+        });
+        await earlier;
+        await Promise.resolve();
+        return { same: current === earlier, settled };
+      }, previous),
+    ).toEqual({ same: false, settled: false });
+    releaseSpanish();
+    await expectLanguage(page, "es");
+    releaseDictionary();
+    await expectLanguage(page, "es");
+    expect(new URL(page.url()).searchParams.get("lang")).toBe("es");
+    expect(
+      await page.evaluate((key) => localStorage.getItem(key), storageKey),
+    ).toBe("es");
+  } finally {
+    releaseDictionary();
+    releaseSpanish();
+    await previous.dispose();
+  }
 });
 
 test("blocked storage still supports URL language and internal navigation", async ({

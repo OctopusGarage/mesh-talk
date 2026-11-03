@@ -320,8 +320,14 @@ test("failed refresh announces unavailability, expires evidence, and recovers", 
       },
     });
   }, BOB);
-  // Let the shared two-second poll consume this short origin lease before failure.
-  await page.waitForTimeout(2200);
+  // Observe the new directory lease before failing reads; a timer tick can be
+  // delayed and the previous local lease has a different expiry.
+  await page.getByTestId("conversation-member-profile").click();
+  await expect(page.getByTestId("member-discovery-sources")).toContainText(
+    "Post office · name unavailable",
+  );
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("member-discovery-sources")).toHaveCount(0);
   await page.evaluate(() => {
     (
       window as unknown as { __mockPresenceFailure: (failed: boolean) => void }
