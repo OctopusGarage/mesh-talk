@@ -587,13 +587,41 @@ test("private wallpaper restores before the gallery and survives temporary readi
   await expect
     .poll(async () => (await snapshot()).wallpaper)
     .toBe(initial.wallpaper);
+  await expect.poll(runtimeReady).toBe(true);
   await page.evaluate(async () => {
     const path = "/src/store/chat.ts";
     const { useChat } = await import(/* @vite-ignore */ path);
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args?: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+    };
+    const invoke = host.__TAURI_INTERNALS__.invoke.bind(
+      host.__TAURI_INTERNALS__,
+    );
+    // Account replacement is authoritative at the host boundary too. Otherwise
+    // the ordinary identity poll correctly restores the mock's previous account.
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      const response = await invoke(command, args);
+      if (
+        command === "owner_node_identity" ||
+        command === "owner_startup_identity"
+      )
+        return {
+          ...(response as Record<string, unknown>),
+          account_id: "replacement-account",
+        };
+      return response;
+    };
     useChat.setState((state: { identityEpoch: number }) => ({
       myAccountId: "replacement-account",
       identityEpoch: state.identityEpoch + 1,
     }));
+    // Exercise the poll explicitly rather than depending on its timer's phase.
+    await useChat.getState().refreshRoster();
   });
   await expect
     .poll(async () => (await snapshot()).scope?.account)

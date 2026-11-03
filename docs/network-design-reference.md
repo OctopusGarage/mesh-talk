@@ -2440,9 +2440,15 @@ Partial pages use their authenticated window bounds for these comparisons.
 Completion is published only for a finished captured upload after final probing,
 never by attaching a newer source stamp to an older finite prefix. Send-only
 operation checks the remote binding without advancing unprocessed incoming IDs.
-Explicit event custody checks lazily prepare the existing bounded selection when
-needed, then require selected membership and fresh exact remote evidence; a
-completion qualification alone never confirms an event.
+Each qualification retains at most 64 exact selected inner/wrapper pairs. An
+explicit target can reuse that membership only after comparing the current local
+stamp and freshly authenticated remote binding and floors. A missing target
+lazily prepares the existing bounded selection before extending the same valid
+qualification. New local generations replace its pairs; they never inherit
+membership from an older selection. Every custody check still requires fresh
+exact remote evidence. Reading an unchanged pair does not rewrite its checkpoint.
+Older signed checkpoints preserve incoming cursor and pending retry evidence;
+unsupported completion qualifications are discarded and rebuilt normally.
 
 Optional checkpoints and inner-to-wrapper mappings live on the existing
 encrypted profile connection. Checkpoints are locally signed and bind the full

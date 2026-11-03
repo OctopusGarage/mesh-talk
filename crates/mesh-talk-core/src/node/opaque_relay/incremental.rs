@@ -2,6 +2,7 @@
 use super::*;
 
 mod checkpoints;
+mod confirmation;
 use crate::node::{
     privacy_sync::{HistorySyncStamp, HistoryUpload},
     session::{self, mailbox},
@@ -135,10 +136,24 @@ struct CompletedUpload {
     remote: RemoteBinding,
     upper: i64,
     revision: i64,
+    targets: Vec<(EventId, EventId)>,
 }
 impl CompletedUpload {
     fn accepts(&self, remote: &RemoteBinding, (upper, revision): (i64, i64)) -> bool {
         self.remote == *remote && self.upper <= upper && self.revision <= revision
+    }
+
+    fn remember_target(&mut self, inner: EventId, outer: EventId) {
+        if let Some(index) = self.targets.iter().position(|(id, _)| *id == inner) {
+            if self.targets[index].1 == outer {
+                return;
+            }
+            self.targets.remove(index);
+        }
+        if self.targets.len() >= MAX_RESULTS {
+            self.targets.remove(0);
+        }
+        self.targets.push((inner, outer));
     }
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,11 +532,15 @@ impl Node {
                     })
             {
                 // Keep sufficient proof unchanged when unrelated remote data grows.
+                // These bounded results came only from IDs selected by the
+                // completed upload view under this exact captured stamp.
+                let targets = p.uploaded.clone();
                 state_mut(p).receipt.completed = Some(CompletedUpload {
                     local,
                     remote,
                     upper,
                     revision,
+                    targets,
                 });
             }
             self.save_mailbox_receipt(p)?;
@@ -684,101 +703,5 @@ impl Node {
         self.send_mailbox_event(channel, p, event, current, true)
             .await?
             .ok_or(session::SessionError::NoProgress)
-    }
-    /// A compact completed-upload hint does not authorize a particular event.
-    /// Recreate the existing selected export before resolving an exact target.
-    pub(in crate::node) async fn prepare_opaque_confirmation<F: Fn() -> bool + Sync>(
-        &self,
-        p: &mut OpaqueMailboxProgress,
-        current: &F,
-    ) -> Result<(), session::SessionError> {
-        if !matches!(p.incremental, Mode::Active(_)) {
-            return Ok(());
-        }
-        let generation = self
-            .privacy
-            .generation
-            .load(std::sync::atomic::Ordering::Acquire);
-        let Some(conversation) = p.conversation else {
-            return Ok(());
-        };
-        loop {
-            if !self.upload_permitted(p, current)
-                || self
-                    .privacy
-                    .generation
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    != generation
-            {
-                return Err(session::SessionError::UnexpectedMessage);
-            }
-            let ready = {
-                let owner = self.sync_store(&p.recipient);
-                let store = owner.lock().expect("projection");
-                let mut entry = state(p).lease.0.lock().expect("upload entry");
-                if entry.view.is_none() {
-                    entry.view = Some(store.open_history_upload(&conversation)?);
-                }
-                let view = entry.view.as_ref().expect("confirmation view");
-                let step = store.prepare_history_upload_step(
-                    view,
-                    crate::eventlog::sync::network::PreparationBudget::default(),
-                )?;
-                store.validate_history_upload(view)?;
-                step.ready
-            };
-            if !self.upload_permitted(p, current)
-                || self
-                    .privacy
-                    .generation
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    != generation
-            {
-                return Err(session::SessionError::UnexpectedMessage);
-            }
-            if ready {
-                return Ok(());
-            }
-            tokio::task::yield_now().await;
-        }
-    }
-    pub(in crate::node) fn opaque_confirmed_wrapper(
-        &self,
-        p: &OpaqueMailboxProgress,
-        inner: EventId,
-    ) -> Result<Option<EventId>, session::SessionError> {
-        let Mode::Active(s) = &p.incremental else {
-            return Ok(p
-                .uploaded()
-                .iter()
-                .find(|(id, _)| *id == inner)
-                .map(|(_, outer)| *outer));
-        };
-        if !self.relay_send_allowed(&p.relay) {
-            return Ok(None);
-        }
-        let entry = s.lease.0.lock().expect("upload entry");
-        let Some(view) = &entry.view else {
-            return Ok(None);
-        };
-        let owner = self.sync_store(&p.recipient);
-        let store = owner.lock().expect("projection");
-        if !store.history_upload_contains(view, inner)? {
-            return Ok(None);
-        }
-        if let Some(outer) = self.cached_wrapper_id(p.mailbox.id(), inner) {
-            return Ok(Some(outer));
-        }
-        let Some(event) = store.history_upload_event(view, inner, PAGE_BYTES)? else {
-            return Ok(None);
-        };
-        let outer = p
-            .mailbox
-            .wrap(&event)
-            .map_err(|error| session::SessionError::Serialization(error.to_string()))?
-            .id;
-        store.validate_history_upload(view)?;
-        self.remember_wrapper_id(p.mailbox.id(), inner, outer);
-        Ok(Some(outer))
     }
 }

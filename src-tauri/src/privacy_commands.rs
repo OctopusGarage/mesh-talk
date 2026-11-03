@@ -432,7 +432,10 @@ mod tests {
                 .privacy_snapshot()
                 .invisible
         );
-        node.0.blocking_write().take();
+        // Stop and join admitted producers before dropping the mock host and
+        // temporary profile; dropping a runtime alone only requests cancellation.
+        let runtime = node.0.blocking_write().take().unwrap();
+        tauri::async_runtime::block_on(runtime.stop());
         let saved = mesh_talk_core::node::PrivacyPolicy::open(
             &root.path().join("accounts/alice/privacy.policy"),
             "pw",

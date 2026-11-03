@@ -13,6 +13,15 @@ use std::{
 
 type UploadKey = (EventId, [u8; 32]);
 const MAX_GROUP_FILE_JOBS: usize = 10_000;
+const MAX_AUTHORIZATION_VIEWS: usize = 4;
+type AuthorizationKey = ([u8; 32], [u8; 32], [u8; 32]);
+
+struct AuthorizationView {
+    upload: super::privacy_sync::HistoryUpload,
+    stamp: Option<super::privacy_sync::HistorySyncStamp>,
+    ready: bool,
+    used: std::time::Instant,
+}
 
 #[derive(Clone)]
 struct GroupFileUpload {
@@ -28,6 +37,7 @@ pub(super) struct GroupFileDelivery {
     scan_cursor: Mutex<Option<i64>>,
     cursor: Mutex<Option<UploadKey>>,
     jobs: Mutex<BTreeMap<UploadKey, GroupFileUpload>>,
+    authorization: Mutex<BTreeMap<AuthorizationKey, AuthorizationView>>,
 }
 
 impl Node {
@@ -99,11 +109,14 @@ impl Node {
             return Ok(None);
         }
         {
-            let book = self.channels.lock().expect("channels lock");
-            let Some(state) = book.state(&row.conversation) else {
+            // The checkpoint validates the exact signed canonical generation;
+            // display membership may still precede an unapplied leave/transfer.
+            let log = self.log.lock().expect("log lock");
+            let Some(state) = self.channel_checkpoints.current_state(row.conversation)? else {
                 return Ok(None);
             };
-            if !self.channel_identity_is_current(state)?
+            let projection = self.account_group_projection_with_log(&log, row.conversation)?;
+            if !self.channel_identity_is_current_in(&state, &projection)
                 || !state.is_accepted_member(&peer.user_id())
                 || !state.members().contains(peer)
                 || (state.owner_account_id().is_some()
@@ -112,18 +125,7 @@ impl Node {
                 return Ok(None);
             }
         }
-        // Check signed controls too: a removal can precede the live-book refresh.
-        let log = self.log.lock().expect("log lock");
-        let Some(members) = super::channel::ChannelBook::projected_members(
-            row.conversation,
-            &log.events(&row.conversation)?,
-        ) else {
-            return Ok(None);
-        };
-        Ok(
-            (members.contains(peer) && members.contains(&self.identity.public()))
-                .then_some((event, row)),
-        )
+        Ok(Some((event, row)))
     }
 
     pub(super) fn group_mailbox_peers(&self) -> Vec<Announce> {
@@ -302,13 +304,11 @@ impl Node {
         }
         // A new member's grant cannot release a pre-invitation file. Reuse the
         // existing recipient projection for its exact signed manifest.
-        if !self
-            .sync_store(&job.recipient)
-            .lock()
-            .expect("projection lock")
-            .authorized_event_ids(&original.conversation_id)?
-            .contains(&job.manifest)
-        {
+        if !self.group_file_outgoing_contains(
+            original.conversation_id,
+            job.manifest,
+            &job.recipient,
+        )? {
             return Ok(false);
         }
         // Custody of ciphertext may precede approval. An explicit refusal or
@@ -327,6 +327,92 @@ impl Node {
                     && decision.decision != ReceiveDecision::Declined
                     && decision.completion.is_none()
             }))
+    }
+
+    fn group_file_outgoing_contains(
+        &self,
+        channel: ConversationId,
+        event: EventId,
+        peer: &PublicIdentity,
+    ) -> Result<bool, LogError> {
+        let owner = self.sync_store(peer);
+        let store = owner.lock().expect("projection lock");
+        let stamp = store.history_sync_stamp(&channel)?;
+        let key = (*channel.as_bytes(), peer.ed25519_pub, peer.x25519_pub);
+        // This owner holds only four leased SQL selections, never historical
+        // event IDs or a cached positive grant. No guard crosses network work.
+        let mut views = self
+            .group_file_delivery
+            .authorization
+            .lock()
+            .expect("group file authorization lock");
+        if let Some(view) = views.get(&key) {
+            match store.validate_history_upload(&view.upload) {
+                Ok(()) => {}
+                Err(LogError::StaleCursor | LogError::ConversationRetiring) => {
+                    views.remove(&key);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(view) = views.get_mut(&key)
+            && view.ready
+            && (stamp.is_none() || view.stamp != stamp)
+        {
+            // Ordinary appends extend the existing finite prepared prefix;
+            // changed authority must reopen through the same selection owner.
+            if store.resume_history_upload(&mut view.upload)? {
+                view.stamp = stamp.clone();
+                view.ready = false;
+            } else {
+                views.remove(&key);
+            }
+        }
+        if !views.contains_key(&key) && views.len() >= MAX_AUTHORIZATION_VIEWS {
+            let oldest = views
+                .iter()
+                .min_by_key(|(_, view)| view.used)
+                .map(|(key, _)| *key)
+                .expect("full authorization cache");
+            views.remove(&oldest);
+        }
+        if let std::collections::btree_map::Entry::Vacant(entry) = views.entry(key) {
+            entry.insert(AuthorizationView {
+                upload: store.open_history_upload(&channel)?,
+                stamp,
+                ready: false,
+                used: std::time::Instant::now(),
+            });
+        }
+        let view = views.get_mut(&key).expect("installed authorization view");
+        view.used = std::time::Instant::now();
+        let step = store.prepare_history_upload_step(
+            &view.upload,
+            crate::eventlog::sync::network::PreparationBudget::default(),
+        );
+        let step = match step {
+            Ok(step) => step,
+            Err(error @ (LogError::StaleCursor | LogError::ConversationRetiring)) => {
+                views.remove(&key);
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        view.ready = step.ready;
+        if !step.ready {
+            return Err(LogError::StaleCursor);
+        }
+        let allowed = store.history_upload_contains(&view.upload, event)?;
+        // A concurrent append may lie beyond this finite prefix. Positive
+        // answers retain the owner's current control fences; an absent event
+        // cannot become a final denial until the source observation catches up.
+        if !allowed {
+            let current = store.history_sync_stamp(&channel)?;
+            if current.is_none() || view.stamp != current {
+                return Err(LogError::StaleCursor);
+            }
+        }
+        Ok(allowed)
     }
 
     fn group_file_custody_current(&self, job: &GroupFileUpload) -> bool {
@@ -491,15 +577,13 @@ impl Node {
                                             Err(error) => { log::warn!("Group file completion deferred after storage failure: {error}"); return; }
                                         };
                                         let outer = if let Some(inner) = final_chunk {
-                                            if self.prepare_opaque_confirmation(&mut progress, &|| {
+                                            let resolved = self.resolve_opaque_confirmation(&mut progress, inner, &|| {
                                                 current() && channel.io_admitted()
-                                            }).await.is_err() {
-                                                return;
-                                            }
+                                            }).await;
                                             if !current() || !channel.io_admitted() {
                                                 return;
                                             }
-                                            match self.opaque_confirmed_wrapper(&progress, inner) {
+                                            match resolved {
                                                 Ok(outer) => outer,
                                                 Err(_) => return,
                                             }
@@ -544,3 +628,7 @@ impl Node {
         .await;
     }
 }
+
+#[cfg(test)]
+#[path = "group_file_authorization_tests.rs"]
+mod authorization_tests;

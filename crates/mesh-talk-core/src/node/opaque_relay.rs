@@ -344,12 +344,13 @@ impl Node {
                         || (self.bridge_directory_allowed()
                             && self.bridge_generation.load(Ordering::SeqCst) == bridge))
             };
-            self.prepare_opaque_confirmation(&mut progress, &current)
+            let outer = self
+                .resolve_opaque_confirmation(&mut progress, inner, &current)
                 .await?;
             if !current() || !channel.io_admitted() {
                 return Err(super::session::SessionError::UnexpectedMessage);
             }
-            if let Some(outer) = self.opaque_confirmed_wrapper(&progress, inner)?
+            if let Some(outer) = outer
                 && !progress.uploaded.contains(&(inner, outer))
             {
                 if progress.uploaded.len() >= 64 {

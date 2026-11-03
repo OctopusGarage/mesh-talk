@@ -2416,9 +2416,21 @@ async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
     );
     let leave_id = leave.id;
     alice.log.lock().unwrap().append(leave).unwrap();
+    let mut denied = false;
+    for _ in 0..1024 {
+        match alice.group_member(&bob.identity.public()) {
+            Ok(false) => {
+                denied = true;
+                break;
+            }
+            Err(LogError::StaleCursor) => {}
+            Ok(true) => panic!("a stale owner snapshot restored departed peer admission"),
+            Err(error) => panic!("membership preparation failed: {error}"),
+        }
+    }
     assert!(
-        !alice.group_member(&bob.identity.public()).unwrap(),
-        "admission must honor the signed leave despite the stale owner snapshot"
+        denied,
+        "bounded admission must finish honoring the signed leave despite the stale owner snapshot"
     );
     alice
         .append_event(group, EventKind::ChannelRename, b"After leave".to_vec())

@@ -956,6 +956,13 @@ impl Node {
             )?;
         account_transitions.commit_own(&identity.public(), &account.public().ed25519_pub)?;
         account_transitions.discard_pending(&identity.public(), &account.public().ed25519_pub)?;
+        let continuity =
+            account_transitions.own_chain(&identity.public(), &account.public().ed25519_pub);
+        log::info!(
+            "account binding continuity: available={}, links={}",
+            !continuity.is_empty(),
+            continuity.len()
+        );
         let account_document_updates = tokio::sync::watch::channel(0).0;
         super::account_documents::store::AccountDocumentStore::authenticate_legacy(
             &storage,

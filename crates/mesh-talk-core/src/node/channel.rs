@@ -565,6 +565,7 @@ impl ChannelBook {
     /// Channel metadata from the validated event DAG. This intentionally creates
     /// no sender/receiver chains and can project a recovery archive for a device
     /// which is not itself a member.
+    #[cfg(test)]
     pub(super) fn projected_metadata<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
         events: &[E],
@@ -573,7 +574,8 @@ impl ChannelBook {
     }
 
     /// Current members from the validated event DAG, without decrypting or
-    /// surfacing message content. Used for connection admission decisions.
+    /// surfacing message content. Reference for indexed admission regressions.
+    #[cfg(test)]
     pub fn projected_members<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
         events: &[E],

@@ -667,6 +667,7 @@
     {
       "id": "core-account-binding-transitions",
       "paths": [
+        "crates/mesh-talk-core/src/node/peer_directory.rs",
         "crates/mesh-talk-core/src/identity/account_transition.rs",
         "crates/mesh-talk-core/src/node/account_transition_store.rs",
         "crates/mesh-talk-core/src/node/account_transition_adoption.rs",
@@ -677,6 +678,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "identity::account_transition::tests::",
+            "node::peer_directory::",
             "node::account_transition_store::tests::",
             "node::account_transition_runtime::tests::",
             "transition_auth_binds_the_chain_visibility_and_noise_session",
@@ -714,6 +716,8 @@
     {
       "id": "core-channel-account-membership",
       "paths": [
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/group_membership_query_tests.rs",
         "crates/mesh-talk-core/src/node/channel.rs",
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
@@ -730,6 +734,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::channel::tests::content_events_preserve_membership_without_rebuilding_account_proofs",
+            "node::privacy_runtime::group_membership_query_tests::",
+            "concurrent_channel_snapshot_does_not_restore_departed_peer_sync",
+            "projected_group_removal_takes_effect_before_channel_book_refresh",
             "node::channel_account_authority::tests::",
             "node::account_group::access::raw_view_tests::",
             "group_inventory_directory_",
@@ -2289,6 +2296,7 @@
       "id": "core-group-file-relay",
       "paths": [
         "crates/mesh-talk-core/src/node/group_file_delivery.rs",
+        "crates/mesh-talk-core/src/node/group_file_authorization_tests.rs",
         "crates/mesh-talk-core/src/node/group_file_delivery_tests.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/file_consent_store.rs",
@@ -2307,6 +2315,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::group_file_delivery_tests::",
+            "node::group_file_delivery::authorization_tests::",
             "node::file_consent_tests::",
             "node::file_consent::",
             "node::file_consent_store::",

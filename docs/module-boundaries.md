@@ -866,6 +866,14 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   current metadata and its signed control reducer. Key distribution/decryption remains separate;
   archives share membership epochs, leaves, acceptance, ownership, rename and
   terminal dissolution rules with the metadata projection.
+  Live group admission also validates this exact current checkpoint rather than
+  replaying message bodies or trusting an older display book. Missing current
+  metadata advances the existing admission preparation with one shared bounded
+  budget and defers authorization while incomplete.
+  Group-file custody keeps at most four recipient/channel upload selections and
+  checks exact manifest membership through the existing history export owner.
+  It resumes append-only work, reopens changed authority and defers incomplete
+  selections; an older positive membership result is never a reusable grant.
 - Peer-avatar journals reclaim obsolete versions using encrypted record-log
   rewrites. They compact on opening older redundant logs and amortize subsequent
   rewrites by profile-version count. Latest clear tombstones survive compaction;

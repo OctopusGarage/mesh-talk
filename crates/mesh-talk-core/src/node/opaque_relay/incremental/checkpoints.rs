@@ -29,19 +29,65 @@ struct PreviousReceipt {
     session_only: bool,
 }
 
+// The deployed pre-target encoding has an outgoing completion proof without pairs.
+// Its receive cursor survives upgrade, but the older proof is not promoted.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct PreviousCompletedUpload {
+    local: HistorySyncStamp,
+    remote: RemoteBinding,
+    upper: i64,
+    revision: i64,
+}
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct PreviousCompletedReceipt {
+    cursor: Option<MailboxCursor>,
+    pending: Vec<EventId>,
+    epoch: i64,
+    source_floor: i64,
+    runtime: [u8; 16],
+    session_only: bool,
+    completed: Option<PreviousCompletedUpload>,
+}
+
 fn receipt_body(bytes: &[u8]) -> Option<Receipt> {
-    bounded(bytes).or_else(|| {
-        let old: PreviousReceipt = bounded(bytes)?;
-        Some(Receipt {
-            cursor: old.cursor,
-            pending: old.pending,
-            epoch: old.epoch,
-            source_floor: old.source_floor,
-            runtime: old.runtime,
-            session_only: old.session_only,
-            completed: None,
+    bounded::<Receipt>(bytes)
+        .filter(|receipt| {
+            receipt
+                .completed
+                .as_ref()
+                .is_none_or(|proof| proof.targets.len() <= MAX_RESULTS)
         })
-    })
+        .or_else(|| {
+            let old: PreviousCompletedReceipt = bounded(bytes)?;
+            // Read the obsolete proof only as its exact old encoding. It has
+            // no selected-membership authority in the upgraded cache.
+            if let Some(proof) = old.completed {
+                let _ = (proof.local, proof.remote, proof.upper, proof.revision);
+            }
+            Some(Receipt {
+                cursor: old.cursor,
+                pending: old.pending,
+                epoch: old.epoch,
+                source_floor: old.source_floor,
+                runtime: old.runtime,
+                session_only: old.session_only,
+                completed: None,
+            })
+        })
+        .or_else(|| {
+            let old: PreviousReceipt = bounded(bytes)?;
+            Some(Receipt {
+                cursor: old.cursor,
+                pending: old.pending,
+                epoch: old.epoch,
+                source_floor: old.source_floor,
+                runtime: old.runtime,
+                session_only: old.session_only,
+                completed: None,
+            })
+        })
 }
 
 impl Node {
@@ -65,6 +111,30 @@ impl Node {
         )
         .then_some(sealed.body)
     }
+    #[cfg(test)]
+    pub(in crate::node::opaque_relay) fn clear_mailbox_targets_for_test(&self, key: &[u8]) {
+        let sealed = self
+            .opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_checkpoint(key)
+            .unwrap()
+            .unwrap();
+        let body = self.open_mailbox_hint(key, &sealed).unwrap();
+        let mut receipt = receipt_body(&body).unwrap();
+        receipt.completed.as_mut().unwrap().targets.clear();
+        let sealed = self
+            .seal_mailbox_hint(key, bincode::serialize(&receipt).unwrap())
+            .unwrap();
+        assert!(
+            self.opaque_receive_cache
+                .lock()
+                .unwrap()
+                .put_checkpoint(key, &sealed)
+                .unwrap()
+        );
+    }
+
     pub(super) fn mailbox_local_binding(&self) -> Result<(i64, i64), LogError> {
         let log = self.log.lock().expect("log lock");
         let repo = log.repository()?;
@@ -116,6 +186,14 @@ impl Node {
         &self,
         p: &mut OpaqueMailboxProgress,
     ) -> Result<(), session::SessionError> {
+        if state(p)
+            .receipt
+            .completed
+            .as_ref()
+            .is_some_and(|proof| proof.targets.len() > MAX_RESULTS)
+        {
+            return Err(session::SessionError::ResourceUnavailable);
+        }
         if state(p).saved.as_ref() == Some(&state(p).receipt) {
             return Ok(());
         }
@@ -208,6 +286,110 @@ mod tests {
         assert!(decoded.completed.is_none());
         let upgraded = receipt_body(&bincode::serialize(&decoded).unwrap()).unwrap();
         assert!(upgraded == decoded);
+    }
+
+    fn fixture_certificate() -> CompletedUpload {
+        CompletedUpload {
+            local: bincode::deserialize(&[7_u8; 32]).unwrap(),
+            remote: RemoteBinding {
+                store_uuid: [3; 16],
+                conversation: ConversationId::new([5; 32]),
+                epoch: 4,
+                first_seen: Some(10),
+            },
+            upper: 20,
+            revision: 9,
+            targets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn previous_completed_receipt_keeps_receive_progress_and_drops_old_proof() {
+        for complete in [false, true] {
+            let proof = fixture_certificate();
+            let old = PreviousCompletedReceipt {
+                cursor: Some(MailboxCursor {
+                    store_uuid: [3; 16],
+                    conversation: ConversationId::new([5; 32]),
+                    epoch: 4,
+                    first_seen: Some(10),
+                    revision: 8,
+                    after: 17,
+                    window: Some((20, 9)),
+                }),
+                pending: vec![EventId::new([8; 32])],
+                epoch: 2,
+                source_floor: 7,
+                runtime: [1; 16],
+                session_only: true,
+                completed: complete.then_some(PreviousCompletedUpload {
+                    local: proof.local,
+                    remote: proof.remote,
+                    upper: proof.upper,
+                    revision: proof.revision,
+                }),
+            };
+            let decoded = receipt_body(&bincode::serialize(&old).unwrap()).unwrap();
+            assert_eq!(decoded.cursor, old.cursor);
+            assert_eq!(decoded.pending, old.pending);
+            assert_eq!(decoded.epoch, old.epoch);
+            assert_eq!(decoded.source_floor, old.source_floor);
+            assert_eq!(decoded.runtime, old.runtime);
+            assert_eq!(decoded.session_only, old.session_only);
+            assert!(decoded.completed.is_none());
+        }
+    }
+
+    #[test]
+    fn qualified_targets_fifo_is_bounded_and_receipt_fits_existing_envelope() {
+        let id = |number: u64| {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&number.to_be_bytes());
+            EventId::new(bytes)
+        };
+        let mut proof = fixture_certificate();
+        for number in 0..65 {
+            proof.remember_target(id(number), id(number + 100));
+        }
+        assert_eq!(proof.targets.len(), MAX_RESULTS);
+        assert_eq!(proof.targets.first(), Some(&(id(1), id(101))));
+        let unchanged = proof.targets.clone();
+        proof.remember_target(id(1), id(101));
+        assert_eq!(
+            proof.targets, unchanged,
+            "hits cannot refresh FIFO position"
+        );
+        proof.remember_target(id(65), id(165));
+        assert_eq!(proof.targets.first(), Some(&(id(2), id(102))));
+        let mut receipt = Receipt {
+            cursor: None,
+            pending: (0..MAX_PENDING as u64).map(id).collect(),
+            epoch: 0,
+            source_floor: 0,
+            runtime: [0; 16],
+            session_only: false,
+            completed: Some(proof),
+        };
+        let body = bincode::serialize(&receipt).unwrap();
+        assert!(
+            bincode::serialized_size(&Sealed {
+                body: body.clone(),
+                signature: vec![0; 64]
+            })
+            .unwrap()
+                <= 16384
+        );
+        assert!(receipt_body(&body).is_some());
+        receipt
+            .completed
+            .as_mut()
+            .unwrap()
+            .targets
+            .push((id(66), id(166)));
+        assert!(
+            receipt_body(&bincode::serialize(&receipt).unwrap()).is_none(),
+            "oversized new proof must not decode as a legacy receipt"
+        );
     }
 
     async fn connection(
@@ -511,7 +693,69 @@ mod tests {
                 .unwrap()
             {}
             assert!(state(&progress).lease.0.lock().unwrap().view.is_none());
-            let mut prepare = Box::pin(node.prepare_opaque_confirmation(&mut progress, &|| true));
+            let proof = state(&progress).receipt.completed.clone().unwrap();
+            let (target, outer) = proof.targets[0];
+            HISTORY_METADATA_ROWS.with(|rows| rows.set(0));
+            let writes = node
+                .storage
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap();
+            assert_eq!(
+                node.resolve_opaque_confirmation(&mut progress, target, &|| true)
+                    .await
+                    .unwrap(),
+                Some(outer)
+            );
+            assert!(state(&progress).lease.0.lock().unwrap().view.is_none());
+            assert_eq!(HISTORY_METADATA_ROWS.with(|rows| rows.get()), 0);
+            assert_eq!(
+                node.storage
+                    .database()
+                    .read(|c| Ok(c.total_changes()))
+                    .unwrap(),
+                writes,
+                "a qualified hit must perform no SQL writes"
+            );
+            let floor = state(&progress).remote_floor;
+            state_mut(&mut progress).remote_floor = Some((0, 0));
+            let mut invalid =
+                Box::pin(node.resolve_opaque_confirmation(&mut progress, target, &|| true));
+            assert!(
+                futures_util::poll!(invalid.as_mut()).is_pending(),
+                "remote rollback must force selected proof preparation"
+            );
+            drop(invalid);
+            state_mut(&mut progress).remote_floor = floor;
+            state(&progress).lease.0.lock().unwrap().view = None;
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(Event::new(
+                    &node.identity,
+                    conversation,
+                    34,
+                    vec![],
+                    34,
+                    0,
+                    EventKind::Message,
+                    vec![9; 128],
+                ))
+                .unwrap();
+            let mut invalid =
+                Box::pin(node.resolve_opaque_confirmation(&mut progress, target, &|| true));
+            assert!(
+                futures_util::poll!(invalid.as_mut()).is_pending(),
+                "a changed local history stamp must not reuse target membership"
+            );
+            drop(invalid);
+            assert!(state(&progress).receipt.completed.as_ref() == Some(&proof));
+            state(&progress).lease.0.lock().unwrap().view = None;
+            let mut prepare = Box::pin(node.resolve_opaque_confirmation(
+                &mut progress,
+                EventId::new([255; 32]),
+                &|| true,
+            ));
             assert!(futures_util::poll!(prepare.as_mut()).is_pending());
             node.privacy
                 .generation

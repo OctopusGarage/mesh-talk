@@ -706,18 +706,57 @@ impl Node {
             let book = self.channels.lock().expect("channels lock not poisoned");
             book.channel_ids()
         };
-        // Admission must use the durable, signed membership controls, including
-        // leaves and transfers that the live book has not processed yet.
-        let log = self.log.lock().expect("log lock not poisoned");
+        // One shared allowance advances stale signed authority without replaying
+        // historical message bodies or granting from the live display cache.
+        let mut budget = crate::eventlog::sync::network::PreparationBudget::default();
+        let mut pending = false;
+        let me = self.identity.public();
         for id in channel_ids {
-            let events = log.events(&id)?;
-            if crate::node::channel::ChannelBook::projected_members(id, &events).is_some_and(
-                |members| members.contains(public) && members.contains(&self.identity.public()),
-            ) {
-                return Ok(true);
+            let query = || -> Result<Option<bool>, LogError> {
+                // Retain the existing append/decision fence, but release it
+                // before preparation acquires its own channel/log guards.
+                let log = self.log.lock().expect("log lock not poisoned");
+                match self.channel_checkpoints.current_state(id)? {
+                    Some(state) => Ok(Some(
+                        state.members().contains(public) && state.members().contains(&me),
+                    )),
+                    None => {
+                        // A published non-local state cannot grant membership.
+                        // An absent checkpoint for retained controls is pending.
+                        if self.channel_checkpoints.source_binding(id)?.is_some()
+                            || !log
+                                .repository()?
+                                .has_kind(&id, crate::eventlog::EventKind::MembershipChange)?
+                        {
+                            Ok(Some(false))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                }
+            };
+            match query() {
+                Ok(Some(true)) => return Ok(true),
+                Ok(Some(false)) => continue,
+                Ok(None) | Err(LogError::StaleCursor) => {}
+                Err(error) => return Err(error),
+            }
+            match self.prepare_channel_admission(id, &mut budget) {
+                Ok(()) => match query() {
+                    Ok(Some(true)) => return Ok(true),
+                    Ok(Some(false)) => {}
+                    Ok(None) | Err(LogError::StaleCursor) => pending = true,
+                    Err(error) => return Err(error),
+                },
+                Err(LogError::StaleCursor) => pending = true,
+                Err(error) => return Err(error),
             }
         }
-        Ok(false)
+        if pending {
+            Err(LogError::StaleCursor)
+        } else {
+            Ok(false)
+        }
     }
 
     pub(in crate::node) fn group_departure_peer(&self, public: &PublicIdentity) -> bool {
@@ -1040,7 +1079,10 @@ impl Node {
                 if error.kind() != io::ErrorKind::InvalidData {
                     return Err(error);
                 }
-                log::warn!("discovered peer proof was not cached");
+                log::warn!(
+                    "discovered peer proof was not cached: {}",
+                    super::peer_directory::rejection_code(&error)
+                );
                 continue;
             }
             if let Some(peer) = peers.iter().find(|p| p.public == proof.public())
@@ -1504,3 +1546,7 @@ mod tests;
 #[cfg(test)]
 #[path = "session_pool_tests.rs"]
 mod session_pool_tests;
+
+#[cfg(test)]
+#[path = "group_membership_query_tests.rs"]
+mod group_membership_query_tests;

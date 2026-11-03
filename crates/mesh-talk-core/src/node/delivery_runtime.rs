@@ -3295,14 +3295,15 @@ impl Node {
             if chunks {
                 let final_chunk = file.final_chunk.ok_or(SessionError::UnexpectedMessage)?;
                 let bridge = self.bridge_generation.load(Ordering::SeqCst);
-                self.prepare_opaque_confirmation(opaque, &|| {
-                    current()
-                        && channel.io_admitted()
-                        && (!federated
-                            || (self.bridge_directory_allowed()
-                                && self.bridge_generation.load(Ordering::SeqCst) == bridge))
-                })
-                .await?;
+                let outer = self
+                    .resolve_opaque_confirmation(opaque, final_chunk, &|| {
+                        current()
+                            && channel.io_admitted()
+                            && (!federated
+                                || (self.bridge_directory_allowed()
+                                    && self.bridge_generation.load(Ordering::SeqCst) == bridge))
+                    })
+                    .await?;
                 if !current()
                     || !channel.io_admitted()
                     || (federated
@@ -3311,9 +3312,7 @@ impl Node {
                 {
                     return Err(SessionError::UnexpectedMessage);
                 }
-                let outer = self
-                    .opaque_confirmed_wrapper(opaque, final_chunk)?
-                    .ok_or(SessionError::NoProgress)?;
+                let outer = outer.ok_or(SessionError::NoProgress)?;
                 let mailbox = if federated {
                     RelayMailbox::federated(&self.identity, &binding.device)
                 } else {

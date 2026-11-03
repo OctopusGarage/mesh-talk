@@ -426,6 +426,7 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
             Account::generate(),
             &proof,
         );
+        node.set_bridge_discovery_enabled(true);
         let conversation = super::super::conversation::dm_conversation_id(
             &node.identity.public(),
             &remote.public(),
@@ -591,7 +592,89 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
             bodies,
             "a signed target wrapper hint avoids reading its payload"
         );
+        // The first target resolution may reconstruct its selected view. Once
+        // qualified, the SAME old target must survive six-scope view rotation.
+        for (relay, office) in &relays {
+            for federated in [false, true] {
+                let observed = counted_scope_exchange(
+                    &node,
+                    office.clone(),
+                    relay,
+                    &remote.public(),
+                    conversation,
+                    federated,
+                    Some(first),
+                )
+                .await;
+                assert_eq!(observed.1, 1);
+                assert!(observed.2.iter().any(|(inner, _)| *inner == first));
+            }
+        }
+        for _ in 0..2 {
+            incremental::HISTORY_METADATA_ROWS.with(|rows| rows.set(0));
+            for (relay, office) in &relays {
+                for federated in [false, true] {
+                    let observed = counted_scope_exchange(
+                        &node,
+                        office.clone(),
+                        relay,
+                        &remote.public(),
+                        conversation,
+                        federated,
+                        Some(first),
+                    )
+                    .await;
+                    assert_eq!(
+                        observed.1, 1,
+                        "each qualified target still needs one fresh custody probe"
+                    );
+                    assert!(observed.2.iter().any(|(inner, _)| *inner == first));
+                }
+            }
+            assert_eq!(
+                incremental::HISTORY_METADATA_ROWS.with(|rows| rows.get()),
+                0,
+                "repeated qualified targets must not rebuild evicted historical selections"
+            );
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts(),
+                bodies,
+                "qualified target rotation must not read historical payloads"
+            );
+        }
         let mailbox = RelayMailbox::new(&node.identity, &remote.public(), &relay.public()).unwrap();
+        // Keep completed upload evidence, but remove its optional target memo
+        // and evict the live view to exercise only exact selected-body recovery.
+        let checkpoint_key = bincode::serialize(&(
+            relay.public(),
+            remote.public(),
+            mailbox.id(),
+            Some(conversation),
+        ))
+        .unwrap();
+        node.clear_mailbox_targets_for_test(&checkpoint_key);
+        for (relay, office) in &relays {
+            for federated in [false, true] {
+                if relay.public() == relays[0].0.public() && !federated {
+                    continue;
+                }
+                counted_scope_exchange(
+                    &node,
+                    office.clone(),
+                    relay,
+                    &remote.public(),
+                    conversation,
+                    federated,
+                    None,
+                )
+                .await;
+            }
+        }
         let mut hint_key = b"wrapper-v1".to_vec();
         hint_key.extend_from_slice(mailbox.id().as_bytes());
         hint_key.extend_from_slice(first.as_bytes());
