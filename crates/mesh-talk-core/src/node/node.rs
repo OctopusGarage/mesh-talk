@@ -249,6 +249,8 @@ pub struct Node {
     pub(in crate::node) sessions: super::session_pool::SessionPool,
     pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
     pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
+    pub(in crate::node) received_expiry_schedule:
+        Mutex<Option<super::expiry_policy::ReceivedExpirySchedule>>,
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
     #[cfg(test)]
     pub(in crate::node) control_fanout_start_test_hook: BlockingTestHook,
@@ -360,7 +362,7 @@ pub struct Node {
     pub(in crate::node) sentlog: Mutex<SentLog>,
     pub(in crate::node) roster: Arc<Mutex<Roster>>,
     /// Session-local preferred address after a successful pinned Noise handshake.
-    pub(in crate::node) preferred_routes: Mutex<HashMap<UserId, std::net::SocketAddr>>,
+    pub(in crate::node) preferred_routes: Mutex<super::route_timing::PreferredRoutes>,
     pub(in crate::node) incoming: super::runtime_delivery::HostPayload<ReceivedDm>,
     pub(in crate::node) channel_incoming:
         super::runtime_delivery::HostPayload<ReceivedChannelMessage>,
@@ -1186,6 +1188,7 @@ impl Node {
             storage,
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
+            received_expiry_schedule: Mutex::new(None),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             control_fanout_start_test_hook: Mutex::new(None),
@@ -1345,7 +1348,7 @@ impl Node {
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
             opaque_receive_cache: Mutex::new(opaque_receive_cache),
-            preferred_routes: Mutex::new(HashMap::new()),
+            preferred_routes: Mutex::new(super::route_timing::PreferredRoutes::default()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),

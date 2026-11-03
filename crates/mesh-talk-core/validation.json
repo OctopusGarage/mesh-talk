@@ -1294,6 +1294,10 @@
           {
             "name": "The actual dedicated worker interleaves a physical class with a trigger at 256 free pages, a target at 64 free pages, up to 64 vacuum iterations and a 100 ms success cooldown plus duty pacing; typed BUSY/LOCKED or incomplete PASSIVE transfers back off independently without starving other classes. Restart discovers pending truncation from one known-main stat; idle/ordinary growth does not checkpoint, and shutdown drains admitted work before lease release.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Conditional V5 refresh uses bounded exact-peer scalar proofs only after bilateral complete zero-mismatch acknowledgment; unchanged populated inventories perform no repeated SQL staging or page writes while preserving origin-expiring presence. Append, source/visibility/origin/expiry, readiness, restart, cancellation and unsupported legacy peers cannot authorize an unsafe shortcut. Address aliases share one bounded identity scheduler without lost wakes or bypassed backoff.",
+            "reference": "docs/post-office-federation.md#unchanged-federation-refreshes"
           }
         ]
       }
@@ -1732,7 +1736,10 @@
             "node::delivery_runtime_tests::expiring_account_message_arrives_over_loopback_and_expires_on_both_sides",
             "node::delivery_runtime_tests::accepted_account_file_card_carries_fixed_deadline",
             "node::delivery_runtime_tests::expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery",
-            "node::delivery_runtime_tests::outgoing_expiry_rejects_past_and_unbounded_deadlines"
+            "node::delivery_runtime_tests::outgoing_expiry_rejects_past_and_unbounded_deadlines",
+            "node::expiry_policy::tests::",
+            "node::node::tests::unchanged_expiry_maintenance_does_not_rescan_future_received_deadlines",
+            "node::favorites::capture_tests::unchanged_expiry_maintenance_does_not_rescan_favorite_media"
           ]
         }
       ],
@@ -1750,6 +1757,10 @@
           },
           {
             "name": "Wire compatibility and recipient clock and restart protections remain intact",
+            "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
+          },
+          {
+            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics.",
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           }
         ]

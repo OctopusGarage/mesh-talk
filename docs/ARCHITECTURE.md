@@ -1278,6 +1278,18 @@ roots and a dev-only embedded WebDriver. The normal entry point has no driver pl
 storage override. Three-platform native scenarios and the usability rubric are documented
 in [platform validation](platform-validation.md).
 
+Unchanged expiry maintenance keeps a constant-size successful-scan schedule,
+qualified by received/file repository revisions, the immutable account and linked
+device authority, and the earliest wall/monotonic deadline. Revision changes,
+reached deadlines, restart and failed work require another scan. The first scan
+and scans after changes can still examine all active expiry metadata; this is not
+a bound on the existing per-message monotonic observations. Favorite attachment
+pruning similarly uses scalar reference/media revisions and its earliest expiry;
+failed cleanup remains retryable. Neither optimization changes erasure authority
+or suppresses due cleanup. Authenticated preferred-route hints share the existing
+256-entry advisory budget; eviction leaves ordinary authenticated route discovery
+and fallback available.
+
 ### Initial native presentation
 
 The application root starts the existing authenticated runtime and account-scoped
@@ -1875,7 +1887,6 @@ forever. Only complete observations are cached and signed. The existing account
 sync wake continues progress; no separate worker is created. Wire IDs remain
 limited to 512, while explicit final local receipts preserve their existing
 131,072-ID bound and are admitted by byte cost before materialization.
-
 
 Transcript lookups return owned, fallible results. Chronological, reverse and
 insertion-order pages select keys and aggregate sender/body bytes before fetching

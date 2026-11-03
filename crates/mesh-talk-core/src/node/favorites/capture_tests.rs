@@ -224,6 +224,73 @@ fn inspection_uses_exact_sets_and_excludes_expired_removed_members() {
     );
 }
 #[test]
+fn unchanged_expiry_maintenance_does_not_rescan_favorite_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let mut favorite = node
+        .save_message_favorite_guarded(source(&node), Default::default(), |c| c())
+        .unwrap();
+    let file = ConversationId::new([96; 32]);
+    favorite.messages[0].file = Some(FavoriteFile {
+        file_conv: hex::encode(file.as_bytes()),
+        name: "retained.txt".into(),
+        size: 5,
+        mime: "text/plain".into(),
+        media: false,
+    });
+    favorite.revision += 1;
+    node.favorites
+        .lock()
+        .unwrap()
+        .merge(FavoriteRecord {
+            generation: 1,
+            favorite: favorite.clone(),
+            removed: false,
+        })
+        .unwrap();
+    node.favorite_media
+        .store_bytes(file, "retained.txt", b"bytes")
+        .unwrap();
+    node.prune_expired_received().unwrap();
+    crate::node::media_store::prune_observations::ROWS.with(|count| count.set(0));
+    node.prune_expired_received().unwrap();
+    assert_eq!(
+        crate::node::media_store::prune_observations::ROWS.with(|count| count.get()),
+        0,
+        "an unchanged favorite and media namespace must not cause another full prune"
+    );
+    assert!(node.favorite_media.contains(file));
+
+    // An arriving orphan invalidates the media inventory; a failed cleanup must
+    // not certify it as complete and suppress recovery after storage returns.
+    let orphan = ConversationId::new([97; 32]);
+    let path = node
+        .favorite_media
+        .store_bytes(orphan, "orphan.txt", b"bytes")
+        .unwrap();
+    let root = path.parent().unwrap();
+    let parked = root.with_extension("parked");
+    std::fs::rename(root, &parked).unwrap();
+    std::fs::write(root, b"unavailable media root").unwrap();
+    assert!(node.prune_expired_received().is_err());
+    std::fs::remove_file(root).unwrap();
+    std::fs::rename(&parked, root).unwrap();
+    node.prune_expired_received().unwrap();
+    assert!(!node.favorite_media.contains(orphan));
+    assert!(node.favorite_media.contains(file));
+
+    // Changed references still retire the previously retained bytes.
+    node.remove_message_favorite_guarded(
+        &favorite.id,
+        favorite.revision,
+        &favorite.device_id,
+        |c| c(),
+    )
+    .unwrap();
+    assert!(!node.favorite_media.contains(file));
+}
+
+#[test]
 fn retained_attachment_export_requires_live_favorite_and_safe_destination() {
     let dir = tempfile::tempdir().unwrap();
     let node = open(dir.path(), &Account::generate());

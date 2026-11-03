@@ -29,6 +29,11 @@ use std::sync::Mutex;
 
 mod indexed;
 
+#[cfg(test)]
+pub(in crate::node) mod prune_observations {
+    std::thread_local! { pub static ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+}
+
 pub(in crate::node) type ManagedFiles =
     Box<dyn Iterator<Item = std::io::Result<(ConversationId, PathBuf)>>>;
 
@@ -339,6 +344,14 @@ impl MediaStore {
         Ok(())
     }
 
+    /// Scalar namespace changes invalidate a successful reference prune.
+    pub(in crate::node) fn inventory_revision(&self) -> std::io::Result<Option<i64>> {
+        self.index
+            .as_ref()
+            .map(|index| index.revision())
+            .transpose()
+    }
+
     /// Recover from a crash between local card erasure and managed-file removal.
     pub fn prune_unreferenced(&self, live: &HashSet<ConversationId>) -> std::io::Result<()> {
         self.prune_unreferenced_where(|file| Ok(live.contains(&file)))
@@ -353,6 +366,8 @@ impl MediaStore {
             let mut after = None;
             loop {
                 let page = index.prune_page(after.as_deref())?;
+                #[cfg(test)]
+                prune_observations::ROWS.with(|count| count.set(count.get() + page.len()));
                 if page.is_empty() {
                     return Ok(());
                 }

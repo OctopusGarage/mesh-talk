@@ -1694,6 +1694,107 @@ fn restart_erases_unexpired_recipient_copy_without_erasing_sender_copy() {
 }
 
 #[test]
+fn unchanged_expiry_maintenance_does_not_rescan_future_received_deadlines() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let mut node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let conversation = ConversationId::new([52; 32]);
+    let now = super::now_millis();
+    let deadline = now + 3_600_000;
+    for index in 0..129u64 {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&index.to_be_bytes());
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conversation,
+                "peer".into(),
+                now,
+                &crate::expiry::wrap(b"future", Some(deadline)),
+                EventId::new(id),
+            )
+            .unwrap();
+    }
+    node.prune_expired_received().unwrap();
+    crate::node::received_store::deadline_observations::ROWS.with(|count| count.set(0));
+    node.prune_expired_received().unwrap();
+    assert_eq!(
+        crate::node::received_store::deadline_observations::ROWS.with(|count| count.get()),
+        0,
+        "unchanged future deadlines must not be loaded again on each expiry tick"
+    );
+    assert_eq!(
+        node.received.lock().unwrap().entries(&conversation).len(),
+        129
+    );
+    // A changed transcript must invalidate quiet-state scheduling even when the
+    // older selected rows all remain in the future.
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            "peer".into(),
+            now,
+            &crate::expiry::wrap(b"already due", Some(now.saturating_sub(1))),
+            EventId::new([253; 32]),
+        )
+        .unwrap();
+    node.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
+    assert!(
+        node.prune_expired_received().is_err(),
+        "failed due-row erasure must remain retryable"
+    );
+    node.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
+    assert!(node.prune_expired_received().unwrap() > 0);
+    assert_eq!(
+        node.received.lock().unwrap().entries(&conversation).len(),
+        129
+    );
+    let soon = now + 60_000;
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            "peer".into(),
+            now,
+            &crate::expiry::wrap(b"due soon", Some(soon)),
+            EventId::new([254; 32]),
+        )
+        .unwrap();
+    node.prune_expired_received().unwrap();
+    // Advancing the anchored clock must wake the cached wall-clock deadline.
+    Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), soon + 1);
+    assert!(node.prune_expired_received().unwrap() > 0);
+    assert_eq!(
+        node.received.lock().unwrap().entries(&conversation).len(),
+        129
+    );
+}
+
+#[test]
 fn monotonic_observation_bounds_expiry_even_with_a_future_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let (dm, _) = mpsc::unbounded_channel();
