@@ -1223,7 +1223,7 @@ pub(in crate::node) mod tests {
             let ready_role = executor.account_group_access(group).unwrap().role == expected_role;
             let pending_role = match owner.account_group_access(group) {
                 Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
-                other => panic!("the imported owner must remain genuinely Pending: {other:?}"),
+                _ => panic!("the imported owner must remain genuinely Pending"),
             };
             let predicate = (
                 status.phase == crate::node::AccountGroupOperationPhase::Committed,
