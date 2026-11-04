@@ -186,7 +186,7 @@ test("CI runs release workflow diagnostics only through the shared glob", () => 
 });
 
 test("Windows builds once then requires four complete serial archive partitions", () => {
-  assert.match(read("ci.yml"), /os: \[ubuntu-latest, macos-latest\]/);
+  assert.match(read("ci.yml"), /os: \[ubuntu-latest, macos-26-intel\]/);
   assert.match(read("ci.yml"), /windows:\n    uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
   const windows = read("windows-workspace.yml");
   assert.match(windows, /needs: build/);

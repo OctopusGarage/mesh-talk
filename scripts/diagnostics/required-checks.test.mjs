@@ -13,7 +13,7 @@ test("gate migration preserves strictness, app binding and unrelated protection"
   assert.equal(next.strict, true);
   assert.deepEqual(next.checks.find(x => x.context === "codecov/patch"), current.checks[2]);
   assert.deepEqual(next.checks.find(x => x.context === "review"), current.checks[3]);
-  for (const name of ["checks (ubuntu-latest)", "checks (macos-latest)", "windows / Windows workspace build", "windows / Windows workspace tests (1/4)", "windows / Windows workspace tests (2/4)", "windows / Windows workspace tests (3/4)", "windows / Windows workspace tests (4/4)", "health / Source and supply-chain checks", "health / Portable checks (windows-latest)"]) {
+  for (const name of ["checks (ubuntu-latest)", "checks (macos-26-intel)", "windows / Windows workspace build", "windows / Windows workspace tests (1/4)", "windows / Windows workspace tests (2/4)", "windows / Windows workspace tests (3/4)", "windows / Windows workspace tests (4/4)", "health / Source and supply-chain checks", "health / Portable checks (windows-latest)"]) {
     assert.deepEqual(next.checks.find(x => x.context === name), { context: name, app_id: 15368 });
   }
   assert.ok(!next.checks.some(x => x.context === "verify"));
@@ -56,8 +56,8 @@ test("the former Windows matrix check requires build and both executable archive
 });
 
 test("Mac capacity allocation migrates Intel work while preserving ARM acceptance", () => {
-  const oldNames = ["health / Portable checks (macos-latest)", "Backend core (macos-latest)"];
-  const armNames = ["checks (macos-latest)", "native-core / Real native UI (macos-latest)"];
+  const oldNames = ["checks (macos-latest)", "health / Portable checks (macos-latest)", "Backend core (macos-latest)"];
+  const armNames = ["native-core / Real native UI (macos-latest)"];
   const webkit = "Portable UI (macos-latest, webkit)";
   const policy = migrateRequiredChecks({ strict: true, checks: [...oldNames, ...armNames, webkit].map(context => ({ context, app_id: 15368 })) });
   const names = policy.checks.map(check => check.context);
@@ -68,7 +68,7 @@ test("Mac capacity allocation migrates Intel work while preserving ARM acceptanc
   for (const name of armNames) assert.ok(names.includes(name));
   assert.ok(names.includes(webkit));
   assert.ok(!names.includes(webkit.replace("macos-latest", "macos-26-intel")));
-  for (const name of ["health / Portable checks (macos-26-intel)", "Backend core (macos-26-intel)", ...armNames]) assert.ok(releaseSourceChecks.includes(name));
+  for (const name of ["checks (macos-26-intel)", "health / Portable checks (macos-26-intel)", "Backend core (macos-26-intel)", ...armNames]) assert.ok(releaseSourceChecks.includes(name));
   assert.deepEqual(migrateRequiredChecks(policy), policy);
 });
 

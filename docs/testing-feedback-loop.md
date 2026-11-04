@@ -224,9 +224,13 @@ and Health, so late desktop scheduling cannot delay that merge. Portable collect
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
 Desktop browser shards start after Health completes, limiting the initial runner
-burst. Portable Health and independent backend jobs use the standard
-`macos-26-intel` pool. All browser suites, the Rust workspace and real native
-desktop acceptance retain `macos-latest` Apple Silicon execution. Measure both
+burst. Portable Health, independent backend jobs and the complete Rust workspace use
+the standard `macos-26-intel` pool. The workspace retains all default targets,
+doc-tests, native lint/build checks and coverage on macOS Intel, Linux and Windows.
+All browser suites and real native desktop acceptance retain `macos-latest` Apple
+Silicon execution; that native gate builds and exercises the production app/CLI,
+rather than repeating the full ARM workspace unit suite. This allocation separates
+heavy compilation from ARM browser/native demand. Measure both
 queue and execution before moving a workload: Intel qualification substantially
 increased full Chromium execution time, and cold WebKit startup left too little
 of the existing scenario budget for its assertions. Vite warmup did not show a
