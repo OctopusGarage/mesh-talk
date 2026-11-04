@@ -1606,6 +1606,10 @@ Portable diagnostics and independent CI jobs retain their existing scheduling.
 
 Linux/macOS coverage runs both the desktop Host and remaining complete workspace
 partitions with pinned Nextest, four concurrent case processes and no retries.
+The partitions collect independently: a Host failure still permits the remaining
+workspace tests to finish, and either failure preserves a nonzero result. The
+timing-log path applies the same rule. This collection cannot authorize a
+coverage report from an incomplete or failed workspace.
 Both use the same repository default process-hang profile. Ordinary cases have
 a fifteen-minute termination limit, sized above measured multi-minute Windows
 stress cases; the registered metadata IPC and reconnect cases retain their
@@ -1617,10 +1621,24 @@ test-enabled example targets retain their default selection and ignored policy;
 doctests remain separate. Successful partitions accumulate into one report; any
 partition failure prevents that report and cannot qualify partial coverage.
 The real-tool `scripts/ci/native-host-coverage.test.mjs` requires actual target
-coverage, both partition failure controls, empty-selection rejection and genuine
+coverage, single and simultaneous partition failures, report-destination failure,
+empty-selection rejection and genuine
 parked-process termination while collection continues. Its short controlled
 watchdog exists only in the isolated fixture; production case budgets remain
 unchanged. Source-shape checks do not replace this hosted pinned-tool evidence.
+
+Linux workspace CI preserves native process-exit crashes separately from test
+assertions. A body that prints a passing result but exits by signal still fails.
+The diagnostic owner uses a dedicated two-GiB loop filesystem and a per-process
+256-MiB core limit, records the checked-out source, tools and executable digest,
+and collects bounded GDB traces with automatic loading and argument printing
+disabled. An actual C exit-handler crash verifies core delivery and symbolization
+on the same Linux VM before product execution. Collection always restores the
+prior kernel pattern and retires its storage; raw cores do not enter artifacts.
+Portable path and output-limit controls do not establish Linux kernel behavior.
+Missing, mismatched, truncated or timed-out crash evidence remains explicit and
+cannot certify the failing test. No-crash collection is normal. This diagnostic
+does not retry failed product tests or change their acceptance criteria.
 
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented

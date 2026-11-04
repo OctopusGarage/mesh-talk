@@ -64,7 +64,8 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            gdb
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -94,7 +95,16 @@ jobs:
       - name: Verify coverage accumulation with the actual tool
         # These fixtures launch real Cargo/rustc processes and share this job's
         # package cache. Give each compiler contract exclusive execution.
-        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/asan-cli.test.mjs
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/asan-cli.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs
+
+      - name: Prepare and verify Linux native crash evidence
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e -o pipefail
+          ulimit -c 262144
+          node scripts/ci/linux-crash-diagnostics.mjs setup
+          node scripts/ci/linux-crash-diagnostics.mjs selftest
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
@@ -128,9 +138,19 @@ jobs:
         run: |
           set -e -o pipefail
           run_coverage() {
-            cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            # Preserve each failure even if another test prevents suite completion.
-            cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
+            local result=0 code
+            # Collect both independent partitions; preserve the first failure.
+            if
+              cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
+            then :; else result=$?; fi
+            if
+              cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
+            then :; else
+              code=$?
+              if [ "$result" -eq 0 ]; then result=$code; fi
+            fi
+            # Failed partitions cannot authorize a complete coverage report.
+            if [ "$result" -ne 0 ]; then return "$result"; fi
             cargo llvm-cov report --lcov --output-path lcov.info
           }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
@@ -148,10 +168,21 @@ jobs:
         shell: bash
         run: |
           set -e -o pipefail
+          ulimit -c 262144
           run_coverage() {
-            cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            # Preserve each failure even if another test prevents suite completion.
-            cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
+            local result=0 code
+            # Collect both independent partitions; preserve the first failure.
+            if
+              cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
+            then :; else result=$?; fi
+            if
+              cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
+            then :; else
+              code=$?
+              if [ "$result" -eq 0 ]; then result=$code; fi
+            fi
+            # Failed partitions cannot authorize a complete coverage report.
+            if [ "$result" -ne 0 ]; then return "$result"; fi
             cargo llvm-cov report --lcov --output-path lcov.info
           }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
@@ -194,6 +225,19 @@ jobs:
           name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
           path: ${{ runner.temp }}/backend-eval-results/
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Collect Linux native crash evidence and retire its storage
+        if: always() && runner.os == 'Linux'
+        run: node scripts/ci/linux-crash-diagnostics.mjs collect
+
+      - name: Preserve Linux native crash diagnostics
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-crash-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-crash-diagnostics/reports/
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload test timing diagnostics

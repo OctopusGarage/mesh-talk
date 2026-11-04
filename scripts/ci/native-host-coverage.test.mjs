@@ -264,7 +264,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     .split("        run: |\n")[1]
     .split("          # llvm-cov runs")[0]
     .replace(/^          /gm, "");
-  for (const failure of ["HOST", "CORE"]) {
+  for (const failure of ["HOST", "CORE", "BOTH"]) {
     for (const timing of ["0", "1"]) {
       rmSync(join(root, "lcov.info"));
       const marker = join(root, `rest-${failure}-${timing}`);
@@ -275,7 +275,9 @@ test("native Host isolation preserves default targets, accumulated coverage and 
           cwd: root,
           env: {
             ...env,
-            [`MESH_FAIL_${failure}`]: "1",
+            ...(failure === "BOTH"
+              ? { MESH_FAIL_HOST: "1", MESH_FAIL_CORE: "1" }
+              : { [`MESH_FAIL_${failure}`]: "1" }),
             MESH_REST_MARKER: marker,
             MESH_TALK_TEST_TIMING: timing,
             RUNNER_TEMP: root,
@@ -291,13 +293,16 @@ test("native Host isolation preserves default targets, accumulated coverage and 
       );
       assert.match(
         failedPartition.stdout + failedPartition.stderr,
-        new RegExp(`${failure.toLowerCase()} failure control`, "u"),
+        new RegExp(`${failure === "BOTH" ? "host" : failure.toLowerCase()} failure control`, "u"),
       );
       assert.equal(
         existsSync(marker),
-        failure === "CORE",
-        "only a successful Host may admit the rest partition",
+        true,
+        "a failed Host must still admit the complete independent rest partition",
       );
+      if (failure === "BOTH")
+        assert.match(failedPartition.stdout + failedPartition.stderr,
+          /core failure control/u, "both partition failures must remain visible");
       assert.equal(
         existsSync(join(root, "lcov.info")),
         false,
@@ -306,12 +311,29 @@ test("native Host isolation preserves default targets, accumulated coverage and 
       if (timing === "1")
         assert.match(
           readFileSync(join(root, "mesh-talk-test-timing.log"), "utf8"),
-          new RegExp(`${failure.toLowerCase()} failure control`, "u"),
+          new RegExp(`${failure === "BOTH" ? "host" : failure.toLowerCase()} failure control`, "u"),
         );
       // Restore the report only for the next independent failure-control iteration.
       writeFileSync(join(root, "lcov.info"), "previous report");
     }
   }
+  for (const timing of ["0", "1"]) {
+    rmSync(join(root, "lcov.info"), { recursive: true, force: true });
+    // A real report destination failure must fail even after both suites pass.
+    mkdirSync(join(root, "lcov.info"));
+    const reportFailure = spawnSync("bash", ["-e", "-o", "pipefail", "-c", block], {
+      cwd: root,
+      env: { ...env, MESH_TALK_TEST_TIMING: timing, RUNNER_TEMP: root },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.equal(reportFailure.error, undefined);
+    assert.notEqual(reportFailure.status, 0, reportFailure.stdout + reportFailure.stderr);
+    assert.equal((reportFailure.stdout + reportFailure.stderr)
+      .match(/4 tests run: 4 passed, 1 skipped/gu)?.length, 2,
+    "report failure must remain nonzero after both complete partitions pass");
+  }
+  rmSync(join(root, "lcov.info"), { recursive: true, force: true });
   const emptyHost = run([...host, "-E", "test(=absent_case)"], {}, 4);
   assert.match(emptyHost, /no tests/u);
   const emptyRest = run([...rest, "-E", "test(=absent_case)"], {}, 4);
