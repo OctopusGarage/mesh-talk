@@ -187,6 +187,16 @@ coordinates its existing delivery journal with that intent.
 publication, its downgrade barrier, authenticated import and retryable cleanup.
 `core/eventlog/persist.rs` selects the profile-backed repository for production
 Nodes; `persist/legacy.rs` retains the explicit standalone compatibility owner.
+`core/identity/device.rs` owns immutable private device keys and one fixed public
+projection per identity. Creation and keystore restoration derive that projection
+once; callers receive an owned clone. Public reads add no retained state and do
+not cache signature validity, membership or permissions.
+
+`core/storage/record_log.rs` owns encrypted framing and confirmation of the
+current owned file prefix. Its durability state is separate from source
+publication barriers and application authority. Reopen and failed replacement
+synchronization require fresh confirmation through that same owner.
+
 `core/node/privacy_sync/network.rs` applies participant authorization to finite
 repository network pages. `core/eventlog/repository/selection.rs` owns disposable
 SQL authorization IDs, causal closure, and bounded retirement cleanup.
@@ -207,6 +217,10 @@ These query owners share the repository ancestry implementation and its incremen
 retirement; callers must resume Pending work without synchronously draining it.
 Canonical preparation reports the caller's shared row, edge and byte budget
 across ordering, generation cleanup, legacy cuts and reducer decisions.
+Legacy-departure discovery scans ordinary headers in bounded pages and commits
+one guarded cursor per page. Every fetched header is charged, including lookahead;
+one causal cut retains its existing turn and pending rank. Account, source and
+canonical-job guards still qualify the cursor before publication.
 The checkpoint's `history_read_ready` gate covers both current signed authority
 and the first attempt of admitted recalls; plaintext consumers must check it
 before hydration. Unknown-target retries become blocking again on their exact

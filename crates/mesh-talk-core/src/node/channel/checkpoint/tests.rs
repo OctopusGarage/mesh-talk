@@ -2293,6 +2293,124 @@ fn channel_logical_retirement_reclaims_orphan_facts_in_bounded_turns() {
 }
 
 #[test]
+fn channel_legacy_scan_amortizes_ordinary_prefix_commits_and_stays_quiet_when_ready() {
+    use crate::eventlog::{
+        repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
+        sync::network::PreparationBudget,
+    };
+    for count in [128, 256] {
+        let fixture = Fixture::new(count);
+        let repository = fixture.log.repository().unwrap();
+        for _ in 0..20 * (count + 2) {
+            if repository
+                .order_step(
+                    &fixture.channel,
+                    CausalOrder::Logical,
+                    OrderWorkBudget::default(),
+                )
+                .unwrap()
+                .readiness
+                == OrderReadiness::Ready
+            {
+                break;
+            }
+        }
+        let generation = repository
+            .order_generation(&fixture.channel, CausalOrder::Logical)
+            .unwrap()
+            .expect("canonical fixture order must be ready");
+        let database = fixture.store.profile.database();
+        let scan_rank = || {
+            database.read(|c| {
+            c.query_row("SELECT COALESCE((SELECT next_rank FROM channel_legacy_scan WHERE job=?1 AND channel=?2),0)",
+                params![generation.job.as_slice(), fixture.channel.as_bytes().as_slice()], |r| r.get::<_, i64>(0))
+                .map_err(LogError::from)
+        }).unwrap()
+        };
+        let budget = PreparationBudget::default();
+        // Complete the two control-header classifications before measuring the
+        // ordinary prefix. No canonical reducer decision has run yet.
+        for _ in 0..count + 2 {
+            if scan_rank() >= 2 {
+                break;
+            }
+            fixture
+                .store
+                .project_step_with_budget(repository, &fixture.me, fixture.channel, budget)
+                .unwrap();
+        }
+        let initial_rank = scan_rank();
+        assert!(initial_rank >= 2 && initial_rank < generation.count as i64);
+        let before_reads = repository.body_read_counts();
+        let before_commits = database.successful_write_commits();
+        let mut largest_prefix = 0;
+        let mut finished = false;
+        for _ in 0..count + 2 {
+            let before = scan_rank();
+            if before == generation.count as i64 {
+                finished = true;
+                break;
+            }
+            let step = fixture
+                .store
+                .project_step_with_budget(repository, &fixture.me, fixture.channel, budget)
+                .unwrap();
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes
+            );
+            let after = scan_rank();
+            assert!(
+                after > before,
+                "ordinary prefix scan must make durable progress"
+            );
+            largest_prefix = largest_prefix.max(after - before);
+        }
+        assert!(
+            finished,
+            "legacy header scan must finish before reducer replay"
+        );
+        assert_eq!(
+            repository.body_read_counts(),
+            before_reads,
+            "legacy classification must not open message bodies"
+        );
+        let remaining = usize::try_from(generation.count as i64 - initial_rank).unwrap();
+        let page_commits = remaining.div_ceil(budget.rows) + 1;
+        let commits = database.successful_write_commits() - before_commits;
+        assert!(
+            commits <= page_commits,
+            "{count} ordinary messages: legacy prefix scan used {commits} durable commits, expected at most {page_commits} bounded-page commits"
+        );
+        assert!(
+            largest_prefix > 1,
+            "a default turn must scan multiple ordinary headers"
+        );
+        fixture.project();
+        let ready_reads = repository.body_read_counts();
+        let ready_commits = database.successful_write_commits();
+        let ready_changes = || database.read(|c| Ok(c.total_changes())).unwrap();
+        let changes = ready_changes();
+        for _ in 0..4 {
+            let step = fixture
+                .store
+                .project_step_with_budget(repository, &fixture.me, fixture.channel, budget)
+                .unwrap();
+            assert!(step.ready);
+            assert_eq!((step.rows, step.edges, step.bytes), (0, 0, 0));
+        }
+        assert_eq!(
+            ready_changes(),
+            changes,
+            "unchanged completed scopes must not rewrite derived state"
+        );
+        assert_eq!(database.successful_write_commits(), ready_commits);
+        assert_eq!(repository.body_read_counts(), ready_reads);
+    }
+}
+
+#[test]
 fn channel_legacy_departure_yields_a_charged_two_row_remainder() {
     use crate::eventlog::sync::network::PreparationBudget;
     let f = Fixture::new(0);

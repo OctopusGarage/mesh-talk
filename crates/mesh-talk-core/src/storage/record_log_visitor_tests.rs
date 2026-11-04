@@ -204,3 +204,175 @@ fn fresh_visitor_log_has_no_visits_and_writer_can_append() {
     .unwrap();
     assert_eq!(visits, 1);
 }
+
+#[test]
+fn durability_confirmed_append_needs_no_repeated_sync() {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<EncryptedRecordLog<Rec>>();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut log, _) =
+        EncryptedRecordLog::<Rec>::open(&dir.path().join("sync.log"), "pw", TEST_MAGIC).unwrap();
+    log.append_durable(&rec(1, b"durable")).unwrap();
+    sync_observations::reset();
+    for _ in 0..3 {
+        log.sync().unwrap();
+    }
+    assert_eq!(
+        sync_observations::counts(),
+        (0, 0),
+        "an acknowledged durable prefix needs no further physical sync"
+    );
+}
+
+#[test]
+fn durability_nondurable_append_requires_one_sync_then_becomes_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut log, _) =
+        EncryptedRecordLog::<Rec>::open(&dir.path().join("sync.log"), "pw", TEST_MAGIC).unwrap();
+    sync_observations::reset();
+    log.append(&rec(1, b"pending")).unwrap();
+    assert_eq!(sync_observations::counts(), (0, 0));
+    log.sync().unwrap();
+    assert_eq!(sync_observations::counts(), (1, 1));
+    log.sync().unwrap();
+    assert_eq!(sync_observations::counts(), (1, 1));
+}
+
+#[test]
+fn durability_reopen_requires_fresh_prefix_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sync.log");
+    let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+    log.append(&rec(1, b"written without a durable acknowledgement"))
+        .unwrap();
+    drop(log);
+    let (log, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+    assert_eq!(
+        records,
+        vec![rec(1, b"written without a durable acknowledgement")]
+    );
+    sync_observations::reset();
+    log.sync().unwrap();
+    assert_eq!(
+        sync_observations::counts(),
+        (1, 1),
+        "readable bytes do not prove this reopened prefix durable"
+    );
+    log.sync().unwrap();
+    assert_eq!(sync_observations::counts(), (1, 1));
+}
+
+#[test]
+fn durability_failed_file_or_parent_sync_is_retried() {
+    for parent in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut log, _) =
+            EncryptedRecordLog::<Rec>::open(&dir.path().join("sync.log"), "pw", TEST_MAGIC)
+                .unwrap();
+        log.append(&rec(1, b"pending")).unwrap();
+        sync_observations::reset();
+        if parent {
+            sync_observations::fail_parent();
+        } else {
+            sync_observations::fail_file();
+        }
+        assert!(matches!(log.sync(), Err(LogError::Io(_))));
+        assert_eq!(
+            sync_observations::counts(),
+            if parent { (1, 1) } else { (1, 0) }
+        );
+        log.sync().unwrap();
+        let confirmed = if parent { (2, 2) } else { (2, 1) };
+        assert_eq!(sync_observations::counts(), confirmed);
+        log.sync().unwrap();
+        assert_eq!(sync_observations::counts(), confirmed);
+    }
+}
+
+#[test]
+fn durability_failed_durable_append_rollback_cannot_restore_a_clean_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sync.log");
+    let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+    log.append_durable(&rec(1, b"accepted")).unwrap();
+    sync_observations::reset();
+    sync_observations::fail_parent();
+    assert!(matches!(
+        log.append_durable(&rec(2, b"rejected")),
+        Err(LogError::Io(_))
+    ));
+    assert!(!log.poisoned);
+    sync_observations::reset();
+    log.sync().unwrap();
+    assert_eq!(
+        sync_observations::counts(),
+        (1, 1),
+        "rollback file sync alone cannot confirm parent durability"
+    );
+    log.sync().unwrap();
+    assert_eq!(sync_observations::counts(), (1, 1));
+    let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+    assert_eq!(records, vec![rec(1, b"accepted")]);
+}
+
+#[test]
+fn durability_poisoned_rollback_rejects_sync_without_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut log, _) =
+        EncryptedRecordLog::<Rec>::open(&dir.path().join("sync.log"), "pw", TEST_MAGIC).unwrap();
+    log.fail_next_append_rollback_for_test(7);
+    assert!(log.append_durable(&rec(1, b"uncertain")).is_err());
+    assert!(log.poisoned);
+    sync_observations::reset();
+    assert!(matches!(log.sync(), Err(LogError::CorruptFile(_))));
+    assert_eq!(sync_observations::counts(), (0, 0));
+}
+
+#[test]
+fn durability_committed_replacements_retry_failed_parent_sync() {
+    for batch in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync.log");
+        let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        log.append_durable(&rec(1, b"old")).unwrap();
+        sync_observations::reset();
+        sync_observations::fail_parent();
+        if batch {
+            log.append_batch_atomic(&[rec(2, b"new")]).unwrap();
+        } else {
+            log.rewrite(&[rec(2, b"new")]).unwrap();
+        }
+        assert_eq!(sync_observations::counts(), (1, 1));
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        let expected = if batch {
+            vec![rec(1, b"old"), rec(2, b"new")]
+        } else {
+            vec![rec(2, b"new")]
+        };
+        assert_eq!(
+            records, expected,
+            "rename committed despite the failed directory sync"
+        );
+        sync_observations::reset();
+        log.sync().unwrap();
+        assert_eq!(sync_observations::counts(), (1, 1));
+        log.sync().unwrap();
+        assert_eq!(sync_observations::counts(), (1, 1));
+    }
+}
+
+#[test]
+fn durability_failed_rewrite_cannot_confirm_the_old_nondurable_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sync.log");
+    let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+    log.append(&rec(1, b"old pending")).unwrap();
+    let temporary = path.with_extension("compact-tmp");
+    log.before_rewrite_rename = Some(Box::new(move || std::fs::remove_file(temporary).unwrap()));
+    assert!(log.rewrite(&[rec(2, b"not committed")]).is_err());
+    sync_observations::reset();
+    log.sync().unwrap();
+    assert_eq!(sync_observations::counts(), (1, 1));
+    let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+    assert_eq!(records, vec![rec(1, b"old pending")]);
+}

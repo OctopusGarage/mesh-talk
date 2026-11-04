@@ -1051,7 +1051,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Canonical preparation shares caller row, edge and byte limits across all phases; plaintext read readiness also fences unattempted admitted recalls and exact dependency wakes without blocking dormant unknown-target retries.",
+            "name": "Canonical preparation shares caller row, edge and byte limits across all phases; plaintext read readiness also fences unattempted admitted recalls and exact dependency wakes without blocking dormant unknown-target retries. Legacy-departure discovery charges bounded header pages and at most one causal cut, commits its source-qualified cursor once per page, and preserves pending ranks and unchanged-read silence.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1226,6 +1226,10 @@
           {
             "name": "Device-keystore temporary decoded and serialized secrets are zeroized while encrypted format, identity signatures and password rejection remain compatible.",
             "reference": "docs/privacy-controls.md#limits"
+          },
+          {
+            "name": "Immutable device keys retain one fixed public projection derived at creation or restoration; repeated public reads return owned copies without new X25519 work or retained query state.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }
@@ -1388,7 +1392,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Streaming replay preserves the encrypted file format, authenticated decode errors and platform-specific repair ownership",
+            "name": "Streaming replay preserves the encrypted file format, authenticated decode errors and platform-specific repair ownership. Confirmed record-log prefixes skip redundant sync; reopen, nondurable writes, rollback and failed post-rename synchronization remain pending, and poison checks precede the fast path.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

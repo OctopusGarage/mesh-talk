@@ -145,6 +145,7 @@ restart; conservative early deletion on restart applies to recipient copies only
 
 - **DeviceIdentity** — per device: Ed25519 (sign) + X25519 (DH). `user_id =
 SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
+  Its public projection is constant for the lifetime of the immutable private keys.
 - **Account** (multi-device) — cross-device Ed25519. `account_id =
 SHA-256("mesh-talk-account-v1" ‖ pub)[:16]`. A **DeviceCertificate** is the account
   key's signature over a device key (domain `mesh-talk-device-cert-v1`), binding device→account.
@@ -1405,6 +1406,15 @@ shares one serialized connection; domain stores own their tables and bounded
 queries. SQLCipher passphrases are domain-separated so user input cannot select
 the raw-key syntax. Production key derivation retains a 600,000-iteration
 password work factor; only existing test configurations reduce it.
+
+Encrypted record logs retain a confirmation flag for their exact owned file
+incarnation and successful prefix. Confirmed prefixes make repeated sync calls
+read-only. Nondurable writes, failed write/rollback attempts and reopened existing files
+require confirmation; poisoned handles reject sync before any fast path. A durable
+append clears pending work only after file and parent synchronization succeed.
+Atomic replacement retains its committed-result contract after rename, while a
+failed parent sync leaves the new handle pending for explicit retry. This state
+neither fences external writers nor replaces fresh source publication checks.
 
 Event repository schema v2 admits the signed `ChannelMetadata` event added by
 channel protocol v5. The only v1 schema change relaxes the event-kind constraint

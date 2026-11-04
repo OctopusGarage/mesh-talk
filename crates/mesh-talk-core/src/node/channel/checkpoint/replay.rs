@@ -612,7 +612,10 @@ impl ChannelCheckpointStore {
                 required: HEADER_CHARGE + 256,
             });
         }
-        let OrderReadState::Ready(page) = repository.causal_headers_after_rank(
+        // Inspect the first header before admitting an ordinary batch. A
+        // pending cut must retain the full remaining allowance: its reducer may
+        // need several facts before it can durably checkpoint one decision.
+        let OrderReadState::Ready(mut page) = repository.causal_headers_after_rank(
             &channel,
             CausalOrder::Logical,
             job,
@@ -625,35 +628,73 @@ impl ChannelCheckpointStore {
         else {
             return Ok(PreparationStep::default());
         };
+        let first_is_cut = page.items.first().is_some_and(|header| {
+            header.kind == EventKind::ChannelLeave && header.ciphertext_bytes == 0
+        });
+        if !first_is_cut
+            && !page.items.is_empty()
+            && budget.rows > 1
+            && count - next > 1
+            && budget.bytes - page.charged_bytes >= HEADER_CHARGE
+        {
+            let OrderReadState::Ready(tail) = repository.causal_headers_after_rank(
+                &channel,
+                CausalOrder::Logical,
+                job,
+                next,
+                PageBudget {
+                    rows: (budget.rows - 1).min(
+                        usize::try_from(count - next - 1)
+                            .map_err(|_| LogError::RepositoryCounterExhausted)?,
+                    ),
+                    bytes: budget.bytes - page.charged_bytes,
+                },
+            )?
+            else {
+                return Err(LogError::StaleCursor);
+            };
+            page.charged_bytes += tail.charged_bytes;
+            page.items.reserve_exact(tail.items.len());
+            page.items.extend(tail.items);
+        }
         let mut through = next;
         let mut candidate = None;
-        let mut work = PreparationStep::default();
+        let mut work = PreparationStep {
+            rows: page.items.len(),
+            bytes: page.charged_bytes,
+            ..Default::default()
+        };
         for header in page.items {
-            work.rows = 1;
-            work.bytes = HEADER_CHARGE;
             through += 1;
             if header.kind != EventKind::ChannelLeave || header.ciphertext_bytes != 0 {
                 continue;
             }
-            if budget.rows < 3 {
-                // A valid caller remainder can pay for this selected header
-                // without enough rows for its causal cut. Charge that read,
-                // retain the cursor, and resume under the next allowance.
-                return Ok(work);
+            if !first_is_cut {
+                // The ordinary page may look ahead to a leave. Charge that I/O
+                // but give its causal cut a fresh full allowance next turn.
+                through -= 1;
+                break;
+            }
+            let remaining = PreparationBudget {
+                rows: budget.rows - work.rows,
+                edges: budget.edges,
+                bytes: budget.bytes - work.bytes,
+            };
+            if remaining.rows >= 2 && remaining.bytes < HEADER_CHARGE + 256 {
+                return Err(LogError::PageBudgetTooSmall {
+                    required: HEADER_CHARGE * 2 + 256,
+                });
+            }
+            if remaining.rows < 2 {
+                // Keep the selected leave at the cursor until a later turn can
+                // pay for its cut, but retain any preceding ordinary prefix.
+                through -= 1;
+                break;
             }
             // Retained headers were admitted only after integrity/signature
             // validation. This empty legacy control needs no body or parent Vec.
-            let (cut, charged) = self.legacy_cut_step(
-                repository,
-                &header,
-                job,
-                revision,
-                PreparationBudget {
-                    rows: budget.rows - 1,
-                    edges: budget.edges,
-                    bytes: budget.bytes - HEADER_CHARGE,
-                },
-            )?;
+            let (cut, charged) =
+                self.legacy_cut_step(repository, &header, job, revision, remaining)?;
             work = add_work(work, charged);
             match cut {
                 super::causal::LegacyCut::Pending => {
@@ -663,6 +704,12 @@ impl ChannelCheckpointStore {
                     candidate = value.map(|value| (value.event, value.member));
                 }
             }
+            // Future-cut preparation retains its existing single-cut owner;
+            // this turn has admitted no ordinary lookahead beside that cut.
+            break;
+        }
+        if through == next && candidate.is_none() {
+            return Ok(work);
         }
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
