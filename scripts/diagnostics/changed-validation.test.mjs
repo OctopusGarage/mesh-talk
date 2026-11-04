@@ -629,8 +629,11 @@ test(
     const f = repository(t);
     configureCLI(
       f,
-      "import test from 'node:test'; import {writeFileSync} from 'node:fs'; test('wait for cancellation', async () => { writeFileSync('target/fixture-pid', String(process.pid)); await new Promise(resolve => setTimeout(resolve, 30000)); });",
+      "import test from 'node:test'; import {writeFileSync, renameSync} from 'node:fs'; test('wait for cancellation', async () => { writeFileSync('target/fixture-pid.tmp', String(process.pid)); renameSync('target/fixture-pid.tmp', 'target/fixture-pid'); await new Promise(resolve => setTimeout(resolve, 30000)); });",
     );
+    // File existence alone is not a completed PID publication. Exercise the
+    // empty-file state that previously ended the readiness wait with PID zero.
+    f.write("target/fixture-pid", "");
     const child = spawn(
       process.execPath,
       [cli, "--run", "--owner", "fixture", "--reason", "cancellation fixture", "--report", "target/validation/feedback/cancelled.json"],
@@ -662,13 +665,17 @@ test(
     const { readFile, readdir } = await import("node:fs/promises");
     for (let attempts = 0; attempts < 150; attempts++) {
       try {
-        descendant = Number(
+        const candidate = Number(
           await readFile(path.join(f.root, "target/fixture-pid"), "utf8"),
         );
-        break;
-      } catch {
-        await delay(50);
+        if (Number.isSafeInteger(candidate) && candidate > 1) {
+          descendant = candidate;
+          break;
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
       }
+      await delay(50);
     }
     assert.ok(descendant, output);
     child.kill("SIGTERM");

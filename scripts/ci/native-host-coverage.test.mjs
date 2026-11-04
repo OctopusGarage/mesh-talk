@@ -172,7 +172,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     const crate = name.replaceAll("-", "_");
     writeFileSync(
       join(root, directory, "src/lib.rs"),
-      `#[inline(never)] pub fn ${directory}_unit() -> u8 { 1 }\n#[inline(never)] pub fn ${directory}_integration() -> u8 { ${directory === "core" ? 'if let Some(path) = std::env::var_os("MESH_AFTER_TIMEOUT_MARKER") { std::fs::write(path, "continued after timeout").unwrap(); }' : ""} 2 }\n#[test] fn unit() { assert_eq!(${directory}_unit(), 1); ${directory === "host" ? 'assert!(std::env::var_os("MESH_FAIL_HOST").is_none(), "host failure control");' : 'if let Some(path) = std::env::var_os("MESH_REST_MARKER") { std::fs::write(path, "rest execution").unwrap(); } assert!(std::env::var_os("MESH_FAIL_CORE").is_none(), "core failure control"); if let Some(path) = std::env::var_os("MESH_PARK_CORE") { std::fs::write(path, "park entered").unwrap(); loop { std::thread::park(); } }'} }\n#[test] #[ignore] fn default_ignored() { panic!("must remain ignored"); }\n`,
+      `#[inline(never)] pub fn ${directory}_unit() -> u8 { 1 }\n#[inline(never)] pub fn ${directory}_example() -> u8 { 4 }\n#[inline(never)] pub fn ${directory}_integration() -> u8 { ${directory === "core" ? 'if let Some(path) = std::env::var_os("MESH_AFTER_TIMEOUT_MARKER") { std::fs::write(path, "continued after timeout").unwrap(); }' : ""} 2 }\n#[test] fn unit() { assert_eq!(${directory}_unit(), 1); ${directory === "host" ? 'assert!(std::env::var_os("MESH_FAIL_HOST").is_none(), "host failure control");' : 'if let Some(path) = std::env::var_os("MESH_REST_MARKER") { std::fs::write(path, "rest execution").unwrap(); } assert!(std::env::var_os("MESH_FAIL_CORE").is_none(), "core failure control"); if let Some(path) = std::env::var_os("MESH_PARK_CORE") { std::fs::write(path, "park entered").unwrap(); loop { std::thread::park(); } }'} }\n#[test] #[ignore] fn default_ignored() { panic!("must remain ignored"); }\n`,
     );
     writeFileSync(
       join(root, directory, "tests/default.rs"),
@@ -184,7 +184,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     );
     writeFileSync(
       join(root, directory, "examples/default.rs"),
-      `#[inline(never)] fn ${directory}_example() -> u8 { 4 }\nfn main() {}\n#[test] fn example() { assert_eq!(${directory}_example(), 4); }\n`,
+      `fn main() {}\n#[test] fn example() { assert_eq!(${crate}::${directory}_example(), 4); }\n`,
     );
   }
   const env = {
@@ -215,6 +215,9 @@ test("native Host isolation preserves default targets, accumulated coverage and 
   const restOutput = run(rest);
   assert.match(restOutput, /4 tests run: 4 passed, 1 skipped/u);
   run(["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"]);
+  // llvm-cov intentionally excludes examples/ and tests/ from its default report.
+  // Each example therefore calls its own library sentinel, so a real hit proves
+  // execution without changing the production coverage denominator.
   const coverage = readFileSync(join(root, "lcov.info"), "utf8");
   for (const directory of ["host", "core"])
     for (const target of ["unit", "integration", "binary", "example"]) {
