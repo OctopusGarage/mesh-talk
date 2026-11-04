@@ -349,6 +349,7 @@ impl Node {
                     if node.cache_discovered_peers().is_err() {
                         log::warn!("verified discovery cache update failed; will retry");
                     }
+                    node.observe_order_work();
                     let discovering = node.drain_profile_receptions()?;
                     node.drain_profile_compaction()?;
                     Ok::<_, NodeError>(discovering)

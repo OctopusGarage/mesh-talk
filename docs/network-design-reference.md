@@ -2541,6 +2541,16 @@ completed scan or inventing a delivery result.
 This exceptional repair can read the captured mailbox prefix;
 it is not part of unchanged ordinary polling.
 
+For operator investigation, `MESH_TALK_TRACE_WORK=1` at Node construction enables
+one indexed page of at most 64 order-job metadata rows every thirty seconds in
+the existing admitted maintenance owner. Opaque job/scope tokens, phase and
+scalar source/progress counters distinguish advancing work from replacement.
+The observation is read-only, retains one store/domain-bound cursor and fetches
+no event bodies. It logs no message identifiers. It adds no network or messaging grant.
+Default operation performs no observation query or logging. Pages are live
+observations rather than a transactionally consistent snapshot across intervals;
+normal resource acceptance runs with this optional logging disabled.
+
 ### Session reuse contract
 
 A fresh node dial, including Control-priority account synchronization, has one

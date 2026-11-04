@@ -512,6 +512,8 @@ pub struct Node {
     pub(in crate::node) profile_receive_work:
         Mutex<super::profile_receive_work::ProfileReceiveWork>,
     pub(in crate::node) profile_compaction_leases: Arc<Mutex<usize>>,
+    pub(in crate::node) order_work_observation:
+        Option<Mutex<super::work_observation::OrderWorkObserver>>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
     pub(in crate::node) reaction_queries: Mutex<super::reactions::ReactionQueryWork>,
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::IndexedReactionStore>,
@@ -1310,6 +1312,7 @@ impl Node {
             call_signal_rx: Mutex::new(call_signal_rx),
             profile_receive_work: Mutex::new(profile_receive_work),
             profile_compaction_leases: Arc::new(Mutex::new(0)),
+            order_work_observation: super::work_observation::OrderWorkObserver::from_env(),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
             sentlog: Mutex::new(sentlog),
