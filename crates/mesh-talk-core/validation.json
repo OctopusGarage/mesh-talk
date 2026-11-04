@@ -1939,6 +1939,7 @@
         "crates/mesh-talk-core/src/node/network_cost.rs",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/files/chunks.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
         "crates/mesh-talk-core/src/node/media_store/**",
@@ -2314,6 +2315,7 @@
         "crates/mesh-talk-core/src/node/delivery_store.rs",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/files/chunks.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/node/participant_runtime.rs"
@@ -2327,6 +2329,7 @@
             "node::file_consent_tests::",
             "node::file_consent::",
             "node::file_consent_store::",
+            "node::files::channel_receive::tests::",
             "node::file_completion::",
             "file_retention_",
             "indexed_file_payload_tests",
@@ -2634,6 +2637,10 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
+            "name": "Empty file receive turns validate current ownership without rewriting an unchanged ticket; channel-file read preflight validates the publication barrier without directory synchronization, while actual file publication retains its write barrier and transactional guards.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
             "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
@@ -2734,6 +2741,7 @@
         "crates/mesh-talk-core/src/postoffice/federation/indexed.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/privacy_sync/admission_tests.rs",
+        "crates/mesh-talk-core/src/node/opaque_receive_cache.rs",
         "crates/mesh-talk-core/src/node/channel_projection_cache.rs",
         "crates/mesh-talk-core/src/node/session/backend.rs",
         "crates/mesh-talk-core/src/eventlog/sync/network.rs",
@@ -2752,6 +2760,7 @@
             "participant_history_sync_stamp_",
             "participant_probe_metadata_",
             "node::opaque_receive_cache::checkpoints::tests::",
+            "node::opaque_receive_cache::tests::",
             "node::channel::checkpoint::",
             "node::channel::tests::",
             "node::channel_account_authority::",
@@ -2777,6 +2786,10 @@
           {
             "name": "Only completed admission or bounded pending retry evidence can advance incoming checkpoints; caches never authorize admission, deletion reversal, custody or recipient delivery.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Repeated current-session hints with identical nullable inner references perform no SQL writes; real transitions, capacity limits and bounded old-session retirement retain exact usage accounting and cannot invent receipt evidence.",
+            "reference": "docs/module-boundaries.md"
           },
           {
             "name": "Direct paged fingerprint probes reuse only exact current scalar summaries under the shared 128-entry projection bound; an append during finite preparation cannot qualify the older cutoff as current, and mismatches retain fresh export authorization.",

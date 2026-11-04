@@ -222,7 +222,23 @@ impl IndexedFileConsentStore {
         before: i64,
         after: i64,
     ) -> Result<(), LogError> {
-        self.check_write()?;
+        if before == after {
+            // A completed single-page cycle revisits the same discovery cursor.
+            // Still validate the exact source and current account/cursor owner;
+            // unchanged polling neither publishes nor retries a directory entry.
+            self.source.check_barrier()?;
+            return if self.offer_scan_position(peer)? == before {
+                Ok(())
+            } else {
+                Err(LogError::StaleCursor)
+            };
+        }
+        // This rotating cursor is discovery progress, not control publication.
+        // The already-published source remains freshly fenced; SQLite commits
+        // the hint durably without republishing the unchanged barrier pathname.
+        #[cfg(test)]
+        self.check_write_failure()?;
+        self.source.check_barrier()?;
         self.source.profile().database().transaction(|c| {
             let owner=self.check_on(c)?;
             c.execute("INSERT OR IGNORE INTO file_consent_offer_scan VALUES(?1,?2,0)",params![owner.namespace(),peer.as_slice()])?;
@@ -341,13 +357,18 @@ impl IndexedFileConsentStore {
         event_ownership::check_event_owner_on(c, owner)?;
         Ok(owner)
     }
-    fn check_write(&self) -> Result<(), LogError> {
-        #[cfg(test)]
+    #[cfg(test)]
+    fn check_write_failure(&self) -> Result<(), LogError> {
         if self.fail_writes {
             return Err(LogError::Io(std::io::Error::other(
                 "injected consent write failure",
             )));
         }
+        Ok(())
+    }
+    fn check_write(&self) -> Result<(), LogError> {
+        #[cfg(test)]
+        self.check_write_failure()?;
         self.source.check_write()
     }
     pub(crate) fn published_control(&self, id: EventId) -> Result<Option<Event>, LogError> {
@@ -605,6 +626,175 @@ mod tests {
             completion: None,
         }
     }
+    fn consent_offer_fixture(
+        count: u8,
+    ) -> (tempfile::TempDir, Arc<crate::node::Node>, DeviceIdentity) {
+        use crate::{discovery::Announce, eventlog::EventKind, file::FileManifest};
+        let directory = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&sender, &Account::generate(), "Sender", 4000);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.set_attachment_global_auto(true).unwrap();
+        let host = crate::node::conversation::dm_conversation_id(
+            &sender.public(),
+            &node.identity.public(),
+        );
+        for index in 1..=count {
+            let manifest = FileManifest {
+                name: "empty.txt".into(),
+                size: 0,
+                mime: "text/plain".into(),
+                checksum: crate::file::file_checksum(&[]),
+                file_key: [3; 32],
+                file_conv: ConversationId::new([index; 32]),
+                chunk_count: 1,
+            };
+            let original = Event::new(
+                &sender,
+                host,
+                u64::from(index),
+                vec![],
+                u64::from(index),
+                1,
+                EventKind::FileManifest,
+                crate::dm::seal(
+                    &sender,
+                    &node.identity.public().x25519_pub,
+                    &manifest.encode(),
+                )
+                .unwrap(),
+            );
+            node.accept_manifest_event(
+                &original,
+                &proof,
+                crate::node::received_log::ReceivedEntry {
+                    event_id: original.id,
+                    conversation: host,
+                    from: sender.user_id(),
+                    wall_clock: 1,
+                    plaintext: manifest.encode(),
+                },
+            )
+            .unwrap();
+        }
+        (directory, node, sender)
+    }
+
+    #[test]
+    fn quiet_file_consent_event_iteration_preserves_controls_without_writes() {
+        for count in [1, 8] {
+            let (directory, node, sender) = consent_offer_fixture(count);
+            let before = node.storage.database().successful_write_commits();
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+            let expected = node.file_consent_events(&sender.public()).unwrap();
+            assert_eq!(expected.len(), usize::from(count));
+            assert!(
+                node.storage.database().successful_write_commits() > before,
+                "new consent controls and discovery progress must remain durable writes"
+            );
+            assert!(
+                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get())
+                    > 0
+            );
+            assert!(
+                node.file_consent_events(&sender.public()).unwrap() == expected,
+                "warming the same offer cycle must preserve its signed controls"
+            );
+            let database = node.storage.database();
+            let changes = database
+                .read(|connection| Ok(connection.total_changes()))
+                .unwrap();
+            let commits = database.successful_write_commits();
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+            for _ in 0..3 {
+                assert!(
+                    node.file_consent_events(&sender.public()).unwrap() == expected,
+                    "quiet polling must refresh the same signed consent controls"
+                );
+            }
+            assert_eq!(
+                database
+                    .read(|connection| Ok(connection.total_changes()))
+                    .unwrap(),
+                changes,
+                "a completed single-page offer cycle must not update its unchanged cursor"
+            );
+            assert_eq!(database.successful_write_commits(), commits);
+            assert_eq!(
+                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+                0,
+                "quiet consent discovery must not synchronize the parent directory"
+            );
+            let path = directory.path().join("file-consent-controls.log");
+            let barrier = std::fs::read(&path).unwrap();
+            std::fs::write(&path, vec![0; barrier.len()]).unwrap();
+            assert!(
+                node.file_consent_events(&sender.public()).is_err(),
+                "a no-op cursor must still reject a replaced source barrier"
+            );
+            std::fs::write(path, barrier).unwrap();
+        }
+    }
+
+    #[test]
+    fn quiet_file_consent_rotating_iteration_does_not_sync_publication_directory() {
+        let (_directory, node, sender) = consent_offer_fixture(33);
+        let cycle = || {
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..6 {
+                let controls = node.file_consent_events(&sender.public()).unwrap();
+                // Preserve the actual API's existing 33-offer fairness oracle.
+                assert!(controls.len() <= 8);
+                assert!(
+                    controls
+                        .iter()
+                        .map(|event| bincode::serialized_size(event).unwrap())
+                        .sum::<u64>()
+                        <= 16 * 1024
+                );
+                seen.extend(controls.into_iter().map(|event| event.id));
+            }
+            assert_eq!(
+                seen.len(),
+                33,
+                "one bounded cycle must revisit every retained offer"
+            );
+            seen
+        };
+        let expected = cycle();
+        let database = node.storage.database();
+        let changes = database
+            .read(|connection| Ok(connection.total_changes()))
+            .unwrap();
+        let commits = database.successful_write_commits();
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+        assert!(
+            cycle() == expected,
+            "warm rotation must retain the same signed controls"
+        );
+        assert!(
+            database
+                .read(|connection| Ok(connection.total_changes()))
+                .unwrap()
+                > changes,
+            "this regression must exercise actual multi-page cursor mutation"
+        );
+        assert!(
+            database.successful_write_commits() > commits,
+            "rotating discovery progress remains a durable SQL hint"
+        );
+        assert_eq!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+            0,
+            "cursor-only rotation must not republish an unchanged legacy-writer barrier"
+        );
+    }
+
     #[test]
     fn indexed_file_consent_migrates_exact_controls_and_reopens_without_frames() {
         let root = tempfile::tempdir().unwrap();

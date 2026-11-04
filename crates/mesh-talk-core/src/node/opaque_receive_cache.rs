@@ -338,16 +338,21 @@ impl OpaqueReceiveCache {
                 let removed = if self.session_cleaned { 0 } else {
                     c.execute("DELETE FROM opaque_session_hints WHERE (mailbox,outer_id) IN (SELECT mailbox,outer_id FROM opaque_session_hints WHERE session<?1 UNION ALL SELECT mailbox,outer_id FROM opaque_session_hints WHERE session>?1 LIMIT 128)", [self.session.as_slice()])?
                 };
-                c.execute("UPDATE opaque_session_usage SET records=records-?1 WHERE singleton=1", [removed as i64])?;
+                if removed != 0 {
+                    c.execute("UPDATE opaque_session_usage SET records=records-?1 WHERE singleton=1", [removed as i64])?;
+                }
                 let mut count: i64 = c.query_row("SELECT records FROM opaque_session_usage WHERE singleton=1", [], |r| r.get(0))?;
+                let initial_count = count;
                 for (outer, inner) in page {
                     let args = params![mailbox.as_bytes().as_slice(), outer.as_bytes().as_slice(), self.session.as_slice(), inner.as_ref().map(|id|id.as_bytes().as_slice())];
-                    let updated = c.execute("UPDATE opaque_session_hints SET session=?3,inner_id=?4 WHERE mailbox=?1 AND outer_id=?2", args)?;
+                    let updated = c.execute("UPDATE opaque_session_hints SET session=?3,inner_id=?4 WHERE mailbox=?1 AND outer_id=?2 AND (session IS NOT ?3 OR inner_id IS NOT ?4)", args)?;
                     if updated != 0 || count >= MAX_ENTRIES as i64 { continue; }
-                    c.execute("INSERT INTO opaque_session_hints VALUES(?1,?2,?3,?4)", args)?;
-                    count += 1;
+                    let inserted = c.execute("INSERT INTO opaque_session_hints VALUES(?1,?2,?3,?4) ON CONFLICT(mailbox,outer_id) DO NOTHING", args)?;
+                    count += inserted as i64;
                 }
-                c.execute("UPDATE opaque_session_usage SET records=?1 WHERE singleton=1", [count])?;
+                if count != initial_count {
+                    c.execute("UPDATE opaque_session_usage SET records=?1 WHERE singleton=1", [count])?;
+                }
                 Ok(removed == 0)
             });
             match result {
@@ -428,6 +433,175 @@ mod tests {
             .unwrap();
         }
         log.sync().unwrap();
+    }
+
+    #[test]
+    fn repeated_nonempty_session_progress_has_no_sql_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &device, &account);
+        let mut log = PersistentEventLog::open_profile(owner.clone(), "pw").unwrap();
+        let event = event(&device);
+        let mailbox = event.conversation_id;
+        let inner = event.id;
+        log.append_durable(event).unwrap();
+        let mut cache = OpaqueReceiveCache::open(
+            owner.clone(),
+            &path,
+            "pw",
+            &device.public(),
+            &account.account_id(),
+        );
+        let mut observations = Vec::new();
+        for count in [1, 32, 128] {
+            let ids: Vec<_> = (0..count).map(id).collect();
+            for retained in [false, true] {
+                let remember = |cache: &mut OpaqueReceiveCache| {
+                    if retained {
+                        cache.remember_progress(
+                            mailbox,
+                            ids.iter().map(|outer| (*outer, Some(inner))),
+                        );
+                    } else {
+                        cache.remember_session(mailbox, &ids);
+                    }
+                };
+                remember(&mut cache);
+                assert!(cache.session_cleaned);
+                let before = owner.database().read(|c| Ok(c.total_changes())).unwrap();
+                let commits = owner.database().successful_write_commits();
+                for _ in 0..3 {
+                    remember(&mut cache);
+                }
+                observations.push((
+                    count,
+                    retained,
+                    owner.database().read(|c| Ok(c.total_changes())).unwrap() - before,
+                    owner.database().successful_write_commits() - commits,
+                ));
+                let seen = cache.seen(mailbox, &log).unwrap();
+                assert!(ids.iter().all(|outer| seen.contains(outer)));
+            }
+        }
+        assert!(
+            observations
+                .iter()
+                .all(|(_, _, changes, commits)| (*changes, *commits) == (0, 0)),
+            "identical current-session hints must change no SQL rows or write commits: {observations:?}"
+        );
+    }
+
+    #[test]
+    fn session_progress_preserves_nullable_evidence_cleanup_and_capacity() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        let device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &device, &account);
+        let mut log = PersistentEventLog::open_profile(owner.clone(), "pw").unwrap();
+        let event = event(&device);
+        let mailbox = event.conversation_id;
+        let inner = event.id;
+        let outer = id(1000);
+        let mut cache = OpaqueReceiveCache::open(
+            owner.clone(),
+            &path,
+            "pw",
+            &device.public(),
+            &account.account_id(),
+        );
+        cache.remember_progress(mailbox, [(outer, Some(inner))].into_iter());
+        assert!(cache.seen(mailbox, &log).unwrap().is_empty());
+        cache.remember_session(mailbox, &[outer]);
+        assert_eq!(cache.seen(mailbox, &log).unwrap(), HashSet::from([outer]));
+        cache.remember_progress(mailbox, [(outer, Some(inner))].into_iter());
+        assert!(cache.seen(mailbox, &log).unwrap().is_empty());
+        log.append_durable(event).unwrap();
+        assert_eq!(cache.seen(mailbox, &log).unwrap(), HashSet::from([outer]));
+
+        let mut old_session = cache.session;
+        old_session[0] ^= 1;
+        owner
+            .database()
+            .transaction(|c| {
+                for n in 0..129 {
+                    c.execute(
+                        "INSERT INTO opaque_session_hints VALUES(?1,?2,?3,NULL)",
+                        params![
+                            mailbox.as_bytes().as_slice(),
+                            id(n).as_bytes().as_slice(),
+                            old_session.as_slice()
+                        ],
+                    )?;
+                }
+                c.execute(
+                    "UPDATE opaque_session_usage SET records=records+129 WHERE singleton=1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        cache.session_cleaned = false;
+        for expected in [2, 1, 1] {
+            cache.remember_session(mailbox, &[outer]);
+            let (actual, charged): (i64, i64) = owner
+                .database()
+                .read(|c| {
+                    Ok((
+                        c.query_row("SELECT count(*) FROM opaque_session_hints", [], |r| {
+                            r.get(0)
+                        })?,
+                        c.query_row(
+                            "SELECT records FROM opaque_session_usage WHERE singleton=1",
+                            [],
+                            |r| r.get(0),
+                        )?,
+                    ))
+                })
+                .unwrap();
+            assert_eq!((actual, charged), (expected, expected));
+        }
+        assert!(cache.session_cleaned);
+
+        // Exercise the existing quota decision without constructing 250,000 hints.
+        owner
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "UPDATE opaque_session_usage SET records=?1 WHERE singleton=1",
+                    [MAX_ENTRIES as i64],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        cache.remember_progress(
+            mailbox,
+            [(outer, Some(id(9999))), (id(1001), None)].into_iter(),
+        );
+        assert!(
+            cache.seen(mailbox, &log).unwrap().is_empty(),
+            "existing evidence must still update at capacity"
+        );
+        let (actual, charged): (i64, i64) = owner
+            .database()
+            .read(|c| {
+                Ok((
+                    c.query_row("SELECT count(*) FROM opaque_session_hints", [], |r| {
+                        r.get(0)
+                    })?,
+                    c.query_row(
+                        "SELECT records FROM opaque_session_usage WHERE singleton=1",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!((actual, charged), (1, MAX_ENTRIES as i64));
+        cache.remember_session(mailbox, &[outer]);
+        assert_eq!(cache.seen(mailbox, &log).unwrap(), HashSet::from([outer]));
     }
 
     #[test]

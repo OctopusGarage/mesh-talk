@@ -910,6 +910,10 @@ account-scoped durable rotating cursor. Each send rechecks the current signed
 controls (at most 16 KiB), so failed exchanges retry without growing a payload
 backlog or retaining obsolete permission. The cursor is discovery progress only;
 returning accounts resume their own offers and stale handles remain fenced.
+An unchanged cursor performs no SQL write. Rotating discovery hints validate
+the current publication barrier and account, then commit through SQLite's FULL
+WAL durability and the existing cursor comparison; they publish no filesystem
+entry. Signed consent publication retains its independent write barrier.
 Warm open does not decrypt historical consent frames. Selected controls enforce the
 existing signed-format byte limit before allocation; persisted counters retain the
 existing admission quotas. Account adoption preserves the previous account's decisions

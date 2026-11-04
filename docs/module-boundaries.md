@@ -200,6 +200,10 @@ synchronization require fresh confirmation through that same owner.
 `core/node/privacy_sync/network.rs` applies participant authorization to finite
 repository network pages. `core/eventlog/repository/selection.rs` owns disposable
 SQL authorization IDs, causal closure, and bounded retirement cleanup.
+Channel-file discovery uses the transcript owner's read publication barrier;
+the actual received-file commit retains its independent write barrier and
+transactional owner checks. Empty file-receive candidate turns preserve their
+existing ticket instead of rewriting it.
 `core/node/channel_projection_cache.rs` owns the shared bounded scalar summaries
 for legacy and paged fingerprint probes. The network adapter qualifies paged
 entries with its exact history stamp before reuse and before publication; the
@@ -335,10 +339,14 @@ indexed cursor eligibility and expiry. ID sets exist only for the bounded active
 wire exchange. Corrupt or foreign hint sources remain preserved and unavailable; hints
 never establish admission, delivery, or deletion authority.
 Opaque hint reads and proven no-ops validate the exact current publication
-barrier without synchronizing its directory. Changed writes retain the shared
+barrier without synchronizing its directory. Changed retained mappings retain the shared
 publication owner's durability check and transaction-time rechecks; failed
 synchronization leaves the mutation retryable. Empty receive-hint batches do no
 work, and duplicate checks remain bounded to each admitted page.
+Nonempty session-only hints compare both the run and nullable inner-event
+reference before updating. Usage counters change only for real insertions or
+bounded retirement; duplicate retries neither rewrite rows nor invent receipt
+evidence.
 
 `core/node/reaction_store/indexed.rs` owns the exact locally authored reaction
 projection. Its independently published source is keyed by the full account

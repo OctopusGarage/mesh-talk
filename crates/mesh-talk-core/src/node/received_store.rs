@@ -164,6 +164,11 @@ impl ReceivedStore {
     pub(crate) fn check_publication(&self) -> Result<(), LogError> {
         self.repository.check_publication()
     }
+    /// Quiet receiver discovery validates the barrier; an actual install must
+    /// independently pass check_write before its transaction.
+    pub(crate) fn check_read_publication(&self) -> Result<(), LogError> {
+        self.repository.check_read_publication()
+    }
     pub(crate) fn check_write(&self) -> Result<(), LogError> {
         #[cfg(test)]
         self.check_failure_for_test()?;

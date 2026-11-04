@@ -91,7 +91,7 @@ impl Node {
         let channel = turn.channel;
         {
             let received = self.received_files.lock().expect("file rows lock");
-            received.check_publication()?;
+            received.check_read_publication()?;
             self.storage
                 .database()
                 .read(|c| received.check_reception_owner_on(c))?;
@@ -631,6 +631,76 @@ mod tests {
             chunk_count: 1,
         }
     }
+    #[test]
+    fn quiet_file_reception_after_drain_preserves_durability_without_writes() {
+        let mut fixture = Fixture::new(vec![manifest(1).encode()]);
+        let before = fixture
+            .receiver
+            .storage
+            .database()
+            .successful_write_commits();
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+        fixture.drain();
+        assert!(
+            fixture
+                .receiver
+                .received_files
+                .lock()
+                .unwrap()
+                .contains(fixture.events[0].id)
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .receiver
+                .storage
+                .database()
+                .successful_write_commits()
+                > before,
+            "a genuine received file must still commit durable processing evidence"
+        );
+        assert!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0,
+            "a genuine received file must synchronize its publication barrier"
+        );
+        let database = fixture.receiver.storage.database();
+        let changes = database
+            .read(|connection| Ok(connection.total_changes()))
+            .unwrap();
+        let commits = database.successful_write_commits();
+        let head = fixture.receiver.reception_head().unwrap();
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+        for _ in 0..3 {
+            fixture.process();
+            assert!(fixture.receiver.pending_channel_file().is_none());
+        }
+        assert_eq!(fixture.receiver.reception_head().unwrap(), head);
+        assert_eq!(
+            database
+                .read(|connection| Ok(connection.total_changes()))
+                .unwrap(),
+            changes,
+            "a drained file receiver must not mutate SQL while polling"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+            0,
+            "a drained file receiver must not synchronize the parent directory"
+        );
+        let path = fixture._directory.path().join("received_files.log");
+        let barrier = std::fs::read(&path).unwrap();
+        std::fs::write(&path, vec![0; barrier.len()]).unwrap();
+        assert!(
+            fixture
+                .receiver
+                .process_channel_file_reception(fixture.channel, "live")
+                .is_err(),
+            "quiet reception must still reject a replaced source barrier"
+        );
+        std::fs::write(path, barrier).unwrap();
+    }
+
     #[test]
     fn channel_file_receive_installs_body_book_and_exact_reception() {
         let file = manifest(1);

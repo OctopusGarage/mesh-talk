@@ -106,6 +106,7 @@ impl IndexedFileBook {
             }
             drop(found);drop(statement);
             let mut ticket:i64=c.query_row("SELECT next_ticket FROM file_receive_scan WHERE account=?1",[self.account.as_slice()],|r|r.get(0))?;
+            let initial_ticket=ticket;
             let mut selected=Vec::new();
             for (id,done,admitted) in candidates {
                 if done {c.execute("DELETE FROM file_receive_pending WHERE account=?1 AND event=?2",params![self.account.as_slice(),id.as_bytes().as_slice()])?;} else {
@@ -114,7 +115,9 @@ impl IndexedFileBook {
                     if admitted {selected.push(id);}
                 }
             }
-            c.execute("UPDATE file_receive_scan SET next_ticket=?1 WHERE account=?2",params![ticket,self.account.as_slice()])?;
+            if ticket!=initial_ticket {
+                c.execute("UPDATE file_receive_scan SET next_ticket=?1 WHERE account=?2",params![ticket,self.account.as_slice()])?;
+            }
             Ok((selected,required))
         })?;
         if selected.is_empty()

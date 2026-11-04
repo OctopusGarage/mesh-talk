@@ -275,6 +275,10 @@ impl TranscriptRepository {
     pub(super) fn check_publication(&self) -> Result<(), LogError> {
         self.source.check_write()
     }
+    /// Read preflight retains exact barrier validation without publishing data.
+    pub(super) fn check_read_publication(&self) -> Result<(), LogError> {
+        self.source.check_barrier()
+    }
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }

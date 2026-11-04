@@ -1583,6 +1583,90 @@ mod tests {
     }
 
     #[test]
+    fn file_receive_empty_candidate_turns_do_not_commit_or_rewrite_scan() {
+        let f = Fixture::new();
+        let conversation = ConversationId::new([12; 32]);
+        let database = f.book.profile.database();
+        let before_changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let before_commits = database.successful_write_commits();
+        for _ in 0..8 {
+            assert!(
+                f.book
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before_changes,
+            "empty receive turns must not rewrite the unchanged scan cursor"
+        );
+        assert_eq!(
+            database.successful_write_commits(),
+            before_commits,
+            "empty receive turns must not create durable write transactions"
+        );
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn file_receive_empty_candidate_turns_reject_stale_owner_and_read_failure() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let conversation = ConversationId::new([12; 32]);
+        assert!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .is_empty()
+        );
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book.receive_candidates(conversation, 8, 4096),
+            Err(LogError::StaleCursor)
+        ));
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(
+            matches!(
+                f.book.receive_candidates(conversation, 8, 4096),
+                Err(LogError::StaleCursor)
+            ),
+            "returning to the same account must not revive its old receive owner"
+        );
+        let fresh = Fixture::new();
+        fresh
+            .book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_receive_pending")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                fresh.book.receive_candidates(conversation, 8, 4096),
+                Err(LogError::Database(_))
+            ),
+            "a failed receive query must not become a successful empty page"
+        );
+    }
+
+    #[test]
     fn file_receive_discovery_is_atomic_fair_and_does_not_discard_large_legal_rows() {
         use crate::eventlog::{Author, persist::PersistentEventLog};
         let f = Fixture::new();
