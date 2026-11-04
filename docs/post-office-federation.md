@@ -276,7 +276,13 @@ Tokio clock is paused; a fixed virtual interval cannot promise a retry count.
 Check every observed retry against capped error backoff and expose an actual
 duty-eligible window before challenging the independent archive deadline with
 a healthy wake. Preserve diagnostic deduplication, bounded slices, exact file
-ownership and joined shutdown assertions. Initial
+ownership and joined shutdown assertions. The real role-GC/physical-progress
+fixture separates SQL wall cost from its virtual functional watchdog. It follows
+each actual completed slice to its armed duty Sleep and proves a second poll
+cannot bypass that pacing or perform another physical inspection. The production
+duty remains three times the measured cost. Full logical and digest retirement,
+real repeated vacuum/page reduction, unchanged live mail/body-read/charge state
+and joined shutdown remain required; page shrink alone cannot certify completion. Initial
 publication can leave retryable archive cleanup pending, while provenance and
 authoritative database failures remain explicit. A separate physical class
 reclaims already-free pages in capped background slices and completes eligible

@@ -1014,25 +1014,45 @@ pub(in crate::node) mod tests {
             );
         }
     }
-    async fn wait_self_control_noise(ready: impl FnMut() -> bool, message: &str) {
-        wait_self_control_noise_diagnosed(std::time::Duration::from_secs(8), ready, || {
-            message.to_owned()
-        })
-        .await;
-    }
-
     async fn wait_self_control_noise_diagnosed(
-        budget: std::time::Duration,
+        deadline: tokio::time::Instant,
         mut ready: impl FnMut() -> bool,
         diagnosis: impl Fn() -> String,
     ) {
-        tokio::time::timeout(budget, async {
+        observe_self_control_by_deadline(deadline, async {
             while !ready() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
         .unwrap_or_else(|_| panic!("{}", diagnosis()));
+    }
+
+    const EXPECTED_SELF_CONTROL_HOLD: [bool; 7] = [true, false, true, true, true, true, true];
+
+    type SelfControlHeldEvidence = ([bool; 7], bool);
+    type SelfControlQualifiedReceipt = (u128, Option<SelfControlHeldEvidence>);
+
+    fn qualified_self_control_receipt(
+        committed: bool,
+        count: Option<usize>,
+        held: Option<SelfControlHeldEvidence>,
+    ) -> bool {
+        committed
+            && count == Some(1)
+            && held.is_none_or(|(flags, server_live)| {
+                flags == EXPECTED_SELF_CONTROL_HOLD && server_live
+            })
+    }
+
+    #[derive(Debug, Default)]
+    struct SelfControlMilestones {
+        private_commit_ms: Option<u128>,
+        qualified_receipt: Option<SelfControlQualifiedReceipt>,
+        public_predicates_ms: Option<u128>,
+        history_begin_ms: Option<u128>,
+        history_completed_ms: Option<u128>,
+        history_stale: u64,
     }
 
     #[derive(Debug, Default)]
@@ -1078,14 +1098,15 @@ pub(in crate::node) mod tests {
         action_deadline: tokio::time::Instant,
         private_receipt: impl std::future::Future<Output = ()>,
         public_tail: impl std::future::Future<Output = T>,
-        hold_request: bool,
     ) -> Result<T, tokio::time::error::Elapsed> {
         observe_self_control_by_deadline(action_deadline, private_receipt).await?;
-        if hold_request {
-            observe_self_control_by_deadline(action_deadline, public_tail).await
-        } else {
-            crate::node::account_group::functional_account_convergence(public_tail).await
-        }
+        // Held and ordinary public projections share functional acceptance.
+        let public_deadline = tokio::time::Instant::now()
+            + crate::node::account_group::FUNCTIONAL_ACCOUNT_CONVERGENCE_BUDGET;
+        crate::node::account_group::functional_account_convergence(
+            observe_self_control_by_deadline(public_deadline, public_tail),
+        )
+        .await?
     }
 
     #[tokio::test(start_paused = true)]
@@ -1107,7 +1128,6 @@ pub(in crate::node) mod tests {
                 tail_released.await.unwrap();
                 "all public predicates observed"
             },
-            false,
         );
         tokio::pin!(completion);
         let mut completed = None;
@@ -1150,7 +1170,6 @@ pub(in crate::node) mod tests {
     }
 
     async fn assert_self_control_phase_expiry(
-        hold_request: bool,
         private_release_before_poll: Option<bool>,
         release_tail_before_poll: bool,
     ) {
@@ -1172,7 +1191,6 @@ pub(in crate::node) mod tests {
                 let _ = tail_entered.send(());
                 let _ = tail_released.await;
             },
-            hold_request,
         );
         tokio::pin!(completion);
         let mut completed = None;
@@ -1206,20 +1224,16 @@ pub(in crate::node) mod tests {
                         panic!("completion cannot precede actual public entry");
                     }
                 }
-                if hold_request {
-                    tokio::time::advance(std::time::Duration::from_secs(if release_tail_before_poll { 6 } else { 5 })).await;
-                    if release_tail_before_poll {
-                        tail_release.take().unwrap().send(()).unwrap();
-                    }
-                } else {
-                    tokio::time::advance(std::time::Duration::from_secs(29)).await;
-                    completed = completion.as_mut().now_or_never();
-                    assert!(completed.is_none(), "the functional budget starts after the actual private receipt");
-                    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+                tokio::time::advance(std::time::Duration::from_secs(29)).await;
+                completed = completion.as_mut().now_or_never();
+                assert!(completed.is_none(), "the functional budget starts after the qualified private receipt");
+                tokio::time::advance(std::time::Duration::from_secs(if release_tail_before_poll { 2 } else { 1 })).await;
+                if release_tail_before_poll {
+                    tail_release.take().unwrap().send(()).unwrap();
                 }
                 completed = completion.as_mut().now_or_never();
                 assert!(matches!(completed.as_ref(), Some(Err(_))),
-                    "the original held-action or functional-convergence deadline must reject missing public completion");
+                    "the functional-convergence deadline must reject missing or late public completion");
             }
         })
         .catch_unwind()
@@ -1240,24 +1254,175 @@ pub(in crate::node) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn self_control_private_receipt_rejects_held_and_late_observation_at_original_deadline() {
-        for hold_request in [false, true] {
-            for release_before_poll in [false, true] {
-                assert_self_control_phase_expiry(hold_request, Some(release_before_poll), false)
-                    .await;
-            }
+        for release_before_poll in [false, true] {
+            assert_self_control_phase_expiry(Some(release_before_poll), false).await;
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn held_self_control_public_tail_keeps_original_action_deadline() {
+    async fn held_self_control_public_tail_rejects_missing_and_late_functional_completion() {
         for release_tail_before_poll in [false, true] {
-            assert_self_control_phase_expiry(true, None, release_tail_before_poll).await;
+            assert_self_control_phase_expiry(None, release_tail_before_poll).await;
         }
     }
 
     #[tokio::test(start_paused = true)]
     async fn functional_self_control_public_tail_requires_completion_by_convergence_deadline() {
-        assert_self_control_phase_expiry(false, None, false).await;
+        assert_self_control_phase_expiry(None, false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_self_control_setup_shares_one_absolute_deadline_and_rejects_late_ready() {
+        use futures_util::FutureExt;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        observe_self_control_by_deadline(
+            deadline,
+            tokio::time::sleep(std::time::Duration::from_secs(20)),
+        )
+        .await
+        .unwrap();
+        let second = std::panic::AssertUnwindSafe(wait_self_control_noise_diagnosed(
+            deadline,
+            || false,
+            || "controlled missing second cold prerequisite".to_owned(),
+        ))
+        .catch_unwind();
+        tokio::pin!(second);
+        assert!(second.as_mut().now_or_never().is_none());
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        assert!(
+            matches!(second.as_mut().now_or_never(), Some(Err(_))),
+            "the next stage cannot reset the paid cold budget"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(
+            std::panic::AssertUnwindSafe(wait_self_control_noise_diagnosed(
+                deadline,
+                || true,
+                || "controlled late ready prerequisite".to_owned()
+            ))
+            .catch_unwind()
+            .await
+            .is_err(),
+            "an immediately ready observation made after the absolute cutoff must fail"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn self_control_causal_receipt_rejects_each_bad_flag_dead_server_and_early_release() {
+        use futures_util::FutureExt;
+        let mut cases = Vec::new();
+        for index in 0..EXPECTED_SELF_CONTROL_HOLD.len() {
+            let mut flags = EXPECTED_SELF_CONTROL_HOLD;
+            flags[index] = !flags[index];
+            cases.push((flags, true));
+        }
+        cases.push((EXPECTED_SELF_CONTROL_HOLD, false));
+        for held in cases {
+            assert!(!qualified_self_control_receipt(true, Some(1), Some(held)));
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+            let public_entered = std::sync::atomic::AtomicBool::new(false);
+            let completion = complete_self_control_phases(
+                deadline,
+                async {
+                    while !qualified_self_control_receipt(true, Some(1), Some(held)) {
+                        tokio::task::yield_now().await;
+                    }
+                },
+                async {
+                    public_entered.store(true, std::sync::atomic::Ordering::Release);
+                },
+            );
+            tokio::pin!(completion);
+            assert!(completion.as_mut().now_or_never().is_none());
+            tokio::time::advance(std::time::Duration::from_secs(8)).await;
+            assert!(matches!(completion.as_mut().now_or_never(), Some(Err(_))));
+            assert!(
+                !public_entered.load(std::sync::atomic::Ordering::Acquire),
+                "public convergence cannot launder unqualified causal proof"
+            );
+        }
+        assert!(!qualified_self_control_receipt(
+            false,
+            Some(1),
+            Some((EXPECTED_SELF_CONTROL_HOLD, true))
+        ));
+        assert!(!qualified_self_control_receipt(
+            true,
+            Some(0),
+            Some((EXPECTED_SELF_CONTROL_HOLD, true))
+        ));
+        assert!(!qualified_self_control_receipt(
+            true,
+            Some(2),
+            Some((EXPECTED_SELF_CONTROL_HOLD, true))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn self_control_causal_receipt_rejects_qualification_first_observed_after_action_cutoff()
+    {
+        use futures_util::FutureExt;
+        let qualified = std::sync::atomic::AtomicBool::new(false);
+        let public_entered = std::sync::atomic::AtomicBool::new(false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let completion = complete_self_control_phases(
+            deadline,
+            async {
+                while !qualified.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+                assert!(qualified_self_control_receipt(
+                    true,
+                    Some(1),
+                    Some((EXPECTED_SELF_CONTROL_HOLD, true))
+                ));
+            },
+            async {
+                public_entered.store(true, std::sync::atomic::Ordering::Release);
+            },
+        );
+        tokio::pin!(completion);
+        assert!(completion.as_mut().now_or_never().is_none());
+        tokio::time::advance(std::time::Duration::from_secs(9)).await;
+        qualified.store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(completion.as_mut().now_or_never(), Some(Err(_))));
+        assert!(!public_entered.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_self_control_qualified_receipt_allows_functional_public_tail_with_original_server_live()
+     {
+        let server = std::sync::Arc::new(());
+        let server_witness = std::sync::Arc::downgrade(&server);
+        let gate = tokio::sync::Semaphore::new(0);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        let result = complete_self_control_phases(
+            deadline,
+            async {
+                assert!(qualified_self_control_receipt(
+                    true,
+                    Some(1),
+                    Some((
+                        EXPECTED_SELF_CONTROL_HOLD,
+                        server_witness.upgrade().is_some() && !gate.is_closed()
+                    ))
+                ));
+            },
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+                assert!(server_witness.upgrade().is_some() && !gate.is_closed());
+                "actual public phase completed"
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "actual public phase completed");
+        assert!(tokio::time::Instant::now() > deadline);
+        assert!(server_witness.upgrade().is_some() && !gate.is_closed());
+        gate.close();
+        drop(server);
+        assert!(server_witness.upgrade().is_none());
     }
 
     type SelfControlPredicate = (bool, Option<usize>, Option<bool>, [Option<bool>; 2]);
@@ -1538,6 +1703,7 @@ pub(in crate::node) mod tests {
     struct SelfControlRequestHold {
         pages: std::sync::Mutex<crate::node::account_group::ControlTestPages>,
         original: std::sync::Mutex<Option<(tokio::task::Id, std::sync::Weak<()>)>>,
+        server: std::sync::Mutex<Option<std::sync::Weak<()>>>,
         release: std::sync::Arc<tokio::sync::Semaphore>,
         armed: std::sync::atomic::AtomicBool,
         admitted: std::sync::atomic::AtomicBool,
@@ -1554,6 +1720,7 @@ pub(in crate::node) mod tests {
             Self {
                 pages: Default::default(),
                 original: Default::default(),
+                server: Default::default(),
                 release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
                 armed: Default::default(),
                 admitted: Default::default(),
@@ -1624,7 +1791,18 @@ pub(in crate::node) mod tests {
                 }
                 *original = Some((page.task, lifetime));
             }
+            let server = std::sync::Arc::new(());
+            *self.server.lock().unwrap() = Some(std::sync::Arc::downgrade(&server));
             let _ = self.release.acquire().await;
+            drop(server);
+        }
+
+        fn server_live(&self) -> bool {
+            self.server
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|owner| owner.upgrade().is_some())
         }
 
         fn flags(&self) -> [bool; 7] {
@@ -2126,35 +2304,47 @@ pub(in crate::node) mod tests {
         *selected_trace_peer.lock().unwrap() = Some(online.identity.public());
         let offline = offline_index.map(|index| nodes[index].1.clone());
         let offline_public = offline.as_ref().map(|node| node.identity.public());
-        let archive_source = if pending { &owner } else { &source };
-        archive_source
-            .send_channel_message(group, b"unrelated retained archive")
-            .await
-            .unwrap();
-        let archive = archive_source
-            .history(group, 100)
-            .unwrap()
-            .into_iter()
-            .find(|row| row.text == b"unrelated retained archive")
-            .unwrap()
-            .id;
-        if !pending {
-            wait_self_control_noise(|| nodes.iter().filter(|(_, node)| node.user_id() != reference.user_id())
-                .all(|(_, node)| match node.history(group, 100) {
-                    Ok(rows) => rows.iter().any(|row| row.id == archive),
-                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
-                    Err(error) => panic!("archive marker history failed: {error}"),
-                }),
-                "the archive marker must be fully retained by physical sources before reference enrollment").await;
-        }
-        // Keep the original signed Member head through a real account exchange
-        // before retiring its author. The requester has no routes or worker yet.
-        // One existing 30s cold-setup budget covers this and final-topology readiness.
         let readiness_started = std::time::Instant::now();
-        let readiness_budget = std::time::Duration::from_secs(30);
+        let readiness_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let archive_source = if pending { &owner } else { &source };
+        let archive = observe_self_control_by_deadline(
+            readiness_deadline,
+            Box::pin(async {
+                archive_source
+                    .send_channel_message(group, b"unrelated retained archive")
+                    .await
+                    .unwrap();
+                archive_source
+                    .history(group, 100)
+                    .unwrap()
+                    .into_iter()
+                    .find(|row| row.text == b"unrelated retained archive")
+                    .unwrap()
+                    .id
+            }),
+        )
+        .await
+        .expect("real archive preparation must complete within the shared cold setup deadline");
+        if !pending {
+            let archive_states = std::cell::RefCell::new(vec!["unobserved"; nodes.len()]);
+            wait_self_control_noise_diagnosed(readiness_deadline, || {
+                for (index, (_, node)) in nodes.iter().enumerate().filter(|(_, (_, node))| node.user_id() != reference.user_id()) {
+                    let state = match node.history(group, 100) {
+                        Ok(rows) => if rows.iter().any(|row| row.id == archive) { "present" } else { "missing" },
+                        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => "pending",
+                        Err(error) => panic!("archive marker history failed: {error}"),
+                    };
+                    archive_states.borrow_mut()[index] = state;
+                    if state != "present" { return false; }
+                }
+                true
+            }, || format!("archive marker must be physically retained before enrollment: elapsed_ms={} nodes={:?}", readiness_started.elapsed().as_millis(), nodes.iter().map(|(label, _)| *label).zip(archive_states.borrow().iter().copied()).collect::<Vec<_>>())).await;
+        }
+        // One absolute cold owner includes real archive preparation, signed old
+        // membership, final topology readiness and the exact initial read hold.
         if let Some(public) = offline_public.as_ref() {
             wait_self_control_noise_diagnosed(
-                readiness_budget.saturating_sub(readiness_started.elapsed()),
+                readiness_deadline,
                 || online.group_control_heads(group).iter().any(|head| {
                     head.proof.public() == *public
                         && head.valid(&shared.public().ed25519_pub)
@@ -2282,7 +2472,7 @@ pub(in crate::node) mod tests {
         let mut observed_caps = None;
         // All readiness proofs must come from the final topology; the admitted
         // action retains its independent, unchanged 8s deadline.
-        wait_self_control_noise_diagnosed(readiness_budget.saturating_sub(readiness_started.elapsed()), || {
+        wait_self_control_noise_diagnosed(readiness_deadline, || {
             let forward = reference.group_operation_versions.lock().unwrap().get(&online.user_id())
                 .map(|support| (support.public == online.identity.public(), support.kinds));
             let reverse = online.group_operation_versions.lock().unwrap().get(&reference.user_id())
@@ -2367,8 +2557,8 @@ pub(in crate::node) mod tests {
             hold.armed.store(true, std::sync::atomic::Ordering::Release);
             online.account_sync_notify.notify_one();
             wait_self_control_noise_diagnosed(
-                readiness_budget.saturating_sub(readiness_started.elapsed()),
-                || hold.original.lock().unwrap().is_some(),
+                readiness_deadline,
+                || hold.original.lock().unwrap().is_some() && hold.server_live(),
                 || format!("the exact executor must own a live unpaired read from the requester before admission; hold_flags={:?}", hold.flags()),
             ).await;
         }
@@ -2468,6 +2658,7 @@ pub(in crate::node) mod tests {
         let action_deadline = admission_started + operation_budget;
         let mut last_private_predicate = None;
         let mut private_committed_at = None;
+        let milestones = std::sync::Mutex::new(SelfControlMilestones::default());
         let private_receipt = async {
             loop {
                 let status = reference
@@ -2489,12 +2680,29 @@ pub(in crate::node) mod tests {
                     last_private_predicate = Some(predicate);
                 }
                 if predicate.0 && predicate.1 == Some(1) {
-                    private_committed_at = Some(std::time::Instant::now());
-                    operation_trace
-                        .lock()
-                        .unwrap()
-                        .record("reference", "private_committed".to_owned());
-                    break;
+                    let observed = std::time::Instant::now();
+                    if private_committed_at.is_none() {
+                        private_committed_at = Some(observed);
+                        milestones.lock().unwrap().private_commit_ms =
+                            Some(admission_started.elapsed().as_millis());
+                        operation_trace
+                            .lock()
+                            .unwrap()
+                            .record("reference", "private_committed".to_owned());
+                    }
+                    let held = request_hold
+                        .as_ref()
+                        .map(|hold| (hold.flags(), hold.server_live()));
+                    let qualified_at = std::time::Instant::now();
+                    if qualified_self_control_receipt(predicate.0, predicate.1, held)
+                        && qualified_at <= action_deadline
+                    {
+                        milestones.lock().unwrap().qualified_receipt = Some((
+                            qualified_at.duration_since(admission_started).as_millis(),
+                            held,
+                        ));
+                        break;
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -2580,20 +2788,33 @@ pub(in crate::node) mod tests {
                     last_predicate = Some(predicate);
                 }
                 if ready {
+                    {
+                        let mut phases = milestones.lock().unwrap();
+                        phases
+                            .public_predicates_ms
+                            .get_or_insert(admission_started.elapsed().as_millis());
+                        phases
+                            .history_begin_ms
+                            .get_or_insert(admission_started.elapsed().as_millis());
+                    }
                     // Capture the first ready history only after the exact
                     // committed effect and both roles are visible. Keep this
-                    // observation inside the original operation deadline and
+                    // observation inside the functional convergence deadline and
                     // before releasing the held response or running postchecks.
                     let history = loop {
                         match reference.history(group, 100) {
                             Ok(history) => break history,
-                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                                milestones.lock().unwrap().history_stale += 1;
+                            }
                             Err(_) => {
                                 panic!("reference history failed outside bounded preparation")
                             }
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     };
+                    milestones.lock().unwrap().history_completed_ms =
+                        Some(admission_started.elapsed().as_millis());
                     operation_trace
                         .lock()
                         .unwrap()
@@ -2615,19 +2836,22 @@ pub(in crate::node) mod tests {
             tokio::time::Instant::from_std(action_deadline),
             private_receipt,
             public_tail,
-            hold_request,
         )
         .await;
         let last_predicate = last_predicate.or(last_private_predicate);
         let failed_phase = if private_committed_at.is_none_or(|observed| observed > action_deadline)
         {
             "private_receipt"
-        } else if hold_request {
-            "held_action"
+        } else if milestones.lock().unwrap().qualified_receipt.is_none() {
+            "causal_qualification"
         } else {
             "public_convergence"
         };
         let held_request_flags = request_hold.as_ref().map(|hold| hold.flags());
+        eprintln!(
+            "self control immutable phase milestones={:?}",
+            milestones.lock().unwrap()
+        );
         if convergence.is_err() {
             let listeners_finished: Vec<_> = handles
                 .iter()
@@ -2658,6 +2882,11 @@ pub(in crate::node) mod tests {
         }
         let history = convergence.unwrap();
         if let Some(hold) = request_hold.as_ref() {
+            assert!(
+                hold.server_live() && !hold.release.is_closed(),
+                "the original authenticated server response must remain held through functional public convergence"
+            );
+            assert_eq!(hold.flags(), EXPECTED_SELF_CONTROL_HOLD);
             hold.release.close();
         }
         eprintln!(
@@ -2666,8 +2895,7 @@ pub(in crate::node) mod tests {
         );
         if let Some(flags) = held_request_flags {
             assert_eq!(
-                flags,
-                [true, false, true, true, true, true, true],
+                flags, EXPECTED_SELF_CONTROL_HOLD,
                 "a request publication Wake must retire the exact old child and deliver the operation through a distinct live read while its original response stays held"
             );
         }

@@ -595,12 +595,28 @@ the source's valid signed observation at the captured or newer order under the
 original custody deadline. Independent held document lanes stay held throughout.
 The custody scenario's independent eight-second assertions remain unchanged.
 The group-forwarding loopback completes profile and signed-membership setup
-under a thirty-second setup watchdog before its existing twenty-second
-content-operation watchdog; fixture retirement has a separate fifteen-second
-watchdog that retains the original failure phase. Independent hosts
-use the production multithread executor; all original ordered-text, archive,
-exact-history and consent assertions remain. Failure reports retain the last
-operation phase, and every exit joins admitted fixture producers before teardown.
+under its thirty-second setup watchdog. Each submitted forwarding operation then
+uses the existing functional convergence owner: individual acceptance and exact
+ordered remote history form one operation; merged acceptance, the new archive,
+consent and verified independent bytes form the second. The earlier compound
+content watchdog mixed two user operations and could truncate the existing
+per-request receipt owner. It is not a forwarding latency SLA. Preserve operation
+identities, original-source isolation and normal TCP/flush/pull behavior.
+The existing multithread executor and fifteen-second owned-retirement watchdog
+remain unchanged. Bounded phase and cached file-state observations explain
+failures; every exit joins admitted producers before propagating the primary.
+
+
+After an injected reception transaction failure, the rollback fixture first
+requires zero committed revision, processing and receipt rows. Removing the
+fault permits the existing background recovery owner to replay the same retained
+batch without new signed traffic or a manual plaintext retry. One functional
+convergence window includes its retained retry eligibility, normal scheduler and
+bounded content/terminal turns; this is not a five-second repair SLA. Cache only
+the actual sequence, terminal and error observations already made by the poll.
+Abort and join the owned recovery task before propagating timeout or panic,
+including startup-continuation probes. Their independent observation bounds and
+production retry/pacing clocks remain unchanged.
 
 The mandatory account-wake fixture also separates its synchronous SQL observer
 from the two simulated hosts with two protocol workers. The positive case's first
@@ -703,26 +719,38 @@ within the original shared content/history deadline, retaining all batch, event
 identity, phase and history assertions. Reject a status first observed after that
 deadline; do not add a new window or substitute a delay for the state predicate.
 
-Modern self-control fixtures allow thirty seconds for cold, bidirectional
-capability and role readiness before admission, matching the existing owner-rename
-setup boundary. This is a bounded setup watchdog, not an operation latency claim:
-retain every full-identity capability and signed-provenance predicate, record
-setup duration and complete/capacity diagnostics, and keep the independent
-private admitted-action deadline at eight seconds, including a validated Committed
-receipt with exactly one original effect. The three ordinary Accept/Decline/Leave
-functional rigs then observe the external owner's exact effect, both canonical
-roles and the first ready history through the existing post-receipt
-`functional_account_convergence` owner. This is an explicit phase-contract
-correction: those public convergence and reopen assertions are functional
-acceptance, not an eight-second end-to-end latency SLA. The dedicated held-request
-rig keeps its complete compound public/history predicate inside the original
-absolute eight seconds. Paused controls must reject a late private receipt and a
-late held tail, keep a functional tail pending beyond the action cutoff only after
-its private receipt, and fail an uncompleted functional tail at its owner bound.
-Use actual phase-entry and completion gates; advancing time cannot certify any
-business predicate. The archive-marker setup, real Noise-fault operation cases
-and dedicated held-traffic latency assertions retain their existing bounds.
-Cold authentication and control exchanges keep their production network limits.
+Modern self-control fixtures use one absolute thirty-second cold-setup owner,
+starting before archive preparation. The exact archive ID must reach every
+physical source through real history before reference enrollment; the same
+remaining budget covers authenticated old Member provenance, final topology,
+capabilities and the original held read. Cached endpoint observations distinguish
+present, missing, pending and unobserved archive state. Setup does not restart its
+budget at a phase transition and cannot certify a late synchronous observation.
+This is functional fixture preparation, not an operation latency claim.
+
+All four rigs retain the independent absolute eight-second private action bound
+from admission, including a validated Committed receipt with exactly one original
+effect. The held-request rig must additionally capture its causal proof inside
+that same private bound: the exact original client child has retired, the newer
+authenticated Wake caused owned cancellation and a distinct request delivered the
+operation header, and the exact server hook remains live behind its unreleased
+gate. A later observation cannot repair missing or late private/causal evidence.
+The server hold has its own lifetime witness; it is distinct from the client child
+whose retirement is required.
+
+After that immutable private proof, exact external public effect, both canonical
+roles and the first ready history use the existing post-receipt
+`functional_account_convergence` owner. The original response stays held and live
+through this public tail; no resubmission, manual pull or injected event qualifies
+it. The previous compound public/history eight-second cutoff was a fixture policy,
+not an independently specified product latency SLA. Phase controls must reject
+late private or causal proof and missing or late public completion, while accepting
+timely private proof followed by real functional convergence beyond the action
+cutoff. Retain separate first phase timestamps and history-pending counts outside
+the verbose trace budget so an early request burst cannot erase this evidence.
+Use actual phase-entry and completion gates; advancing time alone proves no
+business predicate. Real Noise-fault operations and dedicated held-traffic latency
+assertions retain their existing bounds and production network limits.
 
 Reference self-control fixtures hold requester-side public membership recovery
 for the selected group through the remote action proof. Disabling account History
@@ -1633,7 +1661,8 @@ The diagnostic owner uses a dedicated two-GiB loop filesystem and a per-process
 256-MiB core limit, records the checked-out source, tools and executable digest,
 and collects bounded GDB traces with automatic loading and argument printing
 disabled. An actual C exit-handler crash verifies core delivery and symbolization
-on the same Linux VM before product execution. Recovery state publishes atomically before global mutation; controlled incomplete
+on the same Linux VM before product execution. Recovery state publishes atomically
+before global mutation; controlled incomplete
 and rejected writes preserve the prior restoration receipt. Collection always
 restores the prior kernel pattern and retires its storage; raw cores do not enter
 artifacts.
@@ -1646,9 +1675,12 @@ The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
-runs the single notification-only group-chain diagnostic from that same sealed,
-extracted archive, with one case, one test process and zero retries. Its bounded
-raw logs retain source/run/attempt identity and upload on failure. Diagnostic
+runs the six exact critical recovery regressions from that same sealed,
+extracted archive: notification-only gossip, held-request and archive-readiness
+self controls, independent merged forwarding, storage-rollback replay and actual
+role-GC physical progress. Every named case must execute exactly once, serially,
+with zero retries. Missing, duplicate, ignored or failed results reject the probe.
+Its bounded raw logs retain source/run/attempt identity and upload on failure. Diagnostic
 profiles stay outside canonical coverage/cache directories and never contribute
 to LCOV or consumer receipts. The complete fresh-consumer partitions remain the
 acceptance boundary; the early probe supplies earlier same-binary evidence. Four fresh consumers

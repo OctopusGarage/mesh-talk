@@ -418,18 +418,26 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
     let recipient_task = tokio::spawn(recipient.clone().run_accept_loop(listener));
     let mut phase = "forwarding-start";
     let started = std::time::Instant::now();
+    let mut phase_entries = Vec::new();
+    let mut offer_observed = false;
+    let mut consent_accepted = false;
+    let mut last_file_ready = None;
+    let mut verified_bytes = None;
     let observed = std::panic::AssertUnwindSafe(async {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            let mut request = ForwardRequest {
-                operation_id: format!("{}-group-text", super::super::node::now_millis()),
-                source: selected,
-                destinations: vec![ForwardTarget {
-                    kind: "channel".into(),
-                    target: hex::encode(group.as_bytes()),
-                }],
-                mode: "individual".into(),
-            };
+        let mut request = ForwardRequest {
+            operation_id: format!("{}-group-text", super::super::node::now_millis()),
+            source: selected,
+            destinations: vec![ForwardTarget {
+                kind: "channel".into(),
+                target: hex::encode(group.as_bytes()),
+            }],
+            mode: "individual".into(),
+        };
+        // Two distinct user submissions each own functional acceptance. The
+        // second operation does not inherit time spent delivering the first.
+        crate::node::account_group::functional_account_convergence(async {
             phase = "individual-admission";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let accepted = sender
                 .forward_messages_if(request.clone(), |commit| commit())
                 .await
@@ -441,6 +449,7 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                     .all(|item| item.status == "pending" || item.status == "accepted")
             );
             phase = "individual-acceptance";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let accepted = wait_forward_receipts(&sender, &request).await;
             for item in &accepted.items {
                 let id = crate::eventlog::EventId::new(
@@ -454,6 +463,7 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                     .await;
             }
             phase = "individual-history";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             loop {
                 match recipient.channel_history(group, 10) {
                     Ok(history) if history.len() >= 2 => break,
@@ -470,18 +480,24 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                     .collect::<Vec<_>>(),
                 vec![b"first".to_vec(), b"second".to_vec()]
             );
-            request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
-            request.mode = "merged".into();
+        })
+        .await?;
+        request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
+        request.mode = "merged".into();
+        crate::node::account_group::functional_account_convergence(async {
             phase = "merged-admission";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let merged = sender
                 .forward_messages_if(request.clone(), |commit| commit())
                 .await
                 .unwrap();
             assert!(merged.items[0].status == "pending" || merged.items[0].status == "accepted");
             phase = "merged-acceptance";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let merged = wait_forward_receipts(&sender, &request).await;
             let archive_id = merged.items[0].message_id.as_ref().unwrap();
             phase = "merged-history";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let archive = loop {
                 match sender.channel_history(group, 10) {
                     Ok(history) => {
@@ -498,18 +514,29 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                 tokio::time::sleep(Duration::from_millis(20)).await;
             };
             phase = "merged-transfer";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             sender.flush_channel_file(group, archive).await;
             phase = "merged-offer";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let offer = offers.recv().await.unwrap();
+            offer_observed = true;
             assert_eq!(offer.name, "Chat records.mtchat");
             recipient.decide_attachment(archive, true).unwrap();
+            consent_accepted = true;
             phase = "merged-bytes";
-            while !recipient.file_ready_to_save(archive).unwrap() {
+            phase_entries.push((phase, started.elapsed().as_millis()));
+            loop {
+                let ready = recipient.file_ready_to_save(archive).unwrap();
+                last_file_ready = Some(ready);
+                if ready {
+                    break;
+                }
                 recipient.pull_pending_files().await;
                 sender.pull_pending_files().await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             let received = recipient.read_file(archive).unwrap();
+            verified_bytes = Some(received.len());
             let record: serde_json::Value = serde_json::from_slice(&received).unwrap();
             assert_eq!(record["format"], "MTCHAT1");
             assert_eq!(record["messages"][0]["text"], "first");
@@ -531,6 +558,9 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
         node.clear_delivery_observations();
         node.sessions.clear();
     }
+    eprintln!(
+        "group forwarding cached evidence: phase_entries_ms={phase_entries:?} offer_observed={offer_observed} consent_accepted={consent_accepted} last_file_ready={last_file_ready:?} verified_bytes={verified_bytes:?}"
+    );
     let operation_outcome = match &observed {
         Ok(Ok(())) => "completed",
         Ok(Err(_)) => "timed out",

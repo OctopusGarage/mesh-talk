@@ -575,7 +575,7 @@ mod tests {
         assert!(after.freelist_count > 64, "stop need not drain backlog");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn actual_role_gc_supplies_free_pages_for_physical_progress() {
         use crate::eventlog::{ConversationId, Event, EventKind, sync::network::NetworkSyncStore};
         use crate::storage::database::observations::VACUUM_ATTEMPTS;
@@ -638,18 +638,34 @@ mod tests {
         SLICE_TIMES.with(|v| v.borrow_mut().clear());
         PHYSICAL_INSPECTIONS.with(|v| v.set(0));
         VACUUM_ATTEMPTS.with(|v| v.borrow_mut().clear());
+        LAST_DUTY_DEADLINE.with(|v| v.set(None));
         let (stop, rx) = watch::channel(false);
         let worker = office.run_maintenance(rx);
         tokio::pin!(worker);
-        // This inventory crosses physical-GC hysteresis and therefore needs
-        // several paced slices. Observe actual completion instead of assuming
-        // the larger fixture drains in the old small-inventory sleep window.
-        let completion = tokio::time::timeout(Duration::from_secs(5), async {
+        // This is functional GC completion, not a wall-clock SQL throughput
+        // SLA. Use the existing maintenance 10s virtual watchdog: real SQL cost
+        // does not itself advance it, while each actual measured-duty Sleep is
+        // still obeyed before another bounded production slice is polled.
+        let mut completed_slices = 0;
+        let functional_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let completion = tokio::time::timeout_at(functional_deadline, async {
             loop {
-                tokio::select! {
-                    result = &mut worker => panic!("worker stopped: {result:?}"),
-                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                if tokio::time::Instant::now() >= functional_deadline {
+                    std::future::pending::<()>().await;
                 }
+                std::future::poll_fn(|cx| match std::future::Future::poll(worker.as_mut(), cx) {
+                    std::task::Poll::Ready(result) => panic!("worker stopped: {result:?}"),
+                    std::task::Poll::Pending => std::task::Poll::Ready(()),
+                })
+                .await;
+                let slices = SLICE_TIMES.with(|v| v.borrow().len());
+                if slices == completed_slices {
+                    // After duty, the owner may still be waiting for its
+                    // independent physical cooldown or another retained wake.
+                    tokio::time::sleep(MIN_SPACING).await;
+                    continue;
+                }
+                completed_slices = slices;
                 if db.physical_stats().unwrap().page_count < before.page_count
                     && !office
                         .state
@@ -661,6 +677,24 @@ mod tests {
                 {
                     break;
                 }
+                let duty = LAST_DUTY_DEADLINE
+                    .with(|v| v.get())
+                    .expect("a completed production slice must arm its actual duty Sleep");
+                assert!(
+                    duty > tokio::time::Instant::now(),
+                    "pending cleanup must retain its pacing gate"
+                );
+                // Polling the same real owner before its actual deadline may
+                // neither bypass pacing nor perform another physical inspection.
+                let inspections = PHYSICAL_INSPECTIONS.with(|v| v.get());
+                std::future::poll_fn(|cx| match std::future::Future::poll(worker.as_mut(), cx) {
+                    std::task::Poll::Ready(result) => panic!("worker stopped: {result:?}"),
+                    std::task::Poll::Pending => std::task::Poll::Ready(()),
+                })
+                .await;
+                assert_eq!(SLICE_TIMES.with(|v| v.borrow().len()), slices);
+                assert_eq!(PHYSICAL_INSPECTIONS.with(|v| v.get()), inspections);
+                tokio::time::sleep_until(duty).await;
             }
         })
         .await;

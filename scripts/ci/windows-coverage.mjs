@@ -263,45 +263,58 @@ export function verifyLayout(binaries) {
   }
 }
 
-export const gossipProbeCase =
-  "node::group_chain_tests::background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes";
-export function gossipProbeEnabled(env = process.env) {
-  const value = env.MESH_WINDOWS_GOSSIP_PROBE;
+export const criticalRecoveryProbeCases = Object.freeze([
+  "node::group_chain_tests::background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
+  "node::channels::account_self_control::tests::reference_modern_leave_request_overtakes_the_executors_held_requester_read",
+  "node::channels::account_self_control::tests::reference_modern_leave_keeps_left_over_old_member_head_and_reopen",
+  "node::forwarding::tests::forwarding_to_group_delivers_ordered_text_and_independent_merged_file",
+  "node::node::tests::group_reception_failed_rollback_retries_without_new_traffic",
+  "postoffice::maintenance::tests::actual_role_gc_supplies_free_pages_for_physical_progress",
+]);
+export function criticalRecoveryProbeEnabled(env = process.env) {
+  const value = env.MESH_WINDOWS_CRITICAL_RECOVERY_PROBE;
   assert.ok(
     value === undefined || value === "0" || value === "1",
-    "MESH_WINDOWS_GOSSIP_PROBE must be 0 or 1",
+    "MESH_WINDOWS_CRITICAL_RECOVERY_PROBE must be 0 or 1",
   );
   return value === "1";
 }
 
 // Diagnostic only: no consumer receipt or LCOV output. The full four-shard
 // acceptance remains mandatory even after this same-binary probe passes.
-export async function runGossipProbe(
+export async function runCriticalRecoveryProbe(
   { full, reuse, identity: sourceIdentity, archiveSha256, env = process.env },
   run = command,
 ) {
-  if (!gossipProbeEnabled(env)) return;
-  const matches = full.filter(
-    (row) =>
-      row.eventName === `mesh-talk-core::mesh_talk_core$${gossipProbeCase}`,
+  if (!criticalRecoveryProbeEnabled(env)) return;
+  const expectedNames = criticalRecoveryProbeCases.map(
+    (name) => `mesh-talk-core::mesh_talk_core$${name}`,
   );
+  const matches = full.filter((row) => expectedNames.includes(row.eventName));
   assert.equal(
     matches.length,
-    1,
-    "Gossip probe requires exactly one archived case",
+    expectedNames.length,
+    `Critical recovery probe requires all ${expectedNames.length} archived cases`,
   );
+  for (const name of expectedNames) {
+    assert.equal(
+      matches.filter((row) => row.eventName === name).length,
+      1,
+      "Critical recovery probe requires one of each exact case",
+    );
+  }
   assert.ok(
-    matches[0].selected && !matches[0].ignored,
-    "Gossip probe case must be runnable",
+    matches.every((row) => row.selected && !row.ignored),
+    "Critical recovery probe cases must be runnable",
   );
   assert.ok(
     path.isAbsolute(env.RUNNER_TEMP ?? ""),
-    "Gossip probe requires absolute runner temp",
+    "Critical recovery probe requires absolute runner temp",
   );
   assert.match(
     archiveSha256 ?? "",
     /^[a-f0-9]{64}$/u,
-    "Gossip probe requires sealed archive digest",
+    "Critical recovery probe requires sealed archive digest",
   );
   const relative = path.relative(
     realpathSync(process.cwd()),
@@ -311,13 +324,19 @@ export async function runGossipProbe(
     relative === ".." ||
       relative.startsWith(`..${path.sep}`) ||
       path.isAbsolute(relative),
-    "Gossip profiles must remain outside the workspace/cache",
+    "Critical recovery profiles must remain outside the workspace/cache",
   );
-  const directory = path.join(env.RUNNER_TEMP, "windows-gossip-probe");
-  assert.ok(!existsSync(directory), "Gossip probe output already exists");
+  const directory = path.join(
+    env.RUNNER_TEMP,
+    "windows-critical-recovery-probe",
+  );
+  assert.ok(
+    !existsSync(directory),
+    "Critical recovery probe output already exists",
+  );
   mkdirSync(directory);
   const profiles = mkdtempSync(
-    path.join(env.RUNNER_TEMP, "windows-gossip-profraw-"),
+    path.join(env.RUNNER_TEMP, "windows-critical-recovery-profraw-"),
   );
   writeJson(path.join(directory, "input.json"), {
     identity: sourceIdentity,
@@ -333,7 +352,7 @@ export async function runGossipProbe(
         ...nextestArgs,
         ...reuse,
         "-E",
-        `package(=mesh-talk-core) & binary(=mesh_talk_core) & test(=${gossipProbeCase})`,
+        `package(=mesh-talk-core) & binary(=mesh_talk_core) & (${criticalRecoveryProbeCases.map((name) => `test(=${name})`).join(" | ")})`,
         "--test-threads",
         "1",
         "--retries",
@@ -356,7 +375,7 @@ export async function runGossipProbe(
         },
         receipt: path.join(directory, "execution"),
         progress: path.join(directory, "progress.jsonl"),
-        phase: "early-gossip-probe",
+        phase: "early-critical-recovery-probe",
         liveStdout: true,
         maxOutputBytes: 8 * 1024 * 1024,
       },
@@ -377,9 +396,8 @@ export async function runGossipProbe(
     if (retired) rmSync(profiles, { recursive: true });
   }
 }
-
 export async function produce(directory) {
-  gossipProbeEnabled();
+  criticalRecoveryProbeEnabled();
   const before = await identity();
   const archive = path.join(directory, "workspace.tar.zst");
   assert.ok(!existsSync(archive), "Archive already exists");
@@ -409,7 +427,7 @@ export async function produce(directory) {
   verifyIdentity(before, await identity());
   const archiveSha256 = await fileHash(archive);
   writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256, inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
-  await runGossipProbe({ full: inventories[0], reuse, identity: before, archiveSha256 });
+  await runCriticalRecoveryProbe({ full: inventories[0], reuse, identity: before, archiveSha256 });
   rmSync(probe, { recursive: true });
   rmSync(binaryFile);
   console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);

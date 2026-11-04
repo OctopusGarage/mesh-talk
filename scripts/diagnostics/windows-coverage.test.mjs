@@ -14,9 +14,9 @@ import {
   versions,
   command,
   consumerFailurePolicy,
-  gossipProbeEnabled,
-  gossipProbeCase,
-  runGossipProbe,
+  criticalRecoveryProbeEnabled,
+  criticalRecoveryProbeCases,
+  runCriticalRecoveryProbe,
   inventory,
   verifyPartition,
   verifyExecution,
@@ -469,30 +469,47 @@ test("legacy Windows cache compatibility overrides stay outside runtime executio
   assert.match(runtime, /cargo test --workspace --doc --locked/u);
 });
 
-test("the producer enables the single archived gossip probe and preserves its failure log", () => {
+test("the producer enables the exact critical recovery cohort and preserves its failure log", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
     "utf8",
   );
   const producer = workflow.split("  tests:\n")[0];
-  assert.match(producer, /MESH_WINDOWS_GOSSIP_PROBE: '1'/u);
+  assert.match(producer, /MESH_WINDOWS_CRITICAL_RECOVERY_PROBE: '1'/u);
   assert.match(
     producer,
-    /name: Preserve early gossip diagnostic\n\s+if: always\(\)/u,
+    /name: Preserve early critical recovery diagnostic\n\s+if: always\(\)/u,
   );
   assert.match(
     producer,
-    /windows-gossip-probe-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/u,
+    /windows-critical-recovery-probe-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/u,
   );
 });
 
-test("gossip probe flag defaults off and requires one exact runnable archived case", async () => {
-  for (const env of [{}, { MESH_WINDOWS_GOSSIP_PROBE: "0" }])
-    assert.equal(gossipProbeEnabled(env), false);
-  assert.equal(gossipProbeEnabled({ MESH_WINDOWS_GOSSIP_PROBE: "1" }), true);
+test("critical recovery cohort retains each known regression exactly once", () => {
+  assert.deepEqual(criticalRecoveryProbeCases, [
+    "node::group_chain_tests::background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
+    "node::channels::account_self_control::tests::reference_modern_leave_request_overtakes_the_executors_held_requester_read",
+    "node::channels::account_self_control::tests::reference_modern_leave_keeps_left_over_old_member_head_and_reopen",
+    "node::forwarding::tests::forwarding_to_group_delivers_ordered_text_and_independent_merged_file",
+    "node::node::tests::group_reception_failed_rollback_retries_without_new_traffic",
+    "postoffice::maintenance::tests::actual_role_gc_supplies_free_pages_for_physical_progress",
+  ]);
+});
+
+test("critical recovery probe defaults off and requires the complete exact runnable cohort", async () => {
+  for (const env of [{}, { MESH_WINDOWS_CRITICAL_RECOVERY_PROBE: "0" }])
+    assert.equal(criticalRecoveryProbeEnabled(env), false);
+  assert.equal(
+    criticalRecoveryProbeEnabled({ MESH_WINDOWS_CRITICAL_RECOVERY_PROBE: "1" }),
+    true,
+  );
   for (const value of ["", "true", "2"])
     assert.throws(
-      () => gossipProbeEnabled({ MESH_WINDOWS_GOSSIP_PROBE: value }),
+      () =>
+        criticalRecoveryProbeEnabled({
+          MESH_WINDOWS_CRITICAL_RECOVERY_PROBE: value,
+        }),
       /must be 0 or 1/u,
     );
   let calls = 0;
@@ -500,56 +517,74 @@ test("gossip probe flag defaults off and requires one exact runnable archived ca
     calls++;
     throw new Error("must not run");
   };
-  await runGossipProbe({ env: {}, full: [] }, run);
-  const row = {
-    eventName: `mesh-talk-core::mesh_talk_core$${gossipProbeCase}`,
+  await runCriticalRecoveryProbe({ env: {}, full: [] }, run);
+  const rows = criticalRecoveryProbeCases.map((name) => ({
+    eventName: `mesh-talk-core::mesh_talk_core$${name}`,
     selected: true,
     ignored: false,
-  };
+  }));
   for (const full of [
     [],
-    [row, row],
-    [{ ...row, selected: false }],
-    [{ ...row, ignored: true }],
-    [{ ...row, eventName: `other::other$${gossipProbeCase}` }],
+    rows.slice(1),
+    [rows[0], rows[0], ...rows.slice(2)],
+    rows.map((row, i) => (i ? row : { ...row, selected: false })),
+    rows.map((row, i) => (i ? row : { ...row, ignored: true })),
+    rows.map((row, i) =>
+      i ? row : { ...row, eventName: "other::other$unrelated" },
+    ),
   ]) {
     await assert.rejects(
-      runGossipProbe({ env: { MESH_WINDOWS_GOSSIP_PROBE: "1" }, full }, run),
-      /exactly one|runnable/u,
+      runCriticalRecoveryProbe(
+        { env: { MESH_WINDOWS_CRITICAL_RECOVERY_PROBE: "1" }, full },
+        run,
+      ),
+      /requires all|one of each|runnable/u,
     );
   }
   assert.equal(calls, 0);
 });
 
-for (const outcome of ["pass", "nonzero", "malformed"]) {
-  test(`gossip probe ${outcome} preserves real subprocess evidence without coverage acceptance`, async (t) => {
+for (const outcome of [
+  "pass",
+  "nonzero",
+  "malformed",
+  "failed-receipt",
+  "missing-receipt",
+  "duplicate-receipt",
+]) {
+  test(`critical recovery probe ${outcome} preserves real subprocess evidence without coverage acceptance`, async (t) => {
     const temporary = mkdtempSync(path.join(os.tmpdir(), "mesh-gossip-probe-"));
     t.after(() => rmSync(temporary, { recursive: true, force: true }));
-    const row = {
-      eventName: `mesh-talk-core::mesh_talk_core$${gossipProbeCase}`,
+    const rows = criticalRecoveryProbeCases.map((name) => ({
+      eventName: `mesh-talk-core::mesh_talk_core$${name}`,
       selected: true,
       ignored: false,
-    };
+    }));
     const suite = {
       crate: "mesh-talk-core",
       test_binary: "mesh_talk_core",
       kind: "lib",
     };
+    let executed = outcome === "missing-receipt" ? rows.slice(0, -1) : rows;
+    if (outcome === "duplicate-receipt") executed = [...rows, rows[0]];
+    const failure = ["nonzero", "failed-receipt"].includes(outcome);
     const raw =
       outcome === "malformed"
         ? "not-json\n"
         : [
             { type: "suite", event: "started", nextest: suite },
-            { type: "test", event: "started", name: row.eventName },
-            {
-              type: "test",
-              event: outcome === "pass" ? "ok" : "failed",
-              name: row.eventName,
-            },
+            ...executed.flatMap((row, index) => [
+              { type: "test", event: "started", name: row.eventName },
+              {
+                type: "test",
+                event: failure && index === rows.length - 1 ? "failed" : "ok",
+                name: row.eventName,
+              },
+            ]),
             {
               type: "suite",
-              event: outcome === "pass" ? "ok" : "failed",
-              failed: outcome === "pass" ? 0 : 1,
+              event: failure ? "failed" : "ok",
+              failed: failure ? 1 : 0,
               nextest: suite,
             },
           ]
@@ -565,7 +600,7 @@ for (const outcome of ["pass", "nonzero", "malformed"]) {
       );
       assert(
         args.includes(
-          `package(=mesh-talk-core) & binary(=mesh_talk_core) & test(=${gossipProbeCase})`,
+          `package(=mesh-talk-core) & binary(=mesh_talk_core) & (${criticalRecoveryProbeCases.map((name) => `test(=${name})`).join(" | ")})`,
         ),
       );
       assert.equal(args[args.indexOf("--retries") + 1], "0");
@@ -581,9 +616,9 @@ for (const outcome of ["pass", "nonzero", "malformed"]) {
         binary: process.execPath,
       });
     };
-    const pending = runGossipProbe(
+    const pending = runCriticalRecoveryProbe(
       {
-        full: [row],
+        full: rows,
         reuse: [
           "--binaries-metadata",
           "sealed-binaries.json",
@@ -597,7 +632,7 @@ for (const outcome of ["pass", "nonzero", "malformed"]) {
         env: {
           ...process.env,
           RUNNER_TEMP: temporary,
-          MESH_WINDOWS_GOSSIP_PROBE: "1",
+          MESH_WINDOWS_CRITICAL_RECOVERY_PROBE: "1",
         },
       },
       run,
@@ -606,9 +641,13 @@ for (const outcome of ["pass", "nonzero", "malformed"]) {
     else
       await assert.rejects(
         pending,
-        outcome === "nonzero" ? /failed: 7/u : /JSON/u,
+        outcome === "nonzero"
+          ? /failed: 7/u
+          : outcome === "malformed"
+            ? /JSON/u
+            : /execution/iu,
       );
-    const directory = path.join(temporary, "windows-gossip-probe");
+    const directory = path.join(temporary, "windows-critical-recovery-probe");
     assert.equal(
       readFileSync(path.join(directory, "execution.jsonl"), "utf8"),
       raw,
