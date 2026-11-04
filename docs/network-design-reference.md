@@ -2373,6 +2373,16 @@ store, domain, conversation and destructive-generation binding; later appends
 belong to a later exchange. Destructive or authorization changes invalidate the
 view. No database transaction or mutex spans network I/O.
 
+Direct participant fingerprint probes consult the existing bounded projection
+metadata cache before constructing a historical selection. Paged summaries are
+qualified by the exact current history stamp, including source, identity,
+direction and policy dependencies, and share the owner's 128-entry bound with
+legacy summaries. Preparation may publish a summary only if its captured stamp
+remains current; a finite older cutoff must not be labeled with a later stamp.
+Cold or changing observations are cache misses. A summary contains only the
+fingerprint, count and protocol requirements; differing summaries still use
+fresh bounded reconciliation and ordinary export authorization.
+
 Paged exchanges retain one ID chunk and bounded event frames rather than all
 local IDs. Existing peer Have chunk and aggregate limits remain enforced.
 An unavailable current fingerprint bypasses the optional probe; it cannot become

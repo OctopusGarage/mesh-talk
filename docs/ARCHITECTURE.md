@@ -510,6 +510,14 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   refresh, removal, sharing and privacy changes invalidate reuse; a fresh
   connection to an unchanged channel avoids cloning ciphertext or replaying history.
   Invisible-mode projections remain uncached and include only authorized events.
+  Paged participant fingerprint probes use this same bounded metadata owner.
+  Their exact history stamp includes the finite source binding, both identities,
+  account, direction and current policy observations. A completed preparation
+  contributes a summary only when its captured stamp still matches; an append
+  during preparation cannot qualify an older cutoff as current. Cache hits
+  compare scalar summaries before creating SQL selections. Missing observations
+  and changed stamps use ordinary bounded preparation; cached summaries never
+  authorize export, custody or admission.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance

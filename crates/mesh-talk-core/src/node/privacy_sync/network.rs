@@ -91,6 +91,7 @@ pub(in crate::node) struct ParticipantView {
     pub(super) pending: Vec<EventId>,
     export_have: Mutex<Option<[u8; 32]>>,
     sibling_closure: bool,
+    metadata_stamp: Option<HistorySyncStamp>,
 }
 #[derive(Clone)]
 pub(in crate::node) enum ParticipantHaveCursor {
@@ -636,7 +637,28 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     type View = ParticipantView;
     type HaveCursor = ParticipantHaveCursor;
     type ExportCursor = ParticipantExportCursor;
+    fn probe_metadata(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<Option<SyncMetadata>, LogError> {
+        let Some(stamp) = self.history_sync_stamp(conversation)? else {
+            return Ok(None);
+        };
+        let metadata = self
+            .node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache lock not poisoned")
+            .get_paged(&stamp);
+        if metadata.is_some() && self.history_sync_stamp(conversation)?.as_ref() != Some(&stamp) {
+            return Ok(None);
+        }
+        Ok(metadata)
+    }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError> {
+        // Capture BEFORE the finite repository cutoff. A later append must
+        // never label this older view with its newer exact history stamp.
+        let metadata_stamp = self.history_sync_stamp(conversation)?;
         let policy = self.network_policy(conversation)?;
         let observed = self.network_observation(conversation)?;
         let repository = NetworkSyncStore::open_view(
@@ -659,6 +681,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             pending,
             export_have: Mutex::new(None),
             sibling_closure,
+            metadata_stamp,
         };
         #[cfg(test)]
         self.node
@@ -723,7 +746,19 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         if !preparation.ready() {
             return Err(LogError::StaleCursor);
         }
-        Ok(preparation.metadata)
+        let metadata = preparation.metadata;
+        drop(preparation);
+        if metadata.fingerprint.is_some()
+            && let Some(stamp) = &view.metadata_stamp
+            && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
+        {
+            self.node
+                .channel_projection_cache
+                .lock()
+                .expect("projection cache lock not poisoned")
+                .insert_paged(stamp.clone(), metadata);
+        }
+        Ok(metadata)
     }
     fn have_page(
         &self,
@@ -2871,6 +2906,441 @@ mod control_publication_tests {
             Err(LogError::StaleCursor)
         ));
     }
+    #[tokio::test]
+    async fn participant_probe_metadata_rejects_cold_and_appended_finite_views() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let append = |seq| {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(Event::new(
+                    &node.identity,
+                    conversation,
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![1],
+                ))
+                .unwrap();
+        };
+        append(1);
+        // Model a legitimate pre-existing backfill backlog even when the fresh
+        // fixture's insert trigger already advanced its initially empty index.
+        node.storage
+            .database()
+            .transaction(|connection| {
+                connection.execute("UPDATE participant_kind_scan SET ordinal=-1", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let cold = open_prepared(&store, &conversation);
+        assert!(
+            cold.metadata_stamp.is_none(),
+            "fixture must start without raw-kind evidence"
+        );
+        assert_eq!(NetworkSyncStore::metadata(&*store, &cold).unwrap().count, 1);
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "finishing preparation must never upgrade an initially cold stamp"
+        );
+        drop(cold);
+
+        // Finish A without publishing metadata. An append before the first
+        // preparation turn may fail closed when its newer order exceeds A's
+        // cutoff; that existing contract is separate from cache publication.
+        let finite = open_prepared(&store, &conversation);
+        assert!(finite.metadata_stamp.is_some());
+        append(2);
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &finite).unwrap().count,
+            1
+        );
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "an old finite cutoff cannot acquire the current appended history stamp"
+        );
+        let current = open_prepared(&store, &conversation);
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &current).unwrap().count,
+            2
+        );
+        assert_eq!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .unwrap()
+                .count,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_probe_metadata_scopes_full_peer_direction_controls_and_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(Event::new(
+                &node.identity,
+                conversation,
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![1],
+            ))
+            .unwrap();
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        drop(open_prepared(&store, &conversation)); // settle the initially cold index
+        let ready = open_prepared(&store, &conversation);
+        NetworkSyncStore::metadata(&*store, &ready).unwrap();
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_some()
+        );
+        let mut other_transport = peer.public();
+        other_transport.x25519_pub = DeviceIdentity::generate().public().x25519_pub;
+        for other in [other_transport, DeviceIdentity::generate().public()] {
+            assert!(
+                NetworkSyncStore::probe_metadata(
+                    &*node.sync_store(&other).lock().unwrap(),
+                    &conversation
+                )
+                .unwrap()
+                .is_none(),
+                "both peer keys must qualify the scalar cache"
+            );
+        }
+        for inbound in [
+            node.serve_sync_store(&peer.public()),
+            node.pull_sync_store(&peer.public()),
+        ] {
+            assert!(
+                NetworkSyncStore::probe_metadata(&*inbound.lock().unwrap(), &conversation)
+                    .unwrap()
+                    .is_none(),
+                "inbound and pull-only stores have separate authority"
+            );
+        }
+        let control = Event::new(
+            &node.identity,
+            ConversationId::new([217; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::ChannelReplica,
+            vec![0],
+        );
+        node.log.lock().unwrap().append_durable(control).unwrap();
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "even a rejected raw control invalidates qualified metadata"
+        );
+        let refreshed = open_prepared(&store, &conversation);
+        NetworkSyncStore::metadata(&*store, &refreshed).unwrap();
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_some()
+        );
+        node.clear_conversation(conversation).unwrap();
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_none(),
+            "destructive history changes must invalidate previously qualified inventory"
+        );
+    }
+
+    #[test]
+    fn participant_probe_metadata_shares_legacy_fifo_bound_without_touching_hits() {
+        use super::super::super::channel_projection_cache::{
+            ChannelProjectionCache, ProjectionKey, ProjectionMetadata,
+        };
+        let mut cache = ChannelProjectionCache::default();
+        let own = DeviceIdentity::generate().public();
+        let peer = DeviceIdentity::generate().public();
+        let key = |index| ProjectionKey {
+            conversation: ConversationId::new([index; 32]),
+            raw: ([0; 32], 0),
+            peer: peer.clone(),
+            own: own.clone(),
+            own_account: "owner".into(),
+            established: None,
+            privacy_generation: 0,
+            privacy_configured: false,
+            inbound: false,
+            sharing: false,
+        };
+        let legacy = ProjectionMetadata {
+            fingerprint: [0; 32],
+            len: 0,
+            requires_v2: false,
+            requires_v3: false,
+            requires_v4: false,
+            requires_v5: false,
+        };
+        for index in 0..64 {
+            cache.insert(key(index), legacy);
+        }
+        let metadata = SyncMetadata {
+            fingerprint: Some([1; 32]),
+            count: 1,
+            ..Default::default()
+        };
+        for index in 0..64 {
+            cache.insert_paged(
+                HistorySyncStamp {
+                    fingerprint: [index; 32],
+                },
+                metadata,
+            );
+        }
+        assert_eq!(cache.len(), 128);
+        let oldest = HistorySyncStamp {
+            fingerprint: [0; 32],
+        };
+        for _ in 0..3 {
+            assert!(cache.get(&key(0)).is_some());
+            assert!(cache.get_paged(&oldest).is_some());
+        }
+        cache.insert_paged(
+            HistorySyncStamp {
+                fingerprint: [64; 32],
+            },
+            metadata,
+        );
+        assert_eq!(cache.len(), 128);
+        assert!(
+            cache.get(&key(0)).is_none(),
+            "reads must not change FIFO eviction"
+        );
+        assert!(cache.get_paged(&oldest).is_some());
+        for index in 65..128 {
+            cache.insert_paged(
+                HistorySyncStamp {
+                    fingerprint: [index; 32],
+                },
+                metadata,
+            );
+        }
+        cache.insert_paged(
+            HistorySyncStamp {
+                fingerprint: [128; 32],
+            },
+            metadata,
+        );
+        assert_eq!(cache.len(), 128);
+        assert!(cache.get_paged(&oldest).is_none());
+        cache.insert_paged(
+            HistorySyncStamp {
+                fingerprint: [129; 32],
+            },
+            SyncMetadata::default(),
+        );
+        assert_eq!(cache.len(), 128);
+        assert!(
+            cache
+                .get_paged(&HistorySyncStamp {
+                    fingerprint: [129; 32]
+                })
+                .is_none(),
+            "history-only metadata without a fingerprint cannot enter the cache"
+        );
+    }
+
+    /// Exercise fresh store wrappers on both sides of an authenticated equal-FP
+    /// exchange. Only scalar metadata can survive between these independent views.
+    #[tokio::test]
+    async fn participant_probe_metadata_loopback_reuses_without_selection_commits() {
+        use crate::{
+            node::session::{Served, request_round_paged, serve_one_paged},
+            transport::SecureChannel,
+        };
+        for history in [32, 128] {
+            let left_dir = tempfile::tempdir().unwrap();
+            let right_dir = tempfile::tempdir().unwrap();
+            let left_identity = DeviceIdentity::generate();
+            let right_identity = DeviceIdentity::generate();
+            let left_account = Account::generate();
+            let right_account = Account::generate();
+            let left_proof = Announce::new_with_account(&left_identity, &left_account, "Left", 9);
+            let right_proof =
+                Announce::new_with_account(&right_identity, &right_account, "Right", 9);
+            let (left, _, _) = super::super::super::test_support::node_with_files(
+                left_dir.path(),
+                left_identity,
+                left_account,
+                &right_proof,
+            );
+            let (right, _, _) = super::super::super::test_support::node_with_files(
+                right_dir.path(),
+                right_identity,
+                right_account,
+                &left_proof,
+            );
+            left.cached_peer_snapshot_async().await.unwrap();
+            right.cached_peer_snapshot_async().await.unwrap();
+            let conversation = super::super::super::conversation::dm_conversation_id(
+                &left.identity.public(),
+                &right.identity.public(),
+            );
+            let append_shared = |seq| {
+                let event = Event::new(
+                    &left.identity,
+                    conversation,
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![7; 128],
+                );
+                for node in [&left, &right] {
+                    node.log
+                        .lock()
+                        .unwrap()
+                        .append_durable(event.clone())
+                        .unwrap();
+                }
+            };
+            for seq in 1..=history {
+                append_shared(seq);
+            }
+            // A cold raw-kind index deliberately cannot qualify a reusable stamp.
+            let settle = || {
+                for node in [&left, &right] {
+                    while !node
+                        .log
+                        .lock()
+                        .unwrap()
+                        .repository()
+                        .unwrap()
+                        .prepare_kind_metadata_step(PreparationBudget::default())
+                        .unwrap()
+                        .ready
+                    {}
+                }
+            };
+            settle();
+            let commits = || {
+                (
+                    left.storage.database().successful_write_commits(),
+                    right.storage.database().successful_write_commits(),
+                )
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server_node = right.clone();
+            let remote = left.identity.public();
+            let (served, mut completed) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn(async move {
+                let (server, _) = listener.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(server, &server_node.identity)
+                    .await
+                    .unwrap();
+                loop {
+                    // No selection or per-GuardedSyncStore cache crosses a round.
+                    let store = server_node.serve_sync_store(&remote);
+                    if matches!(
+                        serve_one_paged(&mut channel, &store).await.unwrap(),
+                        Served::Closed
+                    ) {
+                        break;
+                    }
+                    // The probe view's destructor has completed before baseline reads.
+                    served.send(()).unwrap();
+                }
+            });
+            let client = tokio::net::TcpStream::connect(address).await.unwrap();
+            let mut channel =
+                SecureChannel::connect(client, &left.identity, Some(&right.identity.public()))
+                    .await
+                    .unwrap();
+            for phase in 0..3 {
+                if phase == 1 {
+                    append_shared(history + 1);
+                    settle();
+                } else if phase == 2 {
+                    // Revocation generation changes invalidate even equal inventory.
+                    for node in [&left, &right] {
+                        node.privacy.generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let before = commits();
+                request_round_paged(
+                    &mut channel,
+                    &left.sync_store(&right.identity.public()),
+                    conversation,
+                )
+                .await
+                .unwrap();
+                completed.recv().await.unwrap();
+                let warmed = commits();
+                assert!(
+                    warmed.0 > before.0 && warmed.1 > before.1,
+                    "new exact scope must prepare on both participants, history={history}, phase={phase}"
+                );
+                for _ in 0..2 {
+                    request_round_paged(
+                        &mut channel,
+                        &left.sync_store(&right.identity.public()),
+                        conversation,
+                    )
+                    .await
+                    .unwrap();
+                    completed.recv().await.unwrap();
+                    assert_eq!(
+                        commits(),
+                        warmed,
+                        "quiet equal-fingerprint probes must not rebuild selections, history={history}, phase={phase}"
+                    );
+                }
+            }
+            drop(channel);
+            task.await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn participant_durable_have_request_uses_no_historical_bodies() {
         use crate::{

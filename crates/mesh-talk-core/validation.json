@@ -1449,7 +1449,11 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["storage::"]
+          "filters": [
+            "storage::",
+            "node::received_log::tests::",
+            "node::sentlog::tests::"
+          ]
         }
       ],
       "escalation": [
@@ -2730,6 +2734,9 @@
         "crates/mesh-talk-core/src/postoffice/federation/indexed.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/privacy_sync/admission_tests.rs",
+        "crates/mesh-talk-core/src/node/channel_projection_cache.rs",
+        "crates/mesh-talk-core/src/node/session/backend.rs",
+        "crates/mesh-talk-core/src/eventlog/sync/network.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/current.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/replay.rs",
         "crates/mesh-talk-core/src/node/channel/graph/preparing.rs"
@@ -2743,6 +2750,7 @@
             "postoffice::storage::role::delta::tests::",
             "participant_history_upload_",
             "participant_history_sync_stamp_",
+            "participant_probe_metadata_",
             "node::opaque_receive_cache::checkpoints::tests::",
             "node::channel::checkpoint::",
             "node::channel::tests::",
@@ -2769,6 +2777,10 @@
           {
             "name": "Only completed admission or bounded pending retry evidence can advance incoming checkpoints; caches never authorize admission, deletion reversal, custody or recipient delivery.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Direct paged fingerprint probes reuse only exact current scalar summaries under the shared 128-entry projection bound; an append during finite preparation cannot qualify the older cutoff as current, and mismatches retain fresh export authorization.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
             "name": "Capability negotiation preserves legacy wire messages and authorization; malformed or unavailable modern exchanges never silently downgrade.",

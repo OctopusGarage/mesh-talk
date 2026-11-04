@@ -4,8 +4,9 @@ use super::{ApplyReport, FileConsentStatus};
 use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, LogError};
 use std::collections::HashSet;
 
-/// Metadata captured atomically with a finite, owned view. A missing current
-/// cached fingerprint skips the optional probe; it never denotes an empty set.
+/// Scalar metadata from a finite owned view or an exactly qualified probe cache.
+/// This grants no Have/export authority. A missing fingerprint skips the optional
+/// probe; it never denotes an empty set.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SyncMetadata {
     pub count: u64,
@@ -128,6 +129,14 @@ pub trait NetworkSyncStore {
     type View;
     type HaveCursor;
     type ExportCursor;
+    /// Optional current scalar probe. Returning metadata grants no export or Have
+    /// permission; a differing fingerprint still requires a fresh owned view.
+    fn probe_metadata(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<SyncMetadata>, LogError> {
+        Ok(None)
+    }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
     /// Opening captures a finite source. Implementations with derived authority
     /// prepare it here; there is no collecting fallback in the session adapter.

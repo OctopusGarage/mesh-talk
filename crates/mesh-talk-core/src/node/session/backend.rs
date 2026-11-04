@@ -327,6 +327,9 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
         c: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError> {
         let store = self.0.lock().expect("store mutex not poisoned");
+        if let Some(metadata) = store.probe_metadata(c)? {
+            return Ok((Some(metadata), None));
+        }
         let view = store.open_view(c)?;
         Ok((None, Some(view)))
     }

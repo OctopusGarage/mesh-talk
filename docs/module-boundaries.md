@@ -200,6 +200,10 @@ synchronization require fresh confirmation through that same owner.
 `core/node/privacy_sync/network.rs` applies participant authorization to finite
 repository network pages. `core/eventlog/repository/selection.rs` owns disposable
 SQL authorization IDs, causal closure, and bounded retirement cleanup.
+`core/node/channel_projection_cache.rs` owns the shared bounded scalar summaries
+for legacy and paged fingerprint probes. The network adapter qualifies paged
+entries with its exact history stamp before reuse and before publication; the
+cache never retains a selection or authorizes Have, export or custody.
 `core/node/privacy_sync/principal/` and `principal.rs` own current principal state
 and resumable preparation; historical IDs, departures and ancestry stay on disk.
 Already-current ordering and authority phases may advance within the same finite
