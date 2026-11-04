@@ -590,7 +590,14 @@ This controlled fault does not establish an unobserved historical timeout cause.
 Post-create custody setup requires the selected channel's authenticated inventory
 and control head floors plus exact bidirectional device capabilities within its
 thirty-second watchdog, with the current whole-Optional bootstrap complete in
-both directions. A same-lane DmRecall or GroupActivity hold keeps setup pending.
+both directions. Capture each publisher's post-create wake revision once and
+require a real authenticated acknowledgement at or above that floor in both
+directions; settled document reads alone do not qualify the notification path.
+A held real Wake response keeps setup pending while the other prerequisites
+remain ready. Prepare all routes and observers before launching independent
+participant hosts. Network-only offline cuts join producers and admitted work
+while preserving the Node for an explicit relaunch; permanent retirement closes
+work admission. A same-lane DmRecall or GroupActivity hold keeps setup pending.
 An independent Directory hold may keep aggregate document status catching up;
 its later display-only heads do not replace the authenticated bootstrap floor.
 Before taking a real holder offline or changing its certificate binding, observe
@@ -1685,12 +1692,13 @@ The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
-runs the twelve exact critical recovery regressions from that same sealed,
+runs the thirteen exact critical recovery regressions from that same sealed,
 extracted archive: notification-only gossip, held-request and archive-readiness
 self controls, independent merged forwarding, storage-rollback replay, actual
 role-GC physical progress, the three authenticated custody setup controls and
 profile compaction with a held admitted writer, external-member reaction
-authentication and canonical own-copy file confirmation.
+authentication, canonical own-copy file confirmation and the sender-sibling
+custody exclusion scenario.
 Every named case must execute exactly once, serially,
 with zero retries. Missing, duplicate, ignored or failed results reject the probe.
 Its bounded raw logs retain source/run/attempt identity and upload on failure. Diagnostic

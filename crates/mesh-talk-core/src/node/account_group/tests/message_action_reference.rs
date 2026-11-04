@@ -804,6 +804,95 @@ async fn independent_action_peer_runtime_joins_accepted_connections_and_admitted
     drop(channel);
 }
 
+#[tokio::test]
+async fn independent_peer_pause_drains_actual_work_and_allows_same_node_relaunch() {
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("source"), &account);
+    let reference = node(&directory.path().join("reference"), &account);
+    link(&source, &reference);
+    link(&reference, &source);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&source, &directory.path().join("source"), address.port());
+    configure(&reference, &directory.path().join("reference"), 1);
+    let mut owner = ActionPeerRuntime::start(source.clone(), listener).await;
+    owner.launch();
+    let old_runtime = owner.runtime_handle();
+    let mut channel = reference
+        .privacy_dial(address, &source.identity.public())
+        .await
+        .unwrap();
+    assert_eq!(channel.peer_identity(), &source.identity.public());
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let written = completed.clone();
+    let writer_node = source.clone();
+    let writer = old_runtime.spawn(async move {
+        writer_node
+            .account_blocking(move |_| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                written.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            })
+            .await
+    });
+    entered_rx.await.unwrap();
+    let mut pausing = tokio::spawn(owner.pause());
+    let observation = std::panic::AssertUnwindSafe(async {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), channel.recv())
+                .await
+                .expect("pause must close the actual accepted Noise connection")
+                .is_err()
+        );
+        assert!(
+            futures_util::poll!(&mut pausing).is_pending(),
+            "pause must retain its runtime until the actual admitted writer finishes"
+        );
+        assert!(!source.runtime_work.is_closed());
+        assert!(!completed.load(std::sync::atomic::Ordering::Acquire));
+    })
+    .catch_unwind()
+    .await;
+    release.send(()).unwrap();
+    pausing.await.unwrap();
+    assert!(completed.load(std::sync::atomic::Ordering::Acquire));
+    match writer.await {
+        Ok(result) => result.unwrap(),
+        Err(error) => assert!(error.is_cancelled()),
+    }
+    assert!(
+        old_runtime
+            .spawn(async {})
+            .await
+            .unwrap_err()
+            .is_cancelled()
+    );
+    assert!(!source.runtime_work.is_closed());
+    if let Err(panic) = observation {
+        std::panic::resume_unwind(panic);
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut relaunched = ActionPeerRuntime::start(source.clone(), listener).await;
+    source
+        .update_presence(&source.signed_announce("Account role fixture", address.port()))
+        .unwrap();
+    relaunched.launch();
+    let channel = reference
+        .privacy_dial(address, &source.identity.public())
+        .await
+        .expect("the same Node must authenticate after its paused host is relaunched");
+    assert_eq!(channel.peer_identity(), &source.identity.public());
+    drop(channel);
+    relaunched.stop().await;
+    assert!(source.runtime_work.is_closed());
+}
+
 async fn reference_message_action(recall: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

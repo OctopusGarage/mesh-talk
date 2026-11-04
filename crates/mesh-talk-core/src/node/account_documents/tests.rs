@@ -1287,6 +1287,8 @@ struct CustodySetupObservation<'a> {
     progress: std::sync::Arc<std::sync::Mutex<[[CustodySetupEventCount; 5]; 2]>>,
     started: std::time::Instant,
     created: Option<(u128, [[CustodySetupEventCount; 5]; 2])>,
+    wake_acknowledged: std::sync::Arc<std::sync::Mutex<[u64; 2]>>,
+    wake_floor: Option<[u64; 2]>,
     phases: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(usize, String)>>>,
 }
 impl<'a> CustodySetupObservation<'a> {
@@ -1298,6 +1300,7 @@ impl<'a> CustodySetupObservation<'a> {
             [[CustodySetupEventCount::default(); 5]; 2],
         ));
         let started = std::time::Instant::now();
+        let wake_acknowledged = std::sync::Arc::new(std::sync::Mutex::new([0; 2]));
         let nodes = [source, sibling];
         let mut previous = Vec::new();
         for (index, node) in nodes.iter().enumerate() {
@@ -1308,9 +1311,17 @@ impl<'a> CustodySetupObservation<'a> {
             let phases = phases.clone();
             let optional_settled = optional_settled.clone();
             let progress = progress.clone();
+            let wake_acknowledged = wake_acknowledged.clone();
             *node.account_client_test_hook.lock().unwrap() =
                 Some(std::sync::Arc::new(move |actual, phase| {
                     if actual == peer {
+                        if let Some(revision) = phase
+                            .strip_prefix("wake_send_ack revision=")
+                            .and_then(|value| value.parse::<u64>().ok())
+                        {
+                            let mut acknowledged = wake_acknowledged.lock().unwrap();
+                            acknowledged[index] = acknowledged[index].max(revision);
+                        }
                         if phase == "document_scope_started scope=Optional" {
                             optional_settled.lock().unwrap()[index] = false;
                         } else if phase == "document_scope_settled scope=Optional" {
@@ -1361,10 +1372,18 @@ impl<'a> CustodySetupObservation<'a> {
             progress,
             started,
             created: None,
+            wake_acknowledged,
+            wake_floor: None,
             phases,
         }
     }
     fn mark_channel_created(&mut self) {
+        // Capture this publication once; later unrelated metadata must not move
+        // the setup target while its authenticated wake is in flight.
+        self.wake_floor = Some(
+            self.nodes
+                .map(|node| node.account_wake_token_for_test().1.max(1)),
+        );
         self.created = Some((
             self.started.elapsed().as_millis(),
             *self.progress.lock().unwrap(),
@@ -1372,6 +1391,16 @@ impl<'a> CustodySetupObservation<'a> {
     }
     fn ready(&self) -> bool {
         self.settled.lock().unwrap().iter().all(|ready| *ready)
+    }
+    fn wake_ready(&self) -> bool {
+        self.wake_floor.is_none_or(|floor| {
+            self.wake_acknowledged
+                .lock()
+                .unwrap()
+                .iter()
+                .zip(floor)
+                .all(|(acknowledged, required)| *acknowledged >= required)
+        })
     }
     fn optional_ready(&self) -> bool {
         self.optional_settled
@@ -1556,6 +1585,7 @@ async fn wait_custody_channel_setup_at_floor(
                 && custody_linked_capabilities_ready(source, sibling)
                 && observation.ready()
                 && observation.optional_ready()
+                && observation.wake_ready()
             {
                 break;
             }
@@ -1586,6 +1616,11 @@ async fn wait_custody_channel_setup_at_floor(
                 }),
             )
         });
+        eprintln!(
+            "custody setup wake floor={:?} acknowledged={:?}",
+            observation.wake_floor,
+            *observation.wake_acknowledged.lock().unwrap()
+        );
         let custody_settled = *observation.settled.lock().unwrap();
         let optional_settled = *observation.optional_settled.lock().unwrap();
         let phases = observation.phases.lock().unwrap().clone();
@@ -1598,6 +1633,178 @@ async fn wait_custody_channel_setup_at_floor(
         );
     }
     result.expect("the new channel's signed inventory/control heads, exact bidirectional capabilities and reciprocal Optional baseline must be ready before the custody scenario");
+}
+
+#[tokio::test]
+async fn custody_channel_setup_waits_for_authenticated_wake_acknowledgement() {
+    use crate::{discovery::Announce, node::account_devices::AccountDevice};
+    use futures_util::FutureExt;
+    use std::{net::IpAddr, sync::Arc, time::Duration};
+    use tokio::{
+        net::TcpListener,
+        sync::{Semaphore, oneshot},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    for (owner, peer) in [(&source, &sibling), (&sibling, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: peer.identity.public(),
+                certificate: account.certify(&peer.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let mut hosts = Vec::new();
+    for current in [&source, &sibling] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let observer = if current.user_id() == source.user_id() {
+            &sibling
+        } else {
+            &source
+        };
+        observer.roster.lock().unwrap().update(
+            &Announce::new_with_account(
+                &current.identity,
+                &account,
+                "wake setup",
+                listener.local_addr().unwrap().port(),
+            ),
+            IpAddr::from([127, 0, 0, 1]),
+            &observer.user_id(),
+        );
+        hosts.push(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+                current.clone(),
+                listener,
+            )
+            .await,
+        );
+    }
+    let release = Arc::new(Semaphore::new(0));
+    let mut observation = CustodySetupObservation::new(&source, &sibling);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        for host in &mut hosts {
+            host.launch();
+        }
+        let channel = source
+            .create_channel("wake setup", vec![sibling.identity.public()])
+            .await
+            .unwrap();
+        observation.mark_channel_created();
+        wait_custody_channel_setup(&source, &sibling, channel, &observation).await;
+        let (arrived, entered) = oneshot::channel();
+        let arrived = Arc::new(std::sync::Mutex::new(Some(arrived)));
+        *sibling.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let exact_source = source.identity.public();
+            let release = release.clone();
+            move |peer, frame| {
+                let exact_source = exact_source.clone();
+                let release = release.clone();
+                let arrived = arrived.clone();
+                Box::pin(async move {
+                    if peer == exact_source
+                        && matches!(
+                            frame,
+                            crate::node::account_sync_wire::AccountHistoryFrame::Wake { .. }
+                        )
+                    {
+                        let signal = arrived.lock().unwrap().take();
+                        if let Some(signal) = signal {
+                            let _ = signal.send(());
+                        }
+                        let _ = release.acquire().await;
+                    }
+                })
+            }
+        }));
+        // A durable Directory publication advances the real publisher token.
+        // The channel head floors and Optional lane remain independent of this
+        // actual authenticated wake response.
+        let bootstrap_floor = custody_channel_setup_keys(&source, channel)
+            .iter()
+            .map(|key| source.account_document_meta(key).unwrap())
+            .collect::<Vec<_>>();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        source
+            .set_device_hostname(Some("custody-wake-floor"))
+            .unwrap();
+        observation.mark_channel_created();
+        tokio::time::timeout_at(deadline, entered)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                let imported = bootstrap_floor.iter().all(|head| {
+                    sibling
+                        .account_document(&head.key)
+                        .unwrap()
+                        .is_some_and(|document| {
+                            let meta = &document.meta;
+                            !meta.tombstone
+                                && meta.valid(&account.public().ed25519_pub)
+                                && meta.writer_device == head.writer_device
+                                && meta.order() >= head.order()
+                        })
+                });
+                if imported
+                    && custody_linked_capabilities_ready(&source, &sibling)
+                    && observation.ready()
+                    && observation.optional_ready()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("old setup prerequisites must settle within the same held-exchange budget");
+        assert!(
+            !observation.wake_ready(),
+            "an older authenticated acknowledgement cannot qualify the new publication floor"
+        );
+        {
+            let setup = wait_custody_channel_setup_at_floor(
+                &source,
+                &sibling,
+                channel,
+                &observation,
+                Some(bootstrap_floor.clone()),
+            );
+            tokio::pin!(setup);
+            assert!(
+                futures_util::poll!(setup.as_mut()).is_pending(),
+                "settled document lanes cannot qualify setup while its real wake is unacknowledged"
+            );
+        }
+        release.close();
+        wait_custody_channel_setup_at_floor(
+            &source,
+            &sibling,
+            channel,
+            &observation,
+            Some(bootstrap_floor),
+        )
+        .await;
+        assert!(observation.wake_ready());
+    })
+    .catch_unwind()
+    .await;
+    release.close();
+    *sibling.account_session_test_hook.lock().unwrap() = None;
+    drop(observation);
+    for host in hosts {
+        host.stop().await;
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
@@ -2263,9 +2470,13 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 );
             }
         }
-        servers.push(Some(tokio::spawn(
-            current.clone().run_accept_loop(listener),
-        )));
+        servers.push(Some(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+                current.clone(),
+                listener,
+            )
+            .await,
+        ));
     }
     // Bounded metadata-only diagnostics for this one source/sibling route.
     let custody_trace =
@@ -2326,6 +2537,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     ];
     let outcome = std::panic::AssertUnwindSafe(Box::pin(async {
     let mut setup_observation = CustodySetupObservation::new(&a, &sibling);
+    for server in servers.iter_mut().flatten() {
+        server.launch();
+    }
     let channel = a
         .create_channel(
             "custody fixture",
@@ -2341,9 +2555,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     });
     if !external_online {
         let server = servers[2].take().unwrap();
-        server.abort();
-        let _ = server.await;
-        bob.runtime_work.drain().await;
+        server.pause().await;
         a.roster.lock().unwrap().forget(&bob.identity.public());
     }
     let mut custody_hold = external_online.then(|| {
@@ -2378,7 +2590,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 a.channel_custody_count(channel, event).unwrap(),
                 servers
                     .iter()
-                    .map(|server| server.as_ref().map(|server| server.is_finished()))
+                    .map(|server| server.as_ref().map(|_| "owned independent host"))
                     .collect::<Vec<_>>(),
                 custody_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
                 custody_trace.lock().unwrap()
@@ -2406,9 +2618,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         );
         assert!(sibling.routing_peer(&bob.user_id()).is_none());
         let server = servers[2].take().unwrap();
-        server.abort();
-        let _ = server.await;
-        bob.runtime_work.drain().await;
+        server.pause().await;
         a.roster.lock().unwrap().forget(&bob.identity.public());
         sibling
             .roster
@@ -2526,7 +2736,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             );
         }
         let bob_server = servers.len();
-        servers.push(Some(tokio::spawn(bob.clone().run_accept_loop(listener))));
+        let mut host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(bob.clone(), listener).await;
+        host.launch();
+        servers.push(Some(host));
         let members = a
             .channels
             .lock()
@@ -2580,8 +2792,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         // Model complete durable ciphertext loss on the synthetic holder. A real
         // authenticated negative probe uses the exact runtime recheck operation.
         let bob_server = servers[bob_server].take().unwrap();
-        bob_server.abort();
-        let _ = bob_server.await;
+        bob_server.pause().await;
         bob.runtime_work.close();
         bob.runtime_work.drain().await;
         let secret = bob.identity.secret_bytes();
@@ -2610,7 +2821,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .forget(&bob.identity.public());
         runtime_work.push(lost.runtime_work.clone());
         let lost_server = servers.len();
-        servers.push(Some(tokio::spawn(lost.clone().run_accept_loop(listener))));
+        let mut host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(lost.clone(), listener).await;
+        host.launch();
+        servers.push(Some(host));
         a.recheck_channel_custody_peer(channel, event, &bob_peer)
             .await;
         assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(0));
@@ -2661,9 +2874,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         // Join producers and admitted blocking writes before reopening this profile.
         let server = servers[1].take().unwrap();
         sibling.runtime_work.close();
-        server.abort();
-        let _ = server.await;
-        sibling.runtime_work.drain().await;
+        server.stop().await;
         let secret = sibling.identity.secret_bytes();
         drop(sibling);
         sibling = node_with_identity(
@@ -2722,9 +2933,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         final_expected = 1;
         lost.runtime_work.close();
         let lost_server = servers[lost_server].take().unwrap();
-        lost_server.abort();
-        let _ = lost_server.await;
-        lost.runtime_work.drain().await;
+        lost_server.stop().await;
     }
     (final_expected, sibling, channel, event)
     })).catch_unwind().await;
@@ -2739,12 +2948,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     for work in &runtime_work {
         work.close();
     }
-    for server in servers.iter().flatten() {
-        server.abort();
-    }
     let drained = tokio::time::timeout(Duration::from_secs(5), async {
         for server in servers.into_iter().flatten() {
-            let _ = server.await;
+            server.stop().await;
         }
         futures_util::future::join_all(runtime_work.iter().map(|work| work.drain())).await;
     })

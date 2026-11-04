@@ -91,9 +91,14 @@ pub(super) fn settle_group_metadata(node: &Node, group: crate::eventlog::Convers
 // Each simulated remote host owns its reactor and retirement independently.
 pub(super) struct IndependentPeerRuntime {
     launch: Option<tokio::sync::oneshot::Sender<()>>,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<PeerRuntimeShutdown>>,
     thread: Option<std::thread::JoinHandle<()>>,
     handle: tokio::runtime::Handle,
+}
+
+enum PeerRuntimeShutdown {
+    Retire,
+    Pause,
 }
 impl IndependentPeerRuntime {
     pub(super) async fn start(node: Arc<Node>, listener: TcpListener) -> Self {
@@ -129,18 +134,24 @@ impl IndependentPeerRuntime {
                 runtime.block_on(async move {
                     let listener = TcpListener::from_std(listener).unwrap();
                     ready.send(tokio::runtime::Handle::current()).unwrap();
+                    let mut shutdown_mode = PeerRuntimeShutdown::Retire;
                     let launched = tokio::select! {
-                        _ = &mut stopped => false,
+                        result = &mut stopped => {
+                            shutdown_mode = result.unwrap_or(PeerRuntimeShutdown::Retire);
+                            false
+                        },
                         result = launched => result.is_ok(),
                     };
                     let task = if launched {
                         let task = tokio::spawn(node.clone().run_accept_loop(listener));
-                        let _ = stopped.await;
+                        shutdown_mode = stopped.await.unwrap_or(PeerRuntimeShutdown::Retire);
                         Some(task)
                     } else {
                         None
                     };
-                    node.runtime_work.close();
+                    if matches!(shutdown_mode, PeerRuntimeShutdown::Retire) {
+                        node.runtime_work.close();
+                    }
                     if let Some(task) = task {
                         task.abort();
                         if let Err(error) = task.await {
@@ -168,9 +179,17 @@ impl IndependentPeerRuntime {
     pub(super) fn launch(&mut self) {
         self.launch.take().unwrap().send(()).unwrap();
     }
-    pub(super) async fn stop(mut self) {
+    pub(super) async fn stop(self) {
+        self.finish(PeerRuntimeShutdown::Retire).await;
+    }
+    // A network-offline cut joins actual producers and admitted work while
+    // retaining the same profile for a later explicit listener relaunch.
+    pub(super) async fn pause(self) {
+        self.finish(PeerRuntimeShutdown::Pause).await;
+    }
+    async fn finish(mut self, mode: PeerRuntimeShutdown) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+            let _ = shutdown.send(mode);
         }
         let thread = self.thread.take().unwrap();
         let joined = tokio::task::spawn_blocking(move || thread.join())
@@ -185,7 +204,7 @@ impl IndependentPeerRuntime {
 impl Drop for IndependentPeerRuntime {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+            let _ = shutdown.send(PeerRuntimeShutdown::Retire);
         }
         if let Some(thread) = self.thread.take() {
             let joined = thread.join();

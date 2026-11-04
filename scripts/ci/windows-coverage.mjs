@@ -276,6 +276,7 @@ export const criticalRecoveryProbeCases = Object.freeze([
   "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
   "node::account_group::tests::message_action_reference::reference_member_reacts_over_noise_with_private_projection_and_history_off",
   "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target",
+  "node::account_documents::tests::channel_custody_never_counts_sender_sibling_as_other_member",
 ]);
 export function criticalRecoveryProbeEnabled(env = process.env) {
   const value = env.MESH_WINDOWS_CRITICAL_RECOVERY_PROBE;
