@@ -2180,6 +2180,17 @@ proportional to the removed rows, without rewriting unrelated event bodies.
 Participant runtime maintenance now drives these bounded repository steps and
 retries publication cleanup through the same admitted blocking-work owner.
 
+Semantic Profile compaction advances the full destructive revision used by
+outgoing authority and retained-history views. In the same transaction it records
+the classified increment separately. Incoming mailbox repair uses the difference
+between these counters, so reclaiming an already handled Profile leaf does not
+discard valid transport progress. Actual retirement, deletion and other
+destructive changes still invalidate incoming coverage. Older databases begin
+with no classified increments; invalid counters fail explicitly. Profile
+publication retires both canonical-order bindings immediately, while existing
+budgeted obsolete-generation maintenance reclaims their ranks and work rows.
+It does not synchronously delete a history-sized derived index.
+
 Participant network sync uses `NetworkSyncStore` directly: retained Have and
 export pages bind a finite commit cutoff and destructive generation. Ordinary
 new messages do not invalidate the captured membership. Authorization, sharing,

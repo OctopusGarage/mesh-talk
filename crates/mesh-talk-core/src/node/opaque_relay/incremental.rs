@@ -15,6 +15,8 @@ use std::sync::Arc;
 const MAX_VIEWS: usize = 4;
 const MAX_PENDING: usize = 256;
 const MAX_RESULTS: usize = 64;
+// Four entry owners, IDs only; independent of the 16-KiB receipt envelope.
+const MAX_REPAIR_HINT_BYTES: usize = 2 * 1024 * 1024;
 const PAGE_BYTES: usize = crate::transport::MAX_PLAINTEXT - 2048;
 
 #[cfg(test)]
@@ -34,6 +36,36 @@ struct UploadEntry {
     complete: bool,
     stamp: Option<HistorySyncStamp>,
     last: Option<(EventId, EventId)>,
+    receipt: Option<Receipt>,
+    repair_hints: BTreeMap<EventId, EventId>,
+    repair_declarations: HashSet<EventId>,
+    repair_lease: Option<super::super::node::ProfileCompactionLease>,
+    repair_generation: u64,
+    repair_progress: std::time::Instant,
+}
+impl UploadEntry {
+    fn remember_repair_hint(
+        &mut self,
+        inner: EventId,
+        outer: EventId,
+    ) -> Result<(), session::SessionError> {
+        let bytes = self.repair_hints.len() * 64 + self.repair_declarations.len() * 32;
+        if !self.repair_hints.contains_key(&inner) && bytes + 64 > MAX_REPAIR_HINT_BYTES {
+            return Err(session::SessionError::ResourceUnavailable);
+        }
+        self.repair_hints.insert(inner, outer);
+        Ok(())
+    }
+    fn remember_repair_declaration(
+        &mut self,
+        inner: EventId,
+    ) -> Result<bool, session::SessionError> {
+        let bytes = self.repair_hints.len() * 64 + self.repair_declarations.len() * 32;
+        if !self.repair_declarations.contains(&inner) && bytes + 32 > MAX_REPAIR_HINT_BYTES {
+            return Err(session::SessionError::ResourceUnavailable);
+        }
+        Ok(self.repair_declarations.insert(inner))
+    }
 }
 struct Lease(Arc<Mutex<UploadEntry>>);
 impl Drop for Lease {
@@ -42,6 +74,54 @@ impl Drop for Lease {
     }
 }
 impl UploadCache {
+    pub(in crate::node) fn clear_receive_repair_leases(&mut self) {
+        for entry in self.entries.values() {
+            let mut entry = entry.lock().expect("upload entry");
+            entry.repair_lease = None;
+            entry.repair_declarations.clear();
+            if let Some(receipt) = entry.receipt.as_mut() {
+                receipt.repair = None;
+            }
+        }
+    }
+    pub(in crate::node) fn clear_stale_receive_repair_leases(&mut self, generation: u64) {
+        for entry in self.entries.values() {
+            let mut entry = entry.lock().expect("upload entry");
+            if entry.repair_generation != generation
+                || entry.repair_progress.elapsed() > std::time::Duration::from_secs(30)
+            {
+                entry.repair_lease = None;
+                entry.repair_declarations.clear();
+                if let Some(repair) = entry
+                    .receipt
+                    .as_mut()
+                    .and_then(|receipt| receipt.repair.as_mut())
+                    && repair.active
+                {
+                    // Protection was abandoned: earlier raw parents may now be
+                    // compacted. Rewind this runtime's derived scan conservatively.
+                    repair.scan = repair.captured.clone();
+                    let upper = repair
+                        .scan
+                        .window
+                        .unwrap_or((repair.scan.after, repair.scan.revision));
+                    repair.scan.after = 0;
+                    repair.scan.window = Some(upper);
+                    repair.page = None;
+                    repair.scan_complete = false;
+                    repair.spent.fill(0);
+                }
+                if entry.repair_generation != generation
+                    && let Some(repair) = entry
+                        .receipt
+                        .as_mut()
+                        .and_then(|receipt| receipt.repair.as_mut())
+                {
+                    repair.spent.fill(0);
+                }
+            }
+        }
+    }
     fn acquire(&mut self, key: &[u8]) -> Result<Lease, session::SessionError> {
         if !self.entries.contains_key(key) {
             if self.entries.len() >= MAX_VIEWS {
@@ -67,6 +147,12 @@ impl UploadCache {
                     complete: false,
                     stamp: None,
                     last: None,
+                    receipt: None,
+                    repair_hints: BTreeMap::new(),
+                    repair_declarations: HashSet::new(),
+                    repair_lease: None,
+                    repair_generation: 0,
+                    repair_progress: std::time::Instant::now(),
                 })),
             );
         }
@@ -112,6 +198,7 @@ pub(super) struct State {
     final_probe: bool,
     remote: Option<RemoteBinding>,
     remote_floor: Option<(i64, i64)>,
+    repair_generation: Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RemoteBinding {
@@ -165,6 +252,53 @@ struct Receipt {
     runtime: [u8; 16],
     session_only: bool,
     completed: Option<CompletedUpload>,
+    repair: Option<Repair>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Repair {
+    captured: MailboxCursor,
+    witness: [u8; 32],
+    active: bool,
+    scan: MailboxCursor,
+    page: Option<RepairPage>,
+    rewind: bool,
+    focus: Option<(EventId, EventId)>,
+    conversation: ConversationId,
+    local_epoch: i64,
+    global_epoch: Option<i64>,
+    owner: EventId,
+    spent: [u8; 32],
+    scan_complete: bool,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RepairPage {
+    cursor: MailboxCursor,
+    ids: Vec<EventId>,
+    next: usize,
+    complete: bool,
+}
+fn pending_repair_witness(pending: &[EventId]) -> ([u8; 32], Vec<EventId>) {
+    use sha2::{Digest, Sha256};
+    let mut sorted = pending.to_vec();
+    sorted.sort();
+    let mut hash = Sha256::new();
+    hash.update(b"MeshTalkMailboxRepairV1\0");
+    for id in &sorted {
+        hash.update(id.as_bytes());
+    }
+    (hash.finalize().into(), sorted)
+}
+impl Repair {
+    fn spent_for(&self, pending: &[EventId], child: EventId) -> bool {
+        pending
+            .binary_search(&child)
+            .is_ok_and(|position| self.spent[position / 8] & (1_u8 << (position % 8)) != 0)
+    }
+    fn mark_spent(&mut self, pending: &[EventId], child: EventId) {
+        if let Ok(position) = pending.binary_search(&child) {
+            self.spent[position / 8] |= 1_u8 << (position % 8);
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Sealed {
@@ -318,7 +452,15 @@ impl Node {
                     )
                     .into());
                 }
+                let child = events.first().cloned();
                 self.accept_opaque_wrappers(p, events)?;
+                if let Some((outer, missing)) = p.missing_parents.take()
+                    && outer == id
+                    && let Some(child) = child
+                {
+                    self.recover_mailbox_parents(channel, p, child, cursor, missing)
+                        .await?;
+                }
                 if let Some(inner) = p.processed_events.get(&id) {
                     if inner.is_none() {
                         state_mut(p).receipt.session_only = true;
@@ -346,8 +488,625 @@ impl Node {
         } else {
             pending.retain(|outer| *outer != id);
         }
+        if !failed
+            && state(p)
+                .receipt
+                .repair
+                .as_ref()
+                .is_some_and(|repair| repair.active && repair.owner == id)
+        {
+            self.finish_mailbox_repair(p)?;
+        }
         p.processed_events.clear();
         Ok(())
+    }
+    fn validate_mailbox_repair(&self, p: &OpaqueMailboxProgress) -> Result<(), LogError> {
+        if let Some(generation) = state(p).repair_generation {
+            if self.privacy.generation.load(Ordering::Acquire) != generation {
+                return Err(LogError::StaleCursor);
+            }
+            let entry = state(p).lease.0.lock().expect("upload entry");
+            if entry.repair_generation != generation || entry.repair_lease.is_none() {
+                return Err(LogError::StaleCursor);
+            }
+        }
+        if state(p).repair_generation.is_some()
+            && let Some(repair) = state(p).receipt.repair.as_ref()
+            && !self.mailbox_repair_scope_valid(repair)?
+        {
+            return Err(LogError::StaleCursor);
+        }
+        Ok(())
+    }
+    fn mailbox_repair_scope_valid(&self, repair: &Repair) -> Result<bool, LogError> {
+        let log = self.log.lock().expect("log lock");
+        let repository = log.repository()?;
+        Ok(if let Some(epoch) = repair.global_epoch {
+            repository.destructive_policy_revision()? == epoch
+        } else {
+            repository.conversation_destructive_epoch(&repair.conversation)? == repair.local_epoch
+        })
+    }
+    fn hold_mailbox_repair_lease(&self, p: &mut OpaqueMailboxProgress) -> Result<(), LogError> {
+        let generation = self.privacy.generation.load(Ordering::Acquire);
+        let needed = {
+            let entry = state(p).lease.0.lock().expect("upload entry");
+            entry.repair_lease.is_none() || entry.repair_generation != generation
+        };
+        if needed {
+            let lease = self.acquire_profile_compaction_lease()?;
+            let old = {
+                let mut entry = state(p).lease.0.lock().expect("upload entry");
+                entry.repair_generation = generation;
+                entry.repair_progress = std::time::Instant::now();
+                entry.repair_lease.replace(lease)
+            };
+            drop(old);
+        }
+        state_mut(p).repair_generation = Some(generation);
+        self.validate_mailbox_repair(p)
+    }
+    fn finish_mailbox_repair(
+        &self,
+        p: &mut OpaqueMailboxProgress,
+    ) -> Result<(), session::SessionError> {
+        let (witness, pending) = pending_repair_witness(&state(p).receipt.pending);
+        if let Some(repair) = state_mut(p).receipt.repair.as_mut() {
+            if repair.witness != witness {
+                repair.witness = witness;
+                repair.spent.fill(0);
+            }
+            repair.mark_spent(&pending, repair.owner);
+            repair.active = false;
+            repair.page = None;
+        }
+        self.save_mailbox_receipt(p)?;
+        let lease = {
+            let mut entry = state(p).lease.0.lock().expect("upload entry");
+            entry.repair_hints.clear();
+            entry.repair_declarations.clear();
+            entry.repair_lease.take()
+        };
+        drop(lease);
+        state_mut(p).repair_generation = None;
+        Ok(())
+    }
+    fn retry_recovery_child(
+        &self,
+        p: &mut OpaqueMailboxProgress,
+        child: &Event,
+        required: &mut HashSet<EventId>,
+    ) -> Result<bool, session::SessionError> {
+        self.validate_mailbox_repair(p)?;
+        self.accept_opaque_wrappers(p, vec![child.clone()])?;
+        self.validate_mailbox_repair(p)?;
+        if p.processed_events.contains_key(&child.id) {
+            p.deferred_events.remove(&child.id);
+            return Ok(true);
+        }
+        if let Some((outer, missing)) = p.missing_parents.take()
+            && outer == child.id
+        {
+            required.extend(missing);
+        }
+        Ok(false)
+    }
+    fn admit_recovery_wrapper(
+        &self,
+        p: &mut OpaqueMailboxProgress,
+        wrapper: Event,
+        required: &mut HashSet<EventId>,
+        child: EventId,
+    ) -> Result<(), session::SessionError> {
+        self.validate_mailbox_repair(p)?;
+        let event = match p.mailbox.open(&wrapper) {
+            Ok(event) => event,
+            Err(_) => {
+                // An unrelated opaque wrapper has the same transport-only
+                // classification as normal receive. It proves neither durable
+                // admission nor custody, and cannot survive a runtime change.
+                self.accept_opaque_wrappers(p, vec![wrapper])?;
+                state_mut(p).receipt.session_only = true;
+                return Ok(());
+            }
+        };
+        let id = event.id;
+        let outer = wrapper.id;
+        let parent = required.contains(&id);
+        let was_present = parent && self.log.lock().expect("log lock").has(&id)?;
+        let owns_recipe = state(p)
+            .receipt
+            .repair
+            .as_ref()
+            .is_some_and(|repair| repair.active && repair.owner == child);
+        if parent && event.is_canonical() && event.verify_integrity() && event.verify_signature() {
+            self.remember_wrapper_id(p.mailbox.id(), id, outer);
+            let mut entry = state(p).lease.0.lock().expect("upload entry");
+            entry.remember_repair_hint(id, outer)?;
+        }
+        p.required_parent = parent.then_some(id);
+        let result = self.accept_opaque_wrappers(p, vec![wrapper]);
+        p.required_parent = None;
+        result?;
+        if let Some((failed, missing)) = p.missing_parents.take()
+            && failed == outer
+            && parent
+        {
+            if required.len().saturating_add(missing.len()) > session::MAX_HAVE_IDS_TOTAL {
+                return Err(session::SessionError::ResourceUnavailable);
+            }
+            required.extend(missing);
+            let fresh = owns_recipe && {
+                let mut entry = state(p).lease.0.lock().expect("upload entry");
+                entry.remember_repair_declaration(id)?
+            };
+            if fresh && let Some(repair) = state_mut(p).receipt.repair.as_mut() {
+                // One rewind is earned by an exact newly authenticated unresolved
+                // declaration, never by oscillating MissingParents subsets.
+                repair.rewind = true;
+                repair.focus = Some((id, outer));
+            }
+        }
+        if parent && self.log.lock().expect("log lock").has(&id)? {
+            let mut entry = state(p).lease.0.lock().expect("upload entry");
+            entry.repair_hints.remove(&id);
+            entry.repair_declarations.remove(&id);
+            if !was_present {
+                entry.repair_progress = std::time::Instant::now();
+            }
+        }
+        #[cfg(test)]
+        if parent && self.log.lock().expect("log lock").has(&id)? {
+            self.trace_account_client(&p.recipient, || "mailbox_parent_recovered".into());
+        }
+        Ok(())
+    }
+
+    async fn recover_known_mailbox_parents<IO: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        p: &mut OpaqueMailboxProgress,
+        child: &Event,
+        cursor: &MailboxCursor,
+        required: &mut HashSet<EventId>,
+        allow_cached: bool,
+    ) -> Result<bool, session::SessionError> {
+        let mut attempted = HashSet::new();
+        loop {
+            self.validate_mailbox_repair(p)?;
+            if required.len() > session::MAX_HAVE_IDS_TOTAL {
+                return Err(session::SessionError::ResourceUnavailable);
+            }
+            let before = required.len();
+            let mut installed = false;
+            let candidates: Vec<_> = required.iter().copied().collect();
+            for inner in candidates {
+                if attempted.contains(&inner) {
+                    continue;
+                }
+                if self.log.lock().expect("log lock").has(&inner)? {
+                    required.remove(&inner);
+                    continue;
+                }
+                let hot = state(p)
+                    .lease
+                    .0
+                    .lock()
+                    .expect("upload entry")
+                    .repair_hints
+                    .get(&inner)
+                    .copied();
+                let outer = p.wrapper_ids.get(&inner).copied().or(hot).or_else(|| {
+                    allow_cached
+                        .then(|| self.cached_wrapper_id(p.mailbox.id(), inner))
+                        .flatten()
+                });
+                let Some(outer) = outer else {
+                    attempted.insert(inner);
+                    continue;
+                };
+                attempted.insert(inner);
+                if !self.relay_receive_allowed(&p.relay) {
+                    return Err(LogError::AdmissionRejected(
+                        "mailbox receive permission revoked".into(),
+                    )
+                    .into());
+                }
+                if !session::request_durable_have(channel, p.mailbox.id(), outer).await? {
+                    continue;
+                }
+                self.validate_mailbox_repair(p)?;
+                let wrappers = mailbox::get(channel, p.mailbox.id(), cursor, &[outer]).await?;
+                if !self.relay_receive_allowed(&p.relay) {
+                    return Err(LogError::AdmissionRejected(
+                        "mailbox receive permission revoked".into(),
+                    )
+                    .into());
+                }
+                let _step = self.acquire_profile_compaction_lease()?;
+                self.validate_mailbox_repair(p)?;
+                for wrapper in wrappers {
+                    let event = p
+                        .mailbox
+                        .open(&wrapper)
+                        .map_err(|error| session::SessionError::Serialization(error.to_string()))?;
+                    if event.id != inner {
+                        return Err(session::SessionError::UnexpectedMessage);
+                    }
+                    self.admit_recovery_wrapper(p, wrapper, required, child.id)?;
+                }
+                if self.log.lock().expect("log lock").has(&inner)? {
+                    required.remove(&inner);
+                    installed = true;
+                    if self.retry_recovery_child(p, child, required)? {
+                        return Ok(true);
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+            if self.retry_recovery_child(p, child, required)? {
+                return Ok(true);
+            }
+            if installed {
+                attempted.clear();
+            }
+            // Every additional pass requires an installed parent or a newly
+            // authenticated dependency. Rejections never create a retry loop.
+            if !installed && required.len() == before {
+                return Ok(false);
+            }
+        }
+    }
+
+    async fn recover_mailbox_parents<IO: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        p: &mut OpaqueMailboxProgress,
+        child: Event,
+        cursor: MailboxCursor,
+        missing: Vec<EventId>,
+    ) -> Result<(), session::SessionError> {
+        // One active child owns its captured page; a bitmap qualifies finite
+        // failed attempts independently for every sorted durable pending ID.
+        let conversation = p
+            .mailbox
+            .open(&child)
+            .map_err(|error| session::SessionError::Serialization(error.to_string()))?
+            .conversation_id;
+        let changed = state(p)
+            .receipt
+            .repair
+            .as_ref()
+            .map(|repair| self.mailbox_repair_scope_valid(repair))
+            .transpose()?
+            .is_some_and(|valid| !valid);
+        let generation_changed = state(p)
+            .lease
+            .0
+            .lock()
+            .expect("upload entry")
+            .repair_generation
+            != self.privacy.generation.load(Ordering::Acquire);
+        if changed {
+            state_mut(p).receipt.repair = None;
+            state(p)
+                .lease
+                .0
+                .lock()
+                .expect("upload entry")
+                .repair_declarations
+                .clear();
+        }
+        if generation_changed && let Some(repair) = state_mut(p).receipt.repair.as_mut() {
+            repair.spent.fill(0);
+        }
+        self.hold_mailbox_repair_lease(p)?;
+        let mut required: HashSet<_> = missing.into_iter().collect();
+        if !state(p).receipt.pending.contains(&child.id) {
+            if state(p).receipt.pending.len() >= MAX_PENDING {
+                return Err(session::SessionError::ResourceUnavailable);
+            }
+            state_mut(p).receipt.pending.push(child.id);
+        }
+        let (witness, pending) = pending_repair_witness(&state(p).receipt.pending);
+        let floor = cursor.window.unwrap_or((cursor.after, cursor.revision));
+        let global_epoch = if pending.len() > 1 {
+            Some(
+                self.log
+                    .lock()
+                    .expect("log lock")
+                    .repository()?
+                    .destructive_policy_revision()?,
+            )
+        } else {
+            None
+        };
+        let remote_changed = state(p).receipt.repair.as_ref().is_some_and(|repair| {
+            RemoteBinding::from(&repair.captured) != RemoteBinding::from(&cursor)
+        });
+        if remote_changed {
+            state_mut(p).receipt.repair = None;
+        }
+        if let Some(repair) = state_mut(p).receipt.repair.as_mut() {
+            if repair.witness != witness {
+                repair.witness = witness;
+                repair.spent.fill(0);
+            }
+            if repair.active && pending.binary_search(&repair.owner).is_err() {
+                repair.active = false;
+                repair.page = None;
+                repair.focus = None;
+            }
+            if !repair.active
+                && repair
+                    .captured
+                    .window
+                    .unwrap_or((repair.captured.after, repair.captured.revision))
+                    != floor
+            {
+                repair.spent.fill(0);
+            }
+            repair.global_epoch = global_epoch;
+        }
+        let spent = state(p)
+            .receipt
+            .repair
+            .as_ref()
+            .is_some_and(|repair| repair.spent_for(&pending, child.id));
+        let active = state(p)
+            .receipt
+            .repair
+            .as_ref()
+            .is_some_and(|repair| repair.active);
+        if !active && !spent {
+            let previous_spent = state(p)
+                .receipt
+                .repair
+                .as_ref()
+                .map_or([0; 32], |repair| repair.spent);
+            let mut scan = cursor.clone();
+            scan.after = 0;
+            scan.window = Some(floor);
+            let epoch = self
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .conversation_destructive_epoch(&conversation)?;
+            state_mut(p).receipt.repair = Some(Repair {
+                captured: cursor.clone(),
+                witness,
+                active: true,
+                scan,
+                page: None,
+                rewind: false,
+                focus: None,
+                conversation,
+                local_epoch: epoch,
+                global_epoch,
+                owner: child.id,
+                spent: previous_spent,
+                scan_complete: false,
+            });
+            state(p)
+                .lease
+                .0
+                .lock()
+                .expect("upload entry")
+                .repair_declarations
+                .clear();
+            self.save_mailbox_receipt(p)?;
+        }
+        let owns_scan = state(p)
+            .receipt
+            .repair
+            .as_ref()
+            .is_some_and(|repair| repair.active && repair.owner == child.id);
+        if owns_scan
+            && let Some((inner, outer)) = state(p)
+                .receipt
+                .repair
+                .as_ref()
+                .and_then(|repair| repair.focus)
+        {
+            required.insert(inner);
+            p.wrapper_ids.insert(inner, outer);
+        }
+        // Probe only this authenticated child's dependencies. A nonowner never
+        // advances, finishes, or spends another child's captured scan.
+        if self
+            .recover_known_mailbox_parents(channel, p, &child, &cursor, &mut required, true)
+            .await?
+        {
+            if owns_scan || !active {
+                self.finish_mailbox_repair(p)?;
+            }
+            return Ok(());
+        }
+        if !owns_scan {
+            if !active {
+                self.finish_mailbox_repair(p)?;
+            }
+            return Ok(());
+        }
+        loop {
+            self.validate_mailbox_repair(p)?;
+            if state(p)
+                .receipt
+                .repair
+                .as_ref()
+                .expect("repair marker")
+                .scan_complete
+            {
+                if state(p)
+                    .receipt
+                    .repair
+                    .as_ref()
+                    .expect("repair marker")
+                    .rewind
+                {
+                    let repair = state_mut(p).receipt.repair.as_mut().expect("repair marker");
+                    repair.rewind = false;
+                    repair.scan_complete = false;
+                    repair.scan = repair.captured.clone();
+                    let upper = repair
+                        .scan
+                        .window
+                        .unwrap_or((repair.scan.after, repair.scan.revision));
+                    repair.scan.after = 0;
+                    repair.scan.window = Some(upper);
+                    repair.page = None;
+                    self.save_mailbox_receipt(p)?;
+                    state(p)
+                        .lease
+                        .0
+                        .lock()
+                        .expect("upload entry")
+                        .repair_progress = std::time::Instant::now();
+                    #[cfg(test)]
+                    self.trace_account_client(&p.recipient, || "mailbox_repair_rewind".into());
+                    continue;
+                }
+                self.finish_mailbox_repair(p)?;
+                return Ok(());
+            }
+            if !self.relay_receive_allowed(&p.relay) {
+                let lease = state(p)
+                    .lease
+                    .0
+                    .lock()
+                    .expect("upload entry")
+                    .repair_lease
+                    .take();
+                drop(lease);
+                return Err(LogError::AdmissionRejected(
+                    "mailbox receive permission revoked".into(),
+                )
+                .into());
+            }
+            if state(p)
+                .receipt
+                .repair
+                .as_ref()
+                .expect("repair marker")
+                .page
+                .is_none()
+            {
+                let scan = state(p)
+                    .receipt
+                    .repair
+                    .as_ref()
+                    .expect("repair marker")
+                    .scan
+                    .clone();
+                let page = mailbox::delta(channel, p.mailbox.id(), Some(&scan)).await?;
+                if !self.relay_receive_allowed(&p.relay) {
+                    return Err(LogError::AdmissionRejected(
+                        "mailbox receive permission revoked".into(),
+                    )
+                    .into());
+                }
+                self.validate_mailbox_repair(p)?;
+                if page.reset {
+                    return Err(LogError::StaleCursor.into());
+                }
+                state_mut(p)
+                    .receipt
+                    .repair
+                    .as_mut()
+                    .expect("repair marker")
+                    .page = Some(RepairPage {
+                    cursor: page.cursor,
+                    ids: page.ids,
+                    next: 0,
+                    complete: page.complete,
+                });
+                self.save_mailbox_receipt(p)?;
+            }
+            let page = state(p)
+                .receipt
+                .repair
+                .as_ref()
+                .expect("repair marker")
+                .page
+                .as_ref()
+                .expect("repair page")
+                .clone();
+            if let Some(outer) = page.ids.get(page.next).copied() {
+                let wrappers =
+                    mailbox::get(channel, p.mailbox.id(), &page.cursor, &[outer]).await?;
+                if !self.relay_receive_allowed(&p.relay) {
+                    return Err(LogError::AdmissionRejected(
+                        "mailbox receive permission revoked".into(),
+                    )
+                    .into());
+                }
+                let _step = self.acquire_profile_compaction_lease()?;
+                self.validate_mailbox_repair(p)?;
+                for wrapper in wrappers {
+                    self.admit_recovery_wrapper(p, wrapper, &mut required, child.id)?;
+                }
+                if self.retry_recovery_child(p, &child, &mut required)? {
+                    self.finish_mailbox_repair(p)?;
+                    return Ok(());
+                }
+                p.processed_events.retain(|id, _| *id == child.id);
+                state_mut(p)
+                    .receipt
+                    .repair
+                    .as_mut()
+                    .expect("repair marker")
+                    .page
+                    .as_mut()
+                    .expect("repair page")
+                    .next += 1;
+                // Durable/volatile progress follows body classification, including
+                // offsets inside a page slower than the exchange watchdog.
+                self.save_mailbox_receipt(p)?;
+                state(p)
+                    .lease
+                    .0
+                    .lock()
+                    .expect("upload entry")
+                    .repair_progress = std::time::Instant::now();
+                #[cfg(test)]
+                self.trace_account_client(&p.recipient, || {
+                    format!(
+                        "mailbox_repair_frontier {} {}",
+                        page.cursor.after,
+                        page.next + 1
+                    )
+                });
+                tokio::task::yield_now().await;
+                continue;
+            }
+            {
+                let repair = state_mut(p).receipt.repair.as_mut().expect("repair marker");
+                repair.scan = page.cursor.clone();
+                repair.page = None;
+                repair.scan_complete = page.complete;
+            }
+            self.save_mailbox_receipt(p)?;
+            if !page.complete {
+                continue;
+            }
+            if self
+                .recover_known_mailbox_parents(
+                    channel,
+                    p,
+                    &child,
+                    &page.cursor,
+                    &mut required,
+                    true,
+                )
+                .await?
+            {
+                self.finish_mailbox_repair(p)?;
+                return Ok(());
+            }
+            // Finalization is now durable. A timeout in the targeted phase
+            // resumes this phase rather than replaying the last page forever.
+        }
     }
     pub(super) async fn advance_incremental_mailbox<IO, F>(
         &self,
@@ -371,12 +1130,28 @@ impl Node {
                 return Ok(None);
             }
             let key = cache_key(p)?;
-            let receipt = self.load_mailbox_receipt(&key, p.mailbox.id())?;
             let lease = self
                 .opaque_upload_cache
                 .lock()
                 .expect("upload cache")
                 .acquire(&key)?;
+            let hot = lease.0.lock().expect("upload entry").receipt.clone();
+            let receipt =
+                self.load_mailbox_receipt_with_runtime(&key, p.mailbox.id(), hot.clone())?;
+            if hot.as_ref().is_some_and(|old| {
+                old.epoch != receipt.epoch
+                    || old.source_floor > receipt.source_floor
+                    || old.runtime != receipt.runtime
+            }) {
+                let old_lease = {
+                    let mut entry = lease.0.lock().expect("upload entry");
+                    entry.receipt = None;
+                    entry.repair_hints.clear();
+                    entry.repair_declarations.clear();
+                    entry.repair_lease.take()
+                };
+                drop(old_lease);
+            }
             let saved = Some(receipt.clone());
             p.incremental = Mode::Active(Box::new(State {
                 key,
@@ -397,6 +1172,7 @@ impl Node {
                 final_probe: false,
                 remote: None,
                 remote_floor: None,
+                repair_generation: None,
             }));
             return Ok(Some(false));
         }
@@ -443,6 +1219,15 @@ impl Node {
             state_mut(p).remote_floor = Some(floor);
             if page.reset && !own_creation {
                 state_mut(p).receipt.pending.clear();
+                state_mut(p).receipt.repair = None;
+                state_mut(p).repair_generation = None;
+                let lease = {
+                    let mut entry = state(p).lease.0.lock().expect("upload entry");
+                    entry.repair_hints.clear();
+                    entry.repair_declarations.clear();
+                    entry.repair_lease.take()
+                };
+                drop(lease);
                 state_mut(p).retry = None;
             }
             if self.relay_receive_allowed(&p.relay) {
@@ -464,7 +1249,19 @@ impl Node {
         }
         if state(p).remote_done {
             if state(p).retry.is_none() {
-                state_mut(p).retry = Some(state(p).receipt.pending.iter().copied().collect());
+                let mut retry: VecDeque<_> = state(p).receipt.pending.iter().copied().collect();
+                if let Some(owner) = state(p)
+                    .receipt
+                    .repair
+                    .as_ref()
+                    .filter(|repair| repair.active)
+                    .map(|repair| repair.owner)
+                    && retry.contains(&owner)
+                {
+                    retry.retain(|id| *id != owner);
+                    retry.push_front(owner);
+                }
+                state_mut(p).retry = Some(retry);
             }
             if let Some(id) = state(p).retry.as_ref().and_then(|ids| ids.front().copied()) {
                 self.incremental_receive_one(channel, p, id, true).await?;

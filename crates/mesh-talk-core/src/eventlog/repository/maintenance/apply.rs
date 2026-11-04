@@ -64,7 +64,8 @@ impl EventRepository {
             let revision = advance(metadata.revision)?;
             let epoch = advance(self.network_epoch_on(c, &conversation)?)?;
             c.execute("UPDATE event_conversations SET destructive_epoch=?3 WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conversation.as_bytes().as_slice(),epoch])?;
-            self.invalidate_conversation_order(c, &conversation)?;
+            self.record_profile_compaction_on(c)?;
+            self.invalidate_profile_order(c, &conversation)?;
             let mut removed = 0i64;
             let mut estimate = 0i64;
             let mut stored = 0i64;

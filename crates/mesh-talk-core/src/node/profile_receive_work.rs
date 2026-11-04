@@ -71,6 +71,17 @@ impl ProfileReceiveWork {
             )?)
         })
     }
+    /// Exact account-scoped terminal processing fact; never retained custody.
+    pub fn processed(&self, id: EventId) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM profile_receive_processed WHERE account=?1 AND id=?2)",
+                params![self.account.as_slice(), id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
+    }
     pub fn discover(
         &self,
         after: Option<i64>,
@@ -213,6 +224,22 @@ mod tests {
         assert!(!seen.contains(&first[0].id));
     }
     #[test]
+    fn exact_processed_fact_survives_same_account_reopen_without_matching_other_ids() {
+        let (_dir, work, own) = fixture();
+        work.discover(None, &headers(), own).unwrap();
+        let id = EventId::new([1; 32]);
+        let other = EventId::new([2; 32]);
+        assert!(!work.processed(id).unwrap());
+        work.complete(id).unwrap();
+        assert!(work.processed(id).unwrap());
+        assert!(!work.processed(other).unwrap());
+        let profile = work.profile.clone();
+        drop(work);
+        let work = ProfileReceiveWork::open(profile).unwrap();
+        assert!(work.processed(id).unwrap());
+        assert!(!work.processed(other).unwrap());
+    }
+    #[test]
     fn discovery_failure_rolls_back_cursor_and_pending_and_retries_exactly() {
         let (_dir, work, own) = fixture();
         work.profile.database().transaction(|c| {
@@ -268,6 +295,10 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(work.after(), Err(LogError::StaleCursor)));
+        assert!(matches!(
+            work.processed(EventId::new([1; 32])),
+            Err(LogError::StaleCursor)
+        ));
         assert!(matches!(
             work.complete(EventId::new([1; 32])),
             Err(LogError::StaleCursor)

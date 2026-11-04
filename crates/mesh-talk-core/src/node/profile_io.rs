@@ -304,12 +304,31 @@ impl Node {
     pub(in crate::node) fn drain_profile_compaction(
         &self,
     ) -> Result<Option<usize>, crate::eventlog::LogError> {
+        // Watchdog retries may retain a bounded repair lease between exchanges.
+        // Revoked or abandoned jobs must not indefinitely pin Profile storage.
+        self.opaque_upload_cache
+            .lock()
+            .expect("upload cache")
+            .clear_stale_receive_repair_leases(
+                self.privacy
+                    .generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
         self.storage.maintain_participant_events()?;
         self.log
             .lock()
             .expect("log mutex not poisoned")
             .repository()?
             .cleanup_selections()?;
+        // A causal repair keeps recovered Profile parents available until its
+        // child has crossed admission. Serialize only the synchronous physical
+        // compaction with lease acquisition; no database guard spans network I/O.
+        let leases = self.profile_compaction_leases.lock().map_err(|_| {
+            LogError::CorruptFile("profile compaction lease owner unavailable".into())
+        })?;
+        if *leases != 0 {
+            return Ok(None);
+        }
         self.log
             .lock()
             .expect("log mutex not poisoned")
@@ -352,5 +371,89 @@ impl Node {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod compaction_lease_tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[test]
+    fn nested_repair_leases_defer_profile_compaction_until_final_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = crate::discovery::Announce::new_with_account(&remote, &account, "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = dm_conversation_id(&node.identity.public(), &remote.public());
+        for revision in 1..=12 {
+            let payload = ProfilePayload::new(&account, None, revision);
+            let event = Event::new(
+                &remote,
+                conversation,
+                revision,
+                vec![],
+                revision,
+                0,
+                EventKind::Profile,
+                crate::dm::seal(
+                    &remote,
+                    &node.identity.public().x25519_pub,
+                    &payload.encode(),
+                )
+                .unwrap(),
+            );
+            node.log.lock().unwrap().append(event).unwrap();
+        }
+        node.log
+            .lock()
+            .unwrap()
+            .request_profile_compaction(conversation)
+            .unwrap();
+        let first = node.acquire_profile_compaction_lease().unwrap();
+        let second = node.acquire_profile_compaction_lease().unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                node.drain_profile_compaction().unwrap(),
+                None,
+                "dependency recovery must exclude physical Profile compaction"
+            );
+        }
+        drop(first);
+        assert_eq!(node.drain_profile_compaction().unwrap(), None);
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .count_kind(&conversation, EventKind::Profile)
+                .unwrap(),
+            12
+        );
+        drop(second);
+        let mut dropped = 0;
+        for _ in 0..64 {
+            dropped += node.drain_profile_compaction().unwrap().unwrap_or(0);
+            if dropped == 10 {
+                break;
+            }
+        }
+        assert_eq!(
+            dropped, 10,
+            "last lease release must allow queued compaction"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .count_kind(&conversation, EventKind::Profile)
+                .unwrap(),
+            2
+        );
     }
 }

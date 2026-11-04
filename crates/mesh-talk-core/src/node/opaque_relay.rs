@@ -199,6 +199,8 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     sync: super::session::SyncProgress,
     uploaded: Vec<(EventId, EventId)>,
     deferred_events: HashSet<EventId>,
+    missing_parents: Option<(EventId, Vec<EventId>)>,
+    required_parent: Option<EventId>,
     processed_events: HashMap<EventId, Option<EventId>>,
     wrapper_ids: HashMap<EventId, EventId>,
     wrappers: Mutex<WrapperCache>,
@@ -223,6 +225,8 @@ impl OpaqueMailboxProgress {
             sync: super::session::SyncProgress::default(),
             uploaded: Vec::new(),
             deferred_events: HashSet::new(),
+            missing_parents: None,
+            required_parent: None,
             processed_events: HashMap::new(),
             wrapper_ids: HashMap::new(),
             wrappers: Mutex::new(WrapperCache::default()),
@@ -614,9 +618,11 @@ impl Node {
         progress: &mut OpaqueMailboxProgress,
         wrappers: Vec<Event>,
     ) -> Result<(), super::session::SessionError> {
+        progress.missing_parents = None;
         let mut inner: Vec<(EventId, Event)> = Vec::new();
         let mut processed = Vec::new();
         let mut retained = Vec::new();
+        let mut semantic = Vec::new();
         for outer in wrappers {
             match progress.mailbox.open(&outer) {
                 Ok(event) => inner.push((outer.id, event)),
@@ -694,6 +700,25 @@ impl Node {
                     }
                     Ok(false) => {}
                 }
+                // This is transport classification of an exact prior terminal
+                // presentation fact, not a new admission or a custody claim.
+                // Explicit authenticated dependency repair must install the raw
+                // parent through the original guarded admission below.
+                if event.kind == EventKind::Profile
+                    && progress.required_parent != Some(event.id)
+                    && event.is_canonical()
+                    && event.verify_integrity()
+                    && event.verify_signature()
+                    && self
+                        .profile_receive_work
+                        .lock()
+                        .expect("profile receive work")
+                        .processed(event.id)?
+                {
+                    processed.push(outer_id);
+                    semantic.push((outer_id, event.id));
+                    continue;
+                }
                 if self
                     .log
                     .lock()
@@ -718,6 +743,9 @@ impl Node {
                     // Recreating the round store must not make the same rejected
                     // page appear newly applied forever. Defer only this operation,
                     // so later drains retry after dependencies or policy recover.
+                    if let LogError::MissingParents(parents) = &error {
+                        progress.missing_parents = Some((outer_id, parents.clone()));
+                    }
                     log::debug!("opaque event admission deferred: {error}");
                     progress.defer_event(outer_id)?;
                 } else if staged {
@@ -741,10 +769,11 @@ impl Node {
                     self.persist_media_if_complete(conv);
                 }
             }
-            for (outer, inner) in &retained {
+            for (outer, inner) in retained.iter().chain(&semantic) {
                 self.remember_wrapper_id(progress.mailbox.id(), *inner, *outer);
             }
-            let retained_by_outer: HashMap<_, _> = retained.iter().copied().collect();
+            let durable_by_outer: HashMap<_, _> =
+                retained.iter().chain(&semantic).copied().collect();
             for outer in &processed {
                 if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
                     && !progress.processed_events.contains_key(outer)
@@ -753,7 +782,7 @@ impl Node {
                 }
                 progress
                     .processed_events
-                    .insert(*outer, retained_by_outer.get(outer).copied());
+                    .insert(*outer, durable_by_outer.get(outer).copied());
             }
             if !retained.is_empty() {
                 self.opaque_receive_cache
@@ -761,9 +790,9 @@ impl Node {
                     .expect("opaque cache lock not poisoned")
                     .remember(progress.mailbox.id(), &retained);
             }
-            // Retained pairs stay dependent on exact main-log membership. Only
-            // wrappers without a retained inner event need session-only progress.
-            processed.retain(|outer| !retained_by_outer.contains_key(outer));
+            // Semantic facts authorize durable transport progress only. They
+            // never enter retained pairs, HAVE, or custody inventories.
+            processed.retain(|outer| !durable_by_outer.contains_key(outer));
             if !processed.is_empty() {
                 self.opaque_receive_cache
                     .lock()

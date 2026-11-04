@@ -45,6 +45,28 @@ impl EventRepository {
         )?;
         Ok((nonnegative(revision)?, nonnegative(bytes)?))
     }
+    /// Profile publication retires derived generations in the source mutation
+    /// transaction. Readers lose their binding immediately; `order_step` owns
+    /// bounded reclamation of their rank/work rows before replacement.
+    fn invalidate_profile_order(
+        &self,
+        c: &Connection,
+        conv: &ConversationId,
+    ) -> Result<(), LogError> {
+        let domain = self.domain.0.as_slice();
+        let conv = conv.as_bytes().as_slice();
+        for kind in 0..=1 {
+            c.execute(
+                "UPDATE event_order_jobs SET phase=4 WHERE domain=?1 AND conversation=?2 AND order_kind=?3",
+                params![domain, conv, kind],
+            )?;
+            c.execute(
+                "DELETE FROM event_order_current WHERE domain=?1 AND conversation=?2 AND order_kind=?3",
+                params![domain, conv, kind],
+            )?;
+        }
+        Ok(())
+    }
     fn invalidate_conversation_order(
         &self,
         c: &Connection,

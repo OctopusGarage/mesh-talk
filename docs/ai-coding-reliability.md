@@ -83,6 +83,11 @@ run inside an authority guard, keep that contract narrow and inspect its complet
 call chain. Queue presentation without retaining a guard needed by the UI;
 validate captured authority when the queued callback executes.
 
+Rust [temporary scopes](https://doc.rust-lang.org/reference/destructors.html#temporary-scopes)
+can keep guards alive through the complete statement, including struct literals
+and tuples. Read repeated owner scalars under one explicit short guard,
+then release it before constructing a value that could acquire the owner again.
+
 **Evidence:** exercise both competing paths and the real authorization variant.
 An ordinary admission fixture does not cover a sensitive proof that itself locks
 app state. Assert that the other operation progresses, not just that the first

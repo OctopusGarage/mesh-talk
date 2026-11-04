@@ -1145,7 +1145,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; drop and recreate cannot revive stale cursors",
+            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; semantic compaction preserves incoming coverage while retaining full outgoing destructive authority, retires both order bindings immediately and defers derived-row reclamation to budgeted maintenance; drop and recreate cannot revive stale cursors",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1542,6 +1542,7 @@
             "node::account_profile_data::tests::",
             "node::account_profile_io::tests::",
             "node::profile_receive_work::tests::",
+            "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
             "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
@@ -1570,6 +1571,7 @@
             "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
             "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
             "node::profile_receive_work::tests::",
+            "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
             "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
@@ -2732,6 +2734,7 @@
       "id": "core-incremental-opaque-mailbox",
       "paths": [
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
+        "crates/mesh-talk-core/src/node/relay_policy.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/opaque_relay/",
         "crates/mesh-talk-core/src/node/session/mailbox.rs",
@@ -2789,7 +2792,7 @@
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {
-            "name": "Only completed admission or bounded pending retry evidence can advance incoming checkpoints; caches never authorize admission, deletion reversal, custody or recipient delivery.",
+            "name": "Restart-stable incoming coverage requires completed admission, exact account-scoped terminal Profile-processing facts or bounded pending retry evidence; session-only transport classification remains fenced to its runtime; semantic handling never grants retained custody, and caches never authorize admission, deletion reversal, custody or recipient delivery. Finite parent-repair work resumes owner-bound partial pages after watchdog cancellation; a fixed-size pending bitmap cannot transfer one child's failed scan to another, and bounded runtime leases protect dependencies while advancing and release on completion, revocation, eviction or progress expiry.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {

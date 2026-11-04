@@ -37,6 +37,23 @@ use tokio::sync::mpsc;
 /// ~9 GB; we cap at a conservative 4 GiB and reject only absurd sizes up front.
 pub(in crate::node) const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
+/// A count-only maintenance lease. No mutex or database guard spans network I/O.
+pub(in crate::node) struct ProfileCompactionLease {
+    active: Arc<Mutex<usize>>,
+}
+
+impl Drop for ProfileCompactionLease {
+    fn drop(&mut self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = active
+            .checked_sub(1)
+            .expect("profile compaction lease count");
+    }
+}
+
 /// A peer's avatar, propagated to us via a signed profile and surfaced to the app so the
 /// UI can render it keyed by the sender's ACCOUNT id. `avatar` is `None` when the peer
 /// CLEARED their avatar (the UI reverts that account to its glyph).
@@ -494,6 +511,7 @@ pub struct Node {
     /// Exact profile receive facts and bounded metadata discovery/retry.
     pub(in crate::node) profile_receive_work:
         Mutex<super::profile_receive_work::ProfileReceiveWork>,
+    pub(in crate::node) profile_compaction_leases: Arc<Mutex<usize>>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
     pub(in crate::node) reaction_queries: Mutex<super::reactions::ReactionQueryWork>,
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::IndexedReactionStore>,
@@ -534,6 +552,20 @@ pub(crate) struct LegacyPayloadTargets {
 }
 
 impl Node {
+    pub(in crate::node) fn acquire_profile_compaction_lease(
+        &self,
+    ) -> Result<ProfileCompactionLease, LogError> {
+        let active = Arc::clone(&self.profile_compaction_leases);
+        let mut count = active
+            .lock()
+            .map_err(|_| LogError::CorruptFile("profile compaction lease owner poisoned".into()))?;
+        *count = count
+            .checked_add(1)
+            .ok_or(LogError::RepositoryCounterExhausted)?;
+        drop(count);
+        Ok(ProfileCompactionLease { active })
+    }
+
     /// Close every legacy handle and the encrypted connection before directory
     /// relocation. Independently retained Node/facade owners prevent publication.
     pub fn close_profile(self: Arc<Self>) -> Result<(), LogError> {
@@ -1277,6 +1309,7 @@ impl Node {
             call_signal_incoming: call_signal_tx,
             call_signal_rx: Mutex::new(call_signal_rx),
             profile_receive_work: Mutex::new(profile_receive_work),
+            profile_compaction_leases: Arc::new(Mutex::new(0)),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
             sentlog: Mutex::new(sentlog),

@@ -2481,8 +2481,12 @@ unsupported completion qualifications are discarded and rebuilt normally.
 
 Optional checkpoints and inner-to-wrapper mappings live on the existing
 encrypted profile connection. Checkpoints are locally signed and bind the full
-relay, recipient and mailbox identities, the local destructive epoch and source
-floor. At most 512 checkpoints use 8 MiB; each blob is limited to 16 KiB.
+relay, recipient and mailbox identities, the local incoming repair revision and
+source floor. Semantic Profile compaction is classified transactionally and does
+not advance this repair revision; the full destructive revision still guards
+outgoing authority and retained-event views. Actual deletion and retirement keep
+their incoming invalidation behavior. At most 512 checkpoints use 8 MiB; each
+blob is limited to 16 KiB.
 Wrapper mappings contain IDs only and have independent 250,000-entry/64-MiB
 limits. Point lookups and unchanged writes do not update cache timestamps or
 rewrite old entries. Reads and proven no-ops still check the exact publication
@@ -2491,18 +2495,51 @@ existing durability and retry rules. Missing, corrupt, foreign or evicted hints 
 validated synchronization; they never grant admission or recipient delivery.
 
 A page cursor is saved only after every ID is either admitted, supported by
-retained local evidence, or recorded in the same checkpoint's bounded retry set
+retained local evidence or an exact account-scoped terminal Profile-processing
+fact, or recorded in the same checkpoint's bounded retry set
 of at most 256 IDs. The log is flushed before checkpoint publication. Missing
 causal parents and rejected admission remain retryable; exhaustion fails before
 advancing the page. Uninvited channel ancestry retains the existing 8-MiB
 operation-local staging budget across frames. Staging remains retry evidence,
 never a session-only success hint; cancellation can therefore replay it safely.
-Receive revocation interrupts processing without consuming the current ID. Session-only control evidence is fenced by a fresh runtime ID
-and cannot justify skipping data after restart. Destructive local changes
-invalidate the receipt, while existing deletion and history-admission policy
+Receive revocation interrupts processing without consuming the current ID. Session-only transport and control evidence is fenced by a fresh runtime ID
+and cannot justify skipping data after restart. Terminal Profile-processing
+facts classify authenticated wrappers without republishing old presentation
+state or granting retained custody. They remain effective when optional hints
+are missing, corrupt or evicted; an unknown older-sequence Profile still crosses
+normal admission. Other destructive local changes invalidate the receipt, while
+existing deletion and history-admission policy
 continues to prevent resurrection. These hints reduce redundant transfer and
 decryption; they do not eliminate cold metadata projection or establish
 installed desktop startup and memory bounds.
+
+A late authenticated child can require a Profile parent whose raw event was
+compacted after terminal handling. Only its exact missing dependencies bypass
+the semantic shortcut, through the existing guarded admission path. Recovery
+first checks signed wrapper mappings and current remote custody, then requests
+the selected wrapper. A count-only maintenance lease keeps recovered parents
+available until child admission; no mutex or database guard spans network waits.
+When mappings are unavailable, a fallback captures one finite remote window.
+Its optional signed marker binds an active scan to one pending wrapper, with a
+fixed-size completion bitmap for the bounded pending set. One child's failed
+scan cannot qualify another child's dependencies. A changed missing-parent
+subset alone cannot trigger another completed scan. Interrupted attempts resume the captured window and its bounded
+partially consumed page. Recovery retries child admission as soon as a required
+parent is installed. A single pending repair binds the child's conversation
+destructive epoch, preserving unrelated conversation compaction progress. A
+shared pending qualification uses the full local destructive revision
+conservatively, so it cannot certify lost dependencies in another conversation.
+These repair fences do not discard ordinary incoming coverage after semantic
+Profile compaction. Optional checkpoint failures do not authorize admission;
+the existing bounded runtime owner retains continuation progress while alive.
+Its active repair lease can span exchange watchdog retries, but completion,
+revocation, eviction and thirty seconds without meaningful progress release it. Runtime
+maintenance also releases leases whose privacy generation has changed.
+Each of the four runtime entries charges repair-ID hints against a 2 MiB budget;
+it retains no historical bodies. Exhaustion defers work without certifying a
+completed scan or inventing a delivery result.
+This exceptional repair can read the captured mailbox prefix;
+it is not part of unchanged ordinary polling.
 
 ### Session reuse contract
 

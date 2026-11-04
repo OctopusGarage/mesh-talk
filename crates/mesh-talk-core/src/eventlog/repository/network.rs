@@ -49,6 +49,16 @@ pub(crate) struct HistorySyncBinding {
 }
 
 impl EventRepository {
+    /// Physical changes to this scope invalidate a pending dependency repair.
+    /// Ordinary appends and compaction in other conversations leave it usable.
+    pub(crate) fn conversation_destructive_epoch(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<i64, LogError> {
+        self.database
+            .read(|c| self.network_epoch_on(c, conversation))
+    }
+
     pub(crate) fn history_sync_binding(
         &self,
         conversation: &ConversationId,

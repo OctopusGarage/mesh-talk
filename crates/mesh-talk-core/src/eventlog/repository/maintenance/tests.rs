@@ -711,3 +711,249 @@ fn drop_recreate_reopen_rejects_old_causal_and_domain_cursors_and_hides_tombston
     ));
     assert_eq!(reopened.count(&other.conversation_id).unwrap(), 1);
 }
+
+// Keep the fixture and assertions at the composition boundary: real eligible
+// Profile publication against already-published canonical history generations.
+#[test]
+fn profile_compaction_defers_ready_order_reclamation_128() {
+    profile_compaction_defers_ready_order_reclamation(128);
+}
+
+#[test]
+fn profile_compaction_defers_ready_order_reclamation_256() {
+    profile_compaction_defers_ready_order_reclamation(256);
+}
+
+fn profile_compaction_defers_ready_order_reclamation(total: u64) {
+    use crate::eventlog::repository::order::{
+        CausalOrder, OrderReadState, OrderReadiness, OrderWorkBudget,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let mut repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    let conv = ConversationId::new([1; 32]);
+    let kinds = [CausalOrder::Logical, CausalOrder::WallClock];
+    let budget = OrderWorkBudget {
+        vertices: 3,
+        edges: 2,
+        bytes: 384,
+    };
+    let page_budget = PageBudget {
+        rows: 1,
+        bytes: 4096,
+    };
+    let mut events: Vec<Event> = Vec::new();
+    let profiles = total / 4;
+    for seq in 1..=total {
+        let kind = if seq <= profiles {
+            EventKind::Profile
+        } else {
+            EventKind::Message
+        };
+        let parents = if seq > profiles + 1 {
+            vec![events.last().unwrap().id]
+        } else {
+            vec![]
+        };
+        // Deliberately disagreeing clocks require both exact canonical orders.
+        let e = Event::new(
+            &author,
+            conv,
+            seq,
+            parents,
+            total - seq,
+            seq,
+            kind,
+            vec![42; 128],
+        );
+        repo.append(&e).unwrap();
+        events.push(e);
+    }
+    let finish_order = |repo: &EventRepository, kind| {
+        for _ in 0..10000 {
+            let step = repo.order_step(&conv, kind, budget).unwrap();
+            assert!(step.seeded + step.ranked + step.cleaned <= budget.vertices);
+            assert!(step.edges <= budget.edges);
+            assert!(step.charged_bytes <= budget.bytes);
+            if step.readiness == OrderReadiness::Ready {
+                return;
+            }
+        }
+        panic!("bounded canonical order failed to converge");
+    };
+    let mut old = Vec::new();
+    for kind in kinds {
+        finish_order(&repo, kind);
+        let generation = repo.order_generation(&conv, kind).unwrap().unwrap();
+        assert_eq!(generation.count, total);
+        let OrderReadState::Ready(page) = repo
+            .causal_headers_page(&conv, kind, None, page_budget)
+            .unwrap()
+        else {
+            panic!("initial order pending")
+        };
+        old.push((kind, generation, page.next.unwrap()));
+    }
+    let derived_rows = |db: &Arc<EncryptedDatabase>, job: &[u8; 16]| {
+        db.read(|c| {
+            c.query_row("SELECT (SELECT count(*) FROM event_order_rows WHERE job=?1)+(SELECT count(*) FROM event_order_work WHERE job=?1)", [job.as_slice()], |r| r.get::<_, i64>(0)).map_err(LogError::from)
+        }).unwrap()
+    };
+    for (_, generation, _) in &old {
+        assert_eq!(derived_rows(&db, &generation.job), (2 * total) as i64);
+    }
+    repo.request_profile_maintenance(&conv).unwrap();
+    let token = repo.begin_profile_maintenance().unwrap();
+    assert_eq!(finish(&repo, token).candidates, profiles - 2);
+    // A failing source mutation must roll back logical invalidation too.
+    db.transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_order_invalidation BEFORE DELETE ON retained_events BEGIN SELECT RAISE(ABORT,'injected Profile publication failure'); END")?;
+        Ok(())
+    }).unwrap();
+    assert!(repo.apply_profile_maintenance(token).is_err());
+    for (kind, generation, cursor) in &old {
+        assert_eq!(
+            repo.order_generation(&conv, *kind).unwrap(),
+            Some(*generation)
+        );
+        assert!(matches!(
+            repo.causal_headers_page(&conv, *kind, Some(cursor), page_budget)
+                .unwrap(),
+            OrderReadState::Ready(_)
+        ));
+        assert_eq!(derived_rows(&db, &generation.job), (2 * total) as i64);
+    }
+    db.transaction(|c| {
+        c.execute_batch("DROP TRIGGER fail_order_invalidation")?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        repo.apply_profile_maintenance(token).unwrap().dropped as u64,
+        profiles - 2
+    );
+    for (kind, generation, cursor) in &old {
+        assert_eq!(repo.order_generation(&conv, *kind).unwrap(), None);
+        assert!(matches!(
+            repo.causal_headers_page(&conv, *kind, None, page_budget)
+                .unwrap(),
+            OrderReadState::Pending
+        ));
+        assert!(matches!(
+            repo.causal_headers_page(&conv, *kind, Some(cursor), page_budget),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            repo.causal_headers_after_rank(&conv, *kind, generation.job, 0, page_budget),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(
+            derived_rows(&db, &generation.job),
+            (2 * total) as i64,
+            "Profile publication must invalidate immediately without synchronously draining history-sized rank/work rows"
+        );
+        db.read(|c| {
+            let phase: i64 = c.query_row(
+                "SELECT phase FROM event_order_jobs WHERE job=?1",
+                [generation.job.as_slice()],
+                |r| r.get(0),
+            )?;
+            assert_eq!(phase, 4, "the preserved generation must be obsolete");
+            Ok(())
+        })
+        .unwrap();
+    }
+    // Interrupt after one real reclamation transaction. Appends while obsolete
+    // must neither republish its ranks nor create another abandoned generation.
+    let first = repo
+        .order_step(&conv, CausalOrder::Logical, budget)
+        .unwrap();
+    assert_eq!(
+        (
+            first.cleaned,
+            first.seeded,
+            first.ranked,
+            first.edges,
+            first.charged_bytes
+        ),
+        (3, 0, 0, 0, 384)
+    );
+    assert_eq!(derived_rows(&db, &old[0].1.job), (2 * total - 3) as i64);
+    let late = Event::new(
+        &author,
+        conv,
+        total + 1,
+        vec![events.last().unwrap().id],
+        0,
+        0,
+        EventKind::Message,
+        vec![42; 128],
+    );
+    repo.append(&late).unwrap();
+    events.push(late);
+    drop(repo);
+    drop(db);
+    let db = database(&dir);
+    repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    assert_eq!(derived_rows(&db, &old[0].1.job), (2 * total - 3) as i64);
+    for (kind, generation, cursor) in &old {
+        assert_eq!(repo.order_generation(&conv, *kind).unwrap(), None);
+        assert!(matches!(
+            repo.causal_headers_page(&conv, *kind, Some(cursor), page_budget),
+            Err(LogError::StaleCursor)
+        ));
+        let mut cleaned = if *kind == CausalOrder::Logical { 3 } else { 0 };
+        for _ in 0..10000 {
+            let before = derived_rows(&db, &generation.job);
+            let step = repo.order_step(&conv, *kind, budget).unwrap();
+            let after = derived_rows(&db, &generation.job);
+            assert!(step.seeded + step.ranked + step.cleaned <= budget.vertices);
+            assert!(step.edges <= budget.edges);
+            assert!(step.charged_bytes <= budget.bytes);
+            assert!(
+                (before - after) as usize <= step.cleaned,
+                "every removed derived row must be charged"
+            );
+            cleaned += step.cleaned;
+            if step.readiness == OrderReadiness::Ready {
+                break;
+            }
+        }
+        assert_eq!(
+            cleaned,
+            2 * total as usize + 1,
+            "both row populations and final obsolete job deletion are charged exactly once"
+        );
+        assert_eq!(derived_rows(&db, &generation.job), 0);
+        let current = repo.order_generation(&conv, *kind).unwrap().unwrap();
+        assert_ne!(current.job, generation.job);
+        let retained: Vec<_> = events.iter().filter(|e| repo.has(&e.id).unwrap()).collect();
+        let expected =
+            crate::eventlog::order::ordered_ids(&retained, &[], *kind == CausalOrder::Logical);
+        let mut actual = Vec::new();
+        let mut cursor = None;
+        loop {
+            let OrderReadState::Ready(page) = repo
+                .causal_headers_page(&conv, *kind, cursor.as_ref(), page_budget)
+                .unwrap()
+            else {
+                panic!("replacement order pending")
+            };
+            actual.extend(page.items.into_iter().map(|h| h.id));
+            cursor = page.next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "replacement must match the independent Kahn oracle"
+        );
+        assert_eq!(actual.len() as u64, total - (profiles - 2) + 1);
+    }
+    assert_eq!(
+        repo.body_decodes.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
