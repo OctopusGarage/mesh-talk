@@ -20,6 +20,37 @@ test("real compiler contracts do not compete for the native job's Cargo cache", 
   }
 });
 
+test("heavy hosted Linux builds reclaim only unused image SDKs before cache expansion", () => {
+  const sources = [
+    ["ci.yml", read("ci.yml")],
+    ["hidden-contacts-native.yml", read("hidden-contacts-native.yml")],
+    ["mutants.yml", read("mutants.yml")],
+    ["sanitizers.yml", read("sanitizers.yml").split("  shards:\n")[1].split("  asan:\n")[0]],
+    ["release.yml", read("release.yml").split("  build-release:\n")[1].split("  verify-release:\n")[0]],
+  ];
+  for (const [file, source] of sources) {
+    const preparation = step(source, "Prepare hosted Linux build storage");
+    assert.ok(preparation, `${file}: missing disk preparation`);
+    assert.match(preparation, /runner.os == 'Linux'/);
+    assert.match(preparation, /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/);
+    assert.match(preparation, /scripts\/ci\/runner-storage\.mjs --prepare/);
+    const index = source.indexOf("name: Prepare hosted Linux build storage");
+    const cache = source.search(/uses: (?:Swatinem\/rust-cache|actions\/cache)@/);
+    assert.ok(index >= 0 && cache > index, `${file}: restore must follow measured image reclamation`);
+    assert.doesNotMatch(preparation, /cargo clean|rm -rf|hostedtoolcache|target\//);
+    assert.match(preparation, /id: runner_storage/);
+    assert.match(preparation, /tee "\$RUNNER_TEMP\/runner-storage\.json"/);
+    const measurements = step(source, "Preserve runner storage measurements");
+    assert.ok(measurements, `${file}: measurements must survive a later full-disk failure`);
+    assert.match(measurements, /steps.runner_storage.outcome == 'success'/);
+    assert.match(measurements, /name: runner-storage-/);
+    assert.ok(source.indexOf("name: Preserve runner storage measurements") < cache);
+
+  }
+  assert.match(step(read("mutants.yml"), "Prepare hosted Linux build storage"), /steps.selection.outputs.selected != '0'/);
+  assert.doesNotMatch(read("ui-shards.yml"), /runner-storage\.mjs/, "browser-only shards do not need native build reclamation");
+});
+
 test("verification Rust caches restore on PRs and publish reusable main caches", () => {
   for (const file of ["ci.yml", "windows-workspace.yml", "e2e-backend.yml", "hidden-contacts-native.yml", "sanitizers.yml", "mutants.yml"]) {
     const cache = read(file).split(/^      - /m).find(value => value.includes("uses: Swatinem/rust-cache@v2"));

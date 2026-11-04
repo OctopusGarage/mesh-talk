@@ -10,6 +10,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { assertHostedUbuntu } from "./runner-storage.mjs";
 
 function archiveUri(uri) {
   let parsed;
@@ -124,22 +125,7 @@ export async function prepareUbuntuAptSources({
   env = process.env,
   platform = process.platform,
 } = {}) {
-  if (
-    platform !== "linux" ||
-    env.GITHUB_ACTIONS !== "true" ||
-    env.RUNNER_ENVIRONMENT !== "github-hosted" ||
-    env.RUNNER_OS !== "Linux"
-  ) {
-    throw new Error(
-      "APT source preparation requires a disposable GitHub-hosted Linux runner",
-    );
-  }
-  if (!(await lstat(root)).isDirectory())
-    throw new Error("APT root must not be a symlink");
-  const release = await readFile(join(root, "etc/os-release"), "utf8");
-  if (!/^ID=(?:ubuntu|"ubuntu"|'ubuntu')[ \t]*$/m.test(release)) {
-    throw new Error("APT source preparation requires Ubuntu");
-  }
+  await assertHostedUbuntu({ root, env, platform });
   const apt = join(root, "etc/apt");
   const files = [join(apt, "sources.list")];
   const directory = join(apt, "sources.list.d");

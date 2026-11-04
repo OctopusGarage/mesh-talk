@@ -333,6 +333,12 @@ do not remove backpressure to make a benchmark look faster.
 wrong-owner requests, saturation and recovery after capacity returns. Include
 real loopback assertions for changed networking/crypto boundaries as required by
 the [network review matrix](network-design-reference.md#minimum-feature-review-matrix).
+Physical execution resources need the same ownership discipline. A hosted runner
+can exhaust disk while expanding a cache or compiling a second profile, before
+it can publish failure logs. The [runner storage owner](../scripts/ci/runner-storage.mjs)
+measures real capacity and reclaims only fixed disposable image SDK payloads;
+[its filesystem controls](../scripts/diagnostics/runner-storage.test.mjs) protect
+workspace/toolchain data, redirected paths and non-hosted environments.
 Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
