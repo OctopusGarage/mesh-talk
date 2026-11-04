@@ -52,7 +52,7 @@ test("one reusable shard implementation retains twelve runners and all evidence 
   assert.match(reusable, /if-no-files-found: error/);
 });
 
-test("browsers and native use ARM while Rust, Health and backend share Intel capacity", () => {
+test("browsers, Rust and native use ARM while Health and backend share Intel capacity", () => {
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
@@ -62,7 +62,7 @@ test("browsers and native use ARM while Rust, Health and backend share Intel cap
   assert.match(job("portable-evidence"), /macos-latest:darwin/);
   assert.match(job("reports"), /for os in ubuntu-24.04 macos-latest windows-latest/);
   assert.match(health, /os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
-  assert.match(rust, /os: \[ubuntu-latest, macos-26-intel\]/);
+  assert.match(rust, /os: \[ubuntu-latest, macos-latest\]/);
   assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
 });
 

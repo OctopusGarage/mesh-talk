@@ -226,13 +226,12 @@ renders all three HTML reports outside acceptance.
 Desktop browser shards start after Health and WebKit complete, with at most three
 desktop shards active at once. Linux retains four concurrent shards. These job
 dependencies and admission limits reduce macOS runner demand while retaining all
-four shards per OS and their complete same-attempt evidence. Portable Health, independent backend jobs and the complete Rust workspace use
-the standard `macos-26-intel` pool. The workspace retains all default targets,
-doc-tests, native lint/build checks and coverage on macOS Intel, Linux and Windows.
-All browser suites and real native desktop acceptance retain `macos-latest` Apple
-Silicon execution; that native gate builds and exercises the production app/CLI,
-rather than repeating the full ARM workspace unit suite. This allocation separates
-heavy compilation from ARM browser/native demand. Measure both
+four shards per OS and their complete same-attempt evidence. Portable Health and
+independent backend jobs use the standard `macos-26-intel` pool. The complete Rust workspace, all browser suites and real native desktop
+acceptance retain `macos-latest` Apple Silicon execution. The workspace retains
+all default targets, doc-tests, native lint/build checks and coverage. Keep these
+compute-heavy protocol tests on ARM; desktop browser admission limits their
+simultaneous demand for macOS runners. Measure both
 queue and execution before moving a workload: Intel qualification substantially
 increased full Chromium execution time, and cold WebKit startup left too little
 of the existing scenario budget for its assertions. Vite warmup did not show a
