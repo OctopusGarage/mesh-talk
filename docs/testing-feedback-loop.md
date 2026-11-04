@@ -119,7 +119,12 @@ Report, receipt and lifecycle-control fixtures control only external Cargo, Rust
 and npm version queries, using stable fixture identities rather than benchmarking
 host startup.
 Their selected tests, process owners, retirement receipts, source invalidation
-and report assertions still execute normally under the original watchdogs.
+and report assertions still execute normally. Functional CLI report fixtures
+wait for actual command closure through the canonical process owner and delete
+temporary repositories only after verified, unforced retirement. Their
+sixty-second whole-test watchdog is a deadlock bound, not a startup performance
+assertion; report state and candidate readiness remain the acceptance evidence.
+Intentional cancellation and queued-lock scenarios retain their own watchdogs.
 The shared tool-version fixture retains the same environment across receipt-reuse
 invocations. Queued resource tests observe their actual waiting owner under the
 existing whole-test watchdog rather than a separate startup cutoff.

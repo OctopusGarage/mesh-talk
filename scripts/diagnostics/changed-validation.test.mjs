@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { spawn, spawnSync } from "node:child_process";
+import { execute } from "../validation/stage.mjs";
 import {
   discoverChanges,
   executePlan,
@@ -448,6 +449,62 @@ const cli = fileURLToPath(
   new URL("../validation/changed.mjs", import.meta.url),
 );
 
+// Functional CLI assertions observe report state and natural process closure.
+// Their watchdog is only a deadlock bound, not a host-startup latency contract.
+const FUNCTIONAL_CLI_WATCHDOG_MS = 60_000;
+
+function commandFixture(t) {
+  const f = repository(t, { automaticCleanup: false });
+  const controller = new AbortController();
+  const completions = [];
+  let retirement;
+  const retire = () => retirement ??= (async () => {
+    controller.abort();
+    const results = await Promise.allSettled(completions);
+    const verified = results.every(result => result.status === "fulfilled"
+      && result.value.cleanupUnverified === false
+      && result.value.forcedRetirement === false);
+    t.signal.removeEventListener("abort", cancelled);
+    if (verified) rmSync(f.root, { recursive: true, force: true });
+    else t.diagnostic(`Unverified CLI fixture retirement; retained ${f.root}`);
+    assert(verified, "CLI fixture owners must retire before directory cleanup");
+  })();
+  const cancelled = () => {
+    void retire().catch(error => t.diagnostic(`CLI fixture retirement failed: ${error.message}`));
+  };
+  t.signal.addEventListener("abort", cancelled, { once: true });
+  t.after(retire);
+  return { ...f, async runCLI(args, { env = isolatedEnv } = {}) {
+    t.signal.throwIfAborted();
+    controller.signal.throwIfAborted();
+    const chunks = { stdout: [], stderr: [] };
+    let bytes = 0;
+    let outputTruncated = false;
+    const completion = execute([process.execPath, cli, ...args], {
+      cwd: f.root, env,
+      signal: AbortSignal.any([t.signal, controller.signal]),
+      onOutput(chunk, channel) {
+        bytes += chunk.length;
+        if (bytes > 64 * 1024) {
+          outputTruncated = true;
+          controller.abort();
+          return;
+        }
+        chunks[channel].push(Buffer.from(chunk));
+      },
+    }).then(result => ({ ...result, status: result.code, outputTruncated,
+      stdout: Buffer.concat(chunks.stdout).toString(),
+      stderr: Buffer.concat(chunks.stderr).toString() }));
+    completions.push(completion);
+    const result = await completion;
+    assert.equal(result.cleanupUnverified, false, result.error);
+    assert.equal(result.forcedRetirement, false, result.error);
+    assert.equal(result.outputTruncated, false, "CLI evidence must remain complete");
+    assert.equal(result.error, undefined);
+    return result;
+  } };
+}
+
 for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWhileQueued: true }, { editWhileQueued: true, managed: true }]) test(
   `cheap static checks run before a busy ${managed ? "managed" : "heavy"} lock${editWhileQueued ? " and edits invalidate their proof" : ""}`,
   { timeout: 20000, skip: process.platform === "win32" ? "POSIX executable fixture; phase partitioning is platform-independent" : false },
@@ -793,12 +850,12 @@ test("real preview unions mandatory boundary evidence with semantic additions wi
   assert.match(missing.stderr, /missing.*browser/i);
 });
 
-for (const failing of [false, true]) test(`real run reports ${failing ? "failing" : "passing"} development tests while candidate acceptance remains pending`, async t => {
-  const f = repository(t);
+for (const failing of [false, true]) test(`real run reports ${failing ? "failing" : "passing"} development tests while candidate acceptance remains pending`, { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, `import test from 'node:test'; test('observed assertion', () => { ${failing ? "console.log('private output sentinel'); throw Error('assertion failed');" : ""} });`);
   const fixture = toolVersionFixture(f.root, { ...isolatedEnv, NODE_TEST_CONTEXT: undefined });
   const reportPath = path.join(f.root, "target/validation/feedback/result.json");
-  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "report fixture", "--report", reportPath], { cwd: f.root, encoding: "utf8", env: fixture.env, timeout: 15000 });
+  const result = await f.runCLI(["--run", "--owner", "fixture", "--reason", "report fixture", "--report", reportPath], { env: fixture.env });
   assert.equal(result.status, failing ? 1 : 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   const { readFile } = await import("node:fs/promises");
   assert.deepEqual([...new Set((await readFile(fixture.probes, "utf8")).trim().split("\n"))].sort(), ["cargo", "npm", "rustc"]);
@@ -814,11 +871,11 @@ for (const failing of [false, true]) test(`real run reports ${failing ? "failing
   assert(report.next.some(item => item.kind === "candidate" && item.status === "not-run"));
 });
 
-for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"} run produces a report without claiming tests passed`, async t => {
-  const f = repository(t);
+for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"} run produces a report without claiming tests passed`, { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "throw Error('unselected test must not execute');");
   f.write(blocked ? "unmapped.rs" : "docs/example.md", "changed");
-  const result = spawnSync(process.execPath, [cli, "--run", "--report", "target/validation/feedback/terminal.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 10000 });
+  const result = await f.runCLI(["--run", "--report", "target/validation/feedback/terminal.json"], { env: isolatedEnv });
   assert.equal(result.status, blocked ? 2 : 0, result.stdout + result.stderr);
   const { readFile } = await import("node:fs/promises");
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/terminal.json"), "utf8"));
@@ -826,13 +883,13 @@ for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"}
   assert.equal(report.candidateReady, false);
 });
 
-test("clean receipt reuse survives changing only the report destination and invents no commands", async t => {
-  const f = repository(t);
+test("clean receipt reuse survives changing only the report destination and invents no commands", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "import test from 'node:test'; test('reusable assertion', () => {});");
   const fixture = toolVersionFixture(f.root, { ...isolatedEnv, CI: "", NODE_TEST_CONTEXT: undefined });
   const { readFile } = await import("node:fs/promises");
   for (const name of ["first", "second"]) {
-    const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "reuse", "--report", `target/validation/feedback/${name}.json`], { cwd: f.root, encoding: "utf8", env: fixture.env, timeout: 15000 });
+    const result = await f.runCLI(["--run", "--owner", "fixture", "--reason", "reuse", "--report", `target/validation/feedback/${name}.json`], { env: fixture.env });
     assert.equal(result.status, 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   }
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/second.json"), "utf8"));
@@ -844,21 +901,21 @@ test("clean receipt reuse survives changing only the report destination and inve
   assert(report.phases[0].evidence.receipt);
 });
 
-test("report destinations cannot overwrite source or keep the supervisor alive after rejection", t => {
-  const f = repository(t);
+test("report destinations cannot overwrite source or keep the supervisor alive after rejection", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "throw Error('must not execute');");
-  const result = spawnSync(process.execPath, [cli, "--run", "--report", "frontend/source.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 3000 });
+  const result = await f.runCLI(["--run", "--report", "frontend/source.json"], { env: isolatedEnv });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /ignored target/);
   assert.equal(result.error, undefined);
 });
 
-test("dirty edits during a test-only run invalidate its report even after assertions pass", async t => {
-  const f = repository(t);
+test("dirty edits during a test-only run invalidate its report even after assertions pass", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "import test from 'node:test'; import {writeFileSync} from 'node:fs'; test('changing input', async () => { await new Promise(resolve => setTimeout(resolve, 50)); writeFileSync('dirty','changed during validation'); });");
   const fixture = toolVersionFixture(f.root, { ...isolatedEnv, NODE_TEST_CONTEXT: undefined });
   f.write("dirty", "dirty before validation");
-  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "dirty source identity", "--report", "target/validation/feedback/dirty.json"], { cwd: f.root, encoding: "utf8", env: fixture.env, timeout: 15000 });
+  const result = await f.runCLI(["--run", "--owner", "fixture", "--reason", "dirty source identity", "--report", "target/validation/feedback/dirty.json"], { env: fixture.env });
   assert.equal(result.status, 1, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   const { readFile } = await import("node:fs/promises");
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/dirty.json"), "utf8"));
@@ -869,11 +926,11 @@ test("dirty edits during a test-only run invalidate its report even after assert
   assert.equal(report.candidateReady, false);
 });
 
-test("a malformed planning contract produces blocked feedback instead of a passing or missing report", async t => {
-  const f = repository(t);
+test("a malformed planning contract produces blocked feedback instead of a passing or missing report", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "throw Error('must not execute');");
   f.write("frontend/validation.json", JSON.stringify({ schema: 1, contracts: [{ id: "broken", paths: [], capability: { summary: "missing required fields" } }] }));
-  const result = spawnSync(process.execPath, [cli, "--run", "--report", "target/validation/feedback/blocked.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 10000 });
+  const result = await f.runCLI(["--run", "--report", "target/validation/feedback/blocked.json"], { env: isolatedEnv });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   const { readFile } = await import("node:fs/promises");
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/blocked.json"), "utf8"));
