@@ -66,8 +66,13 @@ test("browsers and native use ARM while Rust, Health and backend share Intel cap
   assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
 });
 
-test("desktop browser burst waits for Health while Linux starts independently", () => {
-  assert.match(job("desktop"), /needs: health/);
+test("desktop browser burst waits for Health and WebKit with bounded admission while Linux starts independently", () => {
+  const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
+  assert.match(job("desktop"), /needs: \[health, portable\]/);
+  assert.match(job("desktop"), /max_parallel: 3/);
+  assert.match(reusable, /max_parallel:\n        type: number\n        default: 4/);
+  assert.match(reusable, /max-parallel: \$\{\{ inputs.max_parallel \}\}/);
+  assert.doesNotMatch(job("linux"), /max_parallel:/);
   assert.doesNotMatch(job("desktop"), /if: always\(\)/);
   assert.doesNotMatch(job("linux"), /needs:/);
 });

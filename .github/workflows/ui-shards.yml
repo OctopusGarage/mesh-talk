@@ -7,6 +7,10 @@ on:
         type: string
         required: true
         description: JSON array of hosted runner labels
+      max_parallel:
+        type: number
+        default: 4
+        description: Maximum concurrent full-suite shard runners
 
 permissions:
   contents: read
@@ -16,6 +20,7 @@ jobs:
     name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
       matrix:
         os: ${{ fromJSON(inputs.operating_systems) }}
         shard: [1, 2, 3, 4]

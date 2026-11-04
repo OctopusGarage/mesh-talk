@@ -223,8 +223,10 @@ Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
-Desktop browser shards start after Health completes, limiting the initial runner
-burst. Portable Health, independent backend jobs and the complete Rust workspace use
+Desktop browser shards start after Health and WebKit complete, with at most three
+desktop shards active at once. Linux retains four concurrent shards. These job
+dependencies and admission limits reduce macOS runner demand while retaining all
+four shards per OS and their complete same-attempt evidence. Portable Health, independent backend jobs and the complete Rust workspace use
 the standard `macos-26-intel` pool. The workspace retains all default targets,
 doc-tests, native lint/build checks and coverage on macOS Intel, Linux and Windows.
 All browser suites and real native desktop acceptance retain `macos-latest` Apple

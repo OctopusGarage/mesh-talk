@@ -36,11 +36,12 @@ jobs:
       operating_systems: '["ubuntu-24.04"]'
 
   desktop:
-    # Admit the desktop browser burst after portable unit/static checks finish.
-    needs: health
+    # Finish Health and WebKit before admitting the bounded desktop burst.
+    needs: [health, portable]
     uses: ./.github/workflows/ui-shards.yml
     with:
       operating_systems: '["macos-latest","windows-latest"]'
+      max_parallel: 3
 
   coverage:
     # This existing name is required by branch protection. It now certifies
