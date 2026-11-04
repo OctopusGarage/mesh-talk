@@ -184,7 +184,7 @@ impl Node {
             std::thread::sleep(Duration::from_millis(250));
         }
         panic!(
-            "node {:?} pid={} expected peer {id:?} was not introduced within 45 seconds; recent output={:?}",
+            "node {:?} pid={} expected peer was not introduced within 45 seconds; recent output={:?}",
             self.name,
             self.child.id(),
             self.recent_output()
@@ -206,7 +206,7 @@ impl Node {
             }
         }
         panic!(
-            "node {:?} pid={} expected relay {id:?} via UDP port {port} was not discovered within 30 seconds; recent output={:?}",
+            "node {:?} pid={} expected relay via UDP port {port} was not discovered within 30 seconds; recent output={:?}",
             self.name,
             self.child.id(),
             self.recent_output()

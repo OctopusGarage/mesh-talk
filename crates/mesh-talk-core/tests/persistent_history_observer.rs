@@ -136,7 +136,7 @@ fn peer_readiness_requires_the_exact_roster_record() {
     }
     // This actual replay arrived after `(no peers yet)` in the restart failure.
     // It proves message reception, not CLI prefix-resolution readiness.
-    for line in [
+    for (case, line) in [
         format!("from {uid} (Bob): pong-from-bob"),
         format!("[123] {uid}: pong-from-bob"),
         format!("node {uid} listening on tcp/49214"),
@@ -145,7 +145,13 @@ fn peer_readiness_requires_the_exact_roster_record() {
         format!("peer other-user Bob {uid}"),
         format!("peer {uid}extra Bob 127.0.0.1:49214"),
         "(no peers yet)".to_owned(),
-    ] {
-        assert!(!peer_observer::is_peer_listing(&line, uid), "{line}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !peer_observer::is_peer_listing(&line, uid),
+            "non-roster case {case} must remain unready"
+        );
     }
 }
