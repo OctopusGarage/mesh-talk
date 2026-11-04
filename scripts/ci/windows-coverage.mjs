@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -263,7 +263,123 @@ export function verifyLayout(binaries) {
   }
 }
 
+export const gossipProbeCase =
+  "node::group_chain_tests::background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes";
+export function gossipProbeEnabled(env = process.env) {
+  const value = env.MESH_WINDOWS_GOSSIP_PROBE;
+  assert.ok(
+    value === undefined || value === "0" || value === "1",
+    "MESH_WINDOWS_GOSSIP_PROBE must be 0 or 1",
+  );
+  return value === "1";
+}
+
+// Diagnostic only: no consumer receipt or LCOV output. The full four-shard
+// acceptance remains mandatory even after this same-binary probe passes.
+export async function runGossipProbe(
+  { full, reuse, identity: sourceIdentity, archiveSha256, env = process.env },
+  run = command,
+) {
+  if (!gossipProbeEnabled(env)) return;
+  const matches = full.filter(
+    (row) =>
+      row.eventName === `mesh-talk-core::mesh_talk_core$${gossipProbeCase}`,
+  );
+  assert.equal(
+    matches.length,
+    1,
+    "Gossip probe requires exactly one archived case",
+  );
+  assert.ok(
+    matches[0].selected && !matches[0].ignored,
+    "Gossip probe case must be runnable",
+  );
+  assert.ok(
+    path.isAbsolute(env.RUNNER_TEMP ?? ""),
+    "Gossip probe requires absolute runner temp",
+  );
+  assert.match(
+    archiveSha256 ?? "",
+    /^[a-f0-9]{64}$/u,
+    "Gossip probe requires sealed archive digest",
+  );
+  const relative = path.relative(
+    realpathSync(process.cwd()),
+    realpathSync(env.RUNNER_TEMP),
+  );
+  assert.ok(
+    relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative),
+    "Gossip profiles must remain outside the workspace/cache",
+  );
+  const directory = path.join(env.RUNNER_TEMP, "windows-gossip-probe");
+  assert.ok(!existsSync(directory), "Gossip probe output already exists");
+  mkdirSync(directory);
+  const profiles = mkdtempSync(
+    path.join(env.RUNNER_TEMP, "windows-gossip-profraw-"),
+  );
+  writeJson(path.join(directory, "input.json"), {
+    identity: sourceIdentity,
+    archiveSha256,
+    selected: matches,
+  });
+  let retired = false;
+  try {
+    const raw = await run(
+      [
+        "nextest",
+        "run",
+        ...nextestArgs,
+        ...reuse,
+        "-E",
+        `package(=mesh-talk-core) & binary(=mesh_talk_core) & test(=${gossipProbeCase})`,
+        "--test-threads",
+        "1",
+        "--retries",
+        "0",
+        "--no-fail-fast",
+        "--no-tests",
+        "fail",
+        "--message-format",
+        "libtest-json-plus",
+        "--message-format-version",
+        "0.1",
+      ],
+      {
+        env: {
+          ...env,
+          CARGO_NET_OFFLINE: "true",
+          RUST_TEST_THREADS: "1",
+          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1",
+          LLVM_PROFILE_FILE: path.join(profiles, "%m-%p.profraw"),
+        },
+        receipt: path.join(directory, "execution"),
+        progress: path.join(directory, "progress.jsonl"),
+        phase: "early-gossip-probe",
+        liveStdout: true,
+        maxOutputBytes: 8 * 1024 * 1024,
+      },
+    );
+    retired = true;
+    verifyExecution(raw, matches);
+    writeJson(path.join(directory, "proof.json"), {
+      identity: sourceIdentity,
+      archiveSha256,
+      selected: matches,
+      executionSha256: digest(raw),
+      diagnosticOnly: true,
+    });
+  } finally {
+    // A rejected command may indicate unverified process-tree cleanup. Never
+    // delete its profile directory while ownership is uncertain; runner teardown
+    // owns that temporary residue. Raw logs remain available on every outcome.
+    if (retired) rmSync(profiles, { recursive: true });
+  }
+}
+
 export async function produce(directory) {
+  gossipProbeEnabled();
   const before = await identity();
   const archive = path.join(directory, "workspace.tar.zst");
   assert.ok(!existsSync(archive), "Archive already exists");
@@ -291,7 +407,9 @@ export async function produce(directory) {
   }
   const featureResolutionSha256 = digest(canonical(metadata.resolve));
   verifyIdentity(before, await identity());
-  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256: await fileHash(archive), inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
+  const archiveSha256 = await fileHash(archive);
+  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256, inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
+  await runGossipProbe({ full: inventories[0], reuse, identity: before, archiveSha256 });
   rmSync(probe, { recursive: true });
   rmSync(binaryFile);
   console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);

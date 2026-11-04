@@ -514,14 +514,20 @@ deadlines remain unchanged. The departure watchdog is not a new end-to-end
 latency guarantee.
 The dedicated notification-driven gossip fixture excludes both periodic recovery
 clocks and expired fallback work in its existing worker, then requires all five
-receivers to expose the same canonical message within an eight-second functional
-watchdog. Setup queues its channel before the worker starts; no post-send manual
+receivers to expose the same canonical message within the existing thirty-second
+functional watchdog. Setup queues its channel before the worker starts; no post-send manual
 recovery, resend, or roster change is allowed. The fixture also rejects fallback
 or custody-tick work during propagation. Its recorded two-second comparison is a
 performance observation, not an end-to-end latency SLA; disabling periodic rescue
 proves notification-driven progress directly instead of inferring it from timing.
+The earlier short watchdog came from that removed timing inference; it is not a
+five-hop product latency SLA for six debug/coverage hosts sharing one machine.
+Dedicated held-peer and foreground latency controls keep their own eight-second
+bounds. Retain first per-host Noise, signed ciphertext append and committed
+plaintext/UI-publication milestones separately from the bounded recent trace.
+Those diagnostics explain progress but cannot replace the exact history reads.
 Timestamp each canonical history read on its admitted blocking worker after the
-read and exact-ID extraction finish, against the same absolute eight-second
+read and exact-ID extraction finish, against the same absolute functional
 cutoff. Async resumption after that cutoff cannot change the immutable completion
 witness. Cleanup may join and inspect only the original pending read; it cannot
 start another read or accept a completion after the cutoff. Real-history controls
@@ -987,7 +993,7 @@ host acknowledges work; release and join both tasks and runtime owners on every
 exit. Cancellation before server launch must also close admission and join the
 host only after its actual admitted-work permit retires. Verify the runtime is
 stopped when Drop returns and retain stores if retirement is unverified.
-Keep the original absolute eight-second post-send cutoff, including sender
+Keep one absolute thirty-second functional post-send cutoff, including sender
 retirement, and the existing admitted-read completion timestamps. Host isolation
 and explicit scheduling correct the simulation boundary; they do not establish why a historical hop
 was late. All remaining server owners retire before fixture storage.
@@ -1598,8 +1604,13 @@ Portable diagnostics and independent CI jobs retain their existing scheduling.
 
 Linux/macOS coverage runs both the desktop Host and remaining complete workspace
 partitions with pinned Nextest, four concurrent case processes and no retries.
-Both use the same repository default profile, so the existing metadata IPC and
-reconnect case watchdogs apply on every platform. Unit, binary, integration and
+Both use the same repository default process-hang profile. Ordinary cases have
+a fifteen-minute termination limit, sized above measured multi-minute Windows
+stress cases; the registered metadata IPC and reconnect cases retain their
+stricter sixty-second and five-minute limits. A slow report alone does not bound
+a hung process. The real-tool parked-case control derives its policy from the
+repository default, accelerates only the period in its isolated fixture, and
+requires termination plus continued collection of a later test. Unit, binary, integration and
 test-enabled example targets retain their default selection and ignored policy;
 doctests remain separate. Successful partitions accumulate into one report; any
 partition failure prevents that report and cannot qualify partial coverage.
@@ -1612,13 +1623,19 @@ unchanged. Source-shape checks do not replace this hosted pinned-tool evidence.
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
-cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
+cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
+runs the single notification-only group-chain diagnostic from that same sealed,
+extracted archive, with one case, one test process and zero retries. Its bounded
+raw logs retain source/run/attempt identity and upload on failure. Diagnostic
+profiles stay outside canonical coverage/cache directories and never contribute
+to LCOV or consumer receipts. The complete fresh-consumer partitions remain the
+acceptance boundary; the early probe supplies earlier same-binary evidence. Four fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
-another test on that machine. Actual CI consumers set `MESH_WINDOWS_FAIL_FAST=1`
-and end a failed serial shard after its first failing case; the matrix keeps
-independent shards running. This avoids hiding a known failure behind the rest of
-a long partition. The default diagnostic CLI retains collection of all failures.
+another test on that machine. Actual CI consumers set `MESH_WINDOWS_FAIL_FAST=0`
+and collect every selected terminal result after a failure; independent matrix
+shards also continue. Failed, timed-out and incomplete cases still reject the
+whole consumer, while one completed cohort exposes its complete failure frontier.
 A successful consumer must still execute every selected case exactly once and
 pass complete execution/coverage validation. Early failed or incomplete runs
 retain diagnostic evidence and never receive an acceptance receipt. Each

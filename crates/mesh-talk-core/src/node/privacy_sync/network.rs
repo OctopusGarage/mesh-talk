@@ -461,8 +461,31 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         })
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
-        SyncStore::ingest(self, event)
+        #[cfg(not(test))]
+        {
+            SyncStore::ingest(self, event)
+        }
+        #[cfg(test)]
+        {
+            let message =
+                (event.kind == EventKind::Message).then_some((event.conversation_id, event.id));
+            let result = SyncStore::ingest(self, event);
+            if matches!(result, Ok(AppendOutcome::Appended))
+                && let Some((channel, id)) = message
+            {
+                // The durable append owner has returned and released its store guards.
+                self.node.trace_account_client(&self.peer, || {
+                    format!(
+                        "gossip_diag_ciphertext_applied channel={} event={}",
+                        hex::encode(channel.as_bytes()),
+                        id.to_hex()
+                    )
+                });
+            }
+            result
+        }
     }
+
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
         SyncStore::durable_have(self, conversation, id)
     }

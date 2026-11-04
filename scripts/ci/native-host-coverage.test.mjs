@@ -58,6 +58,36 @@ test("native workspace coverage bounds both complete partitions with Nextest", (
   assert.ok(commands.includes("run: cargo test --workspace --doc --locked"));
 });
 
+test("ordinary process hang policy preserves heavy-case margin and dedicated exceptions", () => {
+  const config = readFileSync(
+    new URL("../../.config/nextest.toml", import.meta.url),
+    "utf8",
+  );
+  const section = config.split("[profile.default]\n")[1]?.split(/^\[/mu)[0];
+  assert(section, "ordinary profile must explicitly bound stuck processes");
+  const policy = section.match(
+    /slow-timeout = \{ period = "(\d+)s", terminate-after = (\d+), grace-period = "5s" \}/u,
+  );
+  assert(policy, "ordinary process watchdog must fail and terminate");
+  assert.equal(Number(policy[1]), 60);
+  assert.equal(Number(policy[2]), 15);
+  assert.equal(Number(policy[1]) * Number(policy[2]), 900);
+  assert.match(config, /heavy.*400s/u);
+  assert.match(
+    config,
+    /period = "15s", terminate-after = 4, grace-period = "5s"/u,
+  );
+  assert.match(
+    config,
+    /period = "30s", terminate-after = 10, grace-period = "5s"/u,
+  );
+  assert.match(
+    config.split("[profile.mutants]\n")[1],
+    /period = "60s", terminate-after = 1, grace-period = "5s"/u,
+  );
+  assert.doesNotMatch(config, /on-timeout\s*=\s*"pass"/u);
+});
+
 test("native Host isolation preserves default targets, accumulated coverage and real failure", (t) => {
   const root = mkdtempSync(join(tmpdir(), "mesh-native-host-coverage-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -287,11 +317,23 @@ test("native Host isolation preserves default targets, accumulated coverage and 
   const emptyRest = run([...rest, "-E", "test(=absent_case)"], {}, 4);
   assert.match(emptyRest, /no tests/u);
 
-  // Use an isolated short fault backstop, never change the production 300s
-  // reconnect policy. Real Nextest must kill the parked test and keep collecting.
+  // Parse the actual source default, accelerating ONLY its period in this
+  // isolated fixture. Keep all fifteen periods and the real grace/exception
+  // policy; a one-period hand-written override would not prove the default.
+  const defaultTimeout =
+    'slow-timeout = { period = "60s", terminate-after = 15, grace-period = "5s" }';
+  assert.equal(config.split(defaultTimeout).length, 2);
+  const accelerated = config.replace(
+    defaultTimeout,
+    defaultTimeout.replace('period = "60s"', 'period = "100ms"'),
+  );
+  assert.match(
+    accelerated,
+    /period = "100ms", terminate-after = 15, grace-period = "5s"/u,
+  );
   writeFileSync(
     join(root, ".config/nextest.toml"),
-    `${config}\n[[profile.default.overrides]]\nfilter = 'package(=mesh-talk-core) & test(=unit)'\nslow-timeout = { period = "1s", terminate-after = 1, grace-period = "100ms" }\npriority = 100\n`,
+    `${accelerated}\n[[profile.default.overrides]]\nfilter = 'package(=mesh-talk-core) & test(=unit)'\npriority = 100\n`,
   );
   const parkEntered = join(root, "park-entered");
   const afterTimeout = join(root, "after-timeout");

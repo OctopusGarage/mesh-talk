@@ -3235,6 +3235,14 @@ impl Node {
                     node.trace_account_client(&peer.public, || {
                         format!("channel_recovery_sync_done channel={channel:?}")
                     });
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        format!(
+                            "channel_recovery_report applied={} rejected={}",
+                            report.applied,
+                            report.rejected.len()
+                        )
+                    });
                     node.recycle_sync_channel(conn);
                     Some((report.applied, report.rejected.is_empty()))
                 })
@@ -3249,8 +3257,20 @@ impl Node {
                     format!("channel_recovery_peer_end channel={channel:?} outcome={outcome}")
                 });
                 if let Ok(Some((applied, clean))) = result {
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        "channel_recovery_reception_begin".into()
+                    });
                     node.process_channel_reception(channel, "catch_up");
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        "channel_recovery_channel_reception_end".into()
+                    });
                     node.process_file_events_reception(channel, "catch_up");
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        "channel_recovery_reception_end".into()
+                    });
                     Some((applied, clean))
                 } else {
                     None
@@ -3261,6 +3281,10 @@ impl Node {
         if applied_progress {
             self.schedule_channel_recovery(channel);
         }
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("channel_recovery_group_progress applied={applied_progress}")
+        });
         #[cfg(test)]
         self.trace_account_client(&self.identity.public(), || {
             format!(

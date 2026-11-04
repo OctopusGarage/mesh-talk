@@ -531,7 +531,23 @@ impl Node {
                 if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
                     let _ = hook.send(());
                 }
-                if let Ok(channel) = node.privacy_accept_with_permits(stream, tcp_permits).await {
+                #[cfg(test)]
+                node.trace_account_client(&node.identity.public(), || {
+                    format!("gossip_diag_incoming_tcp sequence={observer_sequence}")
+                });
+                #[cfg(test)]
+                node.trace_account_client(&node.identity.public(), || {
+                    format!("gossip_diag_incoming_noise_begin sequence={observer_sequence}")
+                });
+                let accepted = node.privacy_accept_with_permits(stream, tcp_permits).await;
+                #[cfg(test)]
+                node.trace_account_client(&node.identity.public(), || {
+                    format!(
+                        "gossip_diag_incoming_noise_end sequence={observer_sequence} ok={}",
+                        accepted.is_ok()
+                    )
+                });
+                if let Ok(channel) = accepted {
                     node.serve_connection(channel).await;
                 }
                 #[cfg(test)]
@@ -1437,6 +1453,35 @@ impl Node {
         context: &'static str,
     ) -> Result<(), NodeError> {
         use super::reception_effects::{ArrivalKind, ReceptionMetadata};
+        #[cfg(test)]
+        struct PublishedMessages<'a> {
+            node: &'a Node,
+            channel: ConversationId,
+            ids: Vec<crate::eventlog::EventId>,
+        }
+        #[cfg(test)]
+        impl Drop for PublishedMessages<'_> {
+            fn drop(&mut self) {
+                // Declared before pending: callbacks run after its guard drops,
+                // including bounded-turn early returns and failure unwinding.
+                for id in &self.ids {
+                    self.node
+                        .trace_account_client(&self.node.identity.public(), || {
+                            format!(
+                                "gossip_diag_plaintext_published channel={} event={}",
+                                hex::encode(self.channel.as_bytes()),
+                                id.to_hex()
+                            )
+                        });
+                }
+            }
+        }
+        #[cfg(test)]
+        let mut published = PublishedMessages {
+            node: self,
+            channel: conv,
+            ids: Vec::new(),
+        };
         let mut pending = self
             .pending_channel_plaintext
             .lock()
@@ -1544,6 +1589,8 @@ impl Node {
                 )?;
                 if let Some(metadata) = committed {
                     self.note_reception_change();
+                    #[cfg(test)]
+                    published.ids.push(entry.event_id);
                     if !own && entry.from != self.user_id() {
                         self.note_account_local_change();
                     }

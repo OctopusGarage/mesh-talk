@@ -78,9 +78,19 @@ jobs:
       - name: Workspace doctests
         run: cargo test --workspace --doc --locked
       - name: Build one instrumented workspace archive
+        env:
+          MESH_WINDOWS_GOSSIP_PROBE: '1'
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs produce "$RUNNER_TEMP/windows-workspace-archive"
+      - name: Preserve early gossip diagnostic
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-gossip-probe-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-gossip-probe/
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Upload sealed workspace archive
         uses: actions/upload-artifact@v7
         with:

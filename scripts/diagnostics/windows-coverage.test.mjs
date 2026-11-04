@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -8,6 +14,9 @@ import {
   versions,
   command,
   consumerFailurePolicy,
+  gossipProbeEnabled,
+  gossipProbeCase,
+  runGossipProbe,
   inventory,
   verifyPartition,
   verifyExecution,
@@ -459,3 +468,176 @@ test("legacy Windows cache compatibility overrides stay outside runtime executio
   );
   assert.match(runtime, /cargo test --workspace --doc --locked/u);
 });
+
+test("the producer enables the single archived gossip probe and preserves its failure log", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
+    "utf8",
+  );
+  const producer = workflow.split("  tests:\n")[0];
+  assert.match(producer, /MESH_WINDOWS_GOSSIP_PROBE: '1'/u);
+  assert.match(
+    producer,
+    /name: Preserve early gossip diagnostic\n\s+if: always\(\)/u,
+  );
+  assert.match(
+    producer,
+    /windows-gossip-probe-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/u,
+  );
+});
+
+test("gossip probe flag defaults off and requires one exact runnable archived case", async () => {
+  for (const env of [{}, { MESH_WINDOWS_GOSSIP_PROBE: "0" }])
+    assert.equal(gossipProbeEnabled(env), false);
+  assert.equal(gossipProbeEnabled({ MESH_WINDOWS_GOSSIP_PROBE: "1" }), true);
+  for (const value of ["", "true", "2"])
+    assert.throws(
+      () => gossipProbeEnabled({ MESH_WINDOWS_GOSSIP_PROBE: value }),
+      /must be 0 or 1/u,
+    );
+  let calls = 0;
+  const run = async () => {
+    calls++;
+    throw new Error("must not run");
+  };
+  await runGossipProbe({ env: {}, full: [] }, run);
+  const row = {
+    eventName: `mesh-talk-core::mesh_talk_core$${gossipProbeCase}`,
+    selected: true,
+    ignored: false,
+  };
+  for (const full of [
+    [],
+    [row, row],
+    [{ ...row, selected: false }],
+    [{ ...row, ignored: true }],
+    [{ ...row, eventName: `other::other$${gossipProbeCase}` }],
+  ]) {
+    await assert.rejects(
+      runGossipProbe({ env: { MESH_WINDOWS_GOSSIP_PROBE: "1" }, full }, run),
+      /exactly one|runnable/u,
+    );
+  }
+  assert.equal(calls, 0);
+});
+
+for (const outcome of ["pass", "nonzero", "malformed"]) {
+  test(`gossip probe ${outcome} preserves real subprocess evidence without coverage acceptance`, async (t) => {
+    const temporary = mkdtempSync(path.join(os.tmpdir(), "mesh-gossip-probe-"));
+    t.after(() => rmSync(temporary, { recursive: true, force: true }));
+    const row = {
+      eventName: `mesh-talk-core::mesh_talk_core$${gossipProbeCase}`,
+      selected: true,
+      ignored: false,
+    };
+    const suite = {
+      crate: "mesh-talk-core",
+      test_binary: "mesh_talk_core",
+      kind: "lib",
+    };
+    const raw =
+      outcome === "malformed"
+        ? "not-json\n"
+        : [
+            { type: "suite", event: "started", nextest: suite },
+            { type: "test", event: "started", name: row.eventName },
+            {
+              type: "test",
+              event: outcome === "pass" ? "ok" : "failed",
+              name: row.eventName,
+            },
+            {
+              type: "suite",
+              event: outcome === "pass" ? "ok" : "failed",
+              failed: outcome === "pass" ? 0 : 1,
+              nextest: suite,
+            },
+          ]
+            .map(JSON.stringify)
+            .join("\n") + "\n";
+    let profiles;
+    const run = async (args, options) => {
+      assert.deepEqual(args.slice(0, 2), ["nextest", "run"]);
+      assert(
+        args.includes("sealed-binaries.json") &&
+          args.includes("sealed-metadata.json") &&
+          args.includes("sealed-target"),
+      );
+      assert(
+        args.includes(
+          `package(=mesh-talk-core) & binary(=mesh_talk_core) & test(=${gossipProbeCase})`,
+        ),
+      );
+      assert.equal(args[args.indexOf("--retries") + 1], "0");
+      assert.equal(args[args.indexOf("--test-threads") + 1], "1");
+      assert(args.includes("--no-fail-fast") && args.includes("--no-tests"));
+      assert(!args.includes("--partition") && !args.includes("--lcov"));
+      profiles = path.dirname(options.env.LLVM_PROFILE_FILE);
+      assert.equal(path.dirname(profiles), temporary);
+      const program =
+        "const fs=require('node:fs');const path=require('node:path');fs.writeFileSync(path.join(path.dirname(process.env.LLVM_PROFILE_FILE),'fixture.profraw'),'isolated');process.stdout.write(process.argv[1]);process.stderr.write('gossip diagnostic stderr\\n');process.exitCode=Number(process.argv[2]);";
+      return command(["-e", program, raw, outcome === "nonzero" ? "7" : "0"], {
+        ...options,
+        binary: process.execPath,
+      });
+    };
+    const pending = runGossipProbe(
+      {
+        full: [row],
+        reuse: [
+          "--binaries-metadata",
+          "sealed-binaries.json",
+          "--cargo-metadata",
+          "sealed-metadata.json",
+          "--target-dir-remap",
+          "sealed-target",
+        ],
+        identity: { sourceSha: "fixture-source", runId: "1", runAttempt: "1" },
+        archiveSha256: "a".repeat(64),
+        env: {
+          ...process.env,
+          RUNNER_TEMP: temporary,
+          MESH_WINDOWS_GOSSIP_PROBE: "1",
+        },
+      },
+      run,
+    );
+    if (outcome === "pass") await pending;
+    else
+      await assert.rejects(
+        pending,
+        outcome === "nonzero" ? /failed: 7/u : /JSON/u,
+      );
+    const directory = path.join(temporary, "windows-gossip-probe");
+    assert.equal(
+      readFileSync(path.join(directory, "execution.jsonl"), "utf8"),
+      raw,
+    );
+    assert.match(
+      readFileSync(path.join(directory, "execution.log"), "utf8"),
+      /gossip diagnostic stderr/u,
+    );
+    const closed = readFileSync(path.join(directory, "progress.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map(JSON.parse)
+      .at(-1);
+    assert.equal(closed.event, "closed");
+    assert.equal(closed.code, outcome === "nonzero" ? 7 : 0);
+    assert.equal(
+      existsSync(path.join(directory, "proof.json")),
+      outcome === "pass",
+    );
+    assert.equal(
+      existsSync(profiles),
+      outcome === "nonzero",
+      "unknown command retirement must conservatively retain isolated profiles",
+    );
+    assert(!readdirSync(directory).includes("receipt.json"));
+    assert(
+      !readdirSync(directory).some(
+        (name) => name.endsWith(".lcov") || name.endsWith(".profraw"),
+      ),
+    );
+  });
+}
