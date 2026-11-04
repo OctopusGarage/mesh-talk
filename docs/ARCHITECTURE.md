@@ -2196,6 +2196,15 @@ incremental BLOB prefix; matching receipts and selected controls still receive
 full authentication. Fresh sessions may traverse retained metadata, so they are
 not constant-time opens followed by constant-time preparation.
 
+Accepted headers within a preparation turn use at most that turn's row allowance.
+Parent closure sees both committed selections and this bounded pending batch;
+receipt-only closure includes only pending rows with receipt evidence. Selected
+rows, receipt marks and the scalar resume cursor commit together after current
+view validation. Missing retained rows or changed authority roll back the batch;
+failed turns reload their previous durable cursor. The batch is flushed before
+fingerprint or erase phases read its results. No database transaction spans a
+Node callback or an asynchronous yield.
+
 Preparation defaults to 64 rows, 512 parent edges and an 8 MiB body/work charge.
 Large legal parent lists resume at an exact edge cursor. An undersized budget
 returns an explicit error without discarding the event. Have-dependent export

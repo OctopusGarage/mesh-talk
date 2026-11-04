@@ -216,6 +216,7 @@ impl Preparation {
         store: &GuardedSyncStore<'_>,
         view: &ParticipantView,
         budget: PreparationBudget,
+        pending: &mut Vec<SelectionRow>,
     ) -> Result<PreparationStep, LogError> {
         budget.validate()?;
         match self.phase {
@@ -554,7 +555,7 @@ impl Preparation {
                     ..step
                 })
             }
-            Phase::Future | Phase::Rows => self.row_step(store, view, budget),
+            Phase::Future | Phase::Rows => self.row_step(store, view, budget, pending),
             Phase::Erase => {
                 let count = store
                     .node
@@ -927,7 +928,7 @@ impl Preparation {
         self.rank += 1;
         PreparationStep {
             rows: 1,
-            bytes: std::mem::size_of::<EventHeader>(),
+            bytes: std::mem::size_of::<SelectionRow>(),
             ..Default::default()
         }
     }
@@ -936,8 +937,9 @@ impl Preparation {
         store: &GuardedSyncStore<'_>,
         view: &ParticipantView,
         budget: PreparationBudget,
+        pending: &mut Vec<SelectionRow>,
     ) -> Result<PreparationStep, LogError> {
-        budget.rows_for_bytes(std::mem::size_of::<EventHeader>())?;
+        budget.rows_for_bytes(std::mem::size_of::<SelectionRow>())?;
         let future = self.phase == Phase::Future;
         let count = self.generation.map_or(0, |g| g.count);
         if self.rank as u64 >= count {
@@ -1104,7 +1106,7 @@ impl Preparation {
                     &view.repository,
                     header.id,
                     active.parent_after,
-                    active.receipt,
+                    (active.receipt, pending),
                     budget.edges.min(budget.rows_for_bytes(64)?),
                 )?;
             if !step.closed {
@@ -1329,28 +1331,16 @@ impl Preparation {
                 EventKind::FileManifest => device_policy.attachments,
                 _ => true,
             };
-            if store
-                .node
-                .log
-                .lock()
-                .expect("log lock")
-                .repository()?
-                .insert_selection_row(
-                    self.selection.as_ref().expect("selection"),
-                    &view.repository,
-                    SelectionRow {
-                        header,
-                        rank: self.rank,
-                        candidate: !store.pull_only && (!self.restricted || own),
-                        selected,
-                        own,
-                        receipt: active.receipt,
-                    },
-                )?
-            {
-                self.metadata.count += 1;
-                capabilities(&mut self.metadata, header.kind);
-            }
+            pending.push(SelectionRow {
+                header,
+                rank: self.rank,
+                candidate: !store.pull_only && (!self.restricted || own),
+                selected,
+                own,
+                receipt: active.receipt,
+            });
+            self.metadata.count += 1;
+            capabilities(&mut self.metadata, header.kind);
         }
         Ok(self.advance())
     }

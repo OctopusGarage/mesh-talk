@@ -1981,7 +1981,7 @@
             "reference": "docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities"
           },
           {
-            "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility.",
+            "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility. Accepted rows, receipt marks and their scalar cursor commit together per bounded turn; pending parent closure is exact and failed batches restore prior durable progress.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -2504,7 +2504,7 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress cannot survive restart, and corrupt or foreign optional sources remain preserved without blocking login.",
+            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress cannot survive restart, and corrupt or foreign optional sources remain preserved without blocking login. Reads and proven no-ops validate the fresh publication barrier without directory synchronization; changed writes retain durability checks and failed-sync retry.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

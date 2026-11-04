@@ -1688,8 +1688,125 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn participant_network_chained_preparation_amortizes_commits_across_reloaded_turns() {
+        for count in [128, 256] {
+            let directory = tempfile::tempdir().unwrap();
+            let peer = DeviceIdentity::generate();
+            let peer_account = Account::generate();
+            let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+            let (node, _, _) = super::super::super::test_support::node_with_files(
+                directory.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            node.configure_privacy(
+                directory.path(),
+                "pw",
+                &node.own_group_proof(),
+                std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+            node.privacy
+                .state
+                .write()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .proofs
+                .record(&proof)
+                .unwrap();
+            node.set_allowed(&peer_account.account_id(), true)
+                .await
+                .unwrap();
+            node.set_invisible(true).await.unwrap();
+            let conversation = super::super::super::conversation::dm_conversation_id(
+                &node.identity.public(),
+                &peer.public(),
+            );
+            let mut expected = Vec::new();
+            for seq in 1..=count {
+                let event = Event::new(
+                    &node.identity,
+                    conversation,
+                    seq,
+                    expected.last().copied().into_iter().collect(),
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![7; 2048],
+                );
+                expected.push(event.id);
+                node.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            let database = node.storage.database();
+            let selected_rows = || {
+                database
+                    .read(|c| {
+                        Ok(
+                            c.query_row("SELECT count(*) FROM participant_sync_rows", [], |r| {
+                                r.get::<_, i64>(0)
+                            })?,
+                        )
+                    })
+                    .unwrap()
+            };
+            let owner = node.sync_store(&peer.public());
+            let store = owner.lock().unwrap();
+            let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+            let mut checked_row_turns = 0;
+            let mut reloaded_turns = 0;
+            let mut ready = false;
+            for _ in 0..20 * count {
+                let rows_before = selected_rows();
+                let commits_before = database.successful_write_commits();
+                let budget = PreparationBudget::default();
+                let step = NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap();
+                let rows_added = selected_rows() - rows_before;
+                let commits = database.successful_write_commits() - commits_before;
+                assert!(
+                    step.rows <= budget.rows
+                        && step.edges <= budget.edges
+                        && step.bytes <= budget.bytes
+                );
+                // A turn already inside Rows isolates row admission from cold index setup.
+                if rows_before > 0 && rows_added > 1 {
+                    checked_row_turns += 1;
+                    assert!(
+                        commits <= 2,
+                        "{count} chained messages: a bounded turn admitted {rows_added} rows with {commits} durable write commits; rows and their resume cursor must commit together"
+                    );
+                }
+                if step.ready {
+                    ready = true;
+                    break;
+                }
+                // Restart every committed row batch. The SHA accumulator is
+                // intentionally transient; repeatedly restarting Hash would
+                // prevent any multi-page fingerprint from reaching EOF.
+                let mut preparation = view.preparation.lock().unwrap();
+                if rows_added > 0 && preparation.selection.is_some() {
+                    preparation.discard_transient_preparation();
+                    reloaded_turns += 1;
+                }
+            }
+            assert!(ready, "reloaded bounded preparation must finish");
+            assert!(checked_row_turns > 0 && reloaded_turns > 1);
+            assert_eq!(
+                NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+                count
+            );
+            assert_eq!(
+                collect(&store, &view, &HashSet::new()),
+                expected,
+                "buffered parent closure must survive every durable resume boundary"
+            );
+        }
+    }
+
     #[test]
-    fn participant_network_preparation_recovers_committed_row_before_cursor_failure() {
+    fn participant_network_preparation_rolls_back_rows_on_cursor_failure() {
         let directory = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
@@ -1736,7 +1853,10 @@ mod tests {
             c.execute_batch("CREATE TEMP TRIGGER test_fail_selection_progress BEFORE UPDATE ON participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected selection cursor failure'); END;")?;
             Ok(())
         }).unwrap();
-        assert!(NetworkSyncStore::prepare_view_step(&*store, &view, single_row).is_err());
+        assert!(
+            NetworkSyncStore::prepare_view_step(&*store, &view, PreparationBudget::default())
+                .is_err()
+        );
         assert_eq!(
             node.storage
                 .database()
@@ -1747,8 +1867,8 @@ mod tests {
                     .map_err(Into::into)
                 })
                 .unwrap(),
-            2,
-            "the selected row commits before the injected cursor-save failure"
+            1,
+            "row admission and the resume cursor must both roll back on a failed save"
         );
         assert!(
             !view.preparation.lock().unwrap().ready(),

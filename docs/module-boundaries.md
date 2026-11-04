@@ -316,6 +316,11 @@ owns capability negotiation and exact bounded RPCs; the post-office role owns
 indexed cursor eligibility and expiry. ID sets exist only for the bounded active
 wire exchange. Corrupt or foreign hint sources remain preserved and unavailable; hints
 never establish admission, delivery, or deletion authority.
+Opaque hint reads and proven no-ops validate the exact current publication
+barrier without synchronizing its directory. Changed writes retain the shared
+publication owner's durability check and transaction-time rechecks; failed
+synchronization leaves the mutation retryable. Empty receive-hint batches do no
+work, and duplicate checks remain bounded to each admitted page.
 
 `core/node/reaction_store/indexed.rs` owns the exact locally authored reaction
 projection. Its independently published source is keyed by the full account

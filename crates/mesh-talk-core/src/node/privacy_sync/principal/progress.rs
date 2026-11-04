@@ -1,6 +1,6 @@
 //! Current preparation checkpoint only. No historical event bodies or ID sets
-//! are encoded here. SQL decisions may commit before this cursor; replay is
-//! idempotent and never advances the in-memory cursor after a failed save.
+//! are encoded here. Selected rows and this cursor commit atomically per bounded
+//! turn. Other derived control work remains idempotent across a failed save.
 use super::*;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -238,6 +238,7 @@ impl Preparation {
         }
         let result = (|| {
             let mut step = PreparationStep::default();
+            let mut pending = Vec::new();
             // A turn admits multiple small transitions, not one durable commit
             // per historical header. Its row, edge and byte caps still include
             // rejected work, and the session yields after this finite turn.
@@ -251,6 +252,11 @@ impl Preparation {
                 {
                     break;
                 }
+                // Hash/erasure read the persisted selection. Publish the bounded
+                // row batch and cursor before either can consume it.
+                if !pending.is_empty() && self.phase != Phase::Rows {
+                    break;
+                }
                 let phase = self.phase;
                 let separate_turn = matches!(phase, Phase::Authority | Phase::Order);
                 let remaining = PreparationBudget {
@@ -258,7 +264,7 @@ impl Preparation {
                     edges: budget.edges - step.edges,
                     bytes: budget.bytes - step.bytes,
                 };
-                let next = match self.step_inner(store, view, remaining) {
+                let next = match self.step_inner(store, view, remaining, &mut pending) {
                     Ok(next) => next,
                     Err(LogError::PageBudgetTooSmall { required })
                         if transition > 0 && required <= budget.bytes =>
@@ -293,7 +299,7 @@ impl Preparation {
                     .lock()
                     .expect("log lock")
                     .repository()?
-                    .save_selection_progress(selection, &view.repository, &bytes)?;
+                    .save_selection_batch(selection, &view.repository, &pending, &bytes)?;
             }
             Ok(step)
         })();

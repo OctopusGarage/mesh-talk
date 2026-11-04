@@ -176,6 +176,8 @@ pub(crate) struct EncryptedDatabase {
     connection: Mutex<Connection>,
     path: PathBuf,
     faulted: AtomicBool,
+    #[cfg(test)]
+    successful_write_commits: std::sync::atomic::AtomicUsize,
 }
 impl EncryptedDatabase {
     /// An ambiguous commit or fatal driver failure requires a fresh owner.
@@ -299,6 +301,8 @@ impl EncryptedDatabase {
             connection: Mutex::new(connection),
             path,
             faulted: AtomicBool::new(false),
+            #[cfg(test)]
+            successful_write_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     pub(crate) fn physical_stats(&self) -> Result<PhysicalStats, LogError> {
@@ -465,6 +469,12 @@ impl EncryptedDatabase {
         }
         self.checked_operation(operation(&connection))
     }
+    /// Successful write transactions through this owner, excluding reads and rollbacks.
+    #[cfg(test)]
+    pub(crate) fn successful_write_commits(&self) -> usize {
+        self.successful_write_commits.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn transaction<T>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
@@ -481,9 +491,18 @@ impl EncryptedDatabase {
                 .transaction()
                 .map_err(|e| context("begin database transaction", e)),
         )?;
+        #[cfg(test)]
+        let changes_before = tx.total_changes();
         match self.checked_operation(operation(&tx)) {
             Ok(value) => match tx.commit() {
-                Ok(()) => Ok(value),
+                Ok(()) => {
+                    #[cfg(test)]
+                    if connection.total_changes() != changes_before {
+                        self.successful_write_commits
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(value)
+                }
                 Err(error) => {
                     self.faulted.store(true, Ordering::Release);
                     Err(error.into())
@@ -687,6 +706,31 @@ mod tests {
         })
         .unwrap()
     }
+    #[test]
+    fn write_commit_observation_excludes_reads_and_rollbacks() {
+        let root = tempfile::tempdir().unwrap();
+        let db = create(&root.path().join("profile.db"));
+        let before = db.successful_write_commits();
+        db.transaction(|tx| {
+            let _: i64 = tx.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?;
+            Ok(())
+        })
+        .unwrap();
+        let failed: Result<(), LogError> = db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('rolled back')", [])?;
+            Err(LogError::StaleCursor)
+        });
+        assert!(matches!(failed, Err(LogError::StaleCursor)));
+        assert_eq!(db.successful_write_commits(), before);
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('one')", [])?;
+            tx.execute("INSERT INTO messages VALUES ('two')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.successful_write_commits(), before + 1);
+    }
+
     #[test]
     fn fresh_and_warm_database_require_incremental_vacuum() {
         let root = tempfile::tempdir().unwrap();

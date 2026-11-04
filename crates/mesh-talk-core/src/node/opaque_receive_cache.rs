@@ -266,9 +266,28 @@ impl OpaqueReceiveCache {
     }
 
     pub(super) fn remember(&mut self, mailbox: ConversationId, pairs: &[(EventId, EventId)]) {
-        let persisted = if let Some(source) = &self.source {
-            source.check_write().and_then(|()| {
+        if pairs.is_empty() {
+            return;
+        }
+        let persisted: Result<bool, LogError> = if let Some(source) = &self.source {
+            (|| {
                 for page in pairs.chunks(128) {
+                    source.check_barrier()?;
+                    let unchanged = source.profile().database().read(|c| {
+                        let mut statement = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM opaque_retained_hints WHERE mailbox=?1 AND outer_id=?2)")?;
+                        for (outer, _) in page {
+                            if !statement.query_row(params![mailbox.as_bytes().as_slice(), outer.as_bytes().as_slice()], |row| row.get::<_, bool>(0))? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    })?;
+                    if unchanged {
+                        continue;
+                    }
+                    // put_on rechecks each existing key in the transaction.
+                    // Parent synchronization stays outside the shared SQL guard.
+                    source.check_write()?;
                     let full = source.profile().database().transaction(|c| {
                         for &(outer, inner) in page {
                             if !Self::put_on(c, mailbox, outer, inner, self.record_bytes)? {
@@ -282,7 +301,7 @@ impl OpaqueReceiveCache {
                     }
                 }
                 Ok(true)
-            })
+            })()
         } else {
             Ok(false)
         };

@@ -97,6 +97,23 @@ impl Bucket {
             return Err(invalid("opaque cache blob limit"));
         }
         let profile = cache.checkpoint_profile()?;
+        let unchanged = profile.database().read(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE key=?1 AND value=?2)",
+                    self.table
+                ),
+                params![key, value],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(LogError::from)
+        })?;
+        if unchanged {
+            return Ok(true);
+        }
+        // Sync before entering the SQL guard. The transaction still checks the
+        // exact value again; this preflight does not own concurrent mutation.
+        cache.checkpoint_source()?.check_write()?;
         profile.database().transaction(|c| {
             let existing: Option<(i64,bool)> = c.query_row(&format!("SELECT length(key)+length(value),value=?2 FROM {} WHERE key=?1",self.table), params![key,value], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
             // A warmed poll is read-only, including FIFO metadata.
@@ -126,6 +143,18 @@ impl Bucket {
     fn remove(&self, cache: &OpaqueReceiveCache, key: &[u8]) -> Result<(), LogError> {
         self.key(key)?;
         let profile = cache.checkpoint_profile()?;
+        let exists = profile.database().read(|c| {
+            c.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE key=?1)", self.table),
+                [key],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(LogError::from)
+        })?;
+        if !exists {
+            return Ok(());
+        }
+        cache.checkpoint_source()?.check_write()?;
         profile.database().transaction(|c| {
             let charge: Option<i64> = c
                 .query_row(
@@ -154,15 +183,17 @@ impl Bucket {
 }
 
 impl OpaqueReceiveCache {
-    fn checkpoint_profile(&self) -> Result<&ProfileStorage, LogError> {
+    fn checkpoint_source(&self) -> Result<&PublishedHistorySource, LogError> {
         if !self.checkpoints_ready {
             return Err(invalid("opaque checkpoint cache unavailable"));
         }
-        let source = self
-            .source
+        self.source
             .as_ref()
-            .ok_or_else(|| invalid("opaque checkpoint owner unavailable"))?;
-        source.check_write()?;
+            .ok_or_else(|| invalid("opaque checkpoint owner unavailable"))
+    }
+    fn checkpoint_profile(&self) -> Result<&ProfileStorage, LogError> {
+        let source = self.checkpoint_source()?;
+        source.check_barrier()?;
         Ok(source.profile())
     }
     pub(in crate::node) fn get_checkpoint(&self, key: &[u8]) -> Result<Option<Vec<u8>>, LogError> {
@@ -308,6 +339,137 @@ mod tests {
             &account.account_id(),
         );
         (root, profile, device, account, cache)
+    }
+
+    fn retained_pairs() -> Vec<(EventId, EventId)> {
+        (0_u64..130)
+            .map(|number| {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&number.to_be_bytes());
+                (EventId::new(bytes), EventId::new([9; 32]))
+            })
+            .collect()
+    }
+
+    fn assert_quiet_io(operation: impl FnOnce(&mut OpaqueReceiveCache)) {
+        let (_root, profile, _device, _account, mut cache) = fixture();
+        cache.put_checkpoint(b"checkpoint", b"sealed").unwrap();
+        cache.put_wrapper_hint(b"wrapper", b"outer").unwrap();
+        cache.remember(ConversationId::new([1; 32]), &retained_pairs());
+        let changes = profile.database().read(|c| Ok(c.total_changes())).unwrap();
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+        operation(&mut cache);
+        assert_eq!(
+            profile.database().read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "unchanged optional cache operations must not mutate SQL"
+        );
+        assert_eq!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+            0,
+            "unchanged optional cache operations must not synchronize the parent directory"
+        );
+    }
+
+    #[test]
+    fn quiet_checkpoint_and_wrapper_reads_do_not_sync_parent() {
+        assert_quiet_io(|cache| {
+            assert_eq!(
+                cache.get_checkpoint(b"checkpoint").unwrap(),
+                Some(b"sealed".to_vec())
+            );
+            assert_eq!(cache.get_checkpoint(b"absent").unwrap(), None);
+            assert_eq!(
+                cache.get_wrapper_hint(b"wrapper").unwrap(),
+                Some(b"outer".to_vec())
+            );
+            assert_eq!(cache.get_wrapper_hint(b"absent").unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn quiet_duplicate_checkpoint_and_wrapper_puts_do_not_sync_parent() {
+        assert_quiet_io(|cache| {
+            assert!(cache.put_checkpoint(b"checkpoint", b"sealed").unwrap());
+            assert!(cache.put_wrapper_hint(b"wrapper", b"outer").unwrap());
+        });
+    }
+
+    #[test]
+    fn quiet_missing_checkpoint_remove_does_not_sync_parent() {
+        assert_quiet_io(|cache| cache.remove_checkpoint(b"absent").unwrap());
+    }
+
+    #[test]
+    fn quiet_empty_receive_hints_do_not_sync_parent() {
+        assert_quiet_io(|cache| cache.remember(ConversationId::new([1; 32]), &[]));
+    }
+
+    #[test]
+    fn quiet_duplicate_bounded_receive_hints_do_not_sync_parent() {
+        assert_quiet_io(|cache| cache.remember(ConversationId::new([1; 32]), &retained_pairs()));
+    }
+
+    #[test]
+    fn changed_cache_write_syncs_and_failed_sync_remains_retryable() {
+        let (_root, profile, _device, _account, cache) = fixture();
+        cache.put_checkpoint(b"checkpoint", b"old").unwrap();
+        let changes = profile.database().read(|c| Ok(c.total_changes())).unwrap();
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+        crate::storage::profile::publication::tests::CUT
+            .with(|value| *value.borrow_mut() = Some("parent-sync"));
+        let rejected = cache.put_checkpoint(b"checkpoint", b"new");
+        crate::storage::profile::publication::tests::CUT.with(|value| *value.borrow_mut() = None);
+        assert!(rejected.is_err());
+        assert_eq!(
+            profile.database().read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "a failed barrier sync must precede every cache mutation"
+        );
+        assert_eq!(
+            cache.get_checkpoint(b"checkpoint").unwrap(),
+            Some(b"old".to_vec())
+        );
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+        assert!(cache.put_checkpoint(b"checkpoint", b"new").unwrap());
+        assert!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0,
+            "a changed write must retry barrier synchronization after failure"
+        );
+        assert!(profile.database().read(|c| Ok(c.total_changes())).unwrap() > changes);
+    }
+
+    #[test]
+    fn changed_barrier_rejects_reads_and_noops_before_sql_or_directory_sync() {
+        for replace in [false, true] {
+            let (root, profile, _device, _account, cache) = fixture();
+            cache.put_checkpoint(b"checkpoint", b"sealed").unwrap();
+            cache.put_wrapper_hint(b"wrapper", b"outer").unwrap();
+            let path = OpaqueReceiveCache::path(&root.path().join("events"));
+            if replace {
+                let foreign = root.path().join("foreign-stub");
+                std::fs::write(&foreign, [3; 54]).unwrap();
+                std::fs::rename(foreign, &path).unwrap();
+            } else {
+                std::fs::write(&path, [4; 54]).unwrap();
+            }
+            let changes = profile.database().read(|c| Ok(c.total_changes())).unwrap();
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+            assert!(cache.get_checkpoint(b"checkpoint").is_err());
+            assert!(cache.get_checkpoint(b"absent").is_err());
+            assert!(cache.get_wrapper_hint(b"wrapper").is_err());
+            assert!(cache.put_checkpoint(b"checkpoint", b"sealed").is_err());
+            assert!(cache.put_wrapper_hint(b"wrapper", b"outer").is_err());
+            assert!(cache.remove_checkpoint(b"absent").is_err());
+            assert_eq!(
+                profile.database().read(|c| Ok(c.total_changes())).unwrap(),
+                changes
+            );
+            assert_eq!(
+                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+                0
+            );
+        }
     }
 
     #[test]

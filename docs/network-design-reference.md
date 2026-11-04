@@ -2468,7 +2468,9 @@ relay, recipient and mailbox identities, the local destructive epoch and source
 floor. At most 512 checkpoints use 8 MiB; each blob is limited to 16 KiB.
 Wrapper mappings contain IDs only and have independent 250,000-entry/64-MiB
 limits. Point lookups and unchanged writes do not update cache timestamps or
-rewrite old entries. Missing, corrupt, foreign or evicted hints cause ordinary
+rewrite old entries. Reads and proven no-ops still check the exact publication
+barrier but do not synchronize its parent directory. Changed writes retain the
+existing durability and retry rules. Missing, corrupt, foreign or evicted hints cause ordinary
 validated synchronization; they never grant admission or recipient delivery.
 
 A page cursor is saved only after every ID is either admitted, supported by
