@@ -1,0 +1,5 @@
+"favoriate" 的标志 和 “send myself”一样，改成五角星吧，optimise，
+
+---
+
+verify and commit and push
