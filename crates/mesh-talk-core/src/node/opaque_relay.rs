@@ -246,6 +246,31 @@ impl OpaqueMailboxProgress {
     }
 }
 
+struct SelectedOpaqueControl {
+    id: EventId,
+    kind: SelectedOpaqueControlKind,
+}
+
+enum SelectedOpaqueControlKind {
+    Identity(Vec<(ConversationId, EventId)>),
+    Consent(ConversationId, EventId),
+}
+
+impl SelectedOpaqueControl {
+    fn from_event(event: &Event) -> Result<Self, LogError> {
+        let kind = if super::file_message_identity::is_bundle(event) {
+            SelectedOpaqueControlKind::Identity(super::file_message_identity::bundle_references(
+                event,
+            ))
+        } else {
+            let decision = super::file_consent::Decision::open(event)
+                .ok_or_else(|| LogError::Serialization("invalid selected opaque control".into()))?;
+            SelectedOpaqueControlKind::Consent(decision.file, decision.manifest)
+        };
+        Ok(Self { id: event.id, kind })
+    }
+}
+
 impl Node {
     /// Reconcile one pairwise mailbox, uploading only events authorized for
     /// `recipient`. Every event returned by the relay is decrypted and passed
@@ -518,23 +543,13 @@ impl Node {
                     Some(self.file_message_identity_controls_for(&progress.recipient, false)?);
             }
             if let Some(identities) = &progress.identity_controls {
-                let guarded = self.sync_store(&progress.recipient);
                 for bundle in identities {
-                    let mut authorized = false;
-                    for (file, manifest) in super::file_message_identity::bundle_references(bundle)
-                    {
-                        if guarded
-                            .lock()
-                            .expect("projection lock")
-                            .file_message_identity(&file, &manifest)?
-                            .is_some_and(|current| current.id == bundle.id)
-                        {
-                            authorized = true;
-                            break;
-                        }
-                    }
-                    if authorized {
-                        controls.insert(bundle.id, bundle.clone());
+                    if let Some(current) = self.current_opaque_identity_control(
+                        &progress.recipient,
+                        bundle.id,
+                        &super::file_message_identity::bundle_references(bundle),
+                    )? {
+                        controls.insert(current.id, current);
                     }
                 }
             }
@@ -552,6 +567,46 @@ impl Node {
             );
         }
         Ok(controls)
+    }
+
+    fn current_opaque_identity_control(
+        &self,
+        recipient: &PublicIdentity,
+        id: EventId,
+        references: &[(ConversationId, EventId)],
+    ) -> Result<Option<Event>, LogError> {
+        let guarded = self.sync_store(recipient);
+        for (file, manifest) in references {
+            if let Some(current) = guarded
+                .lock()
+                .expect("projection lock")
+                .file_message_identity(file, manifest)?
+                .filter(|current| current.id == id)
+            {
+                return Ok(Some(current));
+            }
+        }
+        Ok(None)
+    }
+
+    fn selected_opaque_control<F: Fn() -> bool + Sync>(
+        &self,
+        progress: &OpaqueMailboxProgress,
+        selected: &SelectedOpaqueControl,
+        authorize_upload: &F,
+    ) -> Result<Option<Event>, LogError> {
+        if !self.relay_send_allowed(&progress.relay) || !authorize_upload() {
+            return Ok(None);
+        }
+        match &selected.kind {
+            SelectedOpaqueControlKind::Identity(references) => {
+                self.current_opaque_identity_control(&progress.recipient, selected.id, references)
+            }
+            SelectedOpaqueControlKind::Consent(file, manifest) => Ok(self
+                .file_consent_controls(&progress.recipient, &[(*file, *manifest)], false)?
+                .into_iter()
+                .find(|event| event.id == selected.id)),
+        }
     }
 
     fn accept_opaque_wrappers(

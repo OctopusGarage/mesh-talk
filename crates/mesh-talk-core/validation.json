@@ -2732,6 +2732,7 @@
       "id": "core-incremental-opaque-mailbox",
       "paths": [
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
+        "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/opaque_relay/",
         "crates/mesh-talk-core/src/node/session/mailbox.rs",
         "crates/mesh-talk-core/src/node/session/mailbox/",
@@ -2781,6 +2782,10 @@
           },
           {
             "name": "Rotating beyond four heavyweight views preserves bounded completed-upload qualifications; exact current authority and fresh remote destructive identity are checked before skipping history, while explicit event custody still validates current selection and exact remote evidence.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Incremental supplemental controls discover a bounded set once and refresh only the selected identity or consent offer under current authorization; stale queued IDs never send changed payloads and eight real controls require at most sixteen offer checks.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {

@@ -59,6 +59,339 @@ async fn exchange(
 }
 
 #[tokio::test]
+async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
+    use crate::{
+        discovery::Announce, eventlog::sync::network::NetworkSyncStore, file::FileManifest,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let relay_directory = tempfile::tempdir().unwrap();
+    let sender = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&sender, &Account::generate(), "Sender", 47475);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.set_bridge_discovery_enabled(true);
+    node.set_attachment_global_auto(true).unwrap();
+    node.cached_peer_snapshot_async().await.unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&sender.public(), &node.identity.public());
+    for index in 1..=8u8 {
+        let manifest = FileManifest {
+            name: "empty.txt".into(),
+            size: 0,
+            mime: "text/plain".into(),
+            checksum: crate::file::file_checksum(&[]),
+            file_key: [3; 32],
+            file_conv: ConversationId::new([index; 32]),
+            chunk_count: 1,
+        };
+        let original = Event::new(
+            &sender,
+            conversation,
+            u64::from(index),
+            vec![],
+            u64::from(index),
+            1,
+            EventKind::FileManifest,
+            crate::dm::seal(
+                &sender,
+                &node.identity.public().x25519_pub,
+                &manifest.encode(),
+            )
+            .unwrap(),
+        );
+        node.accept_manifest_event(
+            &original,
+            &proof,
+            super::super::received_log::ReceivedEntry {
+                event_id: original.id,
+                conversation,
+                from: sender.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            },
+        )
+        .unwrap();
+    }
+    let expected = node.file_consent_events(&sender.public()).unwrap();
+    assert_eq!(
+        expected.len(),
+        8,
+        "all eight actual controls must be eligible"
+    );
+    let relay = DeviceIdentity::generate();
+    let office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_directory.path()).unwrap(),
+        &relay_directory.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    super::super::file_consent::offered_observations::reset();
+    counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    let checks = super::super::file_consent::offered_observations::count();
+    let mailbox = RelayMailbox::federated(&node.identity, &sender.public()).unwrap();
+    for control in &expected {
+        let wrapper = mailbox.wrap(control).unwrap();
+        assert!(
+            NetworkSyncStore::durable_have(&office, &mailbox.id(), &wrapper.id).unwrap(),
+            "every current signed consent control must reach actual relay custody"
+        );
+    }
+    assert!(
+        (8..=16).contains(&checks),
+        "one discovery of eight offers plus one fresh singleton check per selected control must examine at most sixteen offers, actual={checks}"
+    );
+    let progress = OpaqueMailboxProgress::new(
+        &relay.public(),
+        &sender.public(),
+        Some(conversation),
+        mailbox,
+    );
+    let selected = SelectedOpaqueControl::from_event(&expected[0]).unwrap();
+    assert_eq!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .unwrap()
+            .unwrap()
+            .id,
+        selected.id,
+    );
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| false)
+            .unwrap()
+            .is_none()
+    );
+    node.set_attachment_global_auto(false).unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .unwrap()
+            .is_none(),
+        "a newly signed decision must not be sent under an old queued control ID"
+    );
+    let decision = super::super::file_consent::Decision::open(&expected[0]).unwrap();
+    let replacement = node
+        .file_consent_controls(
+            &sender.public(),
+            &[(decision.file, decision.manifest)],
+            false,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_ne!(replacement.id, selected.id);
+    let replacement = SelectedOpaqueControl::from_event(&replacement).unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &replacement, &|| true)
+            .unwrap()
+            .is_some()
+    );
+    node.delivery
+        .lock()
+        .unwrap()
+        .erase_file(conversation, decision.manifest)
+        .unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &replacement, &|| true)
+            .unwrap()
+            .is_none(),
+        "erasing an offer must revoke its already queued control"
+    );
+    let other_decision = super::super::file_consent::Decision::open(&expected[1]).unwrap();
+    let other = node
+        .file_consent_controls(
+            &sender.public(),
+            &[(other_decision.file, other_decision.manifest)],
+            false,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let other = SelectedOpaqueControl::from_event(&other).unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &other, &|| true)
+            .unwrap()
+            .is_some()
+    );
+    node.configure_privacy(
+        directory.path(),
+        "pw",
+        &node.signed_announce("Local", 47474),
+        std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    let relay_account = Account::generate();
+    let relay_proof = crate::discovery::Announce::new_post_office_with_account(
+        &relay,
+        &relay_account,
+        "Relay",
+        47476,
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&relay_proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_allowed(&relay_account.account_id(), true)
+        .await
+        .unwrap();
+    node.set_allowed(&proof.account_id().unwrap(), true)
+        .await
+        .unwrap();
+    node.set_invisible(true).await.unwrap();
+    assert!(node.relay_send_allowed(&relay.public()));
+    assert!(
+        node.selected_opaque_control(&progress, &other, &|| true)
+            .unwrap()
+            .is_some()
+    );
+    node.set_allowed(&proof.account_id().unwrap(), false)
+        .await
+        .unwrap();
+    assert!(node.relay_send_allowed(&relay.public()));
+    assert!(
+        node.selected_opaque_control(&progress, &other, &|| true)
+            .unwrap()
+            .is_none(),
+        "current account revocation must deny queued controls"
+    );
+}
+
+#[tokio::test]
+async fn incremental_selected_identity_control_rechecks_current_binding() {
+    let directory = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let remote_account = Account::generate();
+    let proof =
+        crate::discovery::Announce::new_with_account(&remote, &remote_account, "Remote", 47475);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    let source = directory.path().join("identity-control.bin");
+    std::fs::write(&source, b"selected identity control").unwrap();
+    let (card, _) = node
+        .enqueue_file_to_account(
+            &remote_account.account_id(),
+            &source,
+            crate::file::FileKind::File,
+        )
+        .await
+        .unwrap();
+    let bundle = node.file_message_identity_bundle(card).unwrap().unwrap();
+    let selected = SelectedOpaqueControl::from_event(&bundle).unwrap();
+    let SelectedOpaqueControlKind::Identity(references) = &selected.kind else {
+        panic!("fixture must exercise the selected identity descriptor branch");
+    };
+    assert!(!references.is_empty());
+    let relay = DeviceIdentity::generate();
+    let mailbox = RelayMailbox::new(&node.identity, &remote.public(), &relay.public()).unwrap();
+    let progress = OpaqueMailboxProgress::new(
+        &relay.public(),
+        &remote.public(),
+        Some(bundle.conversation_id),
+        mailbox,
+    );
+    let current = node
+        .selected_opaque_control(&progress, &selected, &|| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.id, bundle.id);
+    assert_eq!(current.ciphertext, bundle.ciphertext);
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| false)
+            .unwrap()
+            .is_none()
+    );
+
+    node.configure_privacy(
+        directory.path(),
+        "pw",
+        &node.signed_announce("Local", 47474),
+        std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    let relay_account = Account::generate();
+    let relay_proof = crate::discovery::Announce::new_post_office_with_account(
+        &relay,
+        &relay_account,
+        "Relay",
+        47476,
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&relay_proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_allowed(&relay_account.account_id(), true)
+        .await
+        .unwrap();
+    node.set_allowed(&remote_account.account_id(), true)
+        .await
+        .unwrap();
+    node.set_invisible(true).await.unwrap();
+    assert!(node.relay_send_allowed(&relay.public()));
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .unwrap()
+            .is_some()
+    );
+    node.set_allowed(&remote_account.account_id(), false)
+        .await
+        .unwrap();
+    assert!(node.relay_send_allowed(&relay.public()));
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .unwrap()
+            .is_none()
+    );
+    node.set_allowed(&remote_account.account_id(), true)
+        .await
+        .unwrap();
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .unwrap()
+            .is_some()
+    );
+
+    // Every alias must lose its current grant; one surviving alias still authorizes this bundle.
+    for (_, manifest) in references {
+        let parent = node
+            .log
+            .lock()
+            .unwrap()
+            .event_conversation(manifest)
+            .unwrap()
+            .unwrap();
+        node.delivery
+            .lock()
+            .unwrap()
+            .erase_file(parent, *manifest)
+            .unwrap();
+        assert!(node.delivery.lock().unwrap().file_erased(parent, *manifest));
+    }
+    assert!(
+        node.selected_opaque_control(&progress, &selected, &|| true)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn incremental_mailbox_warm_history_does_not_fetch_old_bodies() {
     for count in [32, 128] {
         let directory = tempfile::tempdir().unwrap();

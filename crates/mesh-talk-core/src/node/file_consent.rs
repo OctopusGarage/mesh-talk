@@ -11,6 +11,22 @@ use sha2::{Digest, Sha256};
 const FRAME: &[u8] = b"mesh-talk-file-consent-control-v1\0\0\0\0\0\0\0\0";
 const MAX_BYTES: usize = 1024;
 
+#[cfg(test)]
+pub(super) mod offered_observations {
+    thread_local! {
+        static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub fn reset() {
+        CHECKS.with(|checks| checks.set(0));
+    }
+    pub fn count() -> usize {
+        CHECKS.with(std::cell::Cell::get)
+    }
+    pub(super) fn check() {
+        CHECKS.with(|checks| checks.set(checks.get() + 1));
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Decision {
     pub file: ConversationId,
@@ -173,6 +189,8 @@ impl Node {
         let mut controls = Vec::new();
         let scope = super::conversation::dm_conversation_id(&self.identity.public(), sender);
         for &(file, manifest) in offers {
+            #[cfg(test)]
+            offered_observations::check();
             let parent = self
                 .log
                 .lock()

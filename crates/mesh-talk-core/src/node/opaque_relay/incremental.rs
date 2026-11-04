@@ -107,7 +107,7 @@ pub(super) struct State {
     history_ids: VecDeque<EventId>,
     history_after: i64,
     history_complete: bool,
-    controls: Option<VecDeque<EventId>>,
+    controls: Option<VecDeque<SelectedOpaqueControl>>,
     wrote: bool,
     final_probe: bool,
     remote: Option<RemoteBinding>,
@@ -478,11 +478,16 @@ impl Node {
         }
         if state(p).controls.is_none() {
             let controls = self.opaque_controls(p, current)?;
-            state_mut(p).controls = Some(controls.keys().copied().collect());
+            state_mut(p).controls = Some(
+                controls
+                    .values()
+                    .map(SelectedOpaqueControl::from_event)
+                    .collect::<Result<_, _>>()?,
+            );
         }
-        if let Some(id) = state_mut(p).controls.as_mut().and_then(VecDeque::pop_front)
+        if let Some(selected) = state_mut(p).controls.as_mut().and_then(VecDeque::pop_front)
             && self.upload_permitted(p, current)
-            && let Some(event) = self.opaque_controls(p, current)?.remove(&id)
+            && let Some(event) = self.selected_opaque_control(p, &selected, current)?
             && let Some(outer) = self
                 .send_mailbox_event(channel, p, event, current, false)
                 .await?

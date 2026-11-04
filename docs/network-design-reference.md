@@ -2447,7 +2447,14 @@ turns so other runtime work can progress.
 The node retains at most four scoped views, with at most 16 selected outgoing history
 IDs and 64 recent result hints per exchange. Bodies are fetched and wrapped
 only for selected IDs without confirmed wrapper custody. Supplemental identity
-and consent controls retain their independent bounded selectors.
+and consent controls retain their independent bounded selectors. Incremental
+control queues retain only selected IDs and consent offer references. Before
+sending, resolve the selected identity bundle or single consent offer through
+its current authorization owner and require the event ID to remain unchanged.
+A changed or revoked control is omitted from that queue; the next operation
+rediscovers its replacement. Revalidating one selected control must not rebuild
+every other control in the batch. This selection does not certify an unchanged
+control sweep or replace current send authorization.
 
 Completed upload qualifications are kept in the existing bounded signed
 checkpoint store independently of those four heavyweight views. Rotating through
