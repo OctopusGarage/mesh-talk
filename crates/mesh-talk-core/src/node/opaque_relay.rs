@@ -700,8 +700,9 @@ impl Node {
                     }
                     Ok(false) => {}
                 }
-                // This is transport classification of an exact prior terminal
-                // presentation fact, not a new admission or a custody claim.
+                // Fully authenticated own-device profiles need no presentation;
+                // foreign profiles need an exact prior presentation terminal or
+                // authorized source-retirement fact. Neither certifies custody.
                 // Explicit authenticated dependency repair must install the raw
                 // parent through the original guarded admission below.
                 if event.kind == EventKind::Profile
@@ -709,11 +710,15 @@ impl Node {
                     && event.is_canonical()
                     && event.verify_integrity()
                     && event.verify_signature()
-                    && self
-                        .profile_receive_work
-                        .lock()
-                        .expect("profile receive work")
-                        .processed(event.id)?
+                    && (event.author
+                        == crate::eventlog::event::Author::from_ed25519(
+                            self.identity.public().ed25519_pub,
+                        )
+                        || self
+                            .profile_receive_work
+                            .lock()
+                            .expect("profile receive work")
+                            .processed(event.id)?)
                 {
                     processed.push(outer_id);
                     semantic.push((outer_id, event.id));

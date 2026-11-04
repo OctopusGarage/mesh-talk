@@ -1441,6 +1441,27 @@ impl Node {
             .pending_channel_plaintext
             .lock()
             .expect("channel retry lock");
+        {
+            // Ordinary DMs share this receive callback. Only signed group
+            // controls or a prior local group checkpoint justify channel work.
+            // Keep the source guard through negative demand cleanup so a newly
+            // appended membership cannot lose its queued continuation.
+            let log = self.log.lock().expect("log lock");
+            if !log
+                .repository()?
+                .has_kind(&conv, crate::eventlog::EventKind::MembershipChange)?
+                && !self
+                    .channel_checkpoints
+                    .has_local_channel_checkpoint(conv)?
+            {
+                let more = self.channel_checkpoints.finish_runtime(conv, None)?;
+                pending.lanes.remove(&conv);
+                if more {
+                    self.channel_recovery_notify.notify_one();
+                }
+                return Ok(());
+            }
+        }
         if pending
             .retry_at
             .is_some_and(|deadline| std::time::Instant::now() < deadline)

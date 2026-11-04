@@ -2190,6 +2190,13 @@ with no classified increments; invalid counters fail explicitly. Profile
 publication retires both canonical-order bindings immediately, while existing
 budgeted obsolete-generation maintenance reclaims their ranks and work rows.
 It does not synchronously delete a history-sized derived index.
+The shared profile receive owner records each selected source retirement in that
+same transaction, even if receive discovery has not reached it. The selected
+commit namespace identifies the source account; unresolved legacy ownership
+remains conservative. A failure rolls back retirement evidence with raw deletion.
+Ordinary privacy deletion does not publish this semantic fact. Exact local-device
+Profile signatures also qualify the existing own-presentation exclusion; explicit
+causal-parent recovery still requires ordinary guarded raw admission.
 
 Participant network sync uses `NetworkSyncStore` directly: retained Have and
 export pages bind a finite commit cutoff and destructive generation. Ordinary

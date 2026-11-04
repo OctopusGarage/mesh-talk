@@ -867,6 +867,16 @@ async fn incremental_receive_unknown_profile_with_older_sequence_is_not_suppress
     assert_profile_semantic_replay(3).await;
 }
 
+#[tokio::test]
+async fn incremental_receive_compacted_own_profiles_survive_missing_checkpoint() {
+    assert_profile_semantic_replay(4).await;
+}
+
+#[tokio::test]
+async fn incremental_receive_compacted_undiscovered_profiles_survive_missing_checkpoint() {
+    assert_profile_semantic_replay(5).await;
+}
+
 async fn assert_profile_semantic_replay(mode: u8) {
     use crate::eventlog::sync::network::NetworkSyncStore;
     let directory = tempfile::tempdir().unwrap();
@@ -894,28 +904,60 @@ async fn assert_profile_semantic_replay(mode: u8) {
     let conversation =
         super::super::conversation::dm_conversation_id(&node.identity.public(), &remote.public());
     let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+    if mode == 5 {
+        // A direct synchronization batch can append more than one discovery
+        // page before its single profile reception pass. Keep the profiles
+        // behind one full page of unrelated committed events.
+        let unrelated = ConversationId::new([94; 32]);
+        for revision in 1..=128 {
+            node.log
+                .lock()
+                .unwrap()
+                .append(Event::new(
+                    &remote,
+                    unrelated,
+                    revision,
+                    vec![],
+                    revision,
+                    0,
+                    EventKind::Message,
+                    vec![1],
+                ))
+                .unwrap();
+        }
+    }
     let mut profiles = Vec::new();
     for revision in 1..=12 {
-        let payload = super::super::profile::ProfilePayload::new(&remote_account, None, revision);
+        let (author, author_account, recipient) = if mode == 4 {
+            (&node.identity, &node.account, remote.public())
+        } else {
+            (&remote, &remote_account, node.identity.public())
+        };
+        // Preserve the ordinary maintenance byte threshold despite the backlog.
+        let avatar = (mode == 5).then(|| vec![42; 1024]);
+        let payload = super::super::profile::ProfilePayload::new(author_account, avatar, revision);
         let event = Event::new(
-            &remote,
+            author,
             conversation,
             revision,
             vec![],
             revision,
             0,
             EventKind::Profile,
-            crate::dm::seal(
-                &remote,
-                &node.identity.public().x25519_pub,
-                &payload.encode(),
-            )
-            .unwrap(),
+            crate::dm::seal(author, &recipient.x25519_pub, &payload.encode()).unwrap(),
         );
+        if mode == 4 || mode == 5 {
+            // Model retained historical outgoing profiles or a direct-sync
+            // batch, independently of the optional relay receipt cache.
+            node.log.lock().unwrap().append(event.clone()).unwrap();
+        }
         office.ingest(mailbox.wrap(&event).unwrap()).unwrap();
         profiles.push(event);
     }
     exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    if mode == 4 || mode == 5 {
+        node.process_profile_events(conversation);
+    }
     assert!(
         profiles
             .iter()
@@ -954,7 +996,7 @@ async fn assert_profile_semantic_replay(mode: u8) {
     assert_eq!(retired.len(), 10);
     let replacement_directory = tempfile::tempdir().unwrap();
     match mode {
-        0 => node
+        0 | 4 | 5 => node
             .opaque_receive_cache
             .lock()
             .unwrap()

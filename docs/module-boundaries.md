@@ -1325,8 +1325,11 @@ metadata persisted with the account key. Pairing and recovery preserve it withou
 inferring missing dates. `node/account_profile_data.rs` owns signed bounded
 ordinary profile data and current-profile persistence; `node/account_profile_io.rs`
 owns admitted edits, authenticated reception and legacy compatibility.
-`node/profile_receive_work.rs` owns account-scoped exact receive evidence and
-retry scheduling on the profile's encrypted SQL connection. Discovery advances
+`storage/profile/profile_receive.rs` owns account-scoped exact receive evidence
+and retry scheduling; `node/profile_receive_work.rs` is its compatibility facade.
+The storage owner records exact, account-qualified superseded-source retirement
+inside the authorized compaction transaction, independently of bounded discovery.
+Neither processing nor retirement evidence grants custody. Retry scheduling runs on the profile's encrypted SQL connection. Discovery advances
 through at most 128 committed event headers; each retry pass selects 16 fixed
 metadata rows before loading one signed body at a time. Unknown devices and
 disabled sibling-profile synchronization remain pending. Current-profile writes

@@ -51,6 +51,14 @@ impl EventRepository {
         if count != job.count || bytes != job.bytes {
             return Err(corrupt("maintenance staged counters disagree"));
         }
+        // Bare repository fixtures and relay domains have no participant facts.
+        let profile_receive = match &self.database {
+            RepositoryOwner::Profile(profile) => {
+                profile.ensure_profile_receive_on(c, self.domain)?
+            }
+            #[cfg(test)]
+            RepositoryOwner::Fixture(_) => false,
+        };
         let mut dropped = 0usize;
         while let Some(conv) = select_blob::<32>(
             c,
@@ -72,7 +80,7 @@ impl EventRepository {
             loop {
                 // Release both statement/row lifetimes before any mutation.
                 let candidate = {
-                    let mut stmt=c.prepare("SELECT x.id,x.author,x.estimated_bytes,e.ciphertext_bytes,e.parent_count,e.stored_bytes,e.kind,e.conversation,e.author FROM event_profile_candidates x LEFT JOIN retained_events e ON e.domain=?1 AND e.id=x.id WHERE x.job=?2 AND x.conversation=?3 ORDER BY x.id LIMIT 1")?;
+                    let mut stmt=c.prepare("SELECT x.id,x.author,x.estimated_bytes,e.ciphertext_bytes,e.parent_count,e.stored_bytes,e.kind,e.conversation,e.author,e.commit_ordinal FROM event_profile_candidates x LEFT JOIN retained_events e ON e.domain=?1 AND e.id=x.id WHERE x.job=?2 AND x.conversation=?3 ORDER BY x.id LIMIT 1")?;
                     let mut rows = stmt.query(params![domain, job_id, conv.as_slice()])?;
                     rows.next()?
                         .map(|r| {
@@ -90,11 +98,11 @@ impl EventRepository {
                                     "maintenance candidate disagrees with retained snapshot",
                                 ));
                             }
-                            Ok((id, author, cost, stored))
+                            Ok((id, author, cost, stored, nonnegative(r.get(9)?)?))
                         })
                         .transpose()?
                 };
-                let Some((id, author, cost, body_bytes)) = candidate else {
+                let Some((id, author, cost, body_bytes, commit_ordinal)) = candidate else {
                     break;
                 };
                 let referenced:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM retained_event_parents WHERE domain=?1 AND parent=?2)",params![domain,id.as_slice()],|r|r.get(0))?;
@@ -103,6 +111,20 @@ impl EventRepository {
                 }
                 self.delete_event_edges(c, &id)?;
                 c.execute(DELETE_HEAD, params![domain, conv.as_slice(), id.as_slice()])?;
+                if profile_receive {
+                    match &self.database {
+                        RepositoryOwner::Profile(profile) => profile.record_compacted_on(
+                            c,
+                            self.domain,
+                            EventId::new(id),
+                            commit_ordinal,
+                        )?,
+                        #[cfg(test)]
+                        RepositoryOwner::Fixture(_) => {
+                            unreachable!("fixture has no participant receive work")
+                        }
+                    }
+                }
                 if c.execute(DELETE_EVENT, params![domain, id.as_slice()])? != 1 {
                     return Err(corrupt("maintenance candidate disappeared"));
                 }

@@ -1,6 +1,30 @@
 //! Current metadata access never materializes historical applied/authorized IDs.
 use super::*;
 impl ChannelCheckpointStore {
+    /// Scheduling evidence only. A stale or previous-account checkpoint may
+    /// need replay, but can never supply current membership through this read.
+    pub(in crate::node) fn has_local_channel_checkpoint(
+        &self,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            self.has_local_channel_checkpoint_on(c, channel)
+        })
+    }
+
+    pub(super) fn has_local_channel_checkpoint_on(
+        &self,
+        c: &Connection,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1 AND known_local=1)",
+            [channel.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Frozen history copies do not consume a sender chain. Their validated
     /// release identity still commits with transcript/effect installation.
     pub(in crate::node) fn install_history_receive_on(

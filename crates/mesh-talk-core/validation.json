@@ -1026,7 +1026,10 @@
             "participant_network_canonical_authority_respects_each_preparation_budget",
             "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
             "ancestor_preparation_obeys_caller_work_budget_across_wide_parents",
-            "ancestor_disposable_query_crash_retires_incrementally"
+            "ancestor_disposable_query_crash_retires_incrementally",
+            "ordinary_dm_receive_does_not_schedule_channel_projection",
+            "ordinary_dm_receive_retires_legacy_channel_demand_without_rebuilding_order",
+            "channel_receive_resumes_when_membership_arrives_after_nonchannel_rows"
           ]
         }
       ],
@@ -1057,6 +1060,10 @@
           {
             "name": "Indexed current-state installation preserves the canonical device-local acceptance cutoff and retry ticket without changing current-epoch sender retention or indexed receiver retirement; a fresh invitation clears the former cutoff while pure authority projections retain their separate semantics.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Plaintext recovery schedules only retained membership controls or a known-local checkpoint; ordinary DMs and stale dirty/runtime artifacts cannot create group projections, while delayed membership and existing incomplete groups retain their continuation.",
+            "reference": "docs/network-design-reference.md"
           }
         ]
       },
@@ -1521,7 +1528,8 @@
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_routed_tests.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
-        "crates/mesh-talk-core/src/node/profile_receive_work.rs"
+        "crates/mesh-talk-core/src/node/profile_receive_work.rs",
+        "crates/mesh-talk-core/src/storage/profile/profile_receive.rs"
       ],
       "rust": [
         {
@@ -1545,7 +1553,7 @@
             "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
             "node::account_profile_data::tests::",
             "node::account_profile_io::tests::",
-            "node::profile_receive_work::tests::",
+            "storage::profile::profile_receive::tests::",
             "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
             "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
@@ -1574,7 +1582,7 @@
             "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
             "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
             "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
-            "node::profile_receive_work::tests::",
+            "storage::profile::profile_receive::tests::",
             "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
             "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
@@ -1582,7 +1590,8 @@
         }
       ],
       "escalation": [
-        "Profile publication changes require publishing_profile_projects_newer_sibling_profile_pulled_in_same_round, proving durable import and immediate authenticated projection without a reverse connection. Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
+        "Profile publication changes require publishing_profile_projects_newer_sibling_profile_pulled_in_same_round, proving durable import and immediate authenticated projection without a reverse connection. Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly.",
+        "Superseded Profile retirement requires exact source-account qualification and atomic receive-fact/deletion rollback; old own-device replay, undiscovered foreign replay, missing optional checkpoints and explicit causal-parent recovery must remain covered."
       ],
       "consumers": [
         "desktop-chat",

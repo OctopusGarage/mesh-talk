@@ -970,6 +970,13 @@ Each accepted member controls **Share a copy**. A receiver can obtain its own au
 
 Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules. Source-revision preparation resumes through the existing bounded work and coalesced wake; it does not count as a persistence failure. Actual I/O, database and encrypted-storage failures retain their catch-up provenance and capped exponential plaintext retry schedule.
 
+Channel plaintext recovery requires retained signed membership controls or a prior
+known-local group checkpoint before preparing canonical order. This is scheduling
+evidence, never membership authority. Ordinary DM rows and stale dirty/runtime
+entries do not classify a group. Negative demand cleanup holds the source guard,
+so later membership admission cannot lose its continuation. Existing incomplete
+group work and membership arriving after ordinary rows remain retryable.
+
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
 ```mermaid
@@ -2495,8 +2502,9 @@ existing durability and retry rules. Missing, corrupt, foreign or evicted hints 
 validated synchronization; they never grant admission or recipient delivery.
 
 A page cursor is saved only after every ID is either admitted, supported by
-retained local evidence or an exact account-scoped terminal Profile-processing
-fact, or recorded in the same checkpoint's bounded retry set
+retained local evidence, exact account-scoped terminal Profile-processing or
+authorized superseded-source retirement evidence, the fully verified local-device
+Profile presentation exclusion, or recorded in the same checkpoint's bounded retry set
 of at most 256 IDs. The log is flushed before checkpoint publication. Missing
 causal parents and rejected admission remain retryable; exhaustion fails before
 advancing the page. Uninvited channel ancestry retains the existing 8-MiB
