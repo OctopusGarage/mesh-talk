@@ -334,6 +334,10 @@ pub struct Node {
     pub(in crate::node) account_devices: Mutex<super::account_devices::AccountDevices>,
     pub(in crate::node) account_transitions:
         Mutex<super::account_transition_store::AccountTransitionStore>,
+    #[cfg(test)]
+    pub(in crate::node) inventory_body_validations: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(in crate::node) inventory_live_binding_checks: std::sync::atomic::AtomicUsize,
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
     pub(in crate::node) group_file_prepare_gate: Arc<tokio::sync::Mutex<()>>,
@@ -1277,6 +1281,10 @@ impl Node {
             account,
             account_devices: Mutex::new(account_devices),
             account_transitions: Mutex::new(account_transitions),
+            #[cfg(test)]
+            inventory_body_validations: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            inventory_live_binding_checks: std::sync::atomic::AtomicUsize::new(0),
             account_documents: Mutex::new(account_documents),
             group_file_prepare_gate: Arc::new(tokio::sync::Mutex::new(())),
             group_operation_publication: Mutex::new(()),

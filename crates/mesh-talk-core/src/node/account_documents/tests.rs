@@ -5731,7 +5731,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     }
 }
 
-fn group_inventory_legacy_fixture(
+pub(super) fn group_inventory_legacy_fixture(
     owner: &Node,
     source: &Node,
     name: &str,
@@ -6053,6 +6053,13 @@ async fn group_control_current_account_binding_replacement_revokes_old_owner_obs
     let member = node(&dir.path().join("member"), &account);
     let group = group_inventory_legacy_fixture(&owner, &member, "Binding replacement");
     copy_public_group(&member, &owner, group);
+    let inventory = group_inventory_source_document(&owner, group);
+    member
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(inventory.meta.clone(), inventory.payload())
+        .unwrap();
     let document = group_control_source_document(&owner, group);
     member
         .account_documents
@@ -6081,6 +6088,16 @@ async fn group_control_current_account_binding_replacement_revokes_old_owner_obs
         member.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
     );
+    let warm_inventory = member.group_inventory_references();
+    assert!(
+        warm_inventory
+            .values()
+            .any(|reference| reference.source_device == owner.user_id())
+    );
+    assert_eq!(member.group_inventory_references(), warm_inventory);
+    let live_before_replacement = member
+        .inventory_live_binding_checks
+        .load(std::sync::atomic::Ordering::Relaxed);
     let replacement = Account::generate();
     let secret = owner.identity.secret_bytes();
     let replacement_path = dir.path().join("replacement");
@@ -6120,6 +6137,19 @@ async fn group_control_current_account_binding_replacement_revokes_old_owner_obs
         .accept_account_binding_change_guarded(&change, |commit| commit())
         .await
         .unwrap();
+    let after_replacement = member.group_inventory_references();
+    assert!(
+        after_replacement
+            .values()
+            .all(|reference| reference.source_device != owner.user_id()),
+        "warm intrinsic inventory validation must not preserve replaced account binding"
+    );
+    assert!(
+        member
+            .inventory_live_binding_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > live_before_replacement
+    );
     server.abort();
     let _ = server.await;
     assert_eq!(
@@ -9767,4 +9797,104 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
             |commit| commit(),
         )
         .unwrap();
+}
+
+#[test]
+fn group_inventory_repeated_queries_reuse_intrinsic_validation_but_check_live_binding() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Repeated inventory");
+    let document = group_inventory_source_document(&source, id);
+    let before = source.inventory_body_validations.load(Ordering::Relaxed);
+    let live_before = source.inventory_live_binding_checks.load(Ordering::Relaxed);
+    let first = source.group_inventory_references();
+    assert!(first.contains_key(&hex::encode(id.as_bytes())));
+    for _ in 0..8 {
+        assert_eq!(source.group_inventory_references(), first);
+        source.list_channels().unwrap();
+    }
+    assert_eq!(
+        source.inventory_body_validations.load(Ordering::Relaxed) - before,
+        1,
+        "unchanged document bodies must be decoded and cryptographically validated once"
+    );
+    assert_eq!(
+        source.inventory_live_binding_checks.load(Ordering::Relaxed) - live_before,
+        17,
+        "every query must still check current source binding"
+    );
+    source
+        .account_documents
+        .lock()
+        .unwrap()
+        .remove_blob_for_test(document.meta.content_hash);
+    assert!(
+        source.group_inventory_references().is_empty(),
+        "validated body must not mask a missing or corrupt durable blob"
+    );
+    let healed = group_inventory_source_document(&source, id);
+    assert_eq!(healed.meta, document.meta);
+    assert_eq!(source.group_inventory_references(), first);
+    let mut forged_value: serde_json::Value = serde_json::from_slice(document.payload()).unwrap();
+    forged_value["name"] = serde_json::json!("Forged replacement");
+    let forged_payload = serde_json::to_vec(&forged_value).unwrap();
+    let forged_meta = AccountDocumentMeta::new(
+        &account,
+        source.user_id(),
+        document.meta.key.clone(),
+        document.meta.revision + 1,
+        &forged_payload,
+        false,
+    );
+    assert!(
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(forged_meta, &forged_payload)
+            .is_err(),
+        "warm memo must not accept changed payload with stale directory signature"
+    );
+    assert_eq!(source.group_inventory_references(), first);
+    let tombstone = AccountDocumentMeta::new(
+        &account,
+        source.user_id(),
+        document.meta.key.clone(),
+        document.meta.revision + 1,
+        &[],
+        true,
+    );
+    source
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(tombstone, &[])
+        .unwrap();
+    assert!(
+        source.group_inventory_references().is_empty(),
+        "warm memo must honor signed retraction"
+    );
+    assert!(
+        !source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .unwrap(),
+        "older live body must not resurrect retracted inventory"
+    );
+    assert!(source.group_inventory_references().is_empty());
+    let foreign = node(&dir.path().join("foreign"), &Account::generate());
+    assert!(
+        foreign
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .is_err()
+    );
+    assert!(foreign.group_inventory_references().is_empty());
 }

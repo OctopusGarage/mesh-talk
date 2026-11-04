@@ -585,7 +585,10 @@
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
             "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
             "completed_v5_role_digest_retains_received_epoch_after_source_publication",
-            "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"
+            "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot",
+            "group_inventory_repeated_queries_reuse_intrinsic_validation_but_check_live_binding",
+            "inventory_cache_bounds_replacement_and_oversized_entries",
+            "group_control_current_account_binding_replacement_revokes_old_owner_observation"
           ]
         }
       ],
@@ -611,6 +614,10 @@
           },
           {
             "name": "Negotiated operation patches omit only exactly known nonzero role digests before page limits, complete a normal-operation prefix before loading a following legacy payload, preserve lexical continuations and full-scope authenticated atomic completion, and repair roles or operation heads changed behind a continuation on a fresh scope. Legacy-only pages retain 64 rows and existing byte, worker and deadline bounds. Operation maintenance reuses its existing processed metadata hashes before payload decoding; changed, currently unbound or unfinished foreign inputs retain verification/retry and generic input readers remain complete. A newer authenticated same-device Wake received during or after a failed initial remote-dial attempt may restart that comparison once for an original pending operation without a comparison pair; token identity, partial/parked cooldowns, authentication and local-capacity rules remain unchanged.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Intrinsic inventory validation reuses only exact signed metadata after every durable blob integrity read; bounded decoded caches never replace live account binding checks, retain errors, or survive committed replacement/tombstones.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]

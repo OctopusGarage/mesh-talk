@@ -142,7 +142,21 @@ fn encode_row(
     })
     .map_err(|_| corrupt())
 }
+const MAX_INVENTORY_CACHE_ENTRIES: usize = 128;
+const MAX_INVENTORY_CACHE_BYTES: usize = 2 * 1024 * 1024;
+
+struct InventoryCacheEntry {
+    meta: AccountDocumentMeta,
+    reference: super::inventory::GroupInventoryReference,
+    charge: usize,
+}
+
 pub(in crate::node) struct AccountDocumentStore {
+    // Account-scoped presentation facts only; never memoize live authorization.
+    inventory_cache: BTreeMap<AccountDocumentKey, InventoryCacheEntry>,
+    inventory_cache_bytes: usize,
+    #[cfg(test)]
+    pub(super) inventory_body_validations: usize,
     file: EncryptedRecordLog<Vec<u8>>,
     media: MediaStore,
     current: BTreeMap<AccountDocumentKey, AccountDocumentMeta>,
@@ -289,6 +303,10 @@ impl AccountDocumentStore {
         let journal_bytes =
             INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
         let mut store = Self {
+            inventory_cache: BTreeMap::new(),
+            inventory_cache_bytes: 0,
+            #[cfg(test)]
+            inventory_body_validations: 0,
             file,
             media,
             current: BTreeMap::new(),
@@ -776,6 +794,79 @@ impl AccountDocumentStore {
         self.incomplete.remove(&meta.key);
         self.current.insert(meta.key.clone(), meta);
     }
+    fn remove_inventory_cache(&mut self, key: &AccountDocumentKey) {
+        if let Some(entry) = self.inventory_cache.remove(key) {
+            self.inventory_cache_bytes -= entry.charge;
+        }
+    }
+
+    fn cache_inventory_reference(
+        &mut self,
+        meta: AccountDocumentMeta,
+        reference: super::inventory::GroupInventoryReference,
+        payload_len: usize,
+    ) {
+        self.remove_inventory_cache(&meta.key);
+        // Decoded strings/collections plus their encoded representation, with
+        // serialized metadata and a conservative fixed allocation allowance.
+        let charge = payload_len
+            .saturating_mul(2)
+            .saturating_add(serde_json::to_vec(&meta).map_or(usize::MAX, |bytes| bytes.len()))
+            .saturating_add(1024);
+        if charge > MAX_INVENTORY_CACHE_BYTES {
+            return;
+        }
+        while self.inventory_cache.len() >= MAX_INVENTORY_CACHE_ENTRIES
+            || self.inventory_cache_bytes + charge > MAX_INVENTORY_CACHE_BYTES
+        {
+            let Some(key) = self.inventory_cache.keys().next().cloned() else {
+                break;
+            };
+            self.remove_inventory_cache(&key);
+        }
+        self.inventory_cache_bytes += charge;
+        self.inventory_cache.insert(
+            meta.key.clone(),
+            InventoryCacheEntry {
+                meta,
+                reference,
+                charge,
+            },
+        );
+    }
+
+    pub(super) fn inventory_reference(
+        &mut self,
+        meta: &AccountDocumentMeta,
+    ) -> Option<super::inventory::GroupInventoryReference> {
+        // Always read and verify the durable blob before considering a memo.
+        let document = match self.get(&meta.key) {
+            Ok(Some(document)) if document.meta == *meta => document,
+            _ => {
+                self.remove_inventory_cache(&meta.key);
+                return None;
+            }
+        };
+        if let Some(entry) = self
+            .inventory_cache
+            .get(&meta.key)
+            .filter(|entry| entry.meta == *meta)
+        {
+            return Some(entry.reference.clone());
+        }
+        self.remove_inventory_cache(&meta.key);
+        #[cfg(test)]
+        {
+            self.inventory_body_validations += 1;
+        }
+        let reference = serde_json::from_slice(document.payload()).ok()?;
+        if !super::inventory::valid_reference(meta, &reference) {
+            return None;
+        }
+        self.cache_inventory_reference(meta.clone(), reference.clone(), document.payload().len());
+        Some(reference)
+    }
+
     pub(super) fn get(
         &self,
         key: &AccountDocumentKey,
@@ -1241,6 +1332,7 @@ impl AccountDocumentStore {
             }
             return Err(error);
         }
+        self.remove_inventory_cache(&meta.key);
         self.journal_bytes += bytes.len() + INDEX_FRAME;
         self.records += 1;
         if let Some(control) = super::personal::decode(&meta, payload) {
@@ -1373,6 +1465,93 @@ impl AccountDocumentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inventory_cache_bounds_replacement_and_oversized_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let node = super::super::tests::node(&dir.path().join("node"), &account);
+        let owner = super::super::tests::node(&dir.path().join("owner"), &Account::generate());
+        let group =
+            super::super::tests::group_inventory_legacy_fixture(&owner, &node, "Cache bounds");
+        let document = super::super::tests::group_inventory_source_document(&node, group);
+        let key = document.meta.key.clone();
+        let reference: super::super::inventory::GroupInventoryReference =
+            serde_json::from_slice(document.payload()).unwrap();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        store
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+        assert!(store.inventory_reference(&document.meta).is_some());
+        assert!(store.inventory_reference(&document.meta).is_some());
+        assert_eq!(store.inventory_body_validations, 1);
+        let newer = AccountDocumentMeta::new(
+            &account,
+            node.user_id(),
+            key.clone(),
+            document.meta.revision + 1,
+            document.payload(),
+            false,
+        );
+        store.merge(newer.clone(), document.payload()).unwrap();
+        assert!(store.inventory_cache.is_empty());
+        assert!(store.inventory_reference(&newer).is_some());
+        assert_eq!(store.inventory_body_validations, 2);
+        assert!(
+            store.inventory_reference(&document.meta).is_none(),
+            "stale row metadata cannot use a current cached body"
+        );
+        store.inventory_cache.clear();
+        store.inventory_cache_bytes = 0;
+        for i in 0..MAX_INVENTORY_CACHE_ENTRIES + 1 {
+            let mut meta = document.meta.clone();
+            meta.key = AccountDocumentKey::GroupInventory {
+                channel: format!("{i:064x}"),
+                source_device: node.user_id(),
+            };
+            store.cache_inventory_reference(meta, reference.clone(), document.payload().len());
+        }
+        assert_eq!(store.inventory_cache.len(), MAX_INVENTORY_CACHE_ENTRIES);
+        assert!(store.inventory_cache_bytes <= MAX_INVENTORY_CACHE_BYTES);
+        store.inventory_cache.clear();
+        store.inventory_cache_bytes = 0;
+        // Three individually cacheable entries cannot exceed the aggregate budget.
+        for i in 0..3 {
+            let mut meta = document.meta.clone();
+            meta.key = AccountDocumentKey::GroupInventory {
+                channel: format!("{i:064x}"),
+                source_device: node.user_id(),
+            };
+            store.cache_inventory_reference(meta, reference.clone(), MAX_INVENTORY_CACHE_BYTES / 5);
+        }
+        assert_eq!(store.inventory_cache.len(), 2);
+        assert!(store.inventory_cache_bytes <= MAX_INVENTORY_CACHE_BYTES);
+        let mut replacement = document.meta.clone();
+        store.cache_inventory_reference(replacement.clone(), reference.clone(), 10);
+        replacement.revision += 1;
+        replacement.content_hash = [9; 32];
+        store.cache_inventory_reference(replacement.clone(), reference.clone(), 20);
+        assert_eq!(store.inventory_cache.get(&key).unwrap().meta, replacement);
+        assert_eq!(
+            store.inventory_cache_bytes,
+            store
+                .inventory_cache
+                .values()
+                .map(|entry| entry.charge)
+                .sum::<usize>()
+        );
+        store.cache_inventory_reference(replacement, reference, MAX_INVENTORY_CACHE_BYTES);
+        assert!(!store.inventory_cache.contains_key(&key));
+        assert_eq!(
+            store.inventory_cache_bytes,
+            store
+                .inventory_cache
+                .values()
+                .map(|entry| entry.charge)
+                .sum::<usize>()
+        );
+    }
+
     #[test]
     fn legacy_child_rows_are_negotiated_before_digest_paging_and_share_operation_quota() {
         let dir = tempfile::tempdir().unwrap();

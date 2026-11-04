@@ -977,6 +977,14 @@ entries do not classify a group. Negative demand cleanup holds the source guard,
 so later membership admission cannot lose its continuation. Existing incomplete
 group work and membership arriving after ordinary rows remain retryable.
 
+The account-document store may retain intrinsically validated decoded group
+inventory for at most 128 records and 2 MiB of conservative logical charge.
+Every lookup still reads and integrity-checks the durable blob before comparing
+complete signed metadata. Missing or corrupt data cannot reuse a cached result.
+Replacement and tombstones invalidate the matching entry only after durable
+commit; oversized records remain uncached. Live account binding and permission
+checks run on every query. This cache never supplies current membership authority.
+
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
 ```mermaid
