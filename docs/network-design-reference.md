@@ -2536,7 +2536,12 @@ session owner may retire the oldest such session under capacity pressure, before
 waiting for the listener's connection reservation. At most one retirement is
 pending until the owning server future drops its actual socket and TCP permits.
 No permit is manufactured or released early, and the eight shared/seven directional
-budgets remain unchanged.
+budgets remain unchanged. Admission that is already waiting for a directional or
+shared permit must also observe new inbound idle eligibility and recheck retirement
+pressure. Register that transition before inspecting capacity, retain semaphore
+queue ownership across eligibility wakes, and keep the original single two-second
+admission deadline. An idle transition requests retirement; only actual socket
+owner destruction releases capacity.
 
 Non-consuming readiness ends the idle registration before framed reception starts;
 ready bytes win a simultaneous retirement signal. Handshakes, frame reads and active

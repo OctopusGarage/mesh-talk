@@ -186,7 +186,12 @@ Review fairness across successive turns, not only the batch size. Use the existi
 cursor, coalescing and admission owners; distinguish independent lanes where
 needed. Failed publication must not indefinitely prevent later eligible work.
 Recheck conditions with the synchronization primitive's correct waiter protocol;
-a notification alone is not the durable condition. Preserve startup, wake,
+a notification alone is not the durable condition. Admission must observe both
+permit release and transitions that make retained resources reclaimable. A one-time
+pressure check can miss a busy connection becoming idle after the waiter starts.
+The [session pool](../crates/mesh-talk-core/src/node/session_pool.rs) owns this
+handoff: idle eligibility requests retirement, while the actual connection keeps
+its permits until destruction. Preserve startup, wake,
 shutdown and missed-notification recovery behavior.
 
 Keep independent reasons for continuing work separate. A worker can finish a

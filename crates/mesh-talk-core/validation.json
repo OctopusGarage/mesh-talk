@@ -520,7 +520,7 @@
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
-            "name": "Only completed reusable account sessions may retire under listener/shared pressure: one oldest-idle retirement remains pending until the owner drops real socket permits; ready frames, handshakes and active responses remain protected under unchanged eight shared/seven directional slots and the existing enclosing idle deadline.",
+            "name": "Only completed reusable account sessions may retire under listener/shared pressure: pending directional/shared admission observes new idle eligibility without losing its semaphore queue position or extending its original deadline; one oldest-idle retirement remains pending until the owner drops real socket permits; ready frames, handshakes and active responses remain protected under unchanged eight shared/seven directional slots and the existing enclosing idle deadline.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
