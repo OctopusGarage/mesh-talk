@@ -1685,10 +1685,11 @@ The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
-runs the nine exact critical recovery regressions from that same sealed,
+runs the ten exact critical recovery regressions from that same sealed,
 extracted archive: notification-only gossip, held-request and archive-readiness
 self controls, independent merged forwarding, storage-rollback replay, actual
-role-GC physical progress and the three authenticated custody setup controls.
+role-GC physical progress, the three authenticated custody setup controls and
+profile compaction with a held admitted writer.
 Every named case must execute exactly once, serially,
 with zero retries. Missing, duplicate, ignored or failed results reject the probe.
 Its bounded raw logs retain source/run/attempt identity and upload on failure. Diagnostic
@@ -1757,6 +1758,16 @@ helper paths, default ignored case, clean source, offline LCOV and captured timi
 exercise the same helper. Run its tests with the pinned nextest/coverage tools and
 LLVM tools matching rustc; portable Health does not install those tools.
 
+The CLI profile-compaction loopback must close runtime admission, abort and join
+its accept owner, clear sessions and drain actual admitted work before exclusive
+profile close/reopen. Parent cancellation does not stop a running blocking writer.
+Hold the real accept-loop expiry writer through parent join: its drain must remain
+Pending until that same writer is released, then exclusive close and exact
+persisted message/profile assertions must succeed. Release the hold and perform
+this cleanup on every body failure; preserve the original panic and retain the
+fixture directory if retirement cannot be verified. Existing delivery and
+compaction deadlines remain unchanged.
+
 AddressSanitizer and LeakSanitizer retain the complete default core-library
 inventory and instrumented standard library across four independent Linux
 partitions. Each runner executes one test at a time with no retries. The exact
@@ -1772,8 +1783,11 @@ source/run/attempt/shard artifact names, matching compiler/config identities,
 identical full inventories, and a disjoint exhaustive selected union. It
 revalidates each successful execution and the raw clean/error smoke channels;
 missing, altered, stale, failed or partial evidence cannot certify acceptance.
-Default ignored cases retain their original policy. A failed shard stops at its
-first failing case while independent shards continue. Build-cache publication
+Default ignored cases retain their original policy. A failed shard continues its remaining selected cases with zero retries while
+independent shards also continue; every failure still rejects the entire shard
+and prevents its acceptance receipt. A real first-case failure followed by
+all later selected cases proves complete collection without success laundering.
+Build-cache publication
 remains main-only.
 
 `scripts/ci/asan-cli.test.mjs` uses the pinned Nextest with an already installed

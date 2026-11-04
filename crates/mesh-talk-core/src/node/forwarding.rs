@@ -603,7 +603,21 @@ impl Node {
                             let local_execution = {
                                 let book = self.channels.lock().expect("channels lock");
                                 match book.state(&group) {
-                                    Some(state) => self.channel_identity_is_current(state)?,
+                                    Some(state) => match self.channel_identity_is_current(state) {
+                                        Ok(current) => current,
+                                        // A dirty projection is not a revoked physical grant.
+                                        // Let the existing send owner prepare and revalidate
+                                        // this candidate under its membership commit guard.
+                                        Err(LogError::StaleCursor)
+                                            if state.is_accepted_member(&self.user_id())
+                                                && state
+                                                    .members()
+                                                    .contains(&self.identity.public()) =>
+                                        {
+                                            true
+                                        }
+                                        Err(error) => return Err(error.into()),
+                                    },
                                     None => false,
                                 }
                             };

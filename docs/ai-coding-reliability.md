@@ -226,6 +226,14 @@ entry. Revalidate through the existing atomic commit seam before side effects
 and before publishing private results. Treat frontend generation guards as UI
 ownership, not host authorization. Read commands can expose stale private data too.
 
+A routing or capability preview must not become a second admission owner. When
+the canonical reader reports a typed stale projection, preserve its existing
+bounded preparation path before deciding authorization. Any cached local candidate
+still needs full identity and current authority checks at the real commit seam.
+The [forwarding owner](message-forwarding.md#source-admission-and-lifecycle) tests a
+signed rename that needs preparation, plus dissolution and same-user/different-key
+controls that must never produce a message or send receipt.
+
 Account for reentrant store subscribers and callbacks that can retire an owner
 synchronously during publication. Lock once when combining sensitive proof and
 revision checks. If a guard must be released around preparation, reacquire it and

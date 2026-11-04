@@ -1531,6 +1531,8 @@
             "node::account_profile_io::tests::",
             "node::profile_receive_work::tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::runtime_work::tests::",
+            "node::runtime::retirement_tests::retirement_joins_actual_expiry_writer_before_profile_reopen",
             "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         },
@@ -1559,6 +1561,8 @@
             "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
             "node::profile_receive_work::tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::runtime_work::tests::",
+            "node::runtime::retirement_tests::retirement_joins_actual_expiry_writer_before_profile_reopen",
             "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         }
@@ -2381,6 +2385,10 @@
           {
             "name": "Read-only batch listing projects retained committed and pending receipts without rereading source content, advancing query nonces, notifying network work or admitting operations; the existing writer reconciles terminal progress before batch retirement",
             "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "A typed stale local routing projection with cached accepted full identity reaches the existing bounded send preparation; current departure, dissolution and complete identity are revalidated at commit, while other errors and current delegated routing retain their semantics",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
           },
           {
             "name": "Unauthorized group legs reject before file restaging or network admission while preserving accepted and pending legs; canonical source policy and current runtime authority are rechecked inside admission",

@@ -273,6 +273,7 @@ export const criticalRecoveryProbeCases = Object.freeze([
   "node::account_documents::tests::custody_channel_setup_waits_for_post_create_authenticated_inventory",
   "node::account_documents::tests::custody_channel_setup_waits_for_same_lane_dm_recall_baseline",
   "node::account_documents::tests::custody_channel_setup_does_not_wait_for_independent_directory",
+  "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
 ]);
 export function criticalRecoveryProbeEnabled(env = process.env) {
   const value = env.MESH_WINDOWS_CRITICAL_RECOVERY_PROBE;

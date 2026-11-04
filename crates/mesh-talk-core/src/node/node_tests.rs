@@ -11072,6 +11072,7 @@ async fn account_history_backfills_to_a_linked_device() {
 // The CLI runs Node directly; its accept loop must also maintain the durable log.
 #[tokio::test]
 async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
+    use futures_util::FutureExt;
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let bob_keys = bob.secret_bytes();
@@ -11160,46 +11161,104 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
             )
             .unwrap();
     }
+    // Hold an actual admitted blocking writer across parent cancellation. A
+    // joined accept future alone must never authorize exclusive profile close.
+    let (expiry_entered, expiry_started) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let mut release = Some(release);
+    let released = Mutex::new(released);
+    *bob_node.expiry_cleanup_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = expiry_entered.send(());
+        let _ = released.lock().unwrap().recv();
+    }));
     let accept = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
-    let peer = alice_node.roster.lock().unwrap().peers()[0].clone();
-    alice_node.deliver_direct(&peer, conv).await.unwrap();
-    let received = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(received.text, b"keep me");
-    let compacted = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if bob_node
-                .log
-                .lock()
-                .unwrap()
-                .conversation_len(&conv)
-                .unwrap()
-                == 3
-            {
-                break;
+    let observed = std::panic::AssertUnwindSafe(async {
+        let peer = alice_node.roster.lock().unwrap().peers()[0].clone();
+        alice_node.deliver_direct(&peer, conv).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.text, b"keep me");
+        let compacted = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if bob_node
+                    .log
+                    .lock()
+                    .unwrap()
+                    .conversation_len(&conv)
+                    .unwrap()
+                    == 3
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        })
+        .await;
+        assert!(
+            compacted.is_ok(),
+            "the CLI accept loop must reclaim superseded profiles"
+        );
+        assert_eq!(
+            bob_node
+                .peer_avatar(&alice_node.account.account_id())
+                .unwrap(),
+            Some(vec![9])
+        );
+        // The live indexed writer remains usable after incremental compaction.
+        bob_node
+            .append_event(conv, EventKind::Message, b"after compaction".to_vec())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), expiry_started)
+            .await
+            .expect("the actual accept-loop expiry writer must reach its hold")
+            .unwrap();
+    })
+    .catch_unwind()
+    .await;
+
+    // Retire producers and their captured work on success and on body failure.
+    // Dropping the sender releases the writer even when an earlier assertion
+    // failed; a failed retirement keeps the fixture directory for live work.
+    alice_node.runtime_work.close();
+    bob_node.runtime_work.close();
+    accept.abort();
+    let accept_retired = match accept.await {
+        Ok(()) => true,
+        Err(error) => error.is_cancelled(),
+    };
+    alice_node.sessions.clear();
+    bob_node.sessions.clear();
+    let mut bob_draining = Box::pin(bob_node.runtime_work.drain());
+    let held_writer_blocks_retirement =
+        observed.is_err() || futures_util::poll!(bob_draining.as_mut()).is_pending();
+    drop(release.take());
+    let retirement = tokio::time::timeout(Duration::from_secs(5), async {
+        bob_draining.as_mut().await;
+        alice_node.runtime_work.drain().await;
     })
     .await;
-    accept.abort();
-    let _ = accept.await;
+    drop(bob_draining);
+    if retirement.is_err() {
+        let retained = dir.keep();
+        eprintln!(
+            "profile fixture retained for unverified retirement: {}",
+            retained.display()
+        );
+        if let Err(panic) = observed {
+            std::panic::resume_unwind(panic);
+        }
+        panic!("profile fixture admitted work did not retire");
+    }
+    if let Err(panic) = observed {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(accept_retired, "the actual accept-loop owner must join");
     assert!(
-        compacted.is_ok(),
-        "the CLI accept loop must reclaim superseded profiles"
+        held_writer_blocks_retirement,
+        "a joined parent must not retire its still-held blocking writer"
     );
-    assert_eq!(
-        bob_node
-            .peer_avatar(&alice_node.account.account_id())
-            .unwrap(),
-        Some(vec![9])
-    );
-    // The live indexed writer remains usable after incremental compaction.
-    bob_node
-        .append_event(conv, EventKind::Message, b"after compaction".to_vec())
-        .unwrap();
     let roster = bob_node.roster.clone();
     bob_node.close_profile().unwrap();
     let reopened = Node::open(

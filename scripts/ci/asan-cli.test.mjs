@@ -54,7 +54,7 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   copyFileSync(new URL("../../.config/nextest-asan.toml", import.meta.url), path.join(root, ".config/nextest-asan.toml"));
   writeFileSync(path.join(root, "Cargo.toml"), '[package]\nname="asan-protocol-fixture"\nversion="0.0.0"\nedition="2024"\n[workspace]\n');
   writeFileSync(path.join(root, "Cargo.lock"), 'version = 4\n[[package]]\nname = "asan-protocol-fixture"\nversion = "0.0.0"\n');
-  const cases = Array.from({ length: 32 }, (_, index) => `#[test] fn case_${index}() { assert!(std::env::var_os("MESH_ASAN_PROTOCOL_FAIL").is_none(), "intentional protocol failure"); assert_eq!(std::env::var("RUST_TEST_THREADS").unwrap(), "1"); assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some()); }`).join("\n");
+  const cases = Array.from({ length: 32 }, (_, index) => `#[test] fn case_${index}() { if let Some(path) = std::env::var_os("MESH_ASAN_PROTOCOL_FAIL") { match std::fs::OpenOptions::new().write(true).create_new(true).open(path) { Ok(_) => panic!("intentional protocol failure"), Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (), Err(error) => panic!("failure sentinel: {error}") } } assert_eq!(std::env::var("RUST_TEST_THREADS").unwrap(), "1"); assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some()); }`).join("\n");
   writeFileSync(path.join(root, "src/lib.rs"), `${cases}\n#[test] #[ignore] fn ignored() { panic!("default ignored cases must not run"); }\n`);
   // --lib must not silently expand into bin/integration targets.
   writeFileSync(path.join(root, "tests/must_not_run.rs"), '#[test] fn integration() { panic!("ASan is core lib only"); }\n');
@@ -70,11 +70,24 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   const accepted = run("run");
   assert.equal(accepted.status, 0, `${accepted.error ?? ""}\n${accepted.stdout}\n${accepted.stderr}`);
   assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 33, executedTests: 32, ignoredTests: 1, shards: 4 });
-  const failed = run("fail", { ...env, MESH_ASAN_PROTOCOL_FAIL: "1" });
+  const failed = run("fail", { ...env, MESH_ASAN_PROTOCOL_FAIL: path.join(root, "first-failure.sentinel") });
   assert.equal(failed.status, 1, `${failed.error ?? ""}\n${failed.stderr}`);
   assert.match(failed.stderr, /failed: 100/u);
   assert(!existsSync(path.join(root, "failed/receipt.json")));
-  assert.match(readFileSync(path.join(root, "failed/execution.jsonl"), "utf8"), /"event":"failed"/u);
+  const selected = JSON.parse(readFileSync(path.join(root, "failed/selected.json"))).filter(row => row.selected);
+  assert.ok(selected.length > 1, "the control needs later selected cases");
+  const allEvents = readFileSync(path.join(root, "failed/execution.jsonl"), "utf8").trim().split(/\r?\n/u).map(JSON.parse).filter(event => event.type === "test");
+  const ignored = new Set(JSON.parse(readFileSync(path.join(root, "failed/full.json"))).filter(row => row.ignored).map(row => row.eventName));
+  assert.ok(allEvents.filter(event => ignored.has(event.name)).every(event => ["started", "ignored"].includes(event.event)), "default-ignored cases must remain unexecuted");
+  const events = allEvents.filter(event => !ignored.has(event.name));
+  const expected = selected.map(row => row.eventName).sort();
+  assert.deepEqual(events.filter(event => event.event === "started").map(event => event.name).sort(), expected, "every selected case must start exactly once after an earlier failure");
+  const terminal = events.filter(event => ["ok", "failed"].includes(event.event));
+  assert.deepEqual(terminal.map(event => event.name).sort(), expected, "failure collection must finish the complete selected partition");
+  assert.equal(terminal.filter(event => event.event === "failed").length, 1);
+  assert.equal(terminal.filter(event => event.event === "ok").length, selected.length - 1);
+  const firstFailure = terminal.findIndex(event => event.event === "failed");
+  assert.ok(terminal.slice(firstFailure + 1).some(event => event.event === "ok"), "a real selected case must complete after the first failure");
   const changed = run("changed");
   assert.equal(changed.status, 1);
   assert.match(changed.stderr, /final identity changed/u);
