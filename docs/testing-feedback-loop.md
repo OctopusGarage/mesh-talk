@@ -601,10 +601,13 @@ Appearance policy write. The negative control first establishes actual Owner
 access and equal signed source/receiver inventory inside the existing cold setup
 watchdog. It then measures a real display-name publication under the original
 five seconds, retaining the normal durable preference and self-history triggers.
-Hold only a strictly newer signed header for that same source key. Require its
-version to match the first actual new source floor and changed member label,
-with the hook task still alive and the receiver retaining exactly the old
-baseline. At setup, require actual public Owner access and capture the received
+Hold only strictly newer signed headers for that same source key. Retain the
+first actual new source floor and changed member label. A bounded registry of
+all actual server-hook holders must contain a live, same-peer/account/key/writer
+header at least as new as that floor, with the hold gate still armed and the
+receiver retaining exactly the old baseline. Prune only retired holders and
+fail closed on overflow. A later request's retirement or a valid superseding
+source head cannot erase an earlier qualifying live response. At setup, require actual public Owner access and capture the received
 source's validated signed GroupControl grant. At the held cutoff, independently
 require a current, signed Owner grant for the same group, source/account and
 physical owner binding. Do not require the old MembershipLifetime: normal

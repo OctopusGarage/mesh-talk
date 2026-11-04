@@ -3259,6 +3259,141 @@ async fn held_inventory_owner_evidence_rejects_signed_terminal_unavailable_and_u
     ));
 }
 
+// These witnesses belong to actual server header-hook futures, not client tasks.
+// A newer overlapping response must not erase an older still-live withheld header.
+#[derive(Default)]
+struct HeldInventoryHeaders {
+    holders: Vec<(
+        crate::identity::device::PublicIdentity,
+        crate::node::AccountDocumentMeta,
+        std::sync::Weak<()>,
+    )>,
+    overflowed: bool,
+}
+
+impl HeldInventoryHeaders {
+    fn record(
+        &mut self,
+        peer: crate::identity::device::PublicIdentity,
+        meta: crate::node::AccountDocumentMeta,
+    ) -> Arc<()> {
+        self.holders.retain(|(_, _, task)| task.strong_count() > 0);
+        let task = Arc::new(());
+        if self.holders.len() == 64 {
+            self.overflowed = true;
+        } else {
+            self.holders.push((peer, meta, Arc::downgrade(&task)));
+        }
+        task
+    }
+
+    fn qualifying_live_count(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        account: &[u8; 32],
+        key: &crate::node::AccountDocumentKey,
+        floor: &crate::node::DocumentVersion,
+    ) -> usize {
+        self.holders.iter().filter(|(actual, meta, task)| {
+            task.strong_count() > 0 && actual == peer && meta.account_public == *account
+                && meta.key == *key && !meta.tombstone
+                && matches!(key, crate::node::AccountDocumentKey::GroupInventory { source_device, .. } if *source_device == meta.writer_device)
+                && (meta.revision, &meta.writer_device, &meta.content_hash) >= (floor.revision, &floor.writer_device, &floor.content_hash)
+        }).count()
+    }
+
+    fn holds(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        account: &[u8; 32],
+        key: &crate::node::AccountDocumentKey,
+        floor: &crate::node::DocumentVersion,
+        released: bool,
+    ) -> bool {
+        !released && !self.overflowed && self.qualifying_live_count(peer, account, key, floor) > 0
+    }
+}
+
+#[tokio::test]
+async fn held_inventory_headers_preserve_live_overlaps_and_reject_unqualified_holds() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let channel = source
+        .create_channel("Held inventory witnesses", vec![])
+        .await
+        .unwrap();
+    source.prepare_account_group_fanout(channel).await.unwrap();
+    let key = crate::node::AccountDocumentKey::GroupInventory {
+        channel: hex::encode(channel.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let first = source.account_document_meta(&key).unwrap();
+    source
+        .set_profile_display_name("A real superseding inventory label")
+        .unwrap();
+    source.prepare_account_group_fanout(channel).await.unwrap();
+    let next = source.account_document_meta(&key).unwrap();
+    assert!(
+        (next.revision, &next.writer_device, &next.content_hash)
+            > (first.revision, &first.writer_device, &first.content_hash)
+    );
+    let peer = receiver.identity.public();
+    let account = source.account.public().ed25519_pub;
+    let mut held = HeldInventoryHeaders::default();
+    let first_task = held.record(peer.clone(), first.clone());
+    let latest_task = held.record(peer.clone(), next.clone());
+    assert!(held.holds(&peer, &account, &key, &first.version(), false));
+    assert!(held.holds(&peer, &account, &key, &next.version(), false));
+    drop(latest_task);
+    assert!(
+        held.holds(&peer, &account, &key, &first.version(), false),
+        "latest retirement must not erase a live qualifying predecessor"
+    );
+    assert!(
+        !held.holds(&peer, &account, &key, &next.version(), false),
+        "a stale head cannot meet a newer floor"
+    );
+    assert!(!held.holds(
+        &source.identity.public(),
+        &account,
+        &key,
+        &first.version(),
+        false
+    ));
+    assert!(!held.holds(&peer, &[0; 32], &key, &first.version(), false));
+    let other = source
+        .create_channel("Other real inventory", vec![])
+        .await
+        .unwrap();
+    source.prepare_account_group_fanout(other).await.unwrap();
+    let other_key = crate::node::AccountDocumentKey::GroupInventory {
+        channel: hex::encode(other.as_bytes()),
+        source_device: source.user_id(),
+    };
+    assert!(!held.holds(&peer, &account, &other_key, &first.version(), false));
+    assert!(!held.holds(&peer, &account, &key, &first.version(), true));
+    drop(first_task);
+    assert!(!held.holds(&peer, &account, &key, &first.version(), false));
+    let superseding_task = held.record(peer.clone(), next.clone());
+    assert!(
+        held.holds(&peer, &account, &key, &first.version(), false),
+        "a live superseding signed head also withholds the first fresh floor"
+    );
+    drop(superseding_task);
+    // Retired records are pruned, but an impossible number of live responses
+    // invalidates the oracle rather than silently discarding a live witness.
+    for _ in 0..65 {
+        drop(held.record(peer.clone(), first.clone()));
+    }
+    assert_eq!(held.holders.len(), 1);
+    let tasks: Vec<_> = (0..65)
+        .map(|_| held.record(peer.clone(), first.clone()))
+        .collect();
+    assert_eq!(held.holders.len(), 64);
+    assert!(held.overflowed);
+    assert!(!held.holds(&peer, &account, &key, &first.version(), false));
+    drop(tasks);
+}
+
 async fn mandatory_account_wake_case(hold_inventory: bool) {
     use futures_util::FutureExt;
     #[derive(Default)]
@@ -3269,8 +3404,7 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
         first_header_ms: Option<u128>,
         last_header_ms: Option<u128>,
         last_complete_ms: Option<u128>,
-        held: bool,
-        held_task: Option<std::sync::Weak<()>>,
+        held_headers: HeldInventoryHeaders,
         baseline: Option<crate::node::DocumentVersion>,
         held_version: Option<crate::node::DocumentVersion>,
     }
@@ -3348,11 +3482,9 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                                             )
                                     })
                                 {
-                                    wire.held = true;
                                     wire.held_version = Some(meta.version());
-                                    let task = Arc::new(());
-                                    wire.held_task = Some(Arc::downgrade(&task));
-                                    held_task = Some(task);
+                                    held_task =
+                                        Some(wire.held_headers.record(actual.clone(), meta));
                                 }
                             }
                         }
@@ -3688,17 +3820,42 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
     .catch_unwind()
     .await;
     // Snapshot the negative qualification while the real header is still held.
-    let exact_header_held = {
+    let (exact_header_held, held_header_components) = {
         let wire = inventory_wire.lock().unwrap();
-        wire.held
-            && wire
-                .held_task
-                .as_ref()
-                .is_some_and(|task| task.strong_count() > 0)
-            && !inventory_release.is_closed()
-            && wire.key.is_some()
-            && wire.key == source_inventory_key
-            && wire.held_version == source_floor
+        let released = inventory_release.is_closed();
+        let live = wire
+            .held_headers
+            .holders
+            .iter()
+            .filter(|(_, _, task)| task.strong_count() > 0)
+            .count();
+        let qualified = source_inventory_key
+            .as_ref()
+            .zip(source_floor.as_ref())
+            .map_or(0, |(key, floor)| {
+                wire.held_headers.qualifying_live_count(
+                    &receiver.identity.public(),
+                    &source.account.public().ed25519_pub,
+                    key,
+                    floor,
+                )
+            });
+        let held = source_inventory_key
+            .as_ref()
+            .zip(source_floor.as_ref())
+            .is_some_and(|(key, floor)| {
+                wire.held_headers.holds(
+                    &receiver.identity.public(),
+                    &source.account.public().ed25519_pub,
+                    key,
+                    floor,
+                    released,
+                )
+            });
+        (
+            held,
+            (!released, !wire.held_headers.overflowed, live, qualified),
+        )
     };
     let retained_owner_control = if hold_inventory {
         observed_channel
@@ -3806,12 +3963,13 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                 wire.last_header_ms,
                 wire.last_complete_ms,
                 exact_header_held,
+                held_header_components,
                 wire.baseline.clone(),
                 wire.held_version.clone(),
             )
         };
         eprintln!(
-            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} live_access={live_access:?} retained_signed_owner={retained_owner_valid} owner_grant_checks={owner_grant_checks:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?} publication_phases={publication_phases:?} source_floor_ms={source_floor_ms:?} receiver_head_ms={receiver_head_ms:?} inventory_wire(headers,completes,first_header_ms,last_header_ms,last_complete_ms,held_exact,baseline,held_version)={inventory_wire:?}",
+            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} live_access={live_access:?} retained_signed_owner={retained_owner_valid} owner_grant_checks={owner_grant_checks:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?} publication_phases={publication_phases:?} source_floor_ms={source_floor_ms:?} receiver_head_ms={receiver_head_ms:?} inventory_wire(headers,completes,first_header_ms,last_header_ms,last_complete_ms,held_exact,(armed,bounded,live,qualifying),baseline,held_version)={inventory_wire:?}",
             started.elapsed().as_millis()
         );
     }

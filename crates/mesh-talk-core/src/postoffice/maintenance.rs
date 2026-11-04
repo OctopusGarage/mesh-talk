@@ -17,7 +17,8 @@ use tokio::sync::watch;
 #[cfg(test)]
 thread_local! {
 static PHYSICAL_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-static SLICE_TIMES: std::cell::RefCell<Vec<(Instant,Instant)>> = const { std::cell::RefCell::new(Vec::new()) };}
+static SLICE_TIMES: std::cell::RefCell<Vec<(Instant,Instant)>> = const { std::cell::RefCell::new(Vec::new()) };
+static LAST_DUTY_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>> = const { std::cell::Cell::new(None) };}
 
 const MIN_SPACING: Duration = Duration::from_millis(10);
 fn pause_for(elapsed: Duration, failures: u32) -> Duration {
@@ -244,10 +245,14 @@ impl IndexedPostOffice {
             };
             // Self-notifications never bypass pacing. Cancellation alone can
             // interrupt the spacing/duty/error-backoff gate.
+            let duty = tokio::time::sleep(pause_for(started.elapsed(), failures));
+            #[cfg(test)]
+            LAST_DUTY_DEADLINE.with(|deadline| deadline.set(Some(duty.deadline())));
+            tokio::pin!(duty);
             tokio::select! {
                 biased;
                 result = stop.changed() => { if result.is_err() || *stop.borrow() { return Ok(()); } }
-                _ = tokio::time::sleep(pause_for(started.elapsed(),failures)) => {}
+                _ = &mut duty => {}
             }
             if pending {
                 continue;
@@ -1393,19 +1398,47 @@ mod tests {
             let view = office.open_view(&event.conversation_id).unwrap();
             assert!(office.metadata(&view).unwrap().fingerprint.is_none());
             drop(view);
-            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(349))=>{}}
-            let attempts = ARCHIVE_ATTEMPTS.with(|v| v.borrow().clone());
-            assert!(
-                (2..=3).contains(&attempts.len()),
-                "persistent archive failure must back off, observed {} real checkpoint attempts",
-                attempts.len()
-            );
-            for (index, pair) in attempts.windows(2).enumerate() {
+            // Real synchronous work sets the duty pause, even with Tokio's
+            // clock paused. Await actual retry and healthy-work progress rather
+            // than assuming a fixed 350 ms contains multiple maintenance slices.
+            let observation_limit = tokio::time::Instant::now() + Duration::from_secs(10);
+            let next_eligible = loop {
+                let attempts = ARCHIVE_ATTEMPTS.with(|v| v.borrow().clone());
+                for (index, pair) in attempts.windows(2).enumerate() {
+                    let pause = pause_for(Duration::ZERO, (index + 1) as u32);
+                    assert!(
+                        pair[1] - pair[0] >= pause,
+                        "archive backoff must grow independently of healthy wakes"
+                    );
+                }
+                let healthy = scalar(&office, "SELECT count(*) FROM relay_import_events") == 0
+                    && scalar(&office, "SELECT staging_pending FROM relay_publication") == 0
+                    && scalar(&office, "SELECT session_rows FROM relay_federation_runtime") == 0
+                    && scalar(&office, "SELECT staged_rows FROM relay_federation_runtime") == 0
+                    && {
+                        let view = office.open_view(&event.conversation_id).unwrap();
+                        office.metadata(&view).unwrap().fingerprint.is_some()
+                    };
+                if attempts.len() >= 3 && healthy {
+                    let eligible = *attempts.last().unwrap()
+                        + pause_for(Duration::ZERO, attempts.len() as u32);
+                    let duty = LAST_DUTY_DEADLINE.with(|deadline| deadline.get());
+                    // Without this independent window, slow duty pacing could
+                    // mask a removed archive-error backoff and falsely pass.
+                    if duty.is_some_and(|deadline| deadline + MIN_SPACING < eligible)
+                        && tokio::time::Instant::now() + MIN_SPACING < eligible
+                    {
+                        break eligible;
+                    }
+                }
+                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
                 assert!(
-                    pair[1] - pair[0] >= Duration::from_millis(100u64 << index),
-                    "archive backoff must grow independently of healthy wakes"
+                    tokio::time::Instant::now() < observation_limit,
+                    "actual retry, healthy-work completion and independent archive-backoff window must be observed within the existing watchdog; attempts={} duty={:?}",
+                    attempts.len(),
+                    LAST_DUTY_DEADLINE.with(|deadline| deadline.get())
                 );
-            }
+            };
             assert_eq!(
                 scalar(&office, "SELECT count(*) FROM archive_diagnostic_writes"),
                 1,
@@ -1431,22 +1464,6 @@ mod tests {
             assert!(office.metadata(&view).unwrap().fingerprint.is_some());
             drop(view);
             assert!(owned.iter().all(|p| p.exists()));
-            // Observe a fresh failed attempt before recovery. Measured duty can
-            // delay the third attempt beyond the initial 350 ms observation.
-            // Anchor the no-bypass proof to actual eligibility, not wall timing.
-            let observation_limit = tokio::time::Instant::now() + Duration::from_secs(10);
-            while ARCHIVE_ATTEMPTS.with(|v| v.borrow().len()) < 3 {
-                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
-                assert!(tokio::time::Instant::now() < observation_limit);
-            }
-            let attempts = ARCHIVE_ATTEMPTS.with(|v| v.borrow().clone());
-            assert_eq!(attempts.len(), 3);
-            for (index, pair) in attempts.windows(2).enumerate() {
-                assert!(pair[1] - pair[0] >= Duration::from_millis(100u64 << index));
-            }
-            // The independent contract requires 400 ms after failure three.
-            let next_eligible = *attempts.last().unwrap() + Duration::from_millis(400);
-            assert!(next_eligible > tokio::time::Instant::now() + MIN_SPACING);
             reader
                 .read(|c| {
                     c.execute_batch("ROLLBACK")?;
@@ -1455,6 +1472,12 @@ mod tests {
                 .unwrap();
             drop(reader);
             let before = ARCHIVE_ATTEMPTS.with(|v| v.borrow().len());
+            // A real healthy wake must be serviced after the duty pause, while
+            // the separate archive gate still forbids another checkpoint.
+            office
+                .state
+                .request_preparation_at(super::super::network::unix_now())
+                .unwrap();
             tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(next_eligible - MIN_SPACING)=>{}}
             assert_eq!(
                 ARCHIVE_ATTEMPTS.with(|v| v.borrow().len()),
