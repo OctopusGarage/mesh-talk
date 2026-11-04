@@ -15,9 +15,13 @@ const run = (command, options = {}) => execute(command, { cwd: process.cwd(), en
 const leader = fileURLToPath(new URL("./fixtures/windows-native-leader.ps1", import.meta.url));
 
 // These portable cases exercise the actual parent bridge and an actual child
-// process. They validate receipt rejection, not Windows kernel retirement.
-for (const mode of ["missing", "malformed", "stale", "unconfirmed"]) {
-  test(`command owner rejects ${mode} retirement evidence despite helper exit zero`, async t => {
+// process. They validate receipt interpretation, not Windows kernel retirement.
+for (const mode of ["missing", "malformed", "stale", "unconfirmed", "verified-zero", "verified-nonzero"]) {
+  const verified = mode.startsWith("verified-");
+  const exitCode = mode === "verified-nonzero" ? 1 : 0;
+  test(verified
+    ? `command owner preserves exit ${exitCode} after verified forced retirement`
+    : `command owner rejects ${mode} retirement evidence despite helper exit zero`, async t => {
     const { executeWindows } = await import("../validation/windows-process-owner.mjs");
     const { spawn } = await import("node:child_process");
     const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-receipt-"));
@@ -37,7 +41,8 @@ for (const mode of ["missing", "malformed", "stale", "unconfirmed"]) {
         if (mode !== 'missing') fs.writeFileSync(request.receipt, mode === 'malformed' ? '{' : JSON.stringify({
           schema: 1,
           nonce: mode === 'stale' ? request.nonce + '-previous' : request.nonce,
-          result: { retired: mode !== 'unconfirmed', exitCode: 0 },
+          result: { retired: mode !== 'unconfirmed', forcedRetirement: true,
+            exitCode: mode === 'verified-nonzero' ? 1 : 0 },
         }));
         process.exit(0);
       });
@@ -48,9 +53,17 @@ for (const mode of ["missing", "malformed", "stale", "unconfirmed"]) {
         return spawn(process.execPath, ["-e", fixture, mode], options);
       },
     });
-    assert.notEqual(result.code, 0);
-    assert.equal(result.cleanupUnverified, true);
-    assert.match(result.error, /retirement.*receipt|unverified/i);
+    if (verified) {
+      assert.equal(result.code, exitCode);
+      assert.equal(result.exitCode, exitCode);
+      assert.equal(result.forcedRetirement, true);
+      assert.equal(result.cleanupUnverified, false);
+      assert.equal(result.error, undefined);
+    } else {
+      assert.notEqual(result.code, 0);
+      assert.equal(result.cleanupUnverified, true);
+      assert.match(result.error, /retirement.*receipt|unverified/i);
+    }
   });
 }
 

@@ -121,7 +121,9 @@ host startup.
 Their selected tests, process owners, retirement receipts, source invalidation
 and report assertions still execute normally. Functional CLI report fixtures
 wait for actual command closure through the canonical process owner and delete
-temporary repositories only after verified, unforced retirement. Their
+temporary repositories only after verified retirement. A verified forced
+retirement is an ownership diagnostic; the command exit status and execution
+error determine command success. Their
 sixty-second whole-test watchdog is a deadlock bound, not a startup performance
 assertion; report state and candidate readiness remain the acceptance evidence.
 Intentional cancellation and queued-lock scenarios retain their own watchdogs.

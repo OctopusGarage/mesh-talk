@@ -462,8 +462,7 @@ function commandFixture(t) {
     controller.abort();
     const results = await Promise.allSettled(completions);
     const verified = results.every(result => result.status === "fulfilled"
-      && result.value.cleanupUnverified === false
-      && result.value.forcedRetirement === false);
+      && result.value.cleanupUnverified === false);
     t.signal.removeEventListener("abort", cancelled);
     if (verified) rmSync(f.root, { recursive: true, force: true });
     else t.diagnostic(`Unverified CLI fixture retirement; retained ${f.root}`);
@@ -498,9 +497,10 @@ function commandFixture(t) {
     completions.push(completion);
     const result = await completion;
     assert.equal(result.cleanupUnverified, false, result.error);
-    assert.equal(result.forcedRetirement, false, result.error);
     assert.equal(result.outputTruncated, false, "CLI evidence must remain complete");
     assert.equal(result.error, undefined);
+    assert(Number.isInteger(result.code) && result.code >= 0,
+      "CLI evidence must contain the actual command exit status");
     return result;
   } };
 }
