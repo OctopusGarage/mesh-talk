@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   mkdtemp,
+  readFile,
+  readdir,
   realpath,
   mkdir,
   writeFile,
@@ -14,6 +16,7 @@ import { join } from "node:path";
 import {
   decodeCoreName,
   coreOutcome,
+  save,
   validateExecutable,
   boundedCapture,
   limits,
@@ -111,3 +114,63 @@ test("core qualification rejects zero-exit empty, mismatched and truncated evide
   assert.equal(coreOutcome({ output }, true), "core-truncated");
   assert.equal(coreOutcome({ output, truncated: true }), "text-truncated");
 });
+
+test(
+  "recovery state publishes atomically and rejected writes retain canonical authority",
+  { timeout: 10_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "mesh-core-state-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const p = { state: join(root, "state.json") };
+    const old = {
+      mounted: true,
+      patternChanged: true,
+      originalPattern: "original",
+    };
+    const next = { ...old, mounted: false };
+    await writeFile(p.state, JSON.stringify(old));
+    let entered;
+    let release;
+    const enteredWrite = new Promise((resolve) => {
+      entered = resolve;
+    });
+    const writeReleased = new Promise((resolve) => {
+      release = resolve;
+    });
+    const publishing = save(p, next, {
+      async write(path, data) {
+        await writeFile(path, data);
+        entered();
+        await writeReleased;
+      },
+    });
+    try {
+      await Promise.race([enteredWrite, publishing]);
+      assert.deepEqual(
+        JSON.parse(await readFile(p.state, "utf8")),
+        old,
+        "candidate bytes must not replace recovery authority before completed publication",
+      );
+    } finally {
+      release();
+      await publishing;
+    }
+    assert.deepEqual(JSON.parse(await readFile(p.state, "utf8")), next);
+    assert.deepEqual(await readdir(root), ["state.json"]);
+    await assert.rejects(
+      save(p, old, {
+        async write(path, data) {
+          await writeFile(path, data);
+          throw Error("controlled write rejection");
+        },
+      }),
+      /controlled write rejection/u,
+    );
+    assert.deepEqual(JSON.parse(await readFile(p.state, "utf8")), next);
+    assert.deepEqual(
+      await readdir(root),
+      ["state.json"],
+      "rejected candidate is removed",
+    );
+  },
+);

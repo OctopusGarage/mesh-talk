@@ -1,6 +1,6 @@
 // Linux VM-only exit-crash evidence. Never substitutes for the test exit status.
 import { execute } from "../validation/stage.mjs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
   mkdir,
@@ -8,6 +8,7 @@ import {
   readFile,
   writeFile,
   realpath,
+  rename,
   lstat,
   readdir,
   rm,
@@ -100,8 +101,15 @@ function paths() {
     reports: join(root, "reports"),
   };
 }
-async function save(p, state) {
-  await writeFile(p.state, JSON.stringify(state, null, 2));
+export async function save(p, state, { write = writeFile } = {}) {
+  // Publish complete recovery authority; interruption cannot truncate the prior receipt.
+  const candidate = `${p.state}.${randomUUID()}.tmp`;
+  try {
+    await write(candidate, JSON.stringify(state, null, 2));
+    await rename(candidate, p.state);
+  } finally {
+    await rm(candidate, { force: true });
+  }
 }
 async function metadata(workspace) {
   return {

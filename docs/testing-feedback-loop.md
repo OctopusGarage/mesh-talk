@@ -1633,8 +1633,10 @@ The diagnostic owner uses a dedicated two-GiB loop filesystem and a per-process
 256-MiB core limit, records the checked-out source, tools and executable digest,
 and collects bounded GDB traces with automatic loading and argument printing
 disabled. An actual C exit-handler crash verifies core delivery and symbolization
-on the same Linux VM before product execution. Collection always restores the
-prior kernel pattern and retires its storage; raw cores do not enter artifacts.
+on the same Linux VM before product execution. Recovery state publishes atomically before global mutation; controlled incomplete
+and rejected writes preserve the prior restoration receipt. Collection always
+restores the prior kernel pattern and retires its storage; raw cores do not enter
+artifacts.
 Portable path and output-limit controls do not establish Linux kernel behavior.
 Missing, mismatched, truncated or timed-out crash evidence remains explicit and
 cannot certify the failing test. No-crash collection is normal. This diagnostic
