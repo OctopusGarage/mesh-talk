@@ -318,6 +318,16 @@ paid GroupActivity continuation on that same Optional lane must also keep setup
 pending while its real response is held; release it before admitting the window.
 The channel-specific heads establish post-create freshness; do not require an extra
 periodic bootstrap pass or manually warm the data path.
+The three-node setup controls use the existing independent peer runtime owner:
+each simulated remote has two workers, all routes and observation hooks are
+installed before launch, and synchronous fixture reads cannot occupy every
+remote reactor. Retain the real Noise single-worker negative and multi-worker
+positive controls. Reciprocal Optional readiness can change concurrently, so
+the fixed authenticated-floor positive control awaits its bounded setup helper
+while the independent Directory response remains held; an immediate first poll
+is not a completion contract. Open response gates before stopping hosts, and
+join the external holder's runtime before the offline cut releases its custody
+response. Keep original cold-setup and eight-second custody deadlines.
 Aggregate document status includes independent lanes and is not this setup proof.
 After actual startup, a held Directory/DeviceHostname update must allow setup and
 fresh message/custody progress without releasing the unrelated handler. Capture and
@@ -1675,10 +1685,11 @@ The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
-runs the six exact critical recovery regressions from that same sealed,
+runs the nine exact critical recovery regressions from that same sealed,
 extracted archive: notification-only gossip, held-request and archive-readiness
-self controls, independent merged forwarding, storage-rollback replay and actual
-role-GC physical progress. Every named case must execute exactly once, serially,
+self controls, independent merged forwarding, storage-rollback replay, actual
+role-GC physical progress and the three authenticated custody setup controls.
+Every named case must execute exactly once, serially,
 with zero retries. Missing, duplicate, ignored or failed results reject the probe.
 Its bounded raw logs retain source/run/attempt identity and upload on failure. Diagnostic
 profiles stay outside canonical coverage/cache directories and never contribute

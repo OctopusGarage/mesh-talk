@@ -1657,7 +1657,7 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
             })
             .unwrap();
     }
-    let mut servers = tokio::task::JoinSet::new();
+    let mut hosts = Vec::new();
     for (current, owner) in [
         (&source, &account),
         (&sibling, &account),
@@ -1682,7 +1682,13 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
                 );
             }
         }
-        servers.spawn(current.clone().run_accept_loop(listener));
+        hosts.push(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+                current.clone(),
+                listener,
+            )
+            .await,
+        );
     }
     let release = Arc::new(Semaphore::new(0));
     let _release_on_drop = ReleaseOnDrop(release.clone());
@@ -1692,6 +1698,12 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
     let optional_active = Arc::new(AtomicUsize::new(0));
     let observed = std::panic::AssertUnwindSafe(async {
         let precreate = CustodySetupObservation::new(&source, &sibling);
+        // Install the observation before any remote protocol worker starts.
+        // Each simulated host must serve independently of synchronous fixture
+        // reads and of another host's crypto/storage work.
+        for host in &mut hosts {
+            host.launch();
+        }
         tokio::time::timeout(Duration::from_secs(30), async {
             while !custody_linked_capabilities_ready(&source, &sibling)
                 || !precreate.ready()
@@ -1927,13 +1939,8 @@ async fn custody_channel_setup_held_domain(held_domain: AccountDocumentDomain) {
     optional_release.close();
     *source.account_session_test_hook.lock().unwrap() = None;
     *sibling.account_client_test_hook.lock().unwrap() = None;
-    for current in [&source, &sibling, &external] {
-        current.runtime_work.close();
-    }
-    servers.abort_all();
-    while servers.join_next().await.is_some() {}
-    for current in [&source, &sibling, &external] {
-        current.runtime_work.drain().await;
+    for host in hosts {
+        host.stop().await;
     }
     let observed = match observed {
         Ok(observed) => observed,
@@ -2032,8 +2039,7 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
             })
         }
     }));
-    let mut servers = tokio::task::JoinSet::new();
-    let mut external_server = None;
+    let mut hosts = Vec::new();
     for (current, owner) in [
         (&source, &account),
         (&sibling, &account),
@@ -2057,10 +2063,17 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
                 );
             }
         }
-        let server = servers.spawn(current.clone().run_accept_loop(listener));
-        if current.user_id() == external.user_id() {
-            external_server = Some(server);
-        }
+        hosts.push(Some(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+                current.clone(),
+                listener,
+            )
+            .await,
+        ));
+    }
+    // All routes, observers and response holds precede protocol admission.
+    for host in hosts.iter_mut().flatten() {
+        host.launch();
     }
     let result = std::panic::AssertUnwindSafe(async {
         // Creation had no routes yet; deliver its real original genesis/key
@@ -2137,9 +2150,10 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         let latest_setup = wait_custody_channel_setup(&source, &sibling, channel, &observation);
         tokio::pin!(latest_setup);
         assert!(futures_util::poll!(latest_setup.as_mut()).is_pending(), "recapturing a later source floor must remain blocked by the live Directory hold");
-        let setup = wait_custody_channel_setup_at_floor(&source, &sibling, channel, &observation, Some(bootstrap_floor));
-        tokio::pin!(setup);
-        assert!(futures_util::poll!(setup.as_mut()).is_ready(), "the authenticated pre-hold bootstrap floor must allow setup while later Directory publication is held");
+        // A remote worker may begin a fresh Optional sweep after the readiness
+        // read above. Observe its real bounded completion while Directory stays
+        // held, rather than requiring mutable flags to survive a first poll.
+        wait_custody_channel_setup_at_floor(&source, &sibling, channel, &observation, Some(bootstrap_floor)).await;
         assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must have no route for an independent external-holder query");
         let mut custody_hold = CustodyTransferHold::new(&source, &sibling);
@@ -2160,9 +2174,7 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         assert!(sibling.account_document_meta(&external_head.key).is_none(), "the new source observation must remain unimported while the holder is online");
         // Preserve the original offline-holder proof and prevent a competing
         // sibling-authored observation from replacing the source's signed row.
-        external_server.take().unwrap().abort();
-        external.runtime_work.close();
-        tokio::time::timeout(Duration::from_secs(5), external.runtime_work.drain()).await.expect("external holder must retire before custody observation");
+        hosts[2].take().unwrap().stop().await;
         source.roster.lock().unwrap().forget(&external.identity.public());
         sibling.roster.lock().unwrap().forget(&external.identity.public());
         assert!(sibling.routing_peer(&external.user_id()).is_none());
@@ -2193,15 +2205,8 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
     release.close();
     *source.account_session_test_hook.lock().unwrap() = None;
     drop(observation);
-    for current in [&source, &sibling, &external] {
-        current.runtime_work.close();
-    }
-    servers.abort_all();
-    while servers.join_next().await.is_some() {}
-    for current in [&source, &sibling, &external] {
-        tokio::time::timeout(Duration::from_secs(5), current.runtime_work.drain())
-            .await
-            .expect("custody fixture work must retire");
+    for host in hosts.into_iter().flatten() {
+        host.stop().await;
     }
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);

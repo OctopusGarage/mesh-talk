@@ -270,6 +270,9 @@ export const criticalRecoveryProbeCases = Object.freeze([
   "node::forwarding::tests::forwarding_to_group_delivers_ordered_text_and_independent_merged_file",
   "node::node::tests::group_reception_failed_rollback_retries_without_new_traffic",
   "postoffice::maintenance::tests::actual_role_gc_supplies_free_pages_for_physical_progress",
+  "node::account_documents::tests::custody_channel_setup_waits_for_post_create_authenticated_inventory",
+  "node::account_documents::tests::custody_channel_setup_waits_for_same_lane_dm_recall_baseline",
+  "node::account_documents::tests::custody_channel_setup_does_not_wait_for_independent_directory",
 ]);
 export function criticalRecoveryProbeEnabled(env = process.env) {
   const value = env.MESH_WINDOWS_CRITICAL_RECOVERY_PROBE;
