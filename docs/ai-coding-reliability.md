@@ -337,6 +337,14 @@ document availability or final counts. Verify actual crypto invocation counts an
 mutate authority or stored observations between rows. The custody batch regressions
 in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs) cover this boundary.
 
+Reuse compiled static SQL through the existing bounded connection cache rather
+than caching authorization results. Every execution must still bind the current
+parameters and perform the original source, account and lifetime checks. Warming
+a statement must not freeze a read snapshot, retain old bindings or suppress an
+absence or storage error. Exercise changed parameters and retired owners after
+warming the actual production queries. Intrinsic document memos similarly exclude
+receipt-derived publication authority even when the signed payload is unchanged.
+
 **Evidence:** test the limit and just beyond it, malformed or missing data,
 wrong-owner requests, saturation and recovery after capacity returns. Include
 real loopback assertions for changed networking/crypto boundaries as required by

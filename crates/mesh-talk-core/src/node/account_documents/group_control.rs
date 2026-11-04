@@ -3,6 +3,11 @@ use super::*;
 use crate::{eventlog::ConversationId, node::account_group::wire::GroupControlHead};
 
 pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool {
+    GroupControlHead::decode(payload, &meta.account_public)
+        .is_some_and(|head| valid_head(meta, &head))
+}
+
+pub(super) fn valid_head(meta: &AccountDocumentMeta, head: &GroupControlHead) -> bool {
     let AccountDocumentKey::GroupControl {
         channel,
         source_device,
@@ -10,15 +15,11 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
     else {
         return false;
     };
-    if meta.tombstone {
-        return false;
-    }
-    GroupControlHead::decode(payload, &meta.account_public).is_some_and(|head| {
-        hex::encode(head.group.as_bytes()) == *channel
-            && head.proof.public().user_id() == *source_device
-            && meta.writer_device == *source_device
-            && meta.revision == head.revision
-    })
+    !meta.tombstone
+        && hex::encode(head.group.as_bytes()) == *channel
+        && head.proof.public().user_id() == *source_device
+        && meta.writer_device == *source_device
+        && meta.revision == head.revision
 }
 
 impl Node {
@@ -26,16 +27,12 @@ impl Node {
         &self,
         group: ConversationId,
     ) -> Vec<GroupControlHead> {
-        let store = self.account_documents.lock().expect("documents mutex");
+        let mut store = self.account_documents.lock().expect("documents mutex");
         store
             .group_control_rows(&hex::encode(group.as_bytes()))
             .into_iter()
             .filter_map(|meta| {
-                let document = store.get(&meta.key).ok()??;
-                let mut head = GroupControlHead::decode(
-                    document.payload(),
-                    &self.account.public().ed25519_pub,
-                )?;
+                let mut head = store.control_head(&meta, &self.account.public().ed25519_pub)?;
                 if head.proof.public() == self.identity.public() {
                     head.access.local_frontier = store
                         .local_publication_frontier(&meta, &head.proof.public())
@@ -47,15 +44,14 @@ impl Node {
     }
 
     pub(in crate::node) fn group_control_has_unreadable_head(&self, group: ConversationId) -> bool {
-        let store = self.account_documents.lock().expect("documents mutex");
+        let mut store = self.account_documents.lock().expect("documents mutex");
         store
             .group_control_rows(&hex::encode(group.as_bytes()))
             .into_iter()
             .any(|meta| {
-                store.get(&meta.key).ok().flatten().is_none_or(|document| {
-                    GroupControlHead::decode(document.payload(), &self.account.public().ed25519_pub)
-                        .is_none()
-                })
+                store
+                    .control_head(&meta, &self.account.public().ed25519_pub)
+                    .is_none()
             })
     }
 
@@ -93,16 +89,13 @@ impl Node {
                 .lock()
                 .expect("channel membership commit lock");
             let (previous, old) = {
-                let store = self.account_documents.lock().expect("documents mutex");
+                let mut store = self.account_documents.lock().expect("documents mutex");
                 let previous = store.meta(&key);
-                let old = store.get(&key).ok().flatten().and_then(|document| {
-                    let mut head = GroupControlHead::decode(
-                        document.payload(),
-                        &self.account.public().ed25519_pub,
-                    )?;
+                let old = previous.as_ref().and_then(|meta| {
+                    let mut head = store.control_head(meta, &self.account.public().ed25519_pub)?;
                     if head.proof.public() == self.identity.public() {
                         head.access.local_frontier = store
-                            .local_publication_frontier(&document.meta, &head.proof.public())
+                            .local_publication_frontier(meta, &head.proof.public())
                             .unwrap_or_default();
                     }
                     Some(head)

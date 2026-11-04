@@ -1,4 +1,7 @@
 //! Indexed per-event channel authority and bounded resumable reducer state.
+pub(crate) const SOURCE_REVISION_SQL: &str = "SELECT source_revision FROM event_order_current WHERE domain=?1 AND conversation=?2 AND order_kind=0 AND job=?3";
+pub(crate) const LOAD_PROJECTION_SQL: &str =
+    "SELECT next_rank,state,context FROM channel_projection_work WHERE job=?1 AND channel=?2";
 use super::{graph::AuthorityGraph, projection::MembershipReducer, *};
 use crate::{
     eventlog::{LogError, repository::EventHeader},
@@ -98,12 +101,25 @@ impl ProjectionFacts {
         source_job: [u8; 16],
         channel: ConversationId,
     ) -> Result<(MembershipReducer, i64), LogError> {
-        let row:Option<(i64,Option<Vec<u8>>,Vec<u8>)>=profile.database().read(|c|
-            c.query_row("SELECT next_rank,state,context FROM channel_projection_work WHERE job=?1 AND channel=?2",
-                params![job.as_slice(),channel.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into))?;
-        let source_revision=profile.database().read(|c| {
-            let revision:i64=c.query_row("SELECT source_revision FROM event_order_current WHERE domain=?1 AND conversation=?2 AND order_kind=0 AND job=?3",params![DOMAIN.as_slice(),channel.as_bytes().as_slice(),source_job.as_slice()],|r|r.get(0))?;
-            super::graph::require_source_on(c,channel,source_job,revision)?;
+        let row: Option<(i64, Option<Vec<u8>>, Vec<u8>)> = profile.database().read(|c| {
+            c.prepare_cached(LOAD_PROJECTION_SQL)?
+                .query_row(
+                    params![job.as_slice(), channel.as_bytes().as_slice()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(Into::into)
+        })?;
+        let source_revision = profile.database().read(|c| {
+            let revision: i64 = c.prepare_cached(SOURCE_REVISION_SQL)?.query_row(
+                params![
+                    DOMAIN.as_slice(),
+                    channel.as_bytes().as_slice(),
+                    source_job.as_slice()
+                ],
+                |r| r.get(0),
+            )?;
+            super::graph::require_source_on(c, channel, source_job, revision)?;
             Ok(revision)
         })?;
         let mut reducer = MembershipReducer::new(channel);

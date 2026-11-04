@@ -148,7 +148,8 @@
             "new_account_group_rejects_a_route_whose_authenticated_account_changed",
             "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks",
             "queued_functional_recovery_keeps_all_predicates_after_the_receipt_budget",
-            "queued_functional_recovery_fails_without_actual_pair_retirement"
+            "queued_functional_recovery_fails_without_actual_pair_retirement",
+            "group_control_repeated_access_reuses_intrinsic_validation"
           ]
         }
       ],
@@ -275,6 +276,10 @@
           {
             "name": "Direct owner-control commits retain an exact internal event receipt; asynchronous completion releases authorization, privacy and membership guards before bounded metadata preparation and validates that exact admitted event before fanout or public success.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Inventory references and control heads share one bounded intrinsic memo. Every hit first validates current durable bytes and full metadata; current bindings, log authority and receipt-derived publication frontiers remain fresh. Missing or corrupt data cannot reuse prior validation.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }
         ]
       },
@@ -2575,7 +2580,8 @@
             "node::files::channel_receive::tests::",
             "node::serving::channel_plaintext_retry_tests::",
             "node::node::tests::group_reception_terminal_is_independent_of_erased_and_expired_rows",
-            "node::node::tests::channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance"
+            "node::node::tests::channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance",
+            "channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state"
           ]
         }
       ],
@@ -2599,6 +2605,10 @@
           {
             "name": "Source-revision continuation preserves its reception provenance and does not create or increase a storage retry deadline; actual I/O, database and encrypted-storage failures retain catch-up provenance and the existing exponential retry schedule.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Hot canonical source, event-owner and projection queries reuse the existing bounded compiled-statement cache while executing every fresh parameter, source and owner-lifetime check. Warm bytecode cannot revive stale projections, old owners or missing records.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },

@@ -1446,8 +1446,9 @@ Authenticated legacy publication creates its new database with this policy.
 Connection policy disables mmap, keeps temporary data in memory, suggests a
 4 MiB page cache, and uses FULL synchronization with a 256-page automatic WAL
 checkpoint trigger and a 4 MiB retained-journal target. A connection also retains
-at most 64 prepared SQL statements. Relay inventory, session authority, maintenance
-and network metadata selectors share this fixed cache; the former 16-entry bound
+at most 64 prepared SQL statements. Relay inventory, session authority, maintenance,
+canonical source/owner guards, projection reads and network metadata selectors
+share this fixed cache; the former 16-entry bound
 recompiled warm queries as these paths displaced each other. Reused statements
 still execute every eligibility, readiness, expiry, revision, session and lifecycle
 check against the current transaction. Query results are

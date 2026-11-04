@@ -2653,3 +2653,126 @@ fn channel_legacy_scan_rejects_cursor_beyond_actual_source_before_body_reads() {
     ));
     assert_eq!(repository.body_read_counts(), before);
 }
+
+#[test]
+fn channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state() {
+    use crate::node::channel::{graph, projection_facts};
+    use crate::storage::profile::participant::event_ownership;
+    use rusqlite::StatementStatus;
+
+    let fixture = Fixture::new(1);
+    fixture.project();
+    let source = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    let database = fixture.store.profile.database();
+    let owner = database
+        .read(|c| event_ownership::capture_event_owner_on(c, &fixture.account.public()))
+        .unwrap();
+    // Remove fixture preparation from the measured window. Observe SQLite's
+    // real VM run counts without executing the observing statements ourselves.
+    database
+        .read(|c| {
+            c.flush_prepared_statement_cache();
+            Ok(())
+        })
+        .unwrap();
+    let missing = ConversationId::new([239; 32]);
+    for _ in 0..4 {
+        assert!(
+            fixture
+                .store
+                .published_projection(fixture.channel)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            fixture
+                .store
+                .published_projection(missing)
+                .unwrap()
+                .is_none()
+        );
+        database
+            .read(|c| {
+                graph::require_source_on(c, source.channel, source.job, source.revision)?;
+                graph::require_source_prefix_on(c, source.channel, source.job, source.revision)?;
+                assert!(matches!(
+                    graph::require_source_on(c, missing, source.job, source.revision),
+                    Err(LogError::StaleCursor)
+                ));
+                event_ownership::check_event_owner_on(c, &owner)
+            })
+            .unwrap();
+    }
+    let runs = database
+        .read(|c| {
+            [
+                graph::REQUIRE_SOURCE_SQL,
+                graph::REQUIRE_SOURCE_PREFIX_SQL,
+                event_ownership::CHECK_EVENT_OWNER_SQL,
+                current::PUBLISHED_PROJECTION_SQL,
+                projection_facts::LOAD_PROJECTION_SQL,
+                projection_facts::SOURCE_REVISION_SQL,
+            ]
+            .into_iter()
+            .map(|sql| Ok(c.prepare_cached(sql)?.get_status(StatementStatus::Run)))
+            .collect::<Result<Vec<_>, LogError>>()
+        })
+        .unwrap();
+
+    // An ordinary append invalidates exact current authority immediately even
+    // when the same compiled query has just returned a positive result.
+    let rename = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        100,
+        vec![fixture.genesis],
+        100,
+        100,
+        EventKind::ChannelRename,
+        b"fresh title".to_vec(),
+    );
+    fixture.log.repository().unwrap().append(&rename).unwrap();
+    assert!(matches!(
+        fixture.store.published_projection(fixture.channel),
+        Err(LogError::StaleCursor)
+    ));
+    fixture.project();
+    assert_eq!(
+        fixture
+            .store
+            .current_state(fixture.channel)
+            .unwrap()
+            .unwrap()
+            .name(),
+        "fresh title"
+    );
+
+    // Reusing bytecode must not revive an event owner after A -> B -> A.
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let next = Account::generate();
+    prepare_adoption(database, &fixture.account.public(), &next.public()).unwrap();
+    finish_adoption(database, &next.public()).unwrap();
+    prepare_adoption(database, &next.public(), &fixture.account.public()).unwrap();
+    finish_adoption(database, &fixture.account.public()).unwrap();
+    assert!(matches!(
+        database.read(|c| event_ownership::check_event_owner_on(c, &owner)),
+        Err(LogError::StaleCursor)
+    ));
+    let current_owner = database
+        .read(|c| event_ownership::capture_event_owner_on(c, &fixture.account.public()))
+        .unwrap();
+    database
+        .read(|c| event_ownership::check_event_owner_on(c, &current_owner))
+        .unwrap();
+
+    // Report all owners together: uncached Connection::query_row leaves each
+    // observer with a newly compiled, never-run VM (zero), rather than >=4.
+    assert!(
+        runs.iter().all(|runs| *runs >= 4),
+        "hot owner VM run counts: {runs:?}"
+    );
+}

@@ -978,12 +978,16 @@ so later membership admission cannot lose its continuation. Existing incomplete
 group work and membership arriving after ordinary rows remain retryable.
 
 The account-document store may retain intrinsically validated decoded group
-inventory for at most 128 records and 2 MiB of conservative logical charge.
+inventory and group-control heads for a shared total of at most 128 records and
+2 MiB of conservative logical charge. Head accounting includes nested decoded
+allocations; the inventory estimate is not a separate allowance for heads.
 Every lookup still reads and integrity-checks the durable blob before comparing
 complete signed metadata. Missing or corrupt data cannot reuse a cached result.
 Replacement and tombstones invalidate the matching entry only after durable
 commit; oversized records remain uncached. Live account binding and permission
-checks run on every query. This cache never supplies current membership authority.
+checks run on every query. Receipt-derived local publication frontiers are attached
+to an owned head on each read and never retained in this memo. This cache never
+supplies current membership authority.
 
 The desktop's channel-copy status query admits at most 256 message IDs. The core
 computes member and post-office counts together and may reuse intrinsic device

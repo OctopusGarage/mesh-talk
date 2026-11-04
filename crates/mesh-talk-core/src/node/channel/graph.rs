@@ -1,5 +1,7 @@
 //! Channel authority reads exact signed evidence through one graph contract.
 //! The slice adapter remains for pure validation; the runtime uses indexed reads.
+pub(crate) const REQUIRE_SOURCE_PREFIX_SQL: &str = "SELECT EXISTS(SELECT 1 FROM event_order_current o JOIN event_conversations e ON e.domain=o.domain AND e.conversation=o.conversation WHERE o.domain=?1 AND o.conversation=?2 AND o.order_kind=0 AND o.job=?3 AND o.source_revision>=?4 AND e.revision=o.source_revision AND e.lifecycle=0)";
+pub(crate) const REQUIRE_SOURCE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM event_order_current o JOIN event_conversations e ON e.domain=o.domain AND e.conversation=o.conversation WHERE o.domain=?1 AND o.conversation=?2 AND o.order_kind=0 AND o.job=?3 AND o.source_revision=?4 AND e.revision=?4 AND e.lifecycle=0)";
 use crate::eventlog::{Event, EventId, LogError};
 use std::{
     borrow::Cow,
@@ -85,8 +87,15 @@ pub(in crate::node) fn require_source_on(
     job: [u8; 16],
     revision: i64,
 ) -> Result<(), LogError> {
-    let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM event_order_current o JOIN event_conversations e ON e.domain=o.domain AND e.conversation=o.conversation WHERE o.domain=?1 AND o.conversation=?2 AND o.order_kind=0 AND o.job=?3 AND o.source_revision=?4 AND e.revision=?4 AND e.lifecycle=0)",
-        rusqlite::params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),job.as_slice(),revision],|r|r.get(0))?;
+    let valid: bool = c.prepare_cached(REQUIRE_SOURCE_SQL)?.query_row(
+        rusqlite::params![
+            b"MeshPartEventsV1".as_slice(),
+            channel.as_bytes().as_slice(),
+            job.as_slice(),
+            revision
+        ],
+        |r| r.get(0),
+    )?;
     if !valid {
         return Err(LogError::StaleCursor);
     }
@@ -102,8 +111,15 @@ pub(in crate::node) fn require_source_prefix_on(
     job: [u8; 16],
     revision: i64,
 ) -> Result<(), LogError> {
-    let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM event_order_current o JOIN event_conversations e ON e.domain=o.domain AND e.conversation=o.conversation WHERE o.domain=?1 AND o.conversation=?2 AND o.order_kind=0 AND o.job=?3 AND o.source_revision>=?4 AND e.revision=o.source_revision AND e.lifecycle=0)",
-        rusqlite::params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),job.as_slice(),revision],|r|r.get(0))?;
+    let valid: bool = c.prepare_cached(REQUIRE_SOURCE_PREFIX_SQL)?.query_row(
+        rusqlite::params![
+            b"MeshPartEventsV1".as_slice(),
+            channel.as_bytes().as_slice(),
+            job.as_slice(),
+            revision
+        ],
+        |r| r.get(0),
+    )?;
     if !valid {
         return Err(LogError::StaleCursor);
     }

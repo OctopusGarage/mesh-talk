@@ -9898,3 +9898,55 @@ fn group_inventory_repeated_queries_reuse_intrinsic_validation_but_check_live_bi
     );
     assert!(foreign.group_inventory_references().is_empty());
 }
+
+#[test]
+fn group_control_repeated_access_reuses_intrinsic_validation() {
+    use crate::node::account_group::wire::control_head_body_validations;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let group = crate::eventlog::ConversationId::new([24; 32]);
+    let identity = source.identity.public();
+    let genesis = crate::eventlog::Event::new(
+        &source.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        crate::eventlog::EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Repeated control head".into(),
+            members: vec![identity.clone()],
+            epoch: 0,
+            owner: identity.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append_durable(genesis).unwrap();
+    source.process_channel(group);
+    settle_group_metadata(&source, group);
+    source.publish_account_group_access_for(group);
+    assert_eq!(
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .group_control_rows(&hex::encode(group.as_bytes()))
+            .len(),
+        1
+    );
+    let before = control_head_body_validations();
+    let first = source.account_group_access(group).unwrap();
+    for _ in 0..8 {
+        let current = source.account_group_access(group).unwrap();
+        assert_eq!(current.role, first.role);
+        assert_eq!(current.execution, first.execution);
+        assert_eq!(current.sources.len(), first.sources.len());
+    }
+    assert_eq!(
+        control_head_body_validations() - before,
+        1,
+        "unchanged signed control head must cross the full-body decode/crypto path once"
+    );
+}

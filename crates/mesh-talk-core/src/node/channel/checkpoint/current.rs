@@ -1,4 +1,5 @@
 //! Current metadata access never materializes historical applied/authorized IDs.
+pub(crate) const PUBLISHED_PROJECTION_SQL: &str = "SELECT source_job,source_revision,next_rank FROM channel_current WHERE channel=?1 AND owner_account=?2";
 use super::*;
 impl ChannelCheckpointStore {
     /// Scheduling evidence only. A stale or previous-account checkpoint may
@@ -116,9 +117,15 @@ impl ChannelCheckpointStore {
         &self,
         channel: ConversationId,
     ) -> Result<Option<super::super::ChannelMembershipProjection>, LogError> {
-        let binding:Option<(Vec<u8>,i64,i64)>=self.profile.database().read(|c| {
+        let binding: Option<(Vec<u8>, i64, i64)> = self.profile.database().read(|c| {
             self.check_account_on(c)?;
-            c.query_row("SELECT source_job,source_revision,next_rank FROM channel_current WHERE channel=?1 AND owner_account=?2",params![channel.as_bytes().as_slice(),self.account.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into)
+            c.prepare_cached(PUBLISHED_PROJECTION_SQL)?
+                .query_row(
+                    params![channel.as_bytes().as_slice(), self.account.as_slice()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(Into::into)
         })?;
         let Some((job, revision, count)) = binding else {
             return Ok(None);
