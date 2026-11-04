@@ -1,0 +1,9 @@
+creare pr and merge fix/frontend-motion-polish into main
+
+---
+
+merge all https://github.com/OctopusGarage/mesh-talk/pulls all "build(deps)" pr into this current pr
+
+---
+
+make sure current pr merge to main and close all redundant prs
