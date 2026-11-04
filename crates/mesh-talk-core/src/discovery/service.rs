@@ -52,10 +52,16 @@ struct ResponseBudget {
     window: Option<Instant>,
     sent: u8,
     recent: HashMap<IpAddr, Instant>,
+    // Hold an actual consumed quota window until its rejection is observed.
+    // Instance-local test evidence must not depend on signing or scheduling time.
+    #[cfg(test)]
+    observed_window: Option<(Instant, Arc<tokio::sync::Notify>)>,
 }
 
 impl ResponseBudget {
     fn allow(&mut self, source: IpAddr, now: Instant) -> bool {
+        #[cfg(test)]
+        let now = self.observed_window.as_ref().map_or(now, |(now, _)| *now);
         if self
             .window
             .is_none_or(|start| now.saturating_duration_since(start) >= Duration::from_secs(1))
@@ -66,6 +72,10 @@ impl ResponseBudget {
         self.recent
             .retain(|_, sent| now.saturating_duration_since(*sent) < Duration::from_secs(1));
         if self.sent >= 8 || self.recent.contains_key(&source) || self.recent.len() >= 256 {
+            #[cfg(test)]
+            if let Some((_, denied)) = &self.observed_window {
+                denied.notify_one();
+            }
             return false;
         }
         self.sent += 1;
@@ -1002,23 +1012,45 @@ mod tests {
             shared_announce(&announce),
             endpoint.port(),
             Arc::new(DiscoveryVisibility::default()),
-            Some(routed),
+            Some(routed.clone()),
         ));
         let observed = std::panic::AssertUnwindSafe(async {
-            let first = query_pinned_relay(endpoint, &identity.user_id()).await;
-            assert!(first.is_some(), "the first real signed query must consume the per-IP allowance");
+            // Prime with exactly one datagram. A retrying primer could leave
+            // a duplicate nonce queued and falsely satisfy the later witness.
+            let primer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let nonce = uuid::Uuid::new_v4().into_bytes();
+            primer.send_to(&query::encode_query(nonce), endpoint).await.unwrap();
+            let mut bytes = [0u8; 2048];
+            let (len, from) = tokio::time::timeout(
+                Duration::from_secs(4), primer.recv_from(&mut bytes),
+            ).await.expect("the single priming datagram must receive a real reply").unwrap();
+            assert_eq!(from, endpoint);
+            assert_eq!(query::decode_response(&bytes[..len], nonce), Some(announce.clone()),
+                "the first real signed query must consume the pinned per-IP allowance");
             assert_eq!(replies.load(Ordering::SeqCst), 1);
-            let primed = Instant::now();
+            let denied = Arc::new(tokio::sync::Notify::new());
+            {
+                let mut budget = routed.replies.lock().unwrap();
+                let consumed = budget.recent[&endpoint.ip()];
+                budget.observed_window = Some((consumed, denied.clone()));
+            }
             let expected = identity.user_id();
             let second = query_pinned_relay(endpoint, &expected);
             tokio::pin!(second);
-            // Poll this SAME second query inside the closed one-second reply
-            // window. The short observation never cancels or restarts its own
-            // existing four-second request deadline.
-            let early = tokio::time::timeout(Duration::from_millis(200), second.as_mut()).await;
-            assert!(primed.elapsed() < Duration::from_secs(1), "the negative control must execute while the actual responder allowance is still closed");
-            assert!(early.is_err(), "a second client on the same IP must not bypass the real reply limiter");
-            assert_eq!(replies.load(Ordering::SeqCst), 1, "the responder must not sign another reply inside the per-IP window");
+            // Poll the same real query until its datagram is actually rejected
+            // by the consumed per-IP quota. Its own four-second deadline bounds
+            // this observation; no silence interval certifies packet reception.
+            tokio::select! {
+                biased;
+                () = denied.notified() => {}
+                proof = second.as_mut() => panic!(
+                    "the consumed quota must reject the query before completion: {proof:?}"
+                ),
+            }
+            assert_eq!(replies.load(Ordering::SeqCst), 1, "a rejected query must not be signed");
+            // Return to the real clock. The original query must recover by its
+            // own retransmission, with no cancellation, restart or quota reset.
+            routed.replies.lock().unwrap().observed_window = None;
             let proof = second.await;
             assert_eq!(proof, Some(announce), "the second pinned gateway query must recover from the quota drop within its existing four-second request budget");
         }).catch_unwind().await;
