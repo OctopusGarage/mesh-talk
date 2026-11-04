@@ -3142,6 +3142,245 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
 }
 
 #[tokio::test]
+async fn channel_custody_batch_verifies_shared_certificate_once_per_request() {
+    use crate::{
+        identity::account::Account,
+        node::channel_account_authority::{AccountAuthorityControl, AccountGrant},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let owner = Arc::new(personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+    ));
+    owner.set_post_office_enabled(false);
+    let bob = DeviceIdentity::generate();
+    let bob_sibling = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unavailable = listener.local_addr().unwrap();
+    drop(listener);
+    let bob_proof = Announce::new_with_account(&bob, &bob_account, "Bob", unavailable.port());
+    for proof in [
+        bob_proof.clone(),
+        Announce::new_with_account(
+            &bob_sibling,
+            &bob_account,
+            "Bob sibling",
+            unavailable.port(),
+        ),
+    ] {
+        owner
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, unavailable.ip(), &owner.user_id());
+    }
+    let channel = owner
+        .create_channel("account custody fixture", vec![bob.public()])
+        .await
+        .unwrap();
+    let event = owner
+        .enqueue_channel_message_reply_expiring_if(
+            channel,
+            b"synthetic projected observation",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    owner
+        .publish_channel_custody(channel, event, &bob_sibling.public(), true, false, false)
+        .unwrap();
+    assert_eq!(
+        owner.channel_custody_count(channel, event).unwrap(),
+        Some(0),
+        "a certificate cannot enroll a nonmember into a legacy channel"
+    );
+
+    let own_proof = owner.own_group_proof();
+    let projection = owner.account_group_projection(channel).unwrap();
+    let bindings = vec![own_proof.clone(), bob_proof];
+    let grants = bindings
+        .iter()
+        .enumerate()
+        .map(|(index, proof)| {
+            let accepted = projection
+                .accepted
+                .iter()
+                .find(|member| member.public == proof.public())
+                .unwrap();
+            AccountGrant {
+                incarnation: [index as u8 + 1; 16],
+                pending: false,
+                original: proof.clone(),
+                membership_event: accepted.membership_event,
+                acceptance_event: accepted.acceptance_event,
+            }
+        })
+        .collect();
+    let authority = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: own_proof,
+        owner_account: owner.account.public().ed25519_pub,
+        grants,
+        revoked: Vec::new(),
+        legacy_bindings: bindings,
+        account_signature: Vec::new(),
+    };
+    owner
+        .append_event(
+            channel,
+            EventKind::ChannelAccountAuthority,
+            authority.signed_encode(channel, &owner.account),
+        )
+        .unwrap();
+    owner.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&owner, channel);
+    {
+        let book = owner.channels.lock().unwrap();
+        let state = book.state(&channel).unwrap();
+        assert_eq!(state.owner_account_id(), Some(owner.account_id().as_str()));
+        assert!(!state.members().contains(&bob_sibling.public()));
+    }
+    // Keep fixture preparation outside the measured observation window.
+    let mut ids = vec![event];
+    for body in [
+        b"second custody row".as_slice(),
+        b"third custody row".as_slice(),
+    ] {
+        let id = owner
+            .enqueue_channel_message_reply_expiring_if(channel, body, None, None, |commit| commit())
+            .unwrap();
+        owner
+            .publish_channel_custody(channel, id, &bob_sibling.public(), true, false, false)
+            .unwrap();
+        ids.push(id);
+    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let verifies = Arc::new(AtomicUsize::new(0));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let verifies = verifies.clone();
+        move |_, phase| {
+            if phase == "custody_holder_certificate_verify" {
+                verifies.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }));
+    assert_eq!(
+        owner.channel_custody_counts(channel, &ids).unwrap(),
+        vec![(Some(1), Some(0)); 3]
+    );
+    let first = verifies.swap(0, Ordering::SeqCst);
+    assert_eq!(
+        owner.channel_custody_counts(channel, &ids).unwrap(),
+        vec![(Some(1), Some(0)); 3]
+    );
+    let second = verifies.load(Ordering::SeqCst);
+    *owner.account_client_test_hook.lock().unwrap() = None;
+    assert_eq!(
+        first, 1,
+        "one intrinsic verification for a repeated full certificate per request"
+    );
+    assert_eq!(
+        second, 1,
+        "the next request must independently verify the certificate"
+    );
+
+    assert!(
+        owner
+            .channel_custody_counts(channel, &[])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        owner
+            .channel_custody_counts(channel, &vec![event; 257])
+            .is_err()
+    );
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &vec![event; 256])
+            .unwrap()
+            .len(),
+        256
+    );
+    let unknown = EventId::new([0x5a; 32]);
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &[ids[2], unknown, ids[0], ids[2]])
+            .unwrap(),
+        vec![
+            (Some(1), Some(0)),
+            (None, None),
+            (Some(1), Some(0)),
+            (Some(1), Some(0))
+        ]
+    );
+    // The hook runs before the next row without any custody/document guard held.
+    // Repeated ids must observe new tombstones even when the certificate was cached.
+    let rows = Arc::new(AtomicUsize::new(0));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let owner = Arc::downgrade(&owner);
+        let holder = bob_sibling.public();
+        let rows = rows.clone();
+        move |_, phase| {
+            if phase == "custody_batch_before_row" && rows.fetch_add(1, Ordering::SeqCst) == 1 {
+                owner
+                    .upgrade()
+                    .unwrap()
+                    .publish_channel_custody(channel, event, &holder, false, false, false)
+                    .unwrap();
+            }
+        }
+    }));
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &[event, event])
+            .unwrap(),
+        vec![(Some(1), Some(0)), (Some(0), Some(0))]
+    );
+    *owner.account_client_test_hook.lock().unwrap() = None;
+
+    owner
+        .publish_channel_custody(channel, event, &bob.public(), true, false, false)
+        .unwrap();
+    let rows = Arc::new(AtomicUsize::new(0));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let owner = Arc::downgrade(&owner);
+        move |_, phase| {
+            if phase == "custody_batch_before_row" && rows.fetch_add(1, Ordering::SeqCst) == 1 {
+                let owner = owner.upgrade().unwrap();
+                let (parents, lamport) = owner.log.lock().unwrap().prepare(&channel).unwrap();
+                let preference = Event::new(
+                    &bob,
+                    channel,
+                    1,
+                    parents,
+                    lamport,
+                    1,
+                    EventKind::ChannelReplica,
+                    vec![0],
+                );
+                owner.log.lock().unwrap().append(preference).unwrap();
+                owner.process_channel(channel);
+                crate::node::test_support::settle_group_metadata(&owner, channel);
+                assert!(!owner.channel_replica_enabled(channel, &bob.public().user_id()));
+            }
+        }
+    }));
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &[event, event])
+            .unwrap(),
+        vec![(Some(1), Some(0)), (Some(0), Some(0))]
+    );
+    *owner.account_client_test_hook.lock().unwrap() = None;
+}
+
+#[tokio::test]
 async fn channel_custody_inherited_holder_requires_signed_account_authority() {
     use crate::{
         identity::account::Account,

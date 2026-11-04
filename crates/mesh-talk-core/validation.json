@@ -359,6 +359,8 @@
             "node::account_sync::",
             "node::media_store::",
             "node::node::tests::channel_custody_inherited_holder_requires_signed_account_authority",
+            "node::node::tests::channel_custody_batch_",
+            "node::channels::fanout_tests::channel_custody_batch_",
             "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
             "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
             "custody_retry_classes_each_rotate_through_all_competing_peers",
@@ -371,6 +373,10 @@
         "summary": "Share exact-event group-copy observations between certified sender-account devices without inventing external-member delivery.",
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
+          {
+            "name": "One bounded status request combines member and post-office counts and reuses only intrinsic verification under complete fixed-size certificate keys; document readability, holder binding, tombstones, membership and replica policy remain live per row. Unknown counts stay distinct from zero and request-local reuse expires on return or error.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
           {
             "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation; original cold/readiness and operation deadlines remain unchanged, and first failures plus admitted-work retirement survive setup panics.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"

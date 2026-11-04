@@ -329,6 +329,14 @@ work. The ordinary-DM and delayed-membership regressions in
 [group metadata tests](../crates/mesh-talk-core/src/node/group_metadata_tests.rs)
 check that channel recovery does not prepare ordinary private conversations.
 
+Batch limits do not bound repeated expensive validation within each row. Trace
+the complete consumer path, including helpers that repeat another public query.
+Request-local reuse may retain intrinsic certificate verification under a bounded
+complete cryptographic key; it must not retain mutable membership, holder bindings,
+document availability or final counts. Verify actual crypto invocation counts and
+mutate authority or stored observations between rows. The custody batch regressions
+in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs) cover this boundary.
+
 **Evidence:** test the limit and just beyond it, malformed or missing data,
 wrong-owner requests, saturation and recovery after capacity returns. Include
 real loopback assertions for changed networking/crypto boundaries as required by

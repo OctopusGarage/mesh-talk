@@ -350,7 +350,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Sibling-authored outgoing history can expose confirmed external-member counts; stale sessions and wrong accounts cannot release old runtime projections.",
+            "name": "Sibling-authored outgoing history can expose confirmed external-member counts; stale sessions and wrong accounts cannot release old runtime projections. The existing bounded batch query combines member and post-office observations under one runtime admission, preserves input order, and omits unknown rows without turning them into zero.",
             "reference": "docs/module-boundaries.md#account-document-projections"
           }
         ]

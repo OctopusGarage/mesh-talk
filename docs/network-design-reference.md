@@ -985,6 +985,15 @@ Replacement and tombstones invalidate the matching entry only after durable
 commit; oversized records remain uncached. Live account binding and permission
 checks run on every query. This cache never supplies current membership authority.
 
+The desktop's channel-copy status query admits at most 256 message IDs. The core
+computes member and post-office counts together and may reuse intrinsic device
+certificate verification within that request, retaining at most 256 complete
+fixed-size certificate keys. The request drops this state on completion or error;
+it does not persist permission decisions. Each observation still reads its current
+document and checks current holder binding, tombstones, membership and replica
+policy. Unknown counts remain distinct from confirmed zero, and own-account
+copies and post-office copies remain separate from member-copy targets.
+
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
 ```mermaid
