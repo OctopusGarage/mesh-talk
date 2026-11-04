@@ -1016,29 +1016,48 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
         at = Some(tokio::spawn(a.clone().run_accept_loop(al)));
         ct = Some(tokio::spawn(c.clone().run_accept_loop(cl)));
+        let mut own_copy_pending = true;
         let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while c.file_progress(file).unwrap().is_none() || c.read_file(file).is_err() {
+            loop {
+                own_copy_pending = a.delivery.lock().unwrap().contains_file_destination(
+                    id,
+                    id,
+                    &cp.public(),
+                    &cp.account_id(),
+                );
+                if c.file_progress(file).unwrap().is_some()
+                    && c.read_file(file).is_ok()
+                    && !own_copy_pending
+                {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
+            assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+            assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
+            // Saving reclaims chunk events. Wait for the source's final custody
+            // acknowledgement first, so this phase does not interrupt its Chunks
+            // exchange and introduce a separate reclamation-recovery scenario.
+            c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
+            let final_chunk = a
+                .delivery
+                .lock()
+                .unwrap()
+                .file_card(id)
+                .unwrap()
+                .final_chunk
+                .unwrap();
+            assert!(
+                c.historical_file_completion(file, final_chunk, &ap.public())
+                    .unwrap()
+            );
+            assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
         })
         .await;
-        assert!(own_received.is_ok());
-        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-        assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
-        c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
-        let final_chunk = a
-            .delivery
-            .lock()
-            .unwrap()
-            .file_card(id)
-            .unwrap()
-            .final_chunk
-            .unwrap();
         assert!(
-            c.historical_file_completion(file, final_chunk, &ap.public())
-                .unwrap()
+            own_received.is_ok(),
+            "own-copy confirmation failed: phase={phase} pending_destination={own_copy_pending}"
         );
-        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
         phase = "target_confirmation";
         let bl = bob_socket.listen(1024).unwrap();
         bt = Some(tokio::spawn(b.clone().run_accept_loop(bl)));

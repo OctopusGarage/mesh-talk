@@ -112,6 +112,14 @@ branches of a scheduler if that scheduler still waits for the entire scan inside
 one completion branch. Synchronous final persistence can still block; document
 that boundary instead of claiming a timer can preempt it.
 
+Branches of one `select!` share a task; adding runtime workers does not let a
+blocked branch poll another branch of that same future. Independently scheduled
+work must keep an explicit parent cancellation owner and retain the actual
+child's retirement permit. The [inbound serving owner](../crates/mesh-talk-core/src/node/serving.rs)
+is exercised by the real maintenance-hold Noise regression in
+[account action tests](../crates/mesh-talk-core/src/node/account_group/tests/message_action_reference.rs),
+alongside stalled-handshake retirement and the single-worker negative control.
+
 **Evidence:** pause actual expensive work after admission and assert availability
 of the unrelated guard or operation. Release the pause and verify the final data.
 See the attachment preparation and document-scheduler regressions in

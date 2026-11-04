@@ -719,6 +719,18 @@ released. Parent cancellation aborts those children, while the participant work
 drain retains their actual futures and captures through retirement. The custody
 turn itself still adds no task or connection allowance.
 
+The inbound listener runs as one separately scheduled, parent-owned child of the
+accept-loop host. Synchronous maintenance in the parent's other branches cannot
+prevent an available worker from polling inbound Noise authentication. Connection
+limits, handshake deadlines and authorization remain unchanged. Parent cancellation
+aborts the child; its participant work permit survives until the actual listener
+future and captures are destroyed, and accepted connections retain their own
+permits. Normal parent completion joins listener cancellation. Hosts retire and
+drain participant work before closing or reopening stores. This scheduling seam
+does not promise progress through a shared blocked journal or on a held single-worker
+host; the actual maintenance-hold positive and single-worker negative regressions
+retain that distinction.
+
 New account-group creation gives invitation-target verification one twenty-second
 deadline across the complete selected account set and its device routes. Every
 required account must pass the existing authenticated binding and capability

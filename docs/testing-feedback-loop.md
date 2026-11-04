@@ -1685,11 +1685,12 @@ The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
-runs the ten exact critical recovery regressions from that same sealed,
+runs the twelve exact critical recovery regressions from that same sealed,
 extracted archive: notification-only gossip, held-request and archive-readiness
 self controls, independent merged forwarding, storage-rollback replay, actual
 role-GC physical progress, the three authenticated custody setup controls and
-profile compaction with a held admitted writer.
+profile compaction with a held admitted writer, external-member reaction
+authentication and canonical own-copy file confirmation.
 Every named case must execute exactly once, serially,
 with zero retries. Missing, duplicate, ignored or failed results reject the probe.
 Its bounded raw logs retain source/run/attempt identity and upload on failure. Diagnostic

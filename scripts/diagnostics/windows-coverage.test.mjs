@@ -498,6 +498,8 @@ test("critical recovery cohort retains each known regression exactly once", () =
     "node::account_documents::tests::custody_channel_setup_waits_for_same_lane_dm_recall_baseline",
     "node::account_documents::tests::custody_channel_setup_does_not_wait_for_independent_directory",
     "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+    "node::account_group::tests::message_action_reference::reference_member_reacts_over_noise_with_private_projection_and_history_off",
+    "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target",
   ]);
 });
 

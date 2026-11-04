@@ -1628,7 +1628,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Participant retirement drains admitted control tasks and only authenticated recipient evidence confirms delivery",
+            "name": "The parent-owned inbound listener is independently scheduled beside synchronous maintenance, retains its actual retirement permit through child destruction and preserves connection/handshake limits; participant retirement drains admitted control and connection tasks, and only authenticated recipient evidence confirms delivery",
             "reference": "docs/network-design-reference.md"
           },
           {

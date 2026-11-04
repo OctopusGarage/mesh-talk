@@ -418,6 +418,75 @@ async fn multithreaded_peer_runtime_authenticates_while_one_worker_is_held() {
     peer_authentication_while_worker_is_held(true).await;
 }
 
+// Hold the real maintenance branch, rather than an unrelated spawned task.
+// A second host worker only helps if inbound acceptance is separately scheduled.
+#[tokio::test]
+async fn multithreaded_peer_authenticates_while_account_channel_maintenance_is_held() {
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("source"), &account);
+    let reference = node(&directory.path().join("reference"), &account);
+    link(&source, &reference);
+    link(&reference, &source);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&source, &directory.path().join("source"), address.port());
+    configure(&reference, &directory.path().join("reference"), 1);
+    let group = source
+        .create_channel("held maintenance", vec![])
+        .await
+        .unwrap();
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    *source.account_channel_maintenance_test_hook.lock().unwrap() =
+        Some(Arc::new(move |channel| {
+            assert_eq!(channel, group);
+            if let Some(entered) = entered.lock().unwrap().take() {
+                let _ = entered.send(());
+                let _ = released.lock().unwrap().recv();
+            }
+            false
+        }));
+    let mut owner = ActionPeerRuntime::start_multithreaded(source.clone(), listener).await;
+    owner.launch();
+    let mut dial = None;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .expect("the actual account channel maintenance branch must enter its hold")
+            .unwrap();
+        let client = reference.clone();
+        let expected = source.identity.public();
+        dial = Some(tokio::spawn(async move {
+            client.privacy_dial(address, &expected).await
+        }));
+        let channel =
+            tokio::time::timeout(std::time::Duration::from_secs(5), dial.as_mut().unwrap())
+                .await
+                .expect("inbound Noise must progress while the actual maintenance branch is held")
+                .expect("the client task must join")
+                .expect("the real Noise authentication must succeed");
+        dial = None;
+        assert_eq!(channel.peer_identity(), &source.identity.public());
+    })
+    .catch_unwind()
+    .await;
+    // Release the synchronous worker before aborting/joining its parent owner.
+    drop(release);
+    if let Some(dial) = dial {
+        dial.abort();
+        let _ = dial.await;
+    }
+    owner.stop().await;
+    *source.account_channel_maintenance_test_hook.lock().unwrap() = None;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[tokio::test]
 async fn current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held() {
     peer_authentication_while_worker_is_held(false).await;
@@ -817,6 +886,7 @@ async fn reference_message_action(recall: bool) {
     for (label, node) in [
         ("source", &source),
         ("reference", &reference),
+        ("external", &external),
         ("sibling", &sibling),
     ] {
         let client_trace = trace.clone();
@@ -1342,13 +1412,25 @@ async fn reference_message_action(recall: bool) {
         // never install the source event or plaintext directly in the receiver.
         let observing = external.clone();
         let selected_public = selected.identity.public();
+        let receipt_trace = trace.clone();
+        let executor = selected.clone();
         let public_receipt = async move {
             let peer = observing.routing_peer(&selected_public.user_id()).unwrap();
             assert_eq!(peer.public, selected_public);
             let mut connection = observing
                 .privacy_sync_dial(peer.addr, &peer.public)
                 .await
-                .expect("the accepted external member must authenticate the original executor");
+                .unwrap_or_else(|error| {
+                    eprintln!(
+                        "public action receipt authentication failed turn={turn} external_capacity={:?} executor_capacity={:?} trace={:?}",
+                        observing.sessions.test_capacity_snapshot(),
+                        executor.sessions.test_capacity_snapshot(),
+                        receipt_trace.lock().unwrap()
+                    );
+                    panic!(
+                        "the accepted external member must authenticate the original executor: {error:?}"
+                    );
+                });
             let store = observing.pull_sync_store(connection.peer_identity());
             super::super::super::session::request_round(&mut connection, &store, group)
                 .await
