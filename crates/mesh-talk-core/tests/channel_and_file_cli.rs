@@ -11,6 +11,8 @@
 //! ~instant rather than ~60-70s of real KDF. Nodes are started SEQUENTIALLY (start A,
 //! await its line, then start B) so a slow machine never runs two KDF cold starts at once.
 
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
@@ -111,7 +113,10 @@ fn await_discovery(node: &mut CliNode, want_uid: &str, who: &str) {
     while Instant::now() < deadline {
         node.send("/peers");
         if node
-            .wait_for(|l| l.contains(want_uid), Duration::from_secs(1))
+            .wait_for(
+                |l| peer_observer::is_peer_listing(l, want_uid),
+                Duration::from_secs(1),
+            )
             .is_some()
         {
             return;

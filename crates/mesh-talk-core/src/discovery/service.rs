@@ -972,6 +972,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_gateway_query_recovers_after_another_loopback_client_consumes_reply_budget() {
+        use crate::identity::account::Account;
+        use crate::postoffice::gateway::query_pinned_relay;
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let identity = Arc::new(DeviceIdentity::generate());
+        let account = Account::generate();
+        let announce = Announce::new_post_office_with_account(&identity, &account, "hub", 41001);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let endpoint = socket.local_addr().unwrap();
+        let replies = Arc::new(AtomicUsize::new(0));
+        let routed = Arc::new(RoutedDiscovery::new({
+            let identity = identity.clone();
+            let replies = replies.clone();
+            Arc::new(move |nonce, announce| {
+                let response = query::encode_response(nonce, announce, &identity);
+                if response.is_some() {
+                    replies.fetch_add(1, Ordering::SeqCst);
+                }
+                response
+            })
+        }));
+        let server = tokio::spawn(run_listen_with_routed(
+            socket,
+            Arc::new(Mutex::new(Roster::default())),
+            identity.user_id(),
+            shared_announce(&announce),
+            endpoint.port(),
+            Arc::new(DiscoveryVisibility::default()),
+            Some(routed),
+        ));
+        let observed = std::panic::AssertUnwindSafe(async {
+            let first = query_pinned_relay(endpoint, &identity.user_id()).await;
+            assert!(first.is_some(), "the first real signed query must consume the per-IP allowance");
+            assert_eq!(replies.load(Ordering::SeqCst), 1);
+            let primed = Instant::now();
+            let expected = identity.user_id();
+            let second = query_pinned_relay(endpoint, &expected);
+            tokio::pin!(second);
+            // Poll this SAME second query inside the closed one-second reply
+            // window. The short observation never cancels or restarts its own
+            // existing four-second request deadline.
+            let early = tokio::time::timeout(Duration::from_millis(200), second.as_mut()).await;
+            assert!(primed.elapsed() < Duration::from_secs(1), "the negative control must execute while the actual responder allowance is still closed");
+            assert!(early.is_err(), "a second client on the same IP must not bypass the real reply limiter");
+            assert_eq!(replies.load(Ordering::SeqCst), 1, "the responder must not sign another reply inside the per-IP window");
+            let proof = second.await;
+            assert_eq!(proof, Some(announce), "the second pinned gateway query must recover from the quota drop within its existing four-second request budget");
+        }).catch_unwind().await;
+        server.abort();
+        let stopped = server.await;
+        if let Err(panic) = observed {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            stopped.is_ok() || stopped.as_ref().is_err_and(|error| error.is_cancelled()),
+            "the real responder must be joined without a hidden task panic"
+        );
+    }
+
+    #[tokio::test]
     async fn routed_query_discovers_a_peer_without_sending_our_identity_first() {
         routed_query_roundtrip(Duration::ZERO, Duration::from_secs(15)).await;
     }

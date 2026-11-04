@@ -939,7 +939,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
     assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -953,10 +953,16 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let other = DeviceIdentity::generate();
     let ca = Account::from_secret_bytes(aa.secret_bytes());
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Reserve Bob's identity endpoint without accepting queued TCP handshakes.
+    // Before the own-copy proof, Bob is genuinely offline, not half-started.
+    let bob_socket = tokio::net::TcpSocket::new_v4().unwrap();
+    bob_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let bob_address = bob_socket.local_addr().unwrap();
+    // A bound socket is not a listener. macOS may leave a connect pending
+    // rather than refuse it, so an errno cannot qualify this lifecycle state.
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bob_address.port());
     let cp = Announce::new_with_account(&other, &ca, "Own copy", cl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     a.roster
@@ -1000,61 +1006,103 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
         .event
         .id;
     assert_ne!(actual, id);
-    let at = tokio::spawn(a.clone().run_accept_loop(al));
-    let ct = tokio::spawn(c.clone().run_accept_loop(cl));
-    let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while c.file_progress(file).unwrap().is_none() || c.read_file(file).is_err() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    assert!(own_received.is_ok());
-    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
-    c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
-    let final_chunk = a
-        .delivery
-        .lock()
-        .unwrap()
-        .file_card(id)
-        .unwrap()
-        .final_chunk
-        .unwrap();
-    assert!(
-        c.historical_file_completion(file, final_chunk, &ap.public())
+    use futures_util::FutureExt;
+    let mut at = None;
+    let mut bt = None;
+    let mut ct = None;
+    let mut phase = "own_copy";
+    let mut confirmed_status = None;
+    let mut pending_destination = None;
+    let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
+        at = Some(tokio::spawn(a.clone().run_accept_loop(al)));
+        ct = Some(tokio::spawn(c.clone().run_accept_loop(cl)));
+        let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while c.file_progress(file).unwrap().is_none() || c.read_file(file).is_err() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(own_received.is_ok());
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
+        c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
+        let final_chunk = a
+            .delivery
+            .lock()
             .unwrap()
-    );
-    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
-    let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while a.delivery_status(id) != Some(DeliveryStatus::Delivered)
-            || a.delivery
-                .lock()
+            .file_card(id)
+            .unwrap()
+            .final_chunk
+            .unwrap();
+        assert!(
+            c.historical_file_completion(file, final_chunk, &ap.public())
                 .unwrap()
-                .next_file_destination(None)
-                .is_some()
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        );
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        phase = "target_confirmation";
+        let bl = bob_socket.listen(1024).unwrap();
+        bt = Some(tokio::spawn(b.clone().run_accept_loop(bl)));
+        let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while {
+                confirmed_status = a.delivery_status(id);
+                pending_destination = None;
+                confirmed_status != Some(DeliveryStatus::Delivered) || {
+                    let pending = a.delivery.lock().unwrap().next_file_destination(None).is_some();
+                    pending_destination = Some(pending);
+                    pending
+                }
+            } {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(confirmed.is_ok(),
+            "target confirmation failed: phase={phase} status={confirmed_status:?} pending_destination={pending_destination:?}");
+        let history = a.account_history(&b.account_id(), 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+        assert_eq!(
+            b.account_history(&a.account_id(), 10).unwrap()[0].id,
+            actual
+        );
+        assert_eq!(a.delivery_status(actual), None);
+        assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
+    }).catch_unwind()).await;
+    for current in [&a, &b, &c] {
+        current.runtime_work.close();
+    }
+    let mut server_failed = false;
+    for task in [at, bt, ct].into_iter().flatten() {
+        task.abort();
+        if let Err(error) = task.await {
+            server_failed |= !error.is_cancelled();
         }
-    })
-    .await;
-    at.abort();
-    bt.abort();
-    ct.abort();
-    let _ = at.await;
-    let _ = bt.await;
-    let _ = ct.await;
-    assert!(confirmed.is_ok());
-    let history = a.account_history(&b.account_id(), 10).unwrap();
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].id, id);
-    assert_eq!(
-        b.account_history(&a.account_id(), 10).unwrap()[0].id,
-        actual
+    }
+    let mut retired = true;
+    for current in [&a, &b, &c] {
+        current.sessions.clear();
+        retired &= tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            current.runtime_work.drain(),
+        )
+        .await
+        .is_ok();
+    }
+    if !retired {
+        let _ = (ad.keep(), bd.keep(), cd.keep());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        panic!("own-copy fixture work did not retire; profiles retained");
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        !server_failed,
+        "own-copy fixture server failed unexpectedly"
     );
-    assert_eq!(a.delivery_status(actual), None);
-    assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
-    drop(a);
+    a.close_profile().unwrap();
     let (a, _) = node(
         ad.path(),
         DeviceIdentity::from_secret_bytes(source_secret.0, source_secret.1),

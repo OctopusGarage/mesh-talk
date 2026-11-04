@@ -321,7 +321,12 @@ runtime retirement. A network change cancels obsolete waves and starts fresh.
 Directory exchanges use the existing authenticated adaptive 15–60 second budget;
 failed relays wait at most the five-second refresh interval before eligibility.
 A slow relay cannot hold the refresh metadata lock while doing network or disk I/O.
-Existing origin authority and per-source response limits remain unchanged.
+Existing origin authority and per-source response limits remain unchanged. Pinned
+legacy-gateway UDP discovery queries send the same identity-free nonce in at
+most four datagrams within their existing four-second total query deadline. Their
+one-second retry base and nonce-derived jitter avoid permanently synchronized
+probes behind one source IP; inbound response allowances are unchanged. The
+query future owns its socket and timers, so cancellation leaves no retry task.
 
 The directory's fifteen-second recovery-membership expiry is separate from
 presentation history. Expiry revokes recovery admission but does not impersonate
@@ -2761,6 +2766,12 @@ True stream multiplexing, trust of unapproved discovered relays, hot federation 
 The guiding question for future changes is: **Does this preserve local-first communication, explicit authority, equal trusted relay roles, endpoint-owned delivery truth and bounded recoverable work across the actual reachable graph?** If not, revise the design deliberately before presenting the behavior as compatible.
 
 ## Push-driven reconciliation and recovery
+
+Group recovery retains a fresh queued turn after an authenticated peer applies
+metadata or content and stale sibling rounds have retired. Quiet comparisons do
+not requeue themselves. Targeted turns rotate across pending group identities
+in batches of at most eight and rotate selected peers independently of periodic
+fallback turns; two active groups and three selected peers remain the bounds.
 
 Durable state is authoritative. Notifications schedule reconciliation; they never
 serve as delivery proof, replace signed membership, or transfer plaintext authority.

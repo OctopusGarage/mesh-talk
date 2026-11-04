@@ -1,6 +1,8 @@
 //! Exercise an actual pre-replica CLI binary against the current CLI. The
 //! old binary path is supplied by scripts/channel-compat-rehearsal.sh.
 
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 mod support;
 
 use mesh_talk_core::eventlog::{EventKind, persist::PersistentEventLog};
@@ -83,7 +85,7 @@ impl CliNode {
             if self
                 .lines
                 .recv_timeout(Duration::from_secs(1))
-                .is_ok_and(|line| line.contains(peer_id))
+                .is_ok_and(|line| peer_observer::is_peer_listing(&line, peer_id))
             {
                 return;
             }

@@ -1072,7 +1072,8 @@
         }
       ],
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
+        "Pinned gateway queries must recover when another loopback client consumes the existing per-source UDP reply quota. Preserve the absolute four-second deadline, at most four datagrams, exact endpoint and signed pinned-identity validation, and cancellation ownership. Run the real responder quota regression and existing gateway lifecycle/security tests; repeat bridge_cross_lan and channel_peer_recovery against the production CLI."
       ],
       "consumers": ["core-node", "core-postoffice", "core-transport"]
     },
@@ -1818,7 +1819,7 @@
       ],
       "escalation": [
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
-        "Persistent-history harness changes require cargo test -p mesh-talk-core --test persistent_history_observer and the actual native consumer node scripts/evals/backend-runner.mjs. Keep ordinary controls in their separate target and the ignored-only persistent_history target complete with one real scenario and zero filtered tests. Raw Cargo success alone does not establish report acceptance. Preserve the single query, original row deadlines and timestamped two-direction assertions; retain terminal responses and bounded diagnostics across both process lifetimes. Hosted native backend acceptance remains required.",
+        "Persistent-history and shared CLI peer-readiness harness changes require cargo test -p mesh-talk-core --test persistent_history_observer and the actual native consumer node scripts/evals/backend-runner.mjs, plus affected extra integration targets. Require an exact peer/full-user-ID roster record; live reception, startup/history/probe output and unrelated UID occurrences cannot certify prefix-resolution readiness. Preserve original polling and observation watchdogs. Keep ordinary controls in their separate target and the ignored-only persistent_history target complete with one real scenario and zero filtered tests. Raw Cargo success alone does not establish report acceptance. Preserve the single query, original row deadlines and timestamped two-direction assertions; retain terminal responses and bounded diagnostics across both process lifetimes. Hosted native backend acceptance remains required.",
         "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --lib storage::profile::tests::profile_lock -- --test-threads=1 and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
         "Dedicated indexed relay lifecycle changes require the complete mesh-talk-node binary tests and, on Unix, the indexed_relay_cli integration target. Exercise all five branches and gateway proxy cancellation; successful Unix SIGTERM evidence does not establish native Windows forced-stop recovery or production-KDF startup performance."
       ],
@@ -1952,7 +1953,10 @@
             "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet",
             "bounded_peer_round_owner_keeps_other_receiver_progress_during_a_held_public_view",
             "bounded_peer_round_parent_cancellation_retains_held_child_until_runtime_drain",
-            "borrowed_peer_round_parent_defers_other_receiver_until_held_view_release"
+            "borrowed_peer_round_parent_defers_other_receiver_until_held_view_release",
+            "node::channels::fanout_tests::applied_metadata_only_recovery_retains_one_fresh_group_turn_without_quiet_spin",
+            "node::channels::fanout_tests::applied_group_continuations_rotate_past_requeued_low_ids_and_deleted_cursor",
+            "node::channels::fanout_tests::hot_group_sweeps_do_not_alias_four_peer_rotation_across_four_batches"
           ]
         }
       ],
@@ -1984,7 +1988,8 @@
       },
       "consumers": ["desktop-group-file-network-cost"],
       "escalation": [
-        "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee. Notification-only group gossip must complete cold authenticated setup under its separate thirty-second watchdog before the unchanged eight-second fresh-message assertion; preserve all-listeners-bound ordering, bounded phase evidence, exact message identity and rejection of periodic or manual rescue."
+        "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee. Notification-only group gossip must complete cold authenticated setup under its separate thirty-second watchdog before the unchanged eight-second fresh-message assertion; preserve all-listeners-bound ordering, bounded phase evidence, exact message identity and rejection of periodic or manual rescue.",
+        "Applied peer progress, including metadata-only updates, must queue a fresh group turn after sibling retirement. Quiet comparisons must not spin. Qualify bounded lexical-successor selection beyond eight hot groups, targeted peer rotation, real chain gossip and all owned/borrowed peer-round retirement controls without increasing the original deadlines."
       ]
     },
     {

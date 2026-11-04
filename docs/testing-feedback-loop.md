@@ -133,8 +133,15 @@ independently required. Failed outer invocations must retain the launch error
 and termination signal as well as stdout/stderr; a null status is not a cause.
 
 Persistent-history CLI acceptance sends one history query after identity recovery
-and peer rediscovery. Require its timestamped sent and received rows; live message
-output cannot certify the query. Preserve terminal query errors, bounded stdout
+and peer rediscovery. Across CLI rigs, only the exact `peer <full user ID>` roster
+record certifies peer readiness; live reception, startup, history rows, probe output
+and occurrences inside a name cannot replace that record. Gateway-client setup
+requires the pinned hub's validated route through the configured gateway, not
+only the gateway's local roster row, within the existing setup watchdog. Share
+the roster matcher and keep its ordinary negative controls outside ignored-only
+scenario targets.
+Require timestamped sent and received history rows; live message output cannot
+certify the query. Preserve terminal query errors, bounded stdout
 and stderr, and both process lifetimes' stop evidence. Do not retry the query or
 warm storage to hide an unavailable response. A passing diagnostic run alone does
 not establish the cause of an earlier discarded response.

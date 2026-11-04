@@ -1381,7 +1381,8 @@ async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent:
             if borrowed_parent {
                 borrowed_channel_peer_rounds(rounds).await
             } else {
-                super::channels::complete_channel_peer_rounds(&producer, rounds).await
+                let (checked, clean, _) = super::channels::complete_channel_peer_rounds(&producer, rounds).await;
+                (checked, clean)
             }
         })));
         tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), entered_rx).await
