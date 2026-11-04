@@ -591,8 +591,19 @@ watchdog. It then measures a real display-name publication under the original
 five seconds, retaining the normal durable preference and self-history triggers.
 Hold only a strictly newer signed header for that same source key. Require its
 version to match the first actual new source floor and changed member label,
-with the hook task still alive, Owner access intact and the receiver retaining
-exactly the old baseline. Owner access cannot certify that newer inventory.
+with the hook task still alive and the receiver retaining exactly the old
+baseline. At setup, require actual public Owner access and capture the received
+source's validated signed GroupControl grant. At the held cutoff, independently
+require a current, signed Owner grant for the same group, source/account and
+physical owner binding. Do not require the old MembershipLifetime: normal
+same-account auto-enrollment and authority migration can select another physical
+member as the account grant's representative while that source remains Owner.
+Validate the current signed grant independently; ordinary canonical-generation,
+epoch or representative-lifetime changes cannot substitute for fresh inventory. Classify live projection readiness
+separately: only explicit StaleCursor or Unknown/Reconciling may accompany that
+retained grant; unexpected errors and terminal or changed roles fail. Reject
+signed unavailable, terminal and unrelated heads. Log only safe role/execution
+and error classes. Received Owner permission cannot certify newer inventory.
 Release and join before asserting. Keep bounded local-publication and actual
 header/completion timing; executor alignment alone does not prove a historical
 timeout mechanism.
