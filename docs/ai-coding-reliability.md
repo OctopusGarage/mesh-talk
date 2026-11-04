@@ -294,6 +294,15 @@ do not relabel a committed change as rejected because later best-effort work
 failed. Avoid empty catches, blanket defaults or unconditional retries that hide
 the distinction. Follow the owning feature guide for rollback and durability.
 
+When bounded discovery and compaction share a source, discovery may not have
+visited an item before its raw bytes are removed. Record the exact authorized
+retirement fact with deletion in the same transaction; a volatile cache or a
+later scan cannot supply that evidence. Keep source-account attribution separate
+from the current account and from presentation or custody. The rollback, adoption
+and undiscovered-profile regressions in the
+[profile receive owner](../crates/mesh-talk-core/src/storage/profile/profile_receive.rs)
+exercise this boundary.
+
 **Evidence:** fail before and after the commit point, interleave a second writer,
 retry with the same identity, and restart using retained data. Verify acknowledged
 state survives, stale cleanup cannot delete a newer write, and partial outcomes
@@ -312,6 +321,13 @@ existing frame, file, count, depth and byte limits. Preserve exact account/devic
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
 do not remove backpressure to make a benchmark look faster.
+
+A bounded work item can still be unnecessary work. Classify demand from the
+owning source before constructing a derived index; stale queue entries alone
+must not classify its domain. Preserve later valid demand while retiring stale
+work. The ordinary-DM and delayed-membership regressions in
+[group metadata tests](../crates/mesh-talk-core/src/node/group_metadata_tests.rs)
+check that channel recovery does not prepare ordinary private conversations.
 
 **Evidence:** test the limit and just beyond it, malformed or missing data,
 wrong-owner requests, saturation and recovery after capacity returns. Include
