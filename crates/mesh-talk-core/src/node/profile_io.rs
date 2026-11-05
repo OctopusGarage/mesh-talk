@@ -188,7 +188,7 @@ impl Node {
     /// Receive a bounded metadata discovery/retry page. Unknown devices and
     /// temporarily disabled sibling synchronization keep durable pending work.
     pub(in crate::node) fn process_profile_events(&self, conv: ConversationId) {
-        if let Err(error) = self.drain_profile_receptions().and_then(|_| {
+        if let Err(error) = self.drain_profile_receptions(Some(conv)).and_then(|_| {
             self.log
                 .lock()
                 .expect("log mutex not poisoned")
@@ -199,7 +199,10 @@ impl Node {
         }
     }
 
-    fn drain_profile_receptions(&self) -> Result<bool, NodeError> {
+    fn drain_profile_receptions(
+        &self,
+        conversation: Option<ConversationId>,
+    ) -> Result<bool, NodeError> {
         let work = match self.profile_receive_work.try_lock() {
             Ok(work) => work,
             Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
@@ -222,7 +225,37 @@ impl Node {
             &headers,
             Author::from_ed25519(self.identity.public().ed25519_pub),
         )?;
-        for candidate in work.candidates()? {
+        for candidate in work.candidates_for(conversation)? {
+            // Read retained metadata under a short guard. Routing and profile
+            // owners must never be entered while holding the event-log guard.
+            let header = {
+                self.log
+                    .lock()
+                    .expect("log mutex not poisoned")
+                    .repository()?
+                    .header(&candidate.id)?
+            };
+            if let Some(header) = header {
+                if header.conversation != candidate.conversation
+                    || header.kind != EventKind::Profile
+                {
+                    return Err(NodeError::Log(LogError::CorruptFile(
+                        "profile retry source changed".into(),
+                    )));
+                }
+                let Some(peer) = self.routing_peer(&header.author.user_id()) else {
+                    continue;
+                };
+                if peer.account_id.as_deref() == Some(self.account_id().as_str())
+                    && !self.device_sync_policy().profile
+                {
+                    continue;
+                }
+            } else {
+                work.complete(candidate.id)?;
+                self.note_reception_change();
+                continue;
+            }
             let event = self
                 .log
                 .lock()
@@ -350,7 +383,7 @@ impl Node {
                         log::warn!("verified discovery cache update failed; will retry");
                     }
                     node.observe_order_work();
-                    let discovering = node.drain_profile_receptions()?;
+                    let discovering = node.drain_profile_receptions(None)?;
                     node.drain_profile_compaction()?;
                     Ok::<_, NodeError>(discovering)
                 })
@@ -379,6 +412,77 @@ impl Node {
 mod compaction_lease_tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[test]
+    fn global_profile_recovery_retries_unknown_work_after_verified_proof_arrives() {
+        let directory = tempfile::tempdir().unwrap();
+        let known = DeviceIdentity::generate();
+        let known_account = Account::generate();
+        let proof =
+            crate::discovery::Announce::new_with_account(&known, &known_account, "Known", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let source = DeviceIdentity::generate();
+        let account = Account::generate();
+        let conversation = dm_conversation_id(&source.public(), &node.identity.public());
+        let profile = AccountProfile::new(&account, 1, "Recovered".into(), "bio".into(), None);
+        let event = Event::new(
+            &source,
+            conversation,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Profile,
+            crate::dm::seal(
+                &source,
+                &node.identity.public().x25519_pub,
+                &profile.encode(),
+            )
+            .unwrap(),
+        );
+        let id = event.id;
+        node.log.lock().unwrap().append(event).unwrap();
+        node.drain_profile_receptions(None).unwrap();
+        assert!(
+            !node
+                .profile_receive_work
+                .lock()
+                .unwrap()
+                .processed(id)
+                .unwrap()
+        );
+        let reads = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert_eq!(reads, (0, 0));
+        let proof = crate::discovery::Announce::new_with_account(&source, &account, "Recovered", 9);
+        node.roster.lock().unwrap().update(
+            &proof,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+        node.drain_profile_receptions(None).unwrap();
+        assert!(
+            node.profile_receive_work
+                .lock()
+                .unwrap()
+                .processed(id)
+                .unwrap()
+        );
+        assert_eq!(
+            node.account_profile(&account.account_id()).unwrap(),
+            Some(profile)
+        );
+    }
 
     #[test]
     fn nested_repair_leases_defer_profile_compaction_until_final_release() {

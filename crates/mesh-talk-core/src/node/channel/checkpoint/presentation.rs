@@ -48,6 +48,45 @@ fn decode(bytes: &[u8]) -> Result<Presentation, LogError> {
         .map_err(|e| invalid(&e.to_string()))
 }
 impl ChannelCheckpointStore {
+    /// Avoid recreating completed metadata demand. This is only a scheduling
+    /// hint: callers still run canonical, presentation and plaintext admission.
+    /// Existing unfinished demand belongs to its original receiver turn.
+    pub(in crate::node) fn queue_metadata_runtime(
+        &self,
+        channel: ConversationId,
+    ) -> Result<(), LogError> {
+        let queued = self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                [channel.as_bytes().as_slice()],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(Into::into)
+        })?;
+        if queued {
+            return Ok(());
+        }
+        let prepared = (|| -> Result<bool, LogError> {
+            let Some(source) = self.source_binding(channel)? else {
+                return Ok(false);
+            };
+            let (stamp, replica) = self.presentation_stamps(&source)?;
+            self.profile.database().read(|c| {
+                self.check_source_on(c, &source)?;
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM channel_current p JOIN event_conversations e ON e.domain=?1 AND e.conversation=p.channel JOIN channel_book_metadata m ON m.channel=p.channel WHERE p.channel=?2 AND p.owner_account=?3 AND p.source_job=?4 AND p.source_revision=?5 AND p.next_rank=e.event_count AND m.owner_account=?3 AND m.generation=?6 AND m.job=?4 AND m.stamp=?7 AND m.replica_stamp=?8)",
+                    params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),self.account.as_slice(),source.job.as_slice(),source.revision,self.generation,stamp,replica],
+                    |r| r.get(0),
+                ).map_err(Into::into)
+            })
+        })();
+        match prepared {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(LogError::StaleCursor) => self.queue_runtime(channel),
+            Err(error) => Err(error),
+        }
+    }
     pub(in crate::node) fn prepared_history_policy(
         &self,
         channel: ConversationId,

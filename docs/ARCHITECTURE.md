@@ -1059,7 +1059,18 @@ steps while ordinary control work continues. Clean progress schedules the next
 step; waiting consent releases its socket and slot until a coalesced wake or
 bounded retry becomes due. Fresh work tries the direct recipient first;
 failed routes discard their wire state before advancing to another eligible
-candidate. Exhausted candidates free the slot rather than busy retrying.
+candidate. Exhausted candidates free the slot and retain a bounded runtime retry
+reservation; unrelated wakes cannot immediately rediscover the failed route.
+The existing retry owner reserves before cancellable work, counts a failed
+attempt once and starts its bounded failure delay at completion. Exact attempt
+and eligible-route bindings reject stale completions; a changed eligible route
+can be tried immediately. A clean protocol step continues without failure delay,
+even when its phase name is unchanged. Full retry capacity defers admission while
+advancing discovery, preserving active slots and all durable file destinations.
+Failed durable retirement remains pending and cooled rather than repeatedly
+self-waking. Revoked admission retains an active worker's completion token until
+that worker releases its runtime reservation. Network retirement clears scheduling
+hints after owned work has stopped; hints never certify custody or recipient delivery.
 Dialing, fingerprinting, reconciliation and custody checking each have their
 own clean exchange boundary under a 15-second network operation deadline. Each step
 rechecks the current private authorization and exact destination binding; a
@@ -1594,8 +1605,16 @@ indexed tables. Retired derived generations are reclaimed incrementally. A
 canonical preparation turn shares its explicit row, edge and byte budget across
 ordering, legacy parent cuts, generation cleanup and one reducer decision. A
 completed phase yields before the next one; network preparation forwards actual
-work counts. Canonical readiness alone does not authorize plaintext reads:
-admitted recalls must first be attempted, and exact dependency wakes close that
+work counts.
+
+Completed receive callbacks do not recreate durable metadata demand when the
+exact source, rank, account generation and presentation stamps remain current.
+Qualification runs under the existing canonical, installation and presentation
+guards; a changed source retains demand before further work. Metadata installation
+and plaintext admission still execute with their existing authority checks.
+
+Canonical readiness alone does not authorize plaintext reads: admitted recalls
+must first be attempted, and exact dependency wakes close that
 read gate again. Selected history and sibling plaintext export check this gate
 before body hydration and recheck the captured exact channel source before
 returning their result. Retained signed membership identifies pending channels
@@ -2201,6 +2220,19 @@ causal-parent recovery still requires ordinary guarded raw admission.
 Empty Profile receive retry polls preserve the durable ticket unchanged. New
 pending work still rotates before expensive authentication, and accepted or
 definitively rejected sources retain their existing exact durable completion.
+Network callbacks retry only their actual conversation through a covering
+account/conversation/ticket index. The admitted periodic worker retains global
+rotation and bounded metadata discovery, so proof arrival and policy recovery do
+not depend on another packet for that conversation. Retained headers qualify
+routing and disabled sibling policy before retry bodies are hydrated; skipped
+sources remain pending and final decoded authentication checks remain fresh.
+Index installation scans pending metadata once, without replaying ciphertext or
+completion facts. Scoped retry does not bypass the global discovery-page budget.
+
+Completed receiver download discovery validates its account and exact policy
+generation without rewriting scan bookkeeping. New offers retain transactional
+enqueueing, while changed policy resumes the existing bounded scan. Pending claim
+rotation and exact revision-qualified completion remain separate work owners.
 
 Participant network sync uses `NetworkSyncStore` directly: retained Have and
 export pages bind a finite commit cutoff and destructive generation. Ordinary

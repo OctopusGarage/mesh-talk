@@ -1583,6 +1583,87 @@ mod tests {
     }
 
     #[test]
+    fn completed_download_scan_rejects_stale_owner_and_storage_failure() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        f.book.discover_downloads(7).unwrap();
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book.discover_downloads(7),
+            Err(LogError::StaleCursor)
+        ));
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(
+            matches!(f.book.discover_downloads(7), Err(LogError::StaleCursor)),
+            "returning to an account must not revive its retired scan owner"
+        );
+        let fresh = Fixture::new();
+        fresh.book.discover_downloads(7).unwrap();
+        fresh
+            .book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_download_scan")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            fresh.book.discover_downloads(7).is_err(),
+            "quiet scans must propagate storage read failures"
+        );
+    }
+
+    #[test]
+    fn completed_download_scan_is_quiet_and_changed_policy_resumes() {
+        let f = Fixture::new();
+        f.book.discover_downloads(7).unwrap();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            f.book.discover_downloads(7).unwrap();
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "completed unchanged policy scans must perform no writes"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        let (row, event, _) = f.fixture(1);
+        database
+            .transaction(|c| Fixture::install(c, &row, &event))
+            .unwrap();
+        assert_eq!(
+            f.book.claim_downloads().unwrap().len(),
+            1,
+            "a new offer must enqueue after the scan has completed"
+        );
+        for work in f.book.claim_downloads().unwrap() {
+            f.book.finish_download(work).unwrap();
+        }
+        f.book.discover_downloads(8).unwrap();
+        assert_eq!(
+            f.book.claim_downloads().unwrap().len(),
+            1,
+            "a changed policy must rediscover retained offers"
+        );
+    }
+
+    #[test]
     fn file_receive_empty_candidate_turns_do_not_commit_or_rewrite_scan() {
         let f = Fixture::new();
         let conversation = ConversationId::new([12; 32]);

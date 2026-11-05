@@ -231,6 +231,8 @@ test("shared Cargo configuration selects every workspace crate via owning contra
   assert(!profile.owners.some(owner => owner.id === "core-node"), "established focused ownership must not widen through the catch-all Node prefix");
   assert.deepEqual(profile.rust.find(item => item.package === "mesh-talk-core").filters, [
     "account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
+    "global_profile_recovery_retries_unknown_work_after_verified_proof_arrives",
+    "known_profile_callback_progresses_behind_blocked_other_conversation",
     "node::account_profile::tests::",
     "node::account_profile_data::indexed::tests::",
     "node::account_profile_data::tests::",
@@ -260,6 +262,8 @@ test("shared Cargo configuration selects every workspace crate via owning contra
     "node::trust_card::indexed::tests::",
     "node::trust_card::tests::",
     "storage::profile::profile_receive::tests::",
+    "unknown_profile_callback_skips_body_then_verified_proof_resumes",
+    "unrelated_profile_callbacks_leave_unknown_pending_work_quiet",
     "warm_open_reads_no_avatar_payloads",
   ]);
   const receive = buildAffectedPlan(["crates/mesh-talk-core/src/storage/profile/profile_receive.rs"], { contracts: registered });

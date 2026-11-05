@@ -144,6 +144,9 @@ Uncancellable native work needs an explicit ownership boundary: retain the
 operation's serialization ownership, but not unrelated runtime/session guards across
 the provider call. Revalidate publication and compensate stale effects through
 the owner. A timeout is not permission to abandon durable work or reuse its slot.
+Revoking authorization must not erase the active worker's ownership token before
+its matching completion releases runtime bookkeeping. Discard inactive scheduling
+hints separately from retiring actual work and its permits.
 
 **Evidence:** cancel the caller while work is paused; confirm retirement progress
 where promised, retained serialization, eventual cleanup and absence of stale
@@ -191,9 +194,19 @@ a cursor is only a replay hint, bound checkpoint frequency while preserving
 fairness across restarts, exact owner fences and retry after checkpoint failure.
 An in-memory cursor must not acknowledge a failed required checkpoint or override
 a newer durable cursor written by another owner.
+Observing a completed projection must not manufacture and immediately retire
+durable work on every poll. Qualify quiet reads against the owning source and
+generation, while preserving durable demand before any preparation can mutate
+or yield. Cover source changes between preparation and installation, not only
+an unchanged single-threaded read.
 Separate due retries, cooled jobs and unfinished discovery or preparation.
 Reserve a retry deadline before cancellable work and retain its wake through the
-existing scheduler. A future deadline must not force fast polling; expired
+existing scheduler. Scope each reservation to the exact attempt and eligible route;
+a late completion must not cool or release its replacement, including after a
+route changes away and back. Bound retained reservations without evicting active
+or unexpired entries to admit new work. Start failure backoff from completion,
+and distinguish a successful clean protocol step from an unchanged phase name.
+A future deadline must not force fast polling; expired
 deadlines must not create zero-delay spins. Finite discovery still needs short
 turns while admission capacity remains, even when every queued job is cooling.
 Recheck conditions with the synchronization primitive's correct waiter protocol;
@@ -240,7 +253,11 @@ check real multi-page rotation, restart progress, checkpoint failure, competing
 writers and bounded cursor eviction.
 The [group-file retry regressions](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
 cover missing routes, cancellation, failed refill, full capacity and unfinished
-discovery alongside cooled jobs.
+discovery alongside cooled jobs. The private-file scheduler regressions in
+[delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) and the
+shared [retry owner](../crates/mesh-talk-core/src/node/delivery_retry.rs) cover
+unrelated wakes, cancelled reservations, replacement attempts, completed-step
+progress and capacity churn without retaining file payloads in cooldown hints.
 
 ## R06: Exact authority and stale completions
 
@@ -391,6 +408,10 @@ A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
+
+A storage fault fixture must fail the currently selected persistence owner and
+observe that failure before asserting recovery. A hook on a neighboring journal
+cannot certify the actual commit failed merely because both use the same logger.
 
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an

@@ -621,6 +621,11 @@ impl DeliveryStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_outbox_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.outbox.fail_appends_for_test(enabled)
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_journal_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
         self.journal.fail_appends_for_test(enabled)
     }

@@ -13,6 +13,7 @@ const SCHEMA: &str = "CREATE TABLE profile_receive_scan(account BLOB PRIMARY KEY
 CREATE TABLE profile_receive_pending(account BLOB NOT NULL CHECK(length(account)=32), id BLOB NOT NULL CHECK(length(id)=32), conversation BLOB NOT NULL CHECK(length(conversation)=32), ticket INTEGER NOT NULL CHECK(ticket>0), PRIMARY KEY(account,id));
 CREATE INDEX profile_receive_retry ON profile_receive_pending(account,ticket);
 CREATE TABLE profile_receive_processed(account BLOB NOT NULL CHECK(length(account)=32), id BLOB NOT NULL CHECK(length(id)=32), PRIMARY KEY(account,id));";
+const SCOPED_RETRY_INDEX: &str = "CREATE INDEX profile_receive_conversation_retry ON profile_receive_pending(account,conversation,ticket,id)";
 /// Shared by receive-work startup and authorized source retirement. The exact
 /// processed fact means presentation terminal or superseded-source retirement;
 /// it never certifies retained custody or a newly admitted event.
@@ -25,7 +26,18 @@ pub(crate) fn ensure_schema_on(c: &Connection) -> Result<(), LogError> {
     if !present {
         c.execute_batch(SCHEMA)?;
     }
-    super::manifest::validate_ddl(c, SCHEMA)
+    // Additive migration also runs for profiles whose receive tables predate
+    // conversation-scoped retries. Keep canonical DDL validation for both opens
+    // and the compaction owner's shared schema initialization.
+    let indexed: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='profile_receive_conversation_retry')",
+        [], |r| r.get(0),
+    )?;
+    if !indexed {
+        c.execute_batch(SCOPED_RETRY_INDEX)?;
+    }
+    super::manifest::validate_ddl(c, SCHEMA)?;
+    super::manifest::validate_ddl(c, SCOPED_RETRY_INDEX)
 }
 
 impl ProfileStorage {
@@ -181,12 +193,29 @@ impl ProfileReceiveWork {
     }
     /// Rotate a fixed metadata page before expensive authentication. A storage
     /// or decryption failure leaves exact pending work eligible on later passes.
+    #[cfg(test)]
     pub fn candidates(&self) -> Result<Vec<Candidate>, LogError> {
+        self.candidates_for(None)
+    }
+    /// Callback retries belong to the reconciled conversation; periodic recovery
+    /// keeps the global fair rotation and the same bounded discovery cursor.
+    pub fn candidates_for(
+        &self,
+        conversation: Option<ConversationId>,
+    ) -> Result<Vec<Candidate>, LogError> {
         self.profile.database().transaction(|c| {
             self.check(c)?;
             let mut result=Vec::new();
-            let mut statement=c.prepare("SELECT id,conversation FROM profile_receive_pending WHERE account=?1 ORDER BY ticket LIMIT 16")?;
-            let mut rows=statement.query([self.account.as_slice()])?;
+            let query = if conversation.is_some() {
+                "SELECT id,conversation FROM profile_receive_pending WHERE account=?1 AND conversation=?2 ORDER BY ticket LIMIT 16"
+            } else {
+                "SELECT id,conversation FROM profile_receive_pending WHERE account=?1 ORDER BY ticket LIMIT 16"
+            };
+            let mut statement=c.prepare(query)?;
+            let mut rows = match conversation.as_ref() {
+                Some(conversation) => statement.query(params![self.account.as_slice(), conversation.as_bytes().as_slice()])?,
+                None => statement.query(params![self.account.as_slice()])?,
+            };
             while let Some(row)=rows.next()? {
                 let id:Vec<u8>=row.get(0)?;let conversation:Vec<u8>=row.get(1)?;
                 result.push(Candidate {id:EventId::new(id.try_into().map_err(|_|invalid("invalid profile retry id"))?),conversation:ConversationId::new(conversation.try_into().map_err(|_|invalid("invalid profile retry conversation"))?)});
@@ -228,6 +257,154 @@ mod tests {
         identity::{account::Account, device::DeviceIdentity},
         storage::profile::ProfileStorageLease,
     };
+    #[test]
+    fn scoped_retries_are_bounded_fair_and_global_recovery_keeps_other_work() {
+        let (_dir, work, own) = fixture();
+        let mut page = headers();
+        let a = ConversationId::new([41; 32]);
+        let b = ConversationId::new([42; 32]);
+        for (n, row) in page.iter_mut().enumerate() {
+            row.header.conversation = if n < 40 { a } else { b };
+        }
+        work.discover(None, &page, own).unwrap();
+        let first = work.candidates_for(Some(b)).unwrap();
+        let second = work.candidates_for(Some(b)).unwrap();
+        assert_eq!(first.len(), 16);
+        assert_eq!(second.len(), 16);
+        assert!(first.iter().chain(&second).all(|row| row.conversation == b));
+        assert!(second.iter().all(|row| !first.contains(row)));
+        let global = work.candidates().unwrap();
+        assert_eq!(global.len(), 16);
+        assert!(global.iter().all(|row| row.conversation == a));
+        let db = work.profile.database();
+        let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        assert!(
+            work.candidates_for(Some(ConversationId::new([99; 32])))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(db.successful_write_commits(), commits);
+    }
+
+    #[test]
+    fn scoped_retry_index_migrates_existing_tables_without_replaying_bodies_or_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let profile = open_storage(&dir, &identity, &Account::generate());
+        let repo =
+            crate::eventlog::repository::EventRepository::from_profile(profile.clone(), DOMAIN)
+                .unwrap();
+        append_profiles(&repo);
+        let work = ProfileReceiveWork::open(profile).unwrap();
+        work.discover(
+            None,
+            &repo.committed_headers_page(None, 128).unwrap(),
+            Author::from_ed25519(identity.public().ed25519_pub),
+        )
+        .unwrap();
+        let before_after = work.after().unwrap();
+        assert!(before_after.is_some());
+        assert_eq!(repo.committed_headers_page(None, 128).unwrap().len(), 12);
+        let first = work.candidates().unwrap();
+        work.complete(first[0].id).unwrap();
+        let profile = work.profile.clone();
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP INDEX profile_receive_conversation_retry")?;
+                Ok(())
+            })
+            .unwrap();
+        drop(work);
+        let work = ProfileReceiveWork::open(profile).unwrap();
+        assert_eq!(work.after().unwrap(), before_after);
+        assert_eq!(repo.committed_headers_page(None, 128).unwrap().len(), 12);
+        assert_eq!(fact_count(&work.profile, &work.account), 1);
+        assert!(work.processed(first[0].id).unwrap());
+        let plan: String = work.profile.database().read(|c| {
+            Ok(c.query_row("EXPLAIN QUERY PLAN SELECT id,conversation FROM profile_receive_pending WHERE account=?1 AND conversation=?2 ORDER BY ticket LIMIT 16", params![work.account.as_slice(), [1u8;32].as_slice()], |r|r.get(3))?)
+        }).unwrap();
+        assert!(
+            plan.contains("COVERING INDEX profile_receive_conversation_retry"),
+            "{plan}"
+        );
+        let count: i64 = work
+            .profile
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM profile_receive_pending WHERE account=?1",
+                    [work.account.as_slice()],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(count, 11);
+        assert_eq!(work.candidates().unwrap().len(), 11);
+        assert_eq!(
+            repo.body_read_counts(),
+            (0, 0),
+            "migration and pending selection remain metadata-only"
+        );
+    }
+
+    #[test]
+    fn scoped_retry_index_rejects_incompatible_existing_definition() {
+        let (_dir, work, _) = fixture();
+        work.profile.database().transaction(|c| {
+            c.execute_batch("DROP INDEX profile_receive_conversation_retry; CREATE INDEX profile_receive_conversation_retry ON profile_receive_pending(account,id)")?; Ok(())
+        }).unwrap();
+        assert!(ProfileReceiveWork::open(work.profile.clone()).is_err());
+    }
+
+    #[test]
+    fn scoped_rotation_and_completion_failures_preserve_retry_and_owner_fences() {
+        let (_dir, work, own) = fixture();
+        let page = headers();
+        let conv = page[0].header.conversation;
+        work.discover(None, &page, own).unwrap();
+        work.profile.database().transaction(|c| { c.execute_batch("CREATE TEMP TRIGGER fail_scoped_rotation BEFORE UPDATE ON profile_receive_pending BEGIN SELECT RAISE(ABORT,'injected rotation failure'); END;")?; Ok(()) }).unwrap();
+        assert!(work.candidates_for(Some(conv)).is_err());
+        work.profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_scoped_rotation")?;
+                Ok(())
+            })
+            .unwrap();
+        let first = work.candidates_for(Some(conv)).unwrap();
+        assert_eq!(first[0].id, page[0].header.id);
+        work.profile.database().transaction(|c| { c.execute_batch("CREATE TEMP TRIGGER fail_profile_completion BEFORE DELETE ON profile_receive_pending BEGIN SELECT RAISE(ABORT,'injected completion failure'); END;")?; Ok(()) }).unwrap();
+        assert!(work.complete(first[0].id).is_err());
+        assert!(!work.processed(first[0].id).unwrap());
+        work.profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_profile_completion")?;
+                Ok(())
+            })
+            .unwrap();
+        work.complete(first[0].id).unwrap();
+        assert!(work.processed(first[0].id).unwrap());
+        let replacement = Account::generate();
+        work.profile
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "UPDATE participant_profile SET account=?1 WHERE singleton=1",
+                    [replacement.public().ed25519_pub.as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            work.candidates_for(Some(conv)),
+            Err(LogError::StaleCursor)
+        ));
+    }
+
     fn fixture() -> (tempfile::TempDir, ProfileReceiveWork, Author) {
         let dir = tempfile::tempdir().unwrap();
         let identity = DeviceIdentity::generate();

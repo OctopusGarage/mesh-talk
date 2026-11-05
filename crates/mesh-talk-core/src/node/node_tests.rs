@@ -47,6 +47,147 @@ fn settle_injected_channel(node: &Node, channel: ConversationId) {
 }
 
 #[tokio::test]
+async fn completed_channel_metadata_retains_demand_when_source_changes_before_install() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Arc::new(
+        Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel_tx,
+            file,
+            &root.path().join("events"),
+            &root.path().join("sent"),
+            "pw",
+        )
+        .unwrap(),
+    );
+    let channel = node.create_channel("before", vec![]).await.unwrap();
+    settle_injected_channel(&node, channel);
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_none()
+    );
+    let before = node.channels.lock().unwrap().info_projection(channel);
+    let weak = Arc::downgrade(&node);
+    *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+        let node = weak.upgrade().unwrap();
+        node.append_event(channel, EventKind::ChannelRename, b"after".to_vec())
+            .unwrap();
+    }));
+    assert!(matches!(
+        node.process_channel_reception_inner(channel, "catch_up"),
+        Err(NodeError::Log(LogError::StaleCursor))
+    ));
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_some(),
+        "a source change after quiet qualification must retain durable recovery demand"
+    );
+    assert!(
+        node.channels.lock().unwrap().info_projection(channel) == before,
+        "a changed source must not install stale membership"
+    );
+    settle_injected_channel(&node, channel);
+    assert_eq!(
+        node.channel_checkpoints
+            .current_state(channel)
+            .unwrap()
+            .unwrap()
+            .name(),
+        "after"
+    );
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn completed_channel_receive_callbacks_are_quiet_and_new_messages_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        file,
+        &root.path().join("events"),
+        &root.path().join("sent"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("quiet", vec![]).await.unwrap();
+    node.enqueue_channel_message_reply_expiring_if(channel, b"first", None, None, |commit| {
+        commit()
+    })
+    .unwrap();
+    settle_injected_channel(&node, channel);
+    let messages = node.channel_history(channel, 10).unwrap();
+    let members = node
+        .channel_checkpoints
+        .current_state(channel)
+        .unwrap()
+        .unwrap()
+        .members()
+        .to_vec();
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    for _ in 0..8 {
+        node.process_channel_reception_inner(channel, "catch_up")
+            .unwrap();
+    }
+    assert_eq!(
+        database.read(|c| Ok(c.total_changes())).unwrap(),
+        changes,
+        "settled real receive callbacks must not recreate durable channel demand"
+    );
+    assert_eq!(database.successful_write_commits(), commits);
+    assert_eq!(
+        node.channel_history(channel, 10).unwrap().len(),
+        messages.len()
+    );
+    assert_eq!(
+        node.channel_checkpoints
+            .current_state(channel)
+            .unwrap()
+            .unwrap()
+            .members(),
+        members.as_slice()
+    );
+    node.channel_checkpoints.queue_runtime(channel).unwrap();
+    settle_injected_channel(&node, channel);
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_none()
+    );
+    node.enqueue_channel_message_reply_expiring_if(channel, b"second", None, None, |commit| {
+        commit()
+    })
+    .unwrap();
+    settle_injected_channel(&node, channel);
+    assert_eq!(
+        node.channel_history(channel, 10).unwrap().len(),
+        messages.len() + 1
+    );
+}
+
+#[tokio::test]
 async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -12099,8 +12240,33 @@ async fn disabled_profile_sync_defers_sibling_avatar_until_enabled() {
         EventKind::Profile,
         ciphertext,
     );
+    let id = event.id;
     node.log.lock().unwrap().append(event).unwrap();
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
     node.process_profile_events(conversation);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads
+    );
+    assert!(
+        !node
+            .profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
     assert_eq!(node.peer_avatar(&account.account_id()).unwrap(), None);
     node.set_device_sync_category(crate::node::SyncCategory::Profile, true)
         .unwrap();
@@ -14360,6 +14526,205 @@ async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance(
         assert!(
             incoming.try_recv().is_err(),
             "retry duplicated a receipt or terminal"
+        );
+    }
+}
+
+fn append_pending_profile(
+    node: &Node,
+    source: &DeviceIdentity,
+    account: &crate::identity::account::Account,
+    revision: u64,
+) -> (ConversationId, crate::eventlog::event::EventId) {
+    let conversation = dm_conversation_id(&source.public(), &node.identity.public());
+    let profile = crate::node::AccountProfile::new(
+        account,
+        revision,
+        "Pending peer".into(),
+        "bio".into(),
+        None,
+    );
+    let event = Event::new(
+        source,
+        conversation,
+        revision,
+        vec![],
+        revision,
+        revision,
+        EventKind::Profile,
+        crate::dm::seal(
+            source,
+            &node.identity.public().x25519_pub,
+            &profile.encode(),
+        )
+        .unwrap(),
+    );
+    let id = event.id;
+    node.log.lock().unwrap().append(event).unwrap();
+    (conversation, id)
+}
+
+#[test]
+fn unrelated_profile_callbacks_leave_unknown_pending_work_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let (conversation, id) = append_pending_profile(&node, &source, &account, 1);
+    node.process_profile_events(conversation);
+    let other = ConversationId::new([231; 32]);
+    node.process_profile_events(other); // warm metadata and compaction demand
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    for _ in 0..8 {
+        node.process_profile_events(other);
+    }
+    assert_eq!(
+        database.read(|c| Ok(c.total_changes())).unwrap(),
+        changes,
+        "unrelated callbacks must not rotate pending profile work"
+    );
+    assert_eq!(database.successful_write_commits(), commits);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads
+    );
+    assert!(
+        !node
+            .profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
+}
+
+#[test]
+fn unknown_profile_callback_skips_body_then_verified_proof_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let (conversation, id) = append_pending_profile(&node, &source, &account, 1);
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    node.process_profile_events(conversation);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads,
+        "unknown routing identity must be checked before reading ciphertext"
+    );
+    assert!(
+        !node
+            .profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
+    add_account_peer(
+        &node.roster,
+        &source,
+        &account,
+        "Verified",
+        4000,
+        &node.identity.public().user_id(),
+    );
+    node.process_profile_events(conversation);
+    assert_eq!(
+        node.account_profile(&account.account_id())
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "Pending peer"
+    );
+    assert!(
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
+}
+
+#[test]
+fn known_profile_callback_progresses_behind_blocked_other_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let unknown = DeviceIdentity::generate();
+    let unknown_account = crate::identity::account::Account::generate();
+    let mut blocked = Vec::new();
+    for revision in 1..=16 {
+        blocked.push(append_pending_profile(&node, &unknown, &unknown_account, revision).1);
+    }
+    let known = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    add_account_peer(
+        &node.roster,
+        &known,
+        &account,
+        "Verified",
+        4000,
+        &node.identity.public().user_id(),
+    );
+    let (conversation, id) = append_pending_profile(&node, &known, &account, 1);
+    node.process_profile_events(conversation);
+    assert!(
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap(),
+        "own callback must reach known work behind unrelated blocked tickets"
+    );
+    assert!(
+        node.account_profile(&account.account_id())
+            .unwrap()
+            .is_some()
+    );
+    for id in blocked {
+        assert!(
+            !node
+                .profile_receive_work
+                .lock()
+                .unwrap()
+                .processed(id)
+                .unwrap()
         );
     }
 }

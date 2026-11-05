@@ -259,8 +259,44 @@ type FileKey = (EventId, EventId);
 type FileStepResult = (
     FileKey,
     std::collections::HashMap<FileKey, FileTransfer>,
-    bool,
+    FileStepCompletion,
 );
+#[derive(Clone, Copy, Debug)]
+enum FileStepOutcome {
+    Clean(bool),
+    Failed,
+}
+
+impl FileStepOutcome {
+    fn complete(&self) -> bool {
+        matches!(self, Self::Clean(true))
+    }
+}
+
+#[derive(Debug)]
+struct FileStepCompletion {
+    token: u64,
+    routes: FileRoutes,
+    outcome: FileStepOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileRoutes {
+    endpoints: std::collections::BTreeSet<(bool, String, Option<String>, std::net::SocketAddr)>,
+    current: bool,
+    custody: bool,
+}
+
+// Only cursor/scalar state survives a failed socket. Fresh journal admission
+// supplies the FileCard (including fanout), destination and authorization.
+struct FileContinuation {
+    routes: FileRoutes,
+    candidate_cursor: usize,
+    legacy: bool,
+    sticker_proof_attempted: bool,
+    identity_offered: bool,
+}
+
 type FileWork = (
     super::delivery_store::FileCard,
     super::delivery_store::FileDestination,
@@ -276,6 +312,8 @@ struct FileDeliveryScheduler {
     transfers: std::collections::HashMap<FileKey, FileTransfer>,
     workers: tokio::task::JoinSet<FileStepResult>,
     running_sockets: std::collections::HashSet<FileKey>,
+    retries: super::delivery_retry::RetrySchedule<FileKey, FileRoutes>,
+    parked: std::collections::HashMap<FileKey, FileContinuation>,
     // Bounded scheduling hints, not custody/delivery truth. Eviction merely
     // permits an earlier retry after other destinations have had their turn.
     relay_cooldowns: std::collections::VecDeque<(FileKey, std::time::Instant, bool)>,
@@ -332,23 +370,59 @@ impl FileDeliveryScheduler {
     }
 
     fn admit(&mut self, node: &Node, files: Vec<FileWork>, cursor: Option<FileKey>) {
+        self.admit_at(node, files, cursor, std::time::Instant::now());
+    }
+
+    fn admit_at(
+        &mut self,
+        node: &Node,
+        files: Vec<FileWork>,
+        cursor: Option<FileKey>,
+        now: std::time::Instant,
+    ) {
         self.pending_cursor = cursor;
         node.prune_file_transfers(&mut self.transfers);
         for (file, destination) in files {
             let key = (file.id, destination.binding.event_id);
+            let routes = node.file_retry_routes(&file, &destination);
+            if !routes.current {
+                self.parked.remove(&key);
+                // The in-flight worker still owns its matching completion and
+                // socket marker even after authority is revoked. Forget only
+                // inactive hints; otherwise completion cannot release its owner.
+                if !self.running_sockets.contains(&key) {
+                    self.retries.forget(&key);
+                }
+                continue;
+            }
             if self.transfers.len() + self.workers.len() < MAX_FILE_TRANSFERS
                 && !self.relay_cooldowns.iter().any(|(held, _, _)| *held == key)
+                && self.retries.ready(&key, &routes, now)
                 && node.file_destination_current(&file, &destination)
                 && !self.transfers.contains_key(&key)
                 && !self.running_sockets.contains(&key)
             {
-                self.transfers
-                    .insert(key, FileTransfer::new(file, destination));
+                let mut transfer = FileTransfer::new(file, destination);
+                if let Some(continuation) = self
+                    .parked
+                    .remove(&key)
+                    .filter(|previous| previous.routes == routes)
+                {
+                    transfer.candidate_cursor = continuation.candidate_cursor;
+                    transfer.legacy = continuation.legacy;
+                    transfer.sticker_proof_attempted = continuation.sticker_proof_attempted;
+                    transfer.identity_offered = continuation.identity_offered;
+                }
+                self.transfers.insert(key, transfer);
             }
         }
     }
 
     fn advance(&mut self, node: &std::sync::Arc<Node>) {
+        self.advance_at(node, std::time::Instant::now());
+    }
+
+    fn advance_at(&mut self, node: &std::sync::Arc<Node>, now: std::time::Instant) {
         // Each exchange owns its socket until a clean protocol boundary. Slow
         // peers consume one bounded worker, never the serial delivery loop.
         let mut keys = self.transfers.keys().copied().collect::<Vec<_>>();
@@ -369,10 +443,23 @@ impl FileDeliveryScheduler {
             if dial && sockets >= MAX_FILE_SOCKETS {
                 continue;
             }
+            self.active_cursor = Some(key);
+            let Some(work) = node.runtime_work.admit() else {
+                return;
+            };
+            let routes = node.file_retry_routes(&transfer.file, &transfer.destination);
+            let Some((token, evicted)) = self.retries.reserve(key, routes.clone(), now) else {
+                // Cooled/capacity-deferred keys retain durable intent but own no
+                // transfer or socket slot. The scan cursor already passed them.
+                self.transfers.remove(&key);
+                continue;
+            };
+            if let Some(evicted) = evicted {
+                self.parked.remove(&evicted);
+            }
             if dial {
                 sockets += 1;
             }
-            self.active_cursor = Some(key);
             self.running_sockets.insert(key);
             #[cfg(test)]
             node.file_transfer_peak.fetch_max(
@@ -383,15 +470,20 @@ impl FileDeliveryScheduler {
             let file = transfer.file.clone();
             let destination = transfer.destination.clone();
             let node = node.clone();
-            let Some(work) = node.runtime_work.admit() else {
-                return;
-            };
             self.workers.spawn(work.track(async move {
                 let mut transfers = std::collections::HashMap::from([(key, transfer)]);
-                let complete = node
-                    .retry_file_step(&file, &destination, &mut transfers)
+                let outcome = node
+                    .retry_file_step_outcome(&file, &destination, &mut transfers)
                     .await;
-                (key, transfers, complete)
+                (
+                    key,
+                    transfers,
+                    FileStepCompletion {
+                        token,
+                        routes,
+                        outcome,
+                    },
+                )
             }));
         }
     }
@@ -402,16 +494,29 @@ impl FileDeliveryScheduler {
         result: Result<FileStepResult, tokio::task::JoinError>,
         diagnostic: &mut DeliveryDiagnosticThrottle,
     ) {
-        let Ok((key, mut transfers, complete)) = result else {
+        self.finish_at(node, result, diagnostic, std::time::Instant::now());
+    }
+
+    fn finish_at(
+        &mut self,
+        node: &Node,
+        result: Result<FileStepResult, tokio::task::JoinError>,
+        diagnostic: &mut DeliveryDiagnosticThrottle,
+        now: std::time::Instant,
+    ) {
+        let Ok((key, mut transfers, completion)) = result else {
             // Never retain reservations after a panicked child; drop cancels the
             // other workers and the owning accept loop retires on this failure.
             self.running_sockets.clear();
             self.workers.abort_all();
             return;
         };
+        if !self.retries.owns(&key, completion.token) {
+            return;
+        }
         self.running_sockets.remove(&key);
-        if complete {
-            node.delivery_notify.notify_one();
+        let mut failed = matches!(completion.outcome, FileStepOutcome::Failed);
+        if completion.outcome.complete() {
             if node
                 .delivery
                 .lock()
@@ -420,13 +525,34 @@ impl FileDeliveryScheduler {
                 .is_err()
             {
                 diagnostic.warn_if_due();
+                failed = true;
             } else {
+                node.delivery_notify.notify_one();
                 node.outgoing_file_acks
                     .lock()
                     .expect("outgoing file progress lock not poisoned")
                     .remove(&key);
                 node.note_file_change();
             }
+        }
+        self.retries.complete(&key, completion.token, !failed, now);
+        if failed {
+            // Preserve only scalar candidate traversal outside active capacity.
+            // Dropping the transfer closes any remaining observation-failure socket.
+            if let Some(transfer) = transfers.remove(&key) {
+                self.parked.insert(
+                    key,
+                    FileContinuation {
+                        routes: completion.routes,
+                        candidate_cursor: transfer.candidate_cursor,
+                        legacy: transfer.legacy,
+                        sticker_proof_attempted: transfer.sticker_proof_attempted,
+                        identity_offered: transfer.identity_offered,
+                    },
+                );
+            }
+            // Failure never manufactures an immediate wake.
+            return;
         }
         if let Some(transfer) = transfers.remove(&key) {
             let delay = match transfer.phase {
@@ -2107,6 +2233,8 @@ impl Node {
                     file_scheduler.running_sockets.clear();
                     file_scheduler.transfers.clear();
                     file_scheduler.relay_cooldowns.clear();
+                    file_scheduler.retries.clear();
+                    file_scheduler.parked.clear();
                     self.relay_retry_after.lock().expect("relay retry lock not poisoned").clear();
                     controls.shutdown().await;
                     self.clear_delivery_observations();
@@ -2773,34 +2901,101 @@ impl Node {
             }
     }
 
+    fn file_retry_routes(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+    ) -> FileRoutes {
+        let current = self.file_destination_current(file, destination);
+        let custody = self.file_relay_custody_current(file, destination);
+        let binding = &destination.binding;
+        let mut endpoints = std::collections::BTreeSet::new();
+        if current
+            && let Some(peer) = self
+                .routing_peer(&binding.device.user_id())
+                .filter(|peer| peer.public == binding.device && peer.account_id == binding.account)
+        {
+            endpoints.insert((
+                false,
+                peer.public.user_id(),
+                peer.account_id.clone(),
+                peer.addr,
+            ));
+            endpoints.extend(
+                peer.routes
+                    .iter()
+                    .filter(|route| {
+                        route.source != crate::discovery::roster::RouteSource::PostOffice
+                    })
+                    .map(|route| {
+                        (
+                            false,
+                            peer.public.user_id(),
+                            peer.account_id.clone(),
+                            route.addr,
+                        )
+                    }),
+            );
+        }
+        if custody {
+            let relays = {
+                let roster = self.roster.lock().expect("roster lock not poisoned");
+                self.post_office_candidates_for(&roster, &binding.device)
+            };
+            endpoints.extend(
+                relays
+                    .into_iter()
+                    .filter(|peer| self.relay_send_allowed(&peer.public))
+                    .map(|peer| (true, peer.public.user_id(), peer.account_id, peer.addr)),
+            );
+        }
+        FileRoutes {
+            endpoints,
+            current,
+            custody,
+        }
+    }
+
+    #[cfg(test)]
     pub(in crate::node) async fn retry_file_step(
         &self,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
         transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
     ) -> bool {
+        self.retry_file_step_outcome(file, destination, transfers)
+            .await
+            .complete()
+    }
+
+    async fn retry_file_step_outcome(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+        transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
+    ) -> FileStepOutcome {
         self.prune_file_transfers(transfers);
         let key = (file.id, destination.binding.event_id);
         if !self.file_destination_current(file, destination) {
             transfers.remove(&key);
-            return false;
+            return FileStepOutcome::Clean(false);
         }
         match self.recipient_completed_file(file, destination) {
             Ok(true) => {
                 transfers.remove(&key);
-                return true;
+                return FileStepOutcome::Clean(true);
             }
             Ok(false) => {}
             Err(error) => {
                 log::warn!("file completion observation deferred: {error}");
-                return false;
+                return FileStepOutcome::Failed;
             }
         }
         if !transfers.contains_key(&key) {
             if transfers.len() == MAX_FILE_TRANSFERS {
                 // The worker admits only available slots; standalone callers
                 // leave excess work durable for the next scheduled turn.
-                return false;
+                return FileStepOutcome::Clean(false);
             }
             transfers.insert(key, FileTransfer::new(file.clone(), destination.clone()));
         }
@@ -2819,7 +3014,7 @@ impl Node {
                 .count()
                 >= MAX_FILE_SOCKETS
         {
-            return false;
+            return FileStepOutcome::Clean(false);
         }
         let transfer = transfers.get_mut(&key).unwrap();
         // Standalone callers may resume a clean consent boundary directly;
@@ -2871,9 +3066,9 @@ impl Node {
                 {
                     self.recycle_sync_channel(channel);
                 }
-                true
+                FileStepOutcome::Clean(true)
             }
-            Ok(Ok(false)) => false,
+            Ok(Ok(false)) => FileStepOutcome::Clean(false),
             _ => {
                 #[cfg(test)]
                 eprintln!(
@@ -2893,7 +3088,7 @@ impl Node {
                 if transfer.candidate_cursor >= transfer.candidate_count {
                     transfers.remove(&key);
                 }
-                false
+                FileStepOutcome::Failed
             }
         }
     }
@@ -4028,6 +4223,491 @@ mod diagnostic_tests {
             "completed ordered exchanges must confirm delivery"
         );
         assert_eq!(b.read_file(file).unwrap(), b"valid slow route");
+    }
+
+    #[tokio::test]
+    async fn failed_file_routes_release_capacity_and_do_not_retry_on_unrelated_wakes() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&bob, &account, "Bob", 9);
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        for index in 0..9 {
+            let path = source.path().join(format!("missing-route-{index}.bin"));
+            std::fs::write(&path, format!("distinct file {index}")).unwrap();
+            node.enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+                .await
+                .unwrap();
+        }
+        node.roster.lock().unwrap().forget(&proof.public());
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostics = super::DeliveryDiagnosticThrottle::default();
+        let now = std::time::Instant::now();
+        let mut attempted = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let scan = scheduler.scan(&node);
+            let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+            scheduler.admit_at(&node, files, cursor, now);
+            for key in scheduler.transfers.keys() {
+                assert!(
+                    attempted.insert(*key),
+                    "unrelated wake retried a failed route before its deadline"
+                );
+            }
+            // Eight transfers share fewer socket slots. Drain both bounded
+            // batches before judging failed work, including first admissions.
+            for _ in 0..2 {
+                scheduler.advance(&node);
+                while let Some(result) = scheduler.workers.join_next().await {
+                    scheduler.finish_at(&node, result, &mut diagnostics, now);
+                }
+            }
+            assert!(
+                scheduler.transfers.is_empty(),
+                "failed routes must release all transfer slots"
+            );
+        }
+        assert_eq!(
+            attempted.len(),
+            9,
+            "cooling destinations must not starve the ninth durable destination"
+        );
+        assert_eq!(node.delivery.lock().unwrap().file_cards().count(), 9);
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_preserves_candidates_and_clean_same_phase_boundaries() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&bob, &account, "Bob", 9);
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let path = source.path().join("candidate.bin");
+        std::fs::write(&path, b"candidate continuation").unwrap();
+        let (id, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let key = (id, destination.binding.event_id);
+        let routes = node.file_retry_routes(&card, &destination);
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), now)
+            .unwrap()
+            .0;
+        let mut transfer = super::FileTransfer::new(card.clone(), destination.clone());
+        transfer.candidate_cursor = 1;
+        transfer.candidate_count = 2;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                std::collections::HashMap::from([(key, transfer)]),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Failed,
+                },
+            )),
+            &mut diagnostic,
+            now,
+        );
+        assert!(scheduler.transfers.is_empty());
+        assert_eq!(scheduler.parked[&key].candidate_cursor, 1);
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+        assert!(scheduler.transfers.is_empty());
+        let due = now + std::time::Duration::from_secs(2);
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, due);
+        assert_eq!(
+            scheduler.transfers[&key].candidate_cursor, 1,
+            "retry must retain the next candidate rather than dial the failed first route"
+        );
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), due)
+            .unwrap()
+            .0;
+        let mut transfer = scheduler.transfers.remove(&key).unwrap();
+        transfer.phase = super::FilePhase::Chunks;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                std::collections::HashMap::from([(key, transfer)]),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Clean(false),
+                },
+            )),
+            &mut diagnostic,
+            due,
+        );
+        assert!(matches!(
+            scheduler.transfers[&key].phase,
+            super::FilePhase::Chunks
+        ));
+        assert!(
+            scheduler.retries.ready(&key, &routes, due),
+            "clean same-phase chunks must continue immediately"
+        );
+        // A late result for an older route token cannot retire durable intent
+        // or publish its stale continuation over the replacement owner.
+        let stale = scheduler
+            .retries
+            .reserve(key, routes.clone(), due)
+            .unwrap()
+            .0;
+        let mut replacement_routes = routes.clone();
+        replacement_routes.custody = !replacement_routes.custody;
+        let replacement = scheduler
+            .retries
+            .reserve(key, replacement_routes, due)
+            .unwrap()
+            .0;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token: stale,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Clean(true),
+                },
+            )),
+            &mut diagnostic,
+            due,
+        );
+        assert!(node.file_destination_current(&card, &destination));
+        assert!(scheduler.retries.owns(&key, replacement));
+        scheduler.retries.complete(&key, replacement, true, due);
+        // This injects the scheduler persistence boundary, not crypto acceptance.
+        scheduler.transfers.clear();
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), due)
+            .unwrap()
+            .0;
+        node.delivery
+            .lock()
+            .unwrap()
+            .fail_outbox_appends_for_test(true)
+            .unwrap();
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .retire_file_destination(key.0, key.1)
+                .is_err(),
+            "outbox hook must reject actual retirement persistence"
+        );
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token,
+                    routes: routes.clone(),
+                    outcome: super::FileStepOutcome::Clean(true),
+                },
+            )),
+            &mut diagnostic,
+            due,
+        );
+        assert!(node.file_destination_current(&card, &destination));
+        assert!(!scheduler.retries.ready(&key, &routes, due));
+        node.delivery
+            .lock()
+            .unwrap()
+            .fail_outbox_appends_for_test(false)
+            .unwrap();
+        let recovered = due + std::time::Duration::from_secs(2);
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), recovered)
+            .unwrap()
+            .0;
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token,
+                    routes,
+                    outcome: super::FileStepOutcome::Clean(true),
+                },
+            )),
+            &mut diagnostic,
+            recovered,
+        );
+        assert!(!node.file_destination_current(&card, &destination));
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_new_endpoint_bypasses_failure_but_unrelated_wake_does_not() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof = Announce::new_with_account(
+            &bob,
+            &account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let path = source.path().join("endpoint.bin");
+        std::fs::write(&path, b"new endpoint").unwrap();
+        let (id, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let key = (id, destination.binding.event_id);
+        node.roster.lock().unwrap().forget(&proof.public());
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let routes = node.file_retry_routes(&card, &destination);
+        let token = scheduler
+            .retries
+            .reserve(key, routes.clone(), now)
+            .unwrap()
+            .0;
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        scheduler.finish_at(
+            &node,
+            Ok((
+                key,
+                Default::default(),
+                super::FileStepCompletion {
+                    token,
+                    routes,
+                    outcome: super::FileStepOutcome::Failed,
+                },
+            )),
+            &mut diagnostic,
+            now,
+        );
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+        assert!(scheduler.transfers.is_empty());
+        node.roster.lock().unwrap().update(
+            &proof,
+            "127.0.0.1".parse().unwrap(),
+            &node.identity.user_id(),
+        );
+        scheduler.admit_at(&node, vec![(card.clone(), destination.clone())], None, now);
+        assert!(scheduler.transfers.contains_key(&key));
+        // Pause before polling the admitted worker, then revoke authority.
+        scheduler.advance(&node);
+        node.delivery_suspended
+            .store(true, std::sync::atomic::Ordering::Release);
+        while let Some(result) = scheduler.workers.join_next().await {
+            scheduler.finish(&node, result, &mut diagnostic);
+        }
+        assert!(scheduler.transfers.is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept())
+                .await
+                .is_err(),
+            "authority revoked before first poll must prevent TCP admission"
+        );
+        assert!(node.delivery.lock().unwrap().contains_file_destination(
+            id,
+            key.1,
+            &destination.binding.device,
+            &destination.binding.account
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_expired_inventory_admits_later_durable_destinations() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&bob, &account, "Bob", 9);
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let mut files = Vec::new();
+        for index in 0..=super::MAX_RELAY_CUSTODY_HINTS {
+            let path = source.path().join(format!("inventory-{index}.bin"));
+            std::fs::write(&path, format!("inventory file {index}")).unwrap();
+            let (id, _) = node
+                .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+                .await
+                .unwrap();
+            let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+            let destination = card.destinations[0].clone();
+            files.push((card, destination));
+        }
+        let now = std::time::Instant::now();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        for (card, destination) in files.iter().take(super::MAX_RELAY_CUSTODY_HINTS) {
+            let key = (card.id, destination.binding.event_id);
+            let routes = node.file_retry_routes(card, destination);
+            let token = scheduler
+                .retries
+                .reserve(key, routes.clone(), now)
+                .unwrap()
+                .0;
+            let transfer = super::FileTransfer::new(card.clone(), destination.clone());
+            scheduler.finish_at(
+                &node,
+                Ok((
+                    key,
+                    std::collections::HashMap::from([(key, transfer)]),
+                    super::FileStepCompletion {
+                        token,
+                        routes,
+                        outcome: super::FileStepOutcome::Failed,
+                    },
+                )),
+                &mut diagnostic,
+                now,
+            );
+        }
+        assert_eq!(scheduler.parked.len(), super::MAX_RELAY_CUSTODY_HINTS);
+        let last = files.last().unwrap().clone();
+        let key = (last.0.id, last.1.binding.event_id);
+        scheduler.admit_at(&node, vec![last.clone()], Some(key), now);
+        scheduler.advance_at(&node, now);
+        assert!(
+            scheduler.workers.is_empty(),
+            "unexpired inventory must not be displaced"
+        );
+        assert!(scheduler.transfers.is_empty());
+        let due = now + std::time::Duration::from_secs(2);
+        scheduler.admit_at(&node, vec![last], Some(key), due);
+        scheduler.advance_at(&node, due);
+        assert!(
+            scheduler.running_sockets.contains(&key),
+            "expired failed hints must allow the 257th destination to advance"
+        );
+        assert_eq!(scheduler.parked.len(), super::MAX_RELAY_CUSTODY_HINTS - 1);
+        // Cancel before the task is first polled: the admitted retry reservation
+        // remains installed while no actual socket or FileCard stays parked.
+        scheduler.workers.shutdown().await;
+        assert!(!scheduler.retries.ready(
+            &key,
+            &node.file_retry_routes(&files.last().unwrap().0, &files.last().unwrap().1),
+            due
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_scheduler_revoked_inflight_rescan_releases_matching_socket_owner() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof = Announce::new_with_account(
+            &bob,
+            &account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (node, _, _) = node_with_files(
+            source.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let path = source.path().join("revoked-inflight.bin");
+        std::fs::write(&path, b"retained durable work").unwrap();
+        let (id, _) = node
+            .enqueue_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = node.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let key = (id, destination.binding.event_id);
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        let mut diagnostic = super::DeliveryDiagnosticThrottle::default();
+        scheduler.admit(&node, vec![(card.clone(), destination.clone())], Some(key));
+        scheduler.advance(&node);
+        assert!(scheduler.running_sockets.contains(&key));
+        assert_eq!(scheduler.workers.len(), 1);
+        // The task owns its reservation before its first poll. A journal scan
+        // can revisit that durable key while authority is revoked.
+        node.delivery_suspended
+            .store(true, std::sync::atomic::Ordering::Release);
+        let scan = scheduler.scan(&node);
+        let (files, cursor) = scan.read(&node.delivery.lock().unwrap());
+        assert!(
+            files
+                .iter()
+                .any(|(file, reference)| (file.id, reference.binding.event_id) == key)
+        );
+        scheduler.admit(&node, files, cursor);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(result) = scheduler.workers.join_next().await {
+                scheduler.finish(&node, result, &mut diagnostic);
+            }
+        })
+        .await
+        .expect("revoked worker must finish without networking");
+        assert!(
+            scheduler.running_sockets.is_empty(),
+            "authority rescan must preserve the active token until matching completion releases socket ownership"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+        node.delivery_suspended
+            .store(false, std::sync::atomic::Ordering::Release);
+        scheduler.admit(&node, vec![(card, destination)], Some(key));
+        scheduler.advance(&node);
+        assert_eq!(
+            scheduler.workers.len(),
+            1,
+            "restored durable work must be admitted after revoked completion"
+        );
+        scheduler.workers.shutdown().await;
     }
 
     #[tokio::test]

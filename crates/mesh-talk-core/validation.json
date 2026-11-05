@@ -1346,7 +1346,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
@@ -1574,7 +1574,11 @@
             "storage::profile::profile_receive::tests::",
             "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
-            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled",
+            "unrelated_profile_callbacks_leave_unknown_pending_work_quiet",
+            "unknown_profile_callback_skips_body_then_verified_proof_resumes",
+            "known_profile_callback_progresses_behind_blocked_other_conversation",
+            "global_profile_recovery_retries_unknown_work_after_verified_proof_arrives"
           ]
         },
         {
@@ -1629,7 +1633,7 @@
             "reference": "docs/peer-trust.md"
           },
           {
-            "name": "Empty Profile retry polls preserve durable ticket state; later pending work retains bounded fair rotation and exact completion.",
+            "name": "Empty Profile retry polls preserve durable ticket state; conversation-scoped indexed callbacks avoid unrelated pending work and pre-body metadata gates retain unknown or disabled sources for global recovery. Final authentication, exact completion and bounded fair rotation remain authoritative.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -2355,7 +2359,8 @@
         "crates/mesh-talk-core/src/node/files/channel_receive.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
-        "crates/mesh-talk-core/src/node/participant_runtime.rs"
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_retry.rs"
       ],
       "rust": [
         {
@@ -2376,7 +2381,11 @@
             "relay_custody_releases_slots_for_more_than_eight_pending_files",
             "stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_member",
             "channel_media_source_keeps_signed_chunks_when_local_preview_completes",
-            "node::delivery_store::tests::"
+            "node::delivery_store::tests::",
+            "node::delivery_retry::tests::",
+            "node::delivery_runtime::diagnostic_tests::",
+            "private_file_restart_advances_twenty_four_pending_scopes_fairly",
+            "queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind"
           ]
         }
       ],
@@ -2399,6 +2408,10 @@
           {
             "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks. Consent discovery coalesces replayable cursor checkpoints while preserving bounded fair rotation, restart progress and exact owner fencing.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Private file failure reservations bind exact attempts and eligible routes, survive cancelled awaits, start bounded backoff at completion and cannot be evicted while active or cooling. Quiet wakes preserve durable destinations; clean steps and route replacements retain progress, while failed retirement remains cooled.",
+            "reference": "docs/ARCHITECTURE.md"
           }
         ]
       },
@@ -2585,7 +2598,9 @@
             "node::serving::channel_plaintext_retry_tests::",
             "node::node::tests::group_reception_terminal_is_independent_of_erased_and_expired_rows",
             "node::node::tests::channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance",
-            "channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state"
+            "channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state",
+            "completed_channel_receive_callbacks_are_quiet_and_new_messages_resume",
+            "completed_channel_metadata_retains_demand_when_source_changes_before_install"
           ]
         }
       ],
@@ -2612,6 +2627,10 @@
           },
           {
             "name": "Hot canonical source, event-owner and projection queries reuse the existing bounded compiled-statement cache while executing every fresh parameter, source and owner-lifetime check. Warm bytecode cannot revive stale projections, old owners or missing records.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Completed channel receive callbacks reuse exact source/rank/owner/presentation qualification without recreating demand; source changes between canonical preparation and installation retain durable recovery work before mutation.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -2679,7 +2698,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Empty file receive turns validate current ownership without rewriting an unchanged ticket; channel-file read preflight validates the publication barrier without directory synchronization, while actual file publication retains its write barrier and transactional guards.",
+            "name": "Empty file receive turns and completed exact-policy download discovery validate current ownership without rewriting unchanged tickets or scan progress; changed policy and new offers retain bounded discovery and transactional enqueueing. Channel-file read preflight validates the publication barrier without directory synchronization, while actual file publication retains its write barrier and transactional guards.",
             "reference": "docs/module-boundaries.md"
           },
           {

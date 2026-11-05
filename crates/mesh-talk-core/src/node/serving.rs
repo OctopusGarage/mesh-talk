@@ -1213,9 +1213,9 @@ impl Node {
     /// until its independently budgeted selectors finish.
     fn prepare_channel_metadata_turn(&self, conv: ConversationId) -> Result<bool, LogError> {
         use crate::eventlog::sync::network::PreparationBudget;
-        self.channel_checkpoints.queue_runtime(conv)?;
         let step = {
             let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.queue_metadata_runtime(conv)?;
             self.channel_checkpoints.project_step_with_budget(
                 log.repository()?,
                 &self.identity,
@@ -1253,6 +1253,7 @@ impl Node {
         }
         let step = {
             let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.queue_metadata_runtime(conv)?;
             self.channel_checkpoints.prepare_presentation_step(
                 log.repository()?,
                 &self.identity,
@@ -1296,6 +1297,7 @@ impl Node {
         // book -> log order; a concurrently appended control cannot install
         // an old display as fresh membership for subsequent authoring.
         let log = self.log.lock().expect("log lock");
+        self.channel_checkpoints.queue_metadata_runtime(conv)?;
         let state = self.channel_checkpoints.current_state(conv)?;
         let Some(state) = state else {
             return Ok(false);
