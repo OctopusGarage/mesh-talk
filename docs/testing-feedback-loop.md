@@ -305,48 +305,27 @@ roster refresh before asserting absence. A sleep shorter or longer than a pollin
 period proves neither of those operation boundaries; delayed-consumption and
 paused-polling controls must still exercise expiry, recovery and reappearance.
 
-Custody propagation fixtures first observe the newly created channel's signed
-inventory/control heads, reciprocal exact-peer capabilities and an authenticated
-settled Custody-domain sweep in each direction. The completion must be enabled,
-have no continuation and match the nonzero remote digest to the committed local
-scope. A fixture-local observation epoch clears on a new Custody attempt, so
-failure or cancellation cannot reuse an earlier success. Readiness observed before
-channel creation does not cover that new work. Hold a real authenticated inventory
-response to verify that setup remains pending until release; accept authenticated
-superseding heads so an obsolete captured version cannot strand the fixture.
-The Optional bootstrap must also be currently settled in both directions: a new
-pass clears that observation, and only full UpToDate completion restores it. A
-completed Custody page can precede unfinished DmRecall work and its backoff in the
-same lane. Hold a real authenticated DmRecall response after a prior empty baseline
-to prove the earlier setup predicates cannot admit the observation window. A
-paid GroupActivity continuation on that same Optional lane must also keep setup
-pending while its real response is held; release it before admitting the window.
-The channel-specific heads establish post-create freshness; do not require an extra
-periodic bootstrap pass or manually warm the data path.
-The three-node setup controls use the existing independent peer runtime owner:
-each simulated remote has two workers, all routes and observation hooks are
-installed before launch, and synchronous fixture reads cannot occupy every
-remote reactor. Retain the real Noise single-worker negative and multi-worker
-positive controls. Reciprocal Optional readiness can change concurrently, so
-the fixed authenticated-floor positive control awaits its bounded setup helper
-while the independent Directory response remains held; an immediate first poll
-is not a completion contract. Open response gates before stopping hosts, and
-join the external holder's runtime before the offline cut releases its custody
-response. Keep original cold-setup and eight-second custody deadlines.
-Aggregate document status includes independent lanes and is not this setup proof.
-After actual startup, a held Directory/DeviceHostname update must allow setup and
-fresh message/custody progress without releasing the unrelated handler. Capture and
-authenticate the channel's immutable inventory/control bootstrap floor before
-arming that hold, and retain the same floor afterward. Later descriptive inventory
-publications must not move an already satisfied barrier into the held Directory
-lane. A controlled post-hold profile display update through the owning inventory
-publisher must leave latest-head setup pending while the captured-floor setup
-completes immediately, with the handler still actively held. Retire the
-external holder after its real receipt so a direct query cannot replace proof of
-the source-authored sibling import.
-Keep the existing custody observation budget, real network exchange, offline-holder
-and restart assertions. This setup boundary does not establish a production latency
-guarantee or a dependency between independent mandatory/optional worker lanes.
+Custody propagation fixtures prepare only the selected channel's signed inventory
+and control documents and reciprocal exact-peer capabilities. Use the existing
+local metadata preparation owners and serial real account-document requests on
+bounded inbound-only peers before launching autonomous application hosts. Require
+the authentic document bodies and publisher floors within the existing thirty-second
+preparation bound, then pause and join those temporary hosts before normal startup.
+Do not require global Optional quiescence, a settled Custody sweep or Wake revision
+floors as prerequisites for a custody accounting scenario. Those mutable states
+introduce unrelated work and can restart while a passive observer is waiting.
+
+Keep the existing independent two-worker runtimes for real remote peers. A held
+Directory/DeviceHostname response must remain actively held through a fresh
+message and source-authored custody import. A later descriptive inventory update
+must leave the earlier authenticated channel bootstrap valid. Stop the actual
+external holder after its real receipt; require the source observation to remain
+absent from the sibling at that offline cut and prohibit an independent holder
+route. Keep the original eight-second automatic History/custody observers and
+restart assertions. Do not explicitly pull or prewarm the message or custody row
+measured by those observers. Open response gates before joining the actual hosts.
+Wake authentication, revision deduplication and independent-lane scheduling remain
+in their existing protocol controls, rather than helper-only full-host scenarios.
 
 Forwarding fixtures await the first nonempty authenticated export from the real
 background publisher while peer reads remain held. Durable admission does not
@@ -611,17 +590,13 @@ passive recovery/dial evidence, the History-completion milestone and observed
 endpoint state; restore prior hooks and retire all owned work before teardown.
 This controlled fault does not establish an unobserved historical timeout cause.
 
-Post-create custody setup requires the selected channel's authenticated inventory
-and control head floors plus exact bidirectional device capabilities within its
-thirty-second watchdog, with the current whole-Optional bootstrap complete in
-both directions. Capture each publisher's post-create wake revision once and
-require a real authenticated acknowledgement at or above that floor in both
-directions; settled document reads alone do not qualify the notification path.
-Preparation timeout diagnostics retain the individual predicates and bounded
-phase trace. The real custody scenarios own these setup requirements. Keep Wake
-protocol acceptance in the existing linked-Noise identity, revision deduplication,
-local-edit propagation and legacy periodic-repair controls; do not construct an
-extra full-host scenario merely to prove that this fixture helper waits.
+Channel-specific custody preparation uses real serial authenticated requests for
+inventory/control documents before autonomous workers start. It retains exact-peer
+capability and signed source-floor checks while removing global Optional/Wake
+readiness observers and their helper-only controls. This is fixture preparation;
+the fresh message and custody observation remain automatic and retain their original
+deadlines. Keep Wake protocol acceptance in the existing linked-Noise identity,
+revision deduplication, local-edit propagation and legacy periodic-repair controls.
 
 The direct holder-certificate projection control commits one local message
 without fanout and requires zero existing custody. Its caller owns fresh authenticated

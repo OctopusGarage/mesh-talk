@@ -397,6 +397,12 @@ and business scenarios instead: [Wake authentication and recovery controls](../c
 own linked identity, revision deduplication and notification-driven convergence;
 [custody scenarios](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
 own authenticated preparation, held-domain independence and durable custody.
+Custody accounting preparation uses serial real channel-document requests on
+inbound-only peers before autonomous workers start. A mutable whole-Optional or
+Wake-settled snapshot is not a prerequisite for that accounting contract: it can
+restart and create unrelated capacity contention while an observer waits. Remove
+the global observer and its helper-only full-host tests; retain signed channel
+floors, exact-peer capabilities and the real automatic custody/offline controls.
 Do not add a clock switch solely to rescue a helper's self-test. Keep a loopback
 business scenario focused on its named behavior. The member-invitation proof
 ends after epoch delivery, pre-join isolation and role rejection. Existing
