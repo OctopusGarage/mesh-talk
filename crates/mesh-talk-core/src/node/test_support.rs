@@ -102,20 +102,45 @@ enum PeerRuntimeShutdown {
 }
 impl IndependentPeerRuntime {
     pub(super) async fn start(node: Arc<Node>, listener: TcpListener) -> Self {
-        Self::start_with_workers(node, listener, false).await
+        Self::start_with_workers(node, listener, false, |node, listener| {
+            node.run_accept_loop(listener)
+        })
+        .await
     }
 
     // Match the CLI's multi-thread Tokio host while retaining the explicitly
     // single-thread account-action fixtures' scheduling and ownership contract.
     pub(super) async fn start_multithreaded(node: Arc<Node>, listener: TcpListener) -> Self {
-        Self::start_with_workers(node, listener, true).await
+        Self::start_multithreaded_with(node, listener, |node, listener| {
+            node.run_accept_loop(listener)
+        })
+        .await
     }
 
-    async fn start_with_workers(
+    // Custom protocol providers use the same reactor and retirement owner as
+    // ordinary peers; invoke their handler only after the explicit launch.
+    pub(super) async fn start_multithreaded_with<F, Fut>(
+        node: Arc<Node>,
+        listener: TcpListener,
+        handler: F,
+    ) -> Self
+    where
+        F: FnOnce(Arc<Node>, TcpListener) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        Self::start_with_workers(node, listener, true, handler).await
+    }
+
+    async fn start_with_workers<F, Fut>(
         node: Arc<Node>,
         listener: TcpListener,
         multithreaded: bool,
-    ) -> Self {
+        handler: F,
+    ) -> Self
+    where
+        F: FnOnce(Arc<Node>, TcpListener) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let listener = listener.into_std().unwrap();
         let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
         let (launch, launched) = tokio::sync::oneshot::channel();
@@ -143,7 +168,10 @@ impl IndependentPeerRuntime {
                         result = launched => result.is_ok(),
                     };
                     let task = if launched {
-                        let task = tokio::spawn(node.clone().run_accept_loop(listener));
+                        let server_node = node.clone();
+                        let task = tokio::spawn(async move {
+                            handler(server_node, listener).await;
+                        });
                         shutdown_mode = stopped.await.unwrap_or(PeerRuntimeShutdown::Retire);
                         Some(task)
                     } else {

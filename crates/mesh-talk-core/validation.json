@@ -1957,6 +1957,8 @@
             "independent_peer_runtime_keeps_other_host_progress_while_one_reactor_is_held",
             "independent_peer_runtime_drop_retires_unlaunched_admitted_work",
             "independent_action_peer_runtime_joins_accepted_connections_and_admitted_writers",
+            "account_history_worker_reaches_original_archive_while_source_keeps_appending",
+            "channel_custody_refreshes_holder_certificates_and_deduplicates_explicit_legacy_members",
             "gossip_history_receipts_distinguish_read_completion_from_delayed_delivery",
             "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet",
             "bounded_peer_round_owner_keeps_other_receiver_progress_during_a_held_public_view",

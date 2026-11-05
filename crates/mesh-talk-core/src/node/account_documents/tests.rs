@@ -5143,6 +5143,7 @@ fn private_recall_witness_cannot_recall_another_accounts_target() {
 #[tokio::test]
 async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit_legacy_members() {
     use crate::{discovery::Announce, eventlog::EventId, node::account_devices::AccountDevice};
+    use futures_util::FutureExt;
     use tokio::net::TcpListener;
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -5190,114 +5191,127 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
                 );
             }
         }
-        servers.push(tokio::spawn(current.clone().run_accept_loop(listener)));
+        servers.push(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+                current.clone(),
+                listener,
+            )
+            .await,
+        );
     }
-    let channel = source
-        .create_channel(
-            "legacy custody certificate refresh",
-            vec![
-                bob.identity.public(),
-                bob2.identity.public(),
-                sibling.identity.public(),
-            ],
+    let outcome = std::panic::AssertUnwindSafe(async {
+        // Populate every real route before any autonomous participant starts.
+        for server in &mut servers {
+            server.launch();
+        }
+        let channel = source
+            .create_channel(
+                "legacy custody certificate refresh",
+                vec![
+                    bob.identity.public(),
+                    bob2.identity.public(),
+                    sibling.identity.public(),
+                ],
+            )
+            .await
+            .unwrap();
+        source
+            .send_channel_message(channel, b"synthetic certificate refresh")
+            .await
+            .unwrap();
+        let event = source.channel_history(channel, 10).unwrap()[0].id;
+        wait_custody_source_count(
+            &source,
+            channel,
+            event,
+            2,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
         )
         .await
-        .unwrap();
-    source
-        .send_channel_message(channel, b"synthetic certificate refresh")
-        .await
-        .unwrap();
-    let event = source.channel_history(channel, 10).unwrap()[0].id;
-    wait_custody_source_count(
-        &source,
-        channel,
-        event,
-        2,
-        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-    )
-    .await
-    .expect("both real legacy holders must confirm before their certificate bindings change");
-    assert_eq!(
-        source.channel_custody_count(channel, event).unwrap(),
-        Some(2),
-        "unbound explicit legacy members have separate device principals"
-    );
-    let key = AccountDocumentKey::ChannelCustody {
-        channel: hex::encode(channel.as_bytes()),
-        event: event.to_hex(),
-        holder: bob.user_id(),
-    };
-    let before = source.account_document_meta(&key).unwrap();
-    let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
-    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
-    pull_custody_page(&sibling, &source_peer, &mut cursor).await;
-    assert_eq!(
-        sibling.channel_custody_count(channel, event).unwrap(),
-        Some(2)
-    );
-    for (holder, address) in [(&bob, addresses[2]), (&bob2, addresses[3])] {
-        source.roster.lock().unwrap().update(
-            &Announce::new_with_account(&holder.identity, &bob_account, "Bob", address.port()),
-            address.ip(),
-            &source.user_id(),
+        .expect("both real legacy holders must confirm before their certificate bindings change");
+        assert_eq!(
+            source.channel_custody_count(channel, event).unwrap(),
+            Some(2),
+            "unbound explicit legacy members have separate device principals"
         );
-        let peer = source.routing_peer(&holder.user_id()).unwrap();
+        let key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(channel.as_bytes()),
+            event: event.to_hex(),
+            holder: bob.user_id(),
+        };
+        let before = source.account_document_meta(&key).unwrap();
+        let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
+        let mut cursor =
+            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        eprintln!("certificate custody phase=legacy_import");
+        pull_custody_page(&sibling, &source_peer, &mut cursor).await;
+        assert_eq!(
+            sibling.channel_custody_count(channel, event).unwrap(),
+            Some(2)
+        );
+        for (holder, address) in [(&bob, addresses[2]), (&bob2, addresses[3])] {
+            source.roster.lock().unwrap().update(
+                &Announce::new_with_account(&holder.identity, &bob_account, "Bob", address.port()),
+                address.ip(),
+                &source.user_id(),
+            );
+            let peer = source.routing_peer(&holder.user_id()).unwrap();
+            source
+                .recheck_channel_custody_peer(channel, event, &peer)
+                .await;
+        }
+        let upgraded = source.account_document_meta(&key).unwrap();
+        assert!(upgraded.revision > before.revision);
+        assert_ne!(upgraded.content_hash, before.content_hash);
+        let peer = source.routing_peer(&bob.user_id()).unwrap();
         source
             .recheck_channel_custody_peer(channel, event, &peer)
             .await;
-    }
-    let upgraded = source.account_document_meta(&key).unwrap();
-    assert!(upgraded.revision > before.revision);
-    assert_ne!(upgraded.content_hash, before.content_hash);
-    let peer = source.routing_peer(&bob.user_id()).unwrap();
-    source
-        .recheck_channel_custody_peer(channel, event, &peer)
-        .await;
-    assert_eq!(
-        source.account_document_meta(&key).unwrap(),
-        upgraded,
-        "unchanged positive rechecks do not churn revisions"
-    );
-    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
-    pull_custody_page(&sibling, &source_peer, &mut cursor).await;
-    assert_eq!(
-        sibling.channel_custody_count(channel, event).unwrap(),
-        Some(1),
-        "positive runtime rechecks upgrade the sibling's certified principal projection"
-    );
-    assert!(
-        source
-            .put_account_document_if(
-                key.clone(),
-                b"forged".to_vec(),
-                Some(upgraded.version()),
-                |commit| commit()
-            )
-            .is_err()
-    );
-    assert!(
-        source
-            .remove_account_document_if(key, Some(upgraded.version()), |commit| commit())
-            .is_err()
-    );
-    assert_eq!(
-        source
-            .channel_custody_count(channel, EventId::new([0; 32]))
-            .unwrap(),
-        None
-    );
-    for current in [&source, &sibling, &bob, &bob2] {
-        current.runtime_work.close();
-    }
-    for server in &servers {
-        server.abort();
-    }
+        assert_eq!(
+            source.account_document_meta(&key).unwrap(),
+            upgraded,
+            "unchanged positive rechecks do not churn revisions"
+        );
+        let mut cursor =
+            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        eprintln!("certificate custody phase=upgraded_import");
+        pull_custody_page(&sibling, &source_peer, &mut cursor).await;
+        assert_eq!(
+            sibling.channel_custody_count(channel, event).unwrap(),
+            Some(1),
+            "positive runtime rechecks upgrade the sibling's certified principal projection"
+        );
+        assert!(
+            source
+                .put_account_document_if(
+                    key.clone(),
+                    b"forged".to_vec(),
+                    Some(upgraded.version()),
+                    |commit| commit()
+                )
+                .is_err()
+        );
+        assert!(
+            source
+                .remove_account_document_if(key, Some(upgraded.version()), |commit| commit())
+                .is_err()
+        );
+        assert_eq!(
+            source
+                .channel_custody_count(channel, EventId::new([0; 32]))
+                .unwrap(),
+            None
+        );
+        (channel, event)
+    })
+    .catch_unwind()
+    .await;
+    // Retire every independent producer even when a protocol or semantic
+    // assertion fails, before the encrypted profiles can be removed or reopened.
     for server in servers {
-        let _ = server.await;
+        server.stop().await;
     }
-    for current in [&source, &sibling, &bob, &bob2] {
-        current.runtime_work.drain().await;
-    }
+    let (channel, event) = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let secret = sibling.identity.secret_bytes();
     drop(sibling);
     let reopened = node_with_identity(

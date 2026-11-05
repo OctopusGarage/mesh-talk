@@ -2637,8 +2637,14 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
     sibling_peer(&receiver, &source, listener.local_addr().unwrap());
     let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let served_pages = pages.clone();
-    let server_source = source.clone();
-    let server = tokio::spawn(async move {
+    let continuations = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let served_continuations = continuations.clone();
+    let writer_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let released = writer_released.clone();
+    let (append_entered, append_ready) = tokio::sync::oneshot::channel();
+    let (release_append, append_gate) = std::sync::mpsc::channel();
+    let provider = move |server_source: Arc<Node>, listener: TcpListener| async move {
+        let mut first_append = Some((append_entered, append_gate));
         loop {
             let (mut io, bytes) = accept_legacy_account_request(&listener, &server_source).await;
             let (
@@ -2654,10 +2660,34 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
             else {
                 panic!("expected history request");
             };
-            server_source
+            let served = server_source
                 .serve_account_history(&mut io, version, &account_id, cursor, known_digest, wanted)
                 .await;
+            if !served {
+                break;
+            }
+            if let Some(cursor) = cursor {
+                served_continuations.lock().unwrap().push(cursor);
+            }
             let index = served_pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let writer = if let Some((entered, gate)) = first_append.take() {
+                let source = server_source.clone();
+                let released = released.clone();
+                let (locked, admitted) = tokio::sync::oneshot::channel();
+                let writer = tokio::task::spawn_blocking(move || {
+                    let _sent = source.sentlog.lock().unwrap();
+                    locked.send(()).unwrap();
+                    let _ = gate.recv_timeout(Duration::from_secs(5));
+                    released.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                admitted.await.unwrap();
+                entered.send(()).unwrap();
+                Some(writer)
+            } else {
+                None
+            };
+            // Durable acceptance is synchronous. A simulated remote source must
+            // not share the receiver's reactor while waiting for its own store.
             server_source
                 .enqueue_to_account(
                     &server_source.account_id(),
@@ -2666,9 +2696,45 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
                 )
                 .await
                 .unwrap();
+            if let Some(writer) = writer {
+                writer.await.unwrap();
+            }
         }
-    });
+    };
+    let mut server = crate::node::test_support::IndependentPeerRuntime::start_multithreaded_with(
+        source.clone(),
+        listener,
+        provider,
+    )
+    .await;
+    server.launch();
     let worker = tokio::spawn(receiver.clone().run_account_history_loop());
+    // Qualify the first admitted append separately from continuation progress.
+    // The receiver must import an actual page while the source's writer is held.
+    let admitted = tokio::time::timeout(Duration::from_secs(5), append_ready).await;
+    let first_import = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let original = original.clone();
+            let imported = receiver
+                .account_blocking(move |node| {
+                    let received = node.received.lock().unwrap();
+                    for id in original.iter() {
+                        if received.entry(*id)?.is_some() {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .await?;
+            if imported {
+                break Ok::<(), NodeError>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let imported_while_writer_held = !writer_released.load(std::sync::atomic::Ordering::SeqCst);
+    let _ = release_append.send(());
     let progress_started = std::time::Instant::now();
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -2704,13 +2770,31 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
         pages.load(std::sync::atomic::Ordering::SeqCst),
         original.len(),
     );
+    server.stop().await;
     worker.abort();
-    server.abort();
     let _ = worker.await;
-    let _ = server.await;
+    receiver.runtime_work.close();
+    receiver.sessions.clear();
+    receiver.runtime_work.drain().await;
+    admitted
+        .expect("the source must admit its actual append writer before progress measurement")
+        .expect("the source must publish append admission");
+    first_import
+        .expect("the receiver must import a page while the source writer is held")
+        .expect("the admitted first-page observation must succeed");
     assert!(
-        pages.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+        imported_while_writer_held,
+        "a simulated remote source's blocked writer parked the receiver reactor"
+    );
+    assert!(
+        continuations.lock().unwrap().len() >= 3,
         "the source must change between at least three continuation pages"
+    );
+    assert!(
+        continuations.lock().unwrap()[..3]
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]),
+        "ordinary appends must advance the exclusive cursor instead of replaying a prefix"
     );
     outcome.expect("append-only source changes must preserve forward cursor progress");
 }
