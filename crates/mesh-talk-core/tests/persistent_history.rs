@@ -15,6 +15,8 @@
 
 #[path = "support/history_observer.rs"]
 mod history_observer;
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 mod support;
 
 use history_observer::{read_cli_lines, retain_line, wait_for_history_line};
@@ -130,7 +132,10 @@ fn await_peer(node: &mut CliNode, want_uid: &str, who: &str) {
     while Instant::now() < deadline {
         node.send("/peers");
         if node
-            .wait_for(|l| l.contains(want_uid), Duration::from_secs(1))
+            .wait_for(
+                |l| peer_observer::is_peer_listing(l, want_uid),
+                Duration::from_secs(1),
+            )
             .is_some()
         {
             return;

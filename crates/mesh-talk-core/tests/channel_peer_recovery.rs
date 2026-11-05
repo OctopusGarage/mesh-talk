@@ -2,6 +2,8 @@
 //! through Bob, then Alice exits. Carol must recover Alice's message from Bob.
 //! Run with `cargo test -p mesh-talk-core --test channel_peer_recovery -- --ignored`.
 
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 mod support;
 
 use mesh_talk_core::{
@@ -109,7 +111,10 @@ impl CliNode {
         while Instant::now() < deadline {
             self.send("/peers");
             if self
-                .wait_for(|line| line.contains(user_id), Duration::from_secs(1))
+                .wait_for(
+                    |line| peer_observer::is_peer_listing(line, user_id),
+                    Duration::from_secs(1),
+                )
                 .is_some()
             {
                 return;

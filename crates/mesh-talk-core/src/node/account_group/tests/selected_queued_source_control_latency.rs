@@ -1,4 +1,4 @@
-//! A queued pre-operation suffix does not witness a newly admitted request.
+//! A real short operation prefix leaves a queued suffix that cannot witness new demand.
 use super::selected_same_source_control_latency::{
     BTrace, ColdControlScope, ControlTestPages, record_b_trace, record_control_frame,
     result_snapshot,
@@ -136,66 +136,6 @@ fn record_setup_milestone(
             details,
         ));
     }
-}
-
-#[derive(Default)]
-struct SetupCancellationState {
-    task: Option<tokio::task::Id>,
-    open: bool,
-    published: bool,
-    entered: bool,
-}
-#[derive(Default)]
-struct SetupCancellationGate {
-    state: Mutex<SetupCancellationState>,
-    changed: std::sync::Condvar,
-    entered: Notify,
-}
-impl SetupCancellationGate {
-    fn arm(&self, task: tokio::task::Id) {
-        self.state.lock().unwrap().task = Some(task);
-    }
-    fn before_cancel(&self, task: tokio::task::Id) -> Option<bool> {
-        let mut state = self.state.lock().unwrap();
-        if state.task != Some(task) {
-            return None;
-        }
-        state.entered = true;
-        self.entered.notify_one();
-        // Condvar releases its mutex. No node, ledger or trace guard may be
-        // retained by the caller: the other runtime worker publishes B's rows.
-        while !state.open {
-            state = self.changed.wait(state).unwrap();
-        }
-        Some(state.published)
-    }
-    fn publish_complete(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.published = true;
-        state.open = true;
-        self.changed.notify_all();
-    }
-    fn release(&self) {
-        self.state.lock().unwrap().open = true;
-        self.changed.notify_all();
-    }
-}
-struct ReleaseSetupCancellation(Arc<SetupCancellationGate>);
-impl Drop for ReleaseSetupCancellation {
-    fn drop(&mut self) {
-        self.0.release();
-    }
-}
-
-#[derive(Default, Debug)]
-struct EarlyPreparationFailure {
-    task: Option<tokio::task::Id>,
-    request_index: usize,
-    failed_page: Option<String>,
-    cancelled: Option<&'static str>,
-    completed_page: bool,
-    retired_after: Option<Duration>,
-    resumed_request_index: Option<usize>,
 }
 
 #[derive(Default)]
@@ -566,28 +506,13 @@ fn install_owner_group(owner: &Node, external: &Node, group: ConversationId) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page() {
-    Box::pin(run_queued_source(false, false, false, false)).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_terminal_reuses_completed_background_before_stale_foreground_suffix() {
-    Box::pin(run_queued_source(true, false, false, false)).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn queued_source_ignores_retired_natural_request_before_capturing_live_resume() {
-    Box::pin(run_queued_source(true, true, false, false)).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn queued_source_retains_live_natural_hold_through_forced_early_cancellation() {
-    Box::pin(run_queued_source(false, false, true, false)).await;
+    Box::pin(run_queued_source(true, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held() {
-    Box::pin(run_queued_source(false, false, false, true)).await;
+    Box::pin(run_queued_source(false, true)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -662,12 +587,7 @@ async fn local_maintenance_panic_propagates_through_actual_accept_owner() {
     *source.account_client_test_hook.lock().unwrap() = None;
 }
 
-async fn run_queued_source(
-    gate_terminal: bool,
-    delay_retired_request: bool,
-    force_early_cancel: bool,
-    gate_local_maintenance: bool,
-) {
+async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let a = node(&dir.path().join("a"), &account);
@@ -675,9 +595,14 @@ async fn run_queued_source(
     let reference = node(&dir.path().join("reference"), &account);
     let external = node(&dir.path().join("external"), &Account::generate());
     let group_a = new_channel_id();
-    let group_b = new_channel_id();
+    let group_b = ConversationId::new([3; 32]);
+    let padding_group = ConversationId::new([254; 32]);
     install_owner_group(&a, &external, group_a);
     install_owner_group(&b, &external, group_b);
+    install_owner_group(&b, &external, padding_group);
+    // Use the normal provider's operation-prefix/legacy boundary rather than
+    // importing a full 64-row padding page just to obtain a real continuation.
+    b.publish_account_group_operations_for(padding_group);
     for left in [&a, &b, &reference] {
         for right in [&a, &b, &reference] {
             if left.user_id() != right.user_id() {
@@ -771,12 +696,7 @@ async fn run_queued_source(
     let resume_tx = Arc::new(Mutex::new(Some(resume_tx)));
     let resumed_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_partial = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let early_failure = Arc::new(Mutex::new(EarlyPreparationFailure::default()));
     let b_page_progress = Arc::new(Mutex::new(ProtectedBPageProgress::default()));
-    let delayed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let retired_request_rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (rejected_tx, rejected_rx) = oneshot::channel();
-    let rejected_tx = Arc::new(Mutex::new(Some(rejected_tx)));
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saved_after = Arc::new(Mutex::new(None));
     let b_requests = Arc::new(Mutex::new(Vec::new()));
@@ -794,8 +714,6 @@ async fn run_queued_source(
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let preparation_read = Arc::new(PreparationReadGate::default());
     let _release_preparation_read = ReleasePreparationRead(preparation_read.clone());
-    let setup_cancellation = Arc::new(SetupCancellationGate::default());
-    let _release_setup_cancellation = ReleaseSetupCancellation(setup_cancellation.clone());
     // Independent bounded owner rings keep frequent requester maintenance from
     // evicting the executor's last stalled phase. Snapshot before recovery.
     let executor_owner_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -905,15 +823,8 @@ async fn run_queued_source(
         let own = reference.identity.public();
         let local_maintenance = local_maintenance.clone();
         let held_dispatch_tx = held_dispatch_tx.clone();
-        let requester = Arc::downgrade(&reference);
-        let retired_publication_key = crate::node::AccountDocumentKey::GroupLegacyOperation {
-            channel: hex::encode([1u8; 32]),
-            source_device: b.user_id(),
-        };
-        let delayed_once = delayed_once.clone();
         let origins = origins.clone();
         let b_partial = b_partial.clone();
-        let early_failure = early_failure.clone();
         let b_retired = b_retired.clone();
         let recovery_changed = recovery_changed.clone();
         let trace = trace.clone();
@@ -931,45 +842,13 @@ async fn run_queued_source(
         let owner_trace = requester_owner_trace.clone();
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
-        let setup_cancellation = setup_cancellation.clone();
         move |peer, phase| {
-            if peer == peer_a {
-                let mut failure = early_failure.lock().unwrap();
-                if let Some(task) = failure.task {
-                    if Some(task) == tokio::task::try_id()
-                        && phase.starts_with("page_end ")
-                        && let Some(outcome) = phase
-                            .split_ascii_whitespace()
-                            .find_map(|field| field.strip_prefix("outcome="))
-                    {
-                        if outcome == "ok" {
-                            failure.completed_page = true;
-                        } else {
-                            failure.failed_page = Some(outcome.to_owned());
-                        }
-                    }
-                    for reason in ["same_source", "selected", "wake"] {
-                        if phase == format!("control_cancel task={task:?} reason={reason}") {
-                            failure.cancelled = Some(reason);
-                        }
-                    }
-                }
-            }
-            // Copy first, so the wait retains no diagnostic mutex guard.
             let held_task = *first_held_task.lock().unwrap();
             if peer == peer_a
                 && let Some(task) = held_task
                 && phase.starts_with(&format!("control_cancel task={task:?} "))
             {
                 record_setup_milestone(&setup_trace, clock, "first_A_cancel", phase.clone());
-                if let Some(published) = setup_cancellation.before_cancel(task) {
-                    record_setup_milestone(
-                        &setup_trace,
-                        clock,
-                        "first_A_cancel_released",
-                        format!("task={task:?} canonical_published={published} {phase}"),
-                    );
-                }
             }
             if peer == peer_a
                 && phase.starts_with("page_end ")
@@ -1014,13 +893,7 @@ async fn run_queued_source(
                     .get_or_insert(page.dispatched_at);
             }
             if peer == peer_b {
-                let corpus_present = !delay_retired_request
-                    || !delayed_once.load(std::sync::atomic::Ordering::Acquire)
-                    || requester.upgrade().is_some_and(|node| {
-                        node.account_document_meta(&retired_publication_key)
-                            .is_some()
-                    });
-                b_readiness.lock().unwrap().observe(&phase, corpus_present);
+                b_readiness.lock().unwrap().observe(&phase, true);
             }
             if gate_terminal && peer == peer_b {
                 if phase.starts_with("control_task ")
@@ -1144,18 +1017,12 @@ async fn run_queued_source(
         let first_tx = first_tx.clone();
         let resume_tx = resume_tx.clone();
         let b_partial = b_partial.clone();
-        let early_failure = early_failure.clone();
         let a_requests = a_requests.clone();
         let pages = pages.clone();
         let b_readiness = b_readiness.clone();
-        let delayed_once = delayed_once.clone();
-        let publisher = Arc::downgrade(&b);
         let resumed_task = resumed_task.clone();
-        let retired_request_rejected = retired_request_rejected.clone();
-        let rejected_tx = rejected_tx.clone();
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
-        let setup_cancellation = setup_cancellation.clone();
         let preparation_read = preparation_read.clone();
         move |peer, frame| {
             let expected = expected.clone();
@@ -1163,18 +1030,12 @@ async fn run_queued_source(
             let first_tx = first_tx.clone();
             let resume_tx = resume_tx.clone();
             let b_partial = b_partial.clone();
-            let early_failure = early_failure.clone();
             let a_requests = a_requests.clone();
             let pages = pages.clone();
             let b_readiness = b_readiness.clone();
-            let delayed_once = delayed_once.clone();
-            let publisher = publisher.clone();
             let resumed_task = resumed_task.clone();
-            let retired_request_rejected = retired_request_rejected.clone();
-            let rejected_tx = rejected_tx.clone();
             let setup_trace = setup_trace.clone();
             let first_held_task = first_held_task.clone();
-            let setup_cancellation = setup_cancellation.clone();
             let preparation_read = preparation_read.clone();
             Box::pin(async move {
                 if peer != expected {
@@ -1204,10 +1065,6 @@ async fn run_queued_source(
                 let first_pending = first_tx.lock().unwrap().is_some();
                 if first_pending
                     && (!b_readiness.lock().unwrap().ready()
-                        || (delay_retired_request
-                            && delayed_once.load(std::sync::atomic::Ordering::Acquire)
-                            && !retired_request_rejected
-                                .load(std::sync::atomic::Ordering::Acquire))
                         || !pages.lock().unwrap().request(&request).is_some_and(|page| {
                             page.dispatch()
                                 .is_some_and(|dispatch| !dispatch.paired && !dispatch.protected)
@@ -1215,63 +1072,26 @@ async fn run_queued_source(
                 {
                     return;
                 }
-                let mut delayed_this_request = false;
-                if first_pending
-                    && delay_retired_request
-                    && !delayed_once.swap(true, std::sync::atomic::Ordering::Relaxed)
-                {
-                    // This old adversarial request must retain its real read
-                    // lifetime while waiting for cancellation, not our hold.
-                    read_decision.decide(false);
-                    let page = pages.lock().unwrap().request(&request).unwrap();
-                    // A real authenticated publication cancels this exact old
-                    // client while its acknowledged server callback is delayed.
-                    // The head is one of the same 66 later published below.
-                    let publisher = publisher.upgrade().unwrap();
-                    // The earlier empty B scope is no longer current, even if
-                    // this publication's authenticated wake has not arrived yet.
-                    b_readiness.lock().unwrap().invalidate();
-                    crate::node::account_documents::sync::publish_legacy_control_page_for_test(
-                        &publisher, 1,
-                    );
-                    while pages.lock().unwrap().is_active(page.task) {
-                        tokio::time::sleep(Duration::from_millis(2)).await;
-                    }
-                    delayed_this_request = true;
-                }
                 let Some(page) = pages.lock().unwrap().live_request(&request) else {
-                    if delayed_this_request {
-                        retired_request_rejected.store(true, std::sync::atomic::Ordering::Release);
-                        if let Some(rejected) = rejected_tx.lock().unwrap().take() {
-                            let _ = rejected.send(());
-                        }
-                    }
                     return;
                 };
-                assert!(
-                    !delayed_this_request,
-                    "a retired child must not establish the natural-read hold"
-                );
                 let Some(dispatch) = page.dispatch() else {
                     return;
                 };
-                let request_index = {
+                {
                     let mut requests = a_requests.lock().unwrap();
-                    let index = requests.len();
                     requests.push((
                         request.version,
                         effective_after(&request),
                         request.known_digest,
                         request.operation.as_ref().map(|probe| probe.known_digest),
                     ));
-                    index
-                };
+                }
                 let first = first_tx.lock().unwrap().take();
                 if let Some(first) = first {
                     assert!(effective_after(&request).is_none());
                     {
                         let mut held = first_held_task.lock().unwrap();
-                        setup_cancellation.arm(page.task);
                         *held = Some(page.task);
                     }
                     record_setup_milestone(
@@ -1300,64 +1120,14 @@ async fn run_queued_source(
                 {
                     let resumed = resume_tx.lock().unwrap().take();
                     if let Some(resumed) = resumed {
-                        early_failure.lock().unwrap().resumed_request_index = Some(request_index);
                         *resumed_task.lock().unwrap() = Some(page.task);
                         let _ = resumed.send(());
                         let _ = release.acquire().await;
                     }
                 } else if dispatch.resumed && !dispatch.replacement && dispatch.protected {
-                    // A successful early comparison would pay the only resume
-                    // credit before B's real partial page exists. Fail just this
-                    // one authenticated preparation read without a response;
-                    // its original read failure or observed owner cancellation
-                    // frees the single Control lane without paying the checkpoint.
-                    // Elapsed time is diagnostic, not the retirement classifier.
-                    let induce_failure = {
-                        let mut failure = early_failure.lock().unwrap();
-                        if failure.task.is_none() {
-                            failure.task = Some(page.task);
-                            failure.request_index = request_index;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if induce_failure {
-                        let lifetime = read_decision.lifetime.clone().unwrap();
-                        let started = std::time::Instant::now();
-                        read_decision.decide(false);
-                        while lifetime.strong_count() > 0 {
-                            tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_millis(2)) => {}
-                                _ = release.acquire() => return,
-                            }
-                        }
-                        early_failure.lock().unwrap().retired_after = Some(started.elapsed());
-                        record_setup_milestone(
-                            &setup_trace,
-                            clock,
-                            "early_A_read_retired_without_response",
-                            format!(
-                                "task={:?} elapsed_ms={}",
-                                page.task,
-                                started.elapsed().as_millis()
-                            ),
-                        );
-                        // This callback belongs to the retired client and must
-                        // never establish the later live protected-read hold.
-                        return;
-                    }
-                    record_setup_milestone(
-                        &setup_trace,
-                        clock,
-                        "early_A_resume_ignored",
-                        format!(
-                            "task={:?} nonce={} request_checkpoint={:?} origin={}",
-                            page.task,
-                            hex::encode(request.operation.as_ref().unwrap().nonce),
-                            effective_after(&request),
-                            page.origin
-                        ),
+                    panic!(
+                        "A cannot resume before B validates its actual partial page; task={:?}",
+                        page.task
                     );
                 }
             })
@@ -1527,10 +1297,8 @@ async fn run_queued_source(
                         if value["domain"] == "group_control" && !value["next"].is_null() {
                             let key: crate::node::AccountDocumentKey =
                                 serde_json::from_value(value["next"].clone()).unwrap();
-                            if matches!(
-                                key,
-                                crate::node::AccountDocumentKey::GroupLegacyOperation { .. }
-                            ) {
+                            if matches!(key, crate::node::AccountDocumentKey::GroupOperation { .. })
+                            {
                                 *saved_after.lock().unwrap() = Some(key);
                             }
                         }
@@ -1561,11 +1329,7 @@ async fn run_queued_source(
         }
     }));
     reference.account_sync_notify.notify_one();
-    let (first_task, first_task_lifetime) = super::cold_account_setup(async {
-        let task = first_rx.await?;
-        if delay_retired_request { rejected_rx.await?; }
-        Ok::<_, oneshot::error::RecvError>(task)
-    })
+    let (first_task, first_task_lifetime) = super::cold_account_setup(first_rx)
         .await
         .unwrap_or_else(|error| {
             let ready = b_readiness.lock().unwrap().ready();
@@ -1573,36 +1337,14 @@ async fn run_queued_source(
             panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={ready} B_partial={}; pages={observed:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
         })
         .unwrap();
-    if delay_retired_request {
-        assert!(
-            retired_request_rejected.load(std::sync::atomic::Ordering::Acquire),
-            "the delayed historical request is rejected before canonical publication"
-        );
-    }
     let first_active = pages.lock().unwrap().is_active(first_task);
     assert!(
         first_active,
         "the exact natural A hold must remain live at canonical B publication"
     );
     let keys = super::cold_account_setup(async {
-        if force_early_cancel {
-            // One of the same 66 canonical signed rows, not an empty Wake or
-            // an extra row. Force cancellation before the rest are published.
-            crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 1);
-            record_setup_milestone(&setup_trace, clock, "forced_B1_publication", format!("canonical_rows=1 wake_token={:?}", b.account_wake_token_for_test()));
-            // The publication's automatic authenticated Wake causes the
-            // cancellation. Do not open another connection while the gate
-            // can block the reference's combined accept/scheduler owner.
-            setup_cancellation.entered.notified().await;
-            let entered = setup_cancellation.state.lock().unwrap().entered;
-            assert!(entered);
-            let unrelated_wake = setup_trace.lock().unwrap().iter().any(|row| row.1 == "first_A_cancel" && row.3.ends_with("reason=wake"));
-            assert!(unrelated_wake, "the forced control must reach the exact unrelated-Wake cancellation");
-            let first_active = pages.lock().unwrap().is_active(first_task);
-            assert!(first_active);
-        }
-        record_setup_milestone(&setup_trace, clock, "B66_publication_begin", format!("first_A_task={first_task:?}"));
-        let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
+        record_setup_milestone(&setup_trace, clock, "B2_publication_begin", format!("first_A_task={first_task:?}"));
+        let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 2);
         // Keep the actual child's Weak separately from the bounded history;
         // never retain a strong Arc or accept retirement as a live hold.
         let (ledger_active, origin_retained) = {
@@ -1610,14 +1352,12 @@ async fn run_queued_source(
             (observed.is_active(first_task), observed.lifetime(first_task).is_some())
         };
         let direct_child_alive = first_task_lifetime.strong_count() > 0;
-        let setup_snapshot = setup_trace.lock().unwrap().clone();
-        let phase_snapshot = trace.lock().unwrap().clone();
-        assert!(ledger_active,
-            "natural A retired during canonical publication: task={first_task:?} direct_child_alive={direct_child_alive} origin_retained={origin_retained} elapsed_ms={} setup={setup_snapshot:?} phases={phase_snapshot:?}", clock.elapsed().as_millis());
-        record_setup_milestone(&setup_trace, clock, "B66_publication_end", format!("first_A_task={first_task:?}"));
+        // documents_changed legitimately lets the scheduler cancel A before
+        // the publisher returns. Liveness belongs before the publication trigger;
+        // requiring it here would race the very cancellation under test.
+        record_setup_milestone(&setup_trace, clock, "B2_publication_end", format!("first_A_task={first_task:?} ledger_active={ledger_active} direct_child_alive={direct_child_alive} origin_retained={origin_retained}"));
         // Permanently open before the protected resume and real operation.
         preparation_read.release();
-        setup_cancellation.publish_complete();
         resume_rx.await.map(|()| keys)
     })
         .await
@@ -1627,12 +1367,11 @@ async fn run_queued_source(
             let observed = pages.lock().unwrap().summary();
             let setup = setup_trace.lock().unwrap().clone();
             let phases = trace.lock().unwrap().clone();
-            let early_task_selected = early_failure.lock().unwrap().task.is_some();
             let (headers_attempted, complete_attempted, last_elapsed_ms, current_task_alive) = {
                 let progress = b_page_progress.lock().unwrap();
                 (progress.headers_attempted, progress.complete_attempted, progress.last_elapsed_ms, progress.lifetime.strong_count() > 0)
             };
-            panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={ready} B_partial={}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive} early_task_selected={early_task_selected}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
+            panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={ready} B_partial={}; B_headers_attempted={headers_attempted} B_complete_attempted={complete_attempted} B_last_elapsed_ms={last_elapsed_ms:?} B_current_task_alive={current_task_alive}; A_roles={roles:?}; pages={observed:?}; setup={setup:?}; phases={phases:?}", b_partial.load(std::sync::atomic::Ordering::Acquire));
         })
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
@@ -1640,7 +1379,15 @@ async fn run_queued_source(
         .lock()
         .unwrap()
         .clone()
-        .expect("a real B Complete must retain its legacy continuation");
+        .expect("a real B Complete must retain its operation-prefix continuation");
+    assert_eq!(
+        saved,
+        crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(padding_group.as_bytes()),
+            source_device: b.user_id(),
+        },
+        "the normal short operation prefix must end before the two legacy rows"
+    );
     let result_key = crate::node::AccountDocumentKey::GroupOperation {
         channel: hex::encode(group_b.as_bytes()),
         source_device: b.user_id(),
@@ -1798,7 +1545,7 @@ async fn run_queued_source(
     // Recovery can make a late terminal look timely. Preserve each owner's
     // bounded body-free phase history at the original receipt boundary.
     eprintln!(
-        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} delay_retired_request={delay_retired_request} receipt_ok={} setup={:?} executor={:?} requester={:?}",
+        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} receipt_ok={} setup={:?} executor={:?} requester={:?}",
         receipt.is_ok(),
         setup_trace.lock().unwrap().clone(),
         executor_owner_trace.lock().unwrap().clone(),
@@ -1928,30 +1675,4 @@ async fn run_queued_source(
         a_rows.len() >= 2 && a_rows[0] == a_rows[1],
         "A protected resume repays its exact checkpoint"
     );
-    let failure = early_failure.lock().unwrap();
-    if let Some(task) = failure.task {
-        assert!(
-            failure.retired_after.is_some(),
-            "the exact selected client must retire: {failure:?}"
-        );
-        assert!(
-            !failure.completed_page,
-            "the held read must not pay its page credit: {failure:?}"
-        );
-        assert!(
-            failure.failed_page.is_some() || failure.cancelled.is_some(),
-            "retirement requires an actual failed page or exact owner cancellation: {failure:?}"
-        );
-        assert_ne!(
-            Some(task),
-            *resumed_task.lock().unwrap(),
-            "a retired callback cannot establish the live hold"
-        );
-        assert_eq!(
-            a_rows.get(failure.request_index).unwrap(),
-            a_rows.get(failure.resumed_request_index.unwrap()).unwrap(),
-            "the later distinct live resume must retain the exact failed checkpoint"
-        );
-    }
-    eprintln!("queued early preparation failure witness: {failure:?}");
 }

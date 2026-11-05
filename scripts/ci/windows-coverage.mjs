@@ -291,7 +291,8 @@ export async function produce(directory) {
   }
   const featureResolutionSha256 = digest(canonical(metadata.resolve));
   verifyIdentity(before, await identity());
-  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256: await fileHash(archive), inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
+  const archiveSha256 = await fileHash(archive);
+  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256, inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
   rmSync(probe, { recursive: true });
   rmSync(binaryFile);
   console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);

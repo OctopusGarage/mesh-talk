@@ -52,10 +52,16 @@ struct ResponseBudget {
     window: Option<Instant>,
     sent: u8,
     recent: HashMap<IpAddr, Instant>,
+    // Hold an actual consumed quota window until its rejection is observed.
+    // Instance-local test evidence must not depend on signing or scheduling time.
+    #[cfg(test)]
+    observed_window: Option<(Instant, Arc<tokio::sync::Notify>)>,
 }
 
 impl ResponseBudget {
     fn allow(&mut self, source: IpAddr, now: Instant) -> bool {
+        #[cfg(test)]
+        let now = self.observed_window.as_ref().map_or(now, |(now, _)| *now);
         if self
             .window
             .is_none_or(|start| now.saturating_duration_since(start) >= Duration::from_secs(1))
@@ -66,6 +72,10 @@ impl ResponseBudget {
         self.recent
             .retain(|_, sent| now.saturating_duration_since(*sent) < Duration::from_secs(1));
         if self.sent >= 8 || self.recent.contains_key(&source) || self.recent.len() >= 256 {
+            #[cfg(test)]
+            if let Some((_, denied)) = &self.observed_window {
+                denied.notify_one();
+            }
             return false;
         }
         self.sent += 1;
@@ -969,6 +979,90 @@ mod tests {
 
     fn source() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
+    }
+
+    #[tokio::test]
+    async fn pinned_gateway_query_recovers_after_another_loopback_client_consumes_reply_budget() {
+        use crate::identity::account::Account;
+        use crate::postoffice::gateway::query_pinned_relay;
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let identity = Arc::new(DeviceIdentity::generate());
+        let account = Account::generate();
+        let announce = Announce::new_post_office_with_account(&identity, &account, "hub", 41001);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let endpoint = socket.local_addr().unwrap();
+        let replies = Arc::new(AtomicUsize::new(0));
+        let routed = Arc::new(RoutedDiscovery::new({
+            let identity = identity.clone();
+            let replies = replies.clone();
+            Arc::new(move |nonce, announce| {
+                let response = query::encode_response(nonce, announce, &identity);
+                if response.is_some() {
+                    replies.fetch_add(1, Ordering::SeqCst);
+                }
+                response
+            })
+        }));
+        let server = tokio::spawn(run_listen_with_routed(
+            socket,
+            Arc::new(Mutex::new(Roster::default())),
+            identity.user_id(),
+            shared_announce(&announce),
+            endpoint.port(),
+            Arc::new(DiscoveryVisibility::default()),
+            Some(routed.clone()),
+        ));
+        let observed = std::panic::AssertUnwindSafe(async {
+            // Prime with exactly one datagram. A retrying primer could leave
+            // a duplicate nonce queued and falsely satisfy the later witness.
+            let primer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let nonce = uuid::Uuid::new_v4().into_bytes();
+            primer.send_to(&query::encode_query(nonce), endpoint).await.unwrap();
+            let mut bytes = [0u8; 2048];
+            let (len, from) = tokio::time::timeout(
+                Duration::from_secs(4), primer.recv_from(&mut bytes),
+            ).await.expect("the single priming datagram must receive a real reply").unwrap();
+            assert_eq!(from, endpoint);
+            assert_eq!(query::decode_response(&bytes[..len], nonce), Some(announce.clone()),
+                "the first real signed query must consume the pinned per-IP allowance");
+            assert_eq!(replies.load(Ordering::SeqCst), 1);
+            let denied = Arc::new(tokio::sync::Notify::new());
+            {
+                let mut budget = routed.replies.lock().unwrap();
+                let consumed = budget.recent[&endpoint.ip()];
+                budget.observed_window = Some((consumed, denied.clone()));
+            }
+            let expected = identity.user_id();
+            let second = query_pinned_relay(endpoint, &expected);
+            tokio::pin!(second);
+            // Poll the same real query until its datagram is actually rejected
+            // by the consumed per-IP quota. Its own four-second deadline bounds
+            // this observation; no silence interval certifies packet reception.
+            tokio::select! {
+                biased;
+                () = denied.notified() => {}
+                proof = second.as_mut() => panic!(
+                    "the consumed quota must reject the query before completion: {proof:?}"
+                ),
+            }
+            assert_eq!(replies.load(Ordering::SeqCst), 1, "a rejected query must not be signed");
+            // Return to the real clock. The original query must recover by its
+            // own retransmission, with no cancellation, restart or quota reset.
+            routed.replies.lock().unwrap().observed_window = None;
+            let proof = second.await;
+            assert_eq!(proof, Some(announce), "the second pinned gateway query must recover from the quota drop within its existing four-second request budget");
+        }).catch_unwind().await;
+        server.abort();
+        let stopped = server.await;
+        if let Err(panic) = observed {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            stopped.is_ok() || stopped.as_ref().is_err_and(|error| error.is_cancelled()),
+            "the real responder must be joined without a hidden task panic"
+        );
     }
 
     #[tokio::test]

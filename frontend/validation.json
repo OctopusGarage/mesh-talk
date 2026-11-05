@@ -806,7 +806,8 @@
         "src/lib/automaticDownloads.test.ts"
       ],
       "escalation": [
-        "Chat composition uses conservative state/helper unit fallback only; required browser lifecycle scenarios and affected native session evidence are separate obligations."
+        "Chat composition uses conservative state/helper unit fallback only; required browser lifecycle scenarios and affected native session evidence are separate obligations.",
+        "Touch scenarios establish native browser input emulation and verify actual hover, pointer and touch state before measuring 44px controls; controlled state loss must restore real CSS and tap behavior under R10, not a JavaScript matchMedia substitute."
       ]
     },
     {

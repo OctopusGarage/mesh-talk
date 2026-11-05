@@ -5,6 +5,8 @@
 //! start: two KDFs), and UDP broadcast. Run explicitly:
 //!   nice -n 10 cargo test -p mesh-talk-core --test post_office_offline -- --ignored
 
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
@@ -203,7 +205,10 @@ fn await_peer(node: &mut CliNode, want_uid: &str, who: &str) {
     while Instant::now() < deadline {
         node.send("/peers");
         if node
-            .wait_for(|l| l.contains(want_uid), Duration::from_secs(1))
+            .wait_for(
+                |l| peer_observer::is_peer_listing(l, want_uid),
+                Duration::from_secs(1),
+            )
             .is_some()
         {
             return;

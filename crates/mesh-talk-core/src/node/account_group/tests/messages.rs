@@ -554,9 +554,11 @@ async fn reference_member_send_fixture(fail_receive: bool, held_cold_control: bo
             submit().expect("a reference-only member must admit its own account message");
         assert!(admitted.committed_events.is_empty());
         assert_eq!(admitted.executions[0].device_id, source.user_id());
-        if fail_receive && !sticker {
-            let (key, hash) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                loop {
+        // One functional completion owner covers source arrival, any failed
+        // private-copy retry and final adoption; no subphase resets its budget.
+        let status = super::functional_account_convergence(async {
+            if fail_receive && !sticker {
+                let (key, hash) = loop {
                     if let Some((key, hash, _)) = reference
                         .account_group_operation_inputs()
                         .into_iter()
@@ -570,42 +572,36 @@ async fn reference_member_send_fixture(fail_receive: bool, held_cold_control: bo
                         break (key, hash);
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| {
-                panic_account_send_timeout(&source, &reference, &external, &account, id)
-            });
-            reference.maintain_account_group_operation_effects();
-            assert_ne!(
+                };
+                reference.maintain_account_group_operation_effects();
+                assert_ne!(
+                    reference
+                        .account_group_operation_status(&account.account_id(), id)
+                        .unwrap()
+                        .unwrap()
+                        .phase,
+                    AccountGroupOperationPhase::Committed
+                );
+                assert!(
+                    reference
+                        .operation_projection(group)
+                        .unwrap()
+                        .requests
+                        .iter()
+                        .any(|request| request.reference.id == id && request.body.is_some())
+                );
+                assert_ne!(
+                    reference.operation_seen.lock().unwrap().get(&key),
+                    Some(&hash),
+                    "failed private persistence must not consume the source frame or original body"
+                );
                 reference
-                    .account_group_operation_status(&account.account_id(), id)
+                    .received
+                    .lock()
                     .unwrap()
-                    .unwrap()
-                    .phase,
-                AccountGroupOperationPhase::Committed
-            );
-            assert!(
-                reference
-                    .operation_projection(group)
-                    .unwrap()
-                    .requests
-                    .iter()
-                    .any(|request| request.reference.id == id && request.body.is_some())
-            );
-            assert_ne!(
-                reference.operation_seen.lock().unwrap().get(&key),
-                Some(&hash),
-                "failed private persistence must not consume the source frame or original body"
-            );
-            reference
-                .received
-                .lock()
-                .unwrap()
-                .fail_appends_for_test(false)
-                .unwrap();
-        }
-        let status = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                    .fail_appends_for_test(false)
+                    .unwrap();
+            }
             loop {
                 let status = reference
                     .account_group_operation_status(&account.account_id(), id)

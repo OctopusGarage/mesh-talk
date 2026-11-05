@@ -30,7 +30,7 @@ export function nightlyFromManifest(text) {
 export function partitionArgs(mode, buildArgs, shard) {
   assert.ok(["list", "run"].includes(mode), "Invalid ASan command mode");
   assert.ok(shard === undefined || partitions.includes(shard), "Invalid ASan partition");
-  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard ? ["--partition", `hash:${shard}/4`] : []), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
+  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard ? ["--partition", `hash:${shard}/4`] : []), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
 }
 
 export function verifyAsanUnion(bundles, expected) {

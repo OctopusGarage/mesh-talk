@@ -6,6 +6,7 @@ use crate::node::account_group::operations::AccountGroupDataWorkTurn;
 pub(super) struct LocalMaintenance {
     custody: Option<(EventId, String)>,
     inventory: Option<ConversationId>,
+    inventory_cycle_pending: bool,
     profile: Option<String>,
     profile_projection: Option<AccountDocumentKey>,
     personal: Option<DocumentConversation>,
@@ -16,6 +17,7 @@ pub(super) struct LocalMaintenance {
 
 pub(super) struct LocalMaintenanceTurn {
     pub state: LocalMaintenance,
+    pub more_inventory: bool,
     pub fanout_after: u64,
     pub fanout: Vec<(u64, ConversationId)>,
     pub affected: Vec<(ConversationId, u64)>,
@@ -51,7 +53,15 @@ impl LocalMaintenance {
             .collect();
         node.migrate_channel_custody(&mut self.custody);
         node.publish_account_group_access(&mut self.access);
-        node.publish_group_inventory(&mut self.inventory);
+        self.inventory_cycle_pending |= node
+            .publish_group_inventory(&mut self.inventory)
+            .is_pending();
+        let more_inventory = self.inventory.is_some() || self.inventory_cycle_pending;
+        if self.inventory.is_none() {
+            // An unfinished earlier page earns another fair cycle, not an
+            // unbounded retry of the first hot group.
+            self.inventory_cycle_pending = false;
+        }
         if let Err(error) = node.publish_public_profile_documents_page(&mut self.profile) {
             log::debug!("contact profile publication deferred: {error}");
         }
@@ -73,6 +83,7 @@ impl LocalMaintenance {
         });
         LocalMaintenanceTurn {
             state: self,
+            more_inventory,
             fanout_after: fanout_cursor,
             fanout,
             affected,
@@ -133,6 +144,173 @@ pub(super) fn observe_fanout_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cold_inventory_directory_work_does_not_request_network_refresh_before_publication() {
+        use futures_util::FutureExt;
+        let (_directory, source, _receiver) = super::super::selection_tests::sibling_nodes();
+        let group = source
+            .create_channel("Local directory continuation", vec![])
+            .await
+            .unwrap();
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        assert!(source.account_document_meta(&key).is_none());
+        // Creation is a real durable change. Consume its wake before isolating
+        // the independent, unfinished local directory selector.
+        while source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some()
+        {}
+        assert!(matches!(
+            source.try_publish_group_inventory_groups(&[group]),
+            Err(NodeError::Log(crate::eventlog::LogError::Io(error)))
+                if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(source.account_document_meta(&key).is_none());
+        assert!(
+            source
+                .account_sync_notify
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "unfinished local directory work must not refresh remote document lanes"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_inventory_full_page_retries_pending_groups_without_pinning_later_groups() {
+        let (_directory, source, _receiver) = super::super::selection_tests::sibling_nodes();
+        let mut groups = Vec::new();
+        for index in 0..16 {
+            groups.push(
+                source
+                    .create_channel(&format!("Inventory page {index}"), vec![])
+                    .await
+                    .unwrap(),
+            );
+        }
+        groups.sort_by_key(|group| *group.as_bytes());
+        let key = |group: ConversationId| AccountDocumentKey::GroupInventory {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let last = *groups.last().unwrap();
+        // Only the last real group's selector is ready. Its publication must
+        // not wait for the first group's independent, cold selector.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let result = {
+                    let log = source.log.lock().unwrap();
+                    source.directory_observation(&log, last)
+                };
+                match result {
+                    Ok(_) => break,
+                    Err(crate::eventlog::LogError::StaleCursor) => {}
+                    Err(crate::eventlog::LogError::Io(error))
+                        if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("real directory preparation failed: {error}"),
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(source.account_document_meta(&key(last)).is_none());
+        let first = LocalMaintenance::default().run(source.clone(), 0, false);
+        assert!(source.account_document_meta(&key(groups[0])).is_none());
+        assert!(
+            source.account_document_meta(&key(last)).is_some(),
+            "a pending first group must not block the later ready group"
+        );
+        assert!(first.more_inventory);
+        assert_eq!(first.state.inventory, Some(last));
+        // Exactly one full page ends on an empty page. That page must retain
+        // the earlier groups' unfinished work for another fair cycle.
+        let empty = first.state.run(source.clone(), 0, false);
+        assert!(empty.state.inventory.is_none());
+        assert!(empty.more_inventory);
+        let mut state = empty.state;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let turn = state.run(source.clone(), 0, false);
+                state = turn.state;
+                if !turn.more_inventory {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for group in groups {
+            let document = source.account_document(&key(group)).unwrap().unwrap();
+            assert_eq!(document.meta.writer_device, source.user_id());
+            assert_eq!(document.meta.key, key(group));
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_local_inventory_continuations_publish_without_periodic_or_peer_refresh() {
+        use futures_util::FutureExt;
+        let (directory, source, _receiver) = super::super::selection_tests::sibling_nodes();
+        let group = source
+            .create_channel("Owned inventory continuation", vec![])
+            .await
+            .unwrap();
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        while source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some()
+        {}
+        // No linked device has a route and there is no periodic repair tick.
+        // Only the real parent owns and consumes the local continuation.
+        let mut owner = Box::pin(source.clone().run_account_history_loop_with_tick(None));
+        let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                futures_util::future::poll_fn(|cx| {
+                    assert!(owner.as_mut().poll(cx).is_pending());
+                    if source.account_document_meta(&key).is_some() {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }),
+            )
+            .await
+            .expect("owned local turns must finish the real signed inventory");
+            let document = source.account_document(&key).unwrap().unwrap();
+            assert_eq!(document.meta.key, key);
+            assert_eq!(document.meta.writer_device, source.user_id());
+        })
+        .catch_unwind()
+        .await;
+        drop(owner);
+        source.runtime_work.close();
+        let retired = tokio::time::timeout(Duration::from_secs(5), source.runtime_work.drain())
+            .await
+            .is_ok();
+        if !retired {
+            let _ = directory.keep();
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            retired,
+            "local inventory owner must retire before its store"
+        );
+    }
 
     #[tokio::test]
     async fn actual_local_turn_coalesces_inflight_wakes_without_completion_driven_work() {

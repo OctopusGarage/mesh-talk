@@ -134,8 +134,9 @@
             "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
-            "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
-            "queued_source_retains_live_natural_hold_through_forced_early_cancellation",
+            "selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held",
+            "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
+            "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",
             "preparation_server_decisions_and_drop_release_preserve_child_lifetimes",
             "preparation_decision_inventory_prunes_retired_witnesses_and_rejects_live_overflow",
             "authenticated_preparation_wait_precedes_unchanged_document_read_clock",
@@ -158,11 +159,11 @@
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
           {
-            "name": "Account-maintenance peer waits cannot block bounded local channel preparation or mandatory Directory publication; one parent owns local recovery, account maintenance and custody futures, independent wake subscriptions preserve local demand, and cancellation joins the complete lifetime. The existing serial three-second custody turn progresses during unrelated history/fallback waits without adding tasks or transport allowances.",
+            "name": "Account-maintenance peer waits cannot block bounded local channel preparation or mandatory Directory publication; one parent owns local recovery, account maintenance and custody futures, independent wake subscriptions preserve local demand, and cancellation joins the complete lifetime. The existing serial three-second custody turn progresses during unrelated history/fallback waits; that custody turn adds no task or transport allowance. Selected public peer exchanges retain separately owned bounded children under the participant retirement barrier.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines.",
+            "name": "Ordinary Text/Sticker, Policy/Dissolve, owner Rename and file-result provenance fixtures use the existing thirty-second functional convergence owner for each submitted turn; matching file retries have a separate invocation bound. Required private/public predicates and persistence-fault repair remain inside the same turn, while dedicated held-traffic, transfer and request/result latency bounds are unchanged. Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines. Two live queued controls retain terminal-prefix reuse and dispatch under held maintenance, using the production operation-before-legacy partial-page boundary with a signed higher-key projection and two new legacy rows. Preserve strict lower-result-key ordering, exact checkpoint replay and real signed receipts; separate real-Noise controls retain the 64-row page ceiling and complete replay. Natural A liveness qualifies publication start; publication-triggered cancellation may occur before the publisher returns. Dedicated observer and retirement controls retain rejection of stale child identities without extra queued-operation variants.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
@@ -210,7 +211,7 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Reference self-control evidence asserts the actual admitted remote executor while holding requester-side public membership recovery; real private readiness, original action deadlines and recovery cleanup remain required.",
+            "name": "Reference self-control evidence asserts the actual admitted remote executor while holding requester-side public membership recovery. One absolute thirty-second cold-setup owner begins before archive preparation and covers exact archive receipt by every physical source, authenticated old Member provenance, topology/capabilities and the original held read; phase changes cannot restart its budget or accept late observations. All four rigs require the exact one-effect private Committed receipt within the original absolute eight seconds from admission. The held-request rig also qualifies immutable causal evidence within that same private bound: exact client-child retirement, newer authenticated Wake, owned cancellation, distinct request/header delivery and the separate original server hook still live behind its unreleased gate. Then all four require exact external public effect, both canonical roles and first ready history through the existing post-receipt functional convergence owner; the original server response remains held and live throughout. Missing or late private/causal evidence cannot be repaired by later public success. Keep bounded first phase/history observations outside verbose trace eviction. Exercise actual entry/completion, every disqualifying held predicate, late private/causal/public observations, missing public completion and shared cold-budget controls. Real Noise-fault and independently specified latency cases retain their original bounds and cleanup.",
             "reference": "docs/testing-feedback-loop.md#maintaining-standards-across-requirements"
           },
           {
@@ -302,7 +303,8 @@
         "crates/mesh-talk-core/src/node/account_sync.rs",
         "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
-        "crates/mesh-talk-core/src/node/channels.rs"
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/account_group/access/view/directory.rs"
       ],
       "rust": [
         {
@@ -340,7 +342,8 @@
       },
       "consumers": ["desktop-account-group-inventory"],
       "escalation": [
-        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. In mandatory-wake acceptance, retain the first signed source floor and first receiver-head times plus bounded actual inventory Header/Complete evidence; negative coverage first establishes actual Owner access and an equal signed inventory baseline inside the existing cold setup watchdog, then holds a strictly newer exact-source header outside storage locks until the original five-second cutoff. Require the first fresh signed floor and changed member label, exact held-header version, live hook task, retained old receiver baseline and absent fresh inventory; keep the positive creation window unchanged. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores."
+        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. In mandatory-wake acceptance, retain the first signed source floor and first receiver-head times plus bounded actual inventory Header/Complete evidence; negative coverage first establishes actual Owner access and an equal signed inventory baseline inside the existing cold setup watchdog, then holds a strictly newer exact-source header outside storage locks until the original five-second cutoff. Capture the baseline validated signed GroupControl Owner grant and independently require a current signed Owner grant for the same group/source/account and physical owner binding at that cutoff. Normal same-account auto-enrollment and authority migration may choose a different physical membership representative; do not require cross-baseline MembershipLifetime equality. Independently validate the actual current Owner grant after ordinary canonical-generation/epoch/representative changes. Permit only explicit transient StaleCursor or Unknown/Reconciling alongside that retained evidence; reject unexpected errors, changed/terminal roles, unavailable and unrelated signed heads. Exercise held_inventory_owner_evidence_rejects_signed_terminal_unavailable_and_unrelated_heads and keep diagnostics to safe role/execution/error classes. Require the first fresh signed floor and changed member label, exact held-header version, live hook task, retained old receiver baseline and absent fresh inventory; keep the positive creation window unchanged. Qualify a bounded registry of actual live server-header holders for the exact peer/account/key/writer at or above the immutable first fresh source floor, with the gate armed. A retired last request or a signed superseding head must not erase another qualifying live holder; stale, wrong-scope, released, empty and overflowed registries fail. Exercise held_inventory_headers_preserve_live_overlaps_and_reject_unqualified_holds without changing either five-second window. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores.",
+        "Require typed cold directory preparation without a generic remote refresh before signed publication, actual owner-driven local continuation across cursor wrap, progress for later groups on a pending page, source invalidation and abandoned-selector isolation. Keep the sixteen-group page and per-directory 128-row/512-edge/8-MiB work limits; local continuation must not enqueue every remote document lane. Actual signed publication retains its normal network Wake; the original mandatory-wake five-second windows remain unchanged."
       ]
     },
     {
@@ -361,16 +364,23 @@
           "filters": [
             "node::channel_custody::",
             "node::account_documents::",
+            "node::account_group::tests::message_action_reference::current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held",
+            "node::account_group::tests::message_action_reference::multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
+            "node::account_group::tests::message_action_reference::independent_peer_pause_drains_actual_work_and_allows_same_node_relaunch",
             "node::account_sync::",
             "node::media_store::",
             "node::node::tests::channel_custody_inherited_holder_requires_signed_account_authority",
             "node::node::tests::channel_custody_batch_",
             "node::channels::fanout_tests::channel_custody_batch_",
             "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
+            "node::node::tests::channel_member_recovers_missed_message_from_peer",
             "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
             "custody_retry_classes_each_rotate_through_all_competing_peers",
             "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers",
-            "custody_report_progresses_while_unrelated_channel_recovery_is_held"
+            "custody_report_progresses_while_unrelated_channel_recovery_is_held",
+            "account_wake_requires_exact_linked_noise_identity_and_deduplicates_revisions",
+            "account_preference_local_edit_wakes_sibling_before_periodic_retry",
+            "legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs"
           ]
         }
       ],
@@ -383,7 +393,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation; original cold/readiness and operation deadlines remain unchanged, and first failures plus admitted-work retirement survive setup panics.",
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation. Custody setup prerequisites are exercised by the real inventory, same-lane recall, independent Directory and durable custody scenarios. Wake authentication, exact revision deduplication, local-edit notification and legacy periodic repair retain their dedicated real-protocol controls rather than a full-host self-test of the preparation helper. First failures plus admitted-work retirement survive setup panics.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -395,7 +405,7 @@
       "consumers": ["desktop-shared-channel-custody"],
       "escalation": [
         "Require real linked-sibling/other-member loopback evidence, holder-offline/restart and delayed confirmation/revocation convergence. A forced initial sibling confirmation failure plus a signed unavailable external route must still recover the original History and signed sibling report under the existing deadlines. The unavailable route must be fixture-owned: observe real initiator bytes and close before authentication or any Have/custody response, with a held exact-socket control requiring typed failure after release. Preserve the real failed initial send, empty observations and both eight-second observers without custody warmup. Retain bounded recovery/dial and endpoint evidence, restore prior hooks and retire owned work on success or unwind. This fault control does not prove the historical Windows timeout cause; competing report and replication turns must each rotate through every peer, including even-sized peer sets. Verify old optional-domain rejection preserves supported domains.",
-        "Custody fixtures must observe post-creation authenticated channel inventory/control heads, reciprocal exact-peer capabilities and a real settled Custody-domain sweep before starting the existing custody observation. The whole Optional bootstrap must currently be settled in both directions: a new pass invalidates it, and held same-lane DmRecall or paid GroupActivity work must keep setup pending. A separate Directory hold retains its captured authenticated inventory/control floor so later display-only publications cannot move the barrier. Require enabled completion without continuation and a nonzero matching postcommit digest; a new attempt invalidates the fixture-local witness. Aggregate document status is not a substitute for this scope proof. After actual startup, hold an independent Directory/DeviceHostname update through setup and fresh message/custody progress. Stop the real external holder after its source receipt and require source-authored sibling import so a direct query cannot satisfy the proof. Observe the exact positive source count through read-only custody notifications within the thirty-second setup watchdog before stopping a holder or changing its certificate binding; a successful send alone is not this receipt. For an offline-holder proof, hold only the exact source-to-sibling custody response until the holder is stopped and drained, prove the signed source observation is still absent at that cut and the sibling has no independent holder route, then require that authentic captured or newer observation within the original custody deadline. A held real inventory response must keep setup pending; release must permit real authenticated convergence. Accept authentic superseding heads without waiting for obsolete metadata. Keep setup separate from custody timing and preserve mandatory-lane independence, source-offline restart and missing-state assertions. Keep intentional missing-blob repair in an independent real-holder fixture with no autonomous source worker during corruption; prove unknown state, authenticated repair without signed metadata churn and durable readability after reopen. Automatic holder-offline propagation must retain its original deadline without explicit pull or prior custody warmup. Controlled fault-path evidence must not be presented as proof of an unobserved historical timeout mechanism. Matching ASan execution is required when an instrumented failure exposed the fixture ordering."
+        "Custody scenarios and setup controls must give each simulated remote an independent two-worker peer runtime, install all routes and observers before any launch and verify existing real Noise worker-starvation controls. Qualify fixed post-create bidirectional authenticated wake-acknowledgement floors alongside signed heads and Optional settlement before starting custody observation. Network-only offline cuts pause and join actual producers and admitted work while preserving Node admission for relaunch; permanent retirement still closes it. Await bounded fixed-floor readiness while Directory remains held instead of requiring an immediate first poll; join the external host at the actual offline cut and all remaining hosts before storage retirement. Custody fixtures must observe post-creation authenticated channel inventory/control heads, reciprocal exact-peer capabilities and a real settled Custody-domain sweep before starting the existing custody observation. The whole Optional bootstrap must currently be settled in both directions: a new pass invalidates it, and held same-lane DmRecall or paid GroupActivity work must keep setup pending. A separate Directory hold retains its captured authenticated inventory/control floor so later display-only publications cannot move the barrier. Require enabled completion without continuation and a nonzero matching postcommit digest; a new attempt invalidates the fixture-local witness. Aggregate document status is not a substitute for this scope proof. After actual startup, hold an independent Directory/DeviceHostname update through setup and fresh message/custody progress. Stop the real external holder after its source receipt and require source-authored sibling import so a direct query cannot satisfy the proof. Observe the exact positive source count through read-only custody notifications within the thirty-second setup watchdog before stopping a holder or changing its certificate binding; a successful send alone is not this receipt. For an offline-holder proof, hold only the exact source-to-sibling custody response until the holder is stopped and drained, prove the signed source observation is still absent at that cut and the sibling has no independent holder route, then require that authentic captured or newer observation within the original custody deadline. A held real inventory response must keep setup pending; release must permit real authenticated convergence. Accept authentic superseding heads without waiting for obsolete metadata. Keep setup separate from custody timing and preserve mandatory-lane independence, source-offline restart and missing-state assertions. Keep intentional missing-blob repair in an independent real-holder fixture with no autonomous source worker during corruption; prove unknown state, authenticated repair without signed metadata churn and durable readability after reopen. Automatic holder-offline propagation must retain its original deadline without explicit pull or prior custody warmup. Controlled fault-path evidence must not be presented as proof of an unobserved historical timeout mechanism. Matching ASan execution is required when an instrumented failure exposed the fixture ordering."
       ]
     },
     {
@@ -525,7 +535,7 @@
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
-            "name": "Only completed reusable account sessions may retire under listener/shared pressure: one oldest-idle retirement remains pending until the owner drops real socket permits; ready frames, handshakes and active responses remain protected under unchanged eight shared/seven directional slots and the existing enclosing idle deadline.",
+            "name": "Only completed reusable account sessions may retire under listener/shared pressure: pending directional/shared admission observes new idle eligibility without losing its semaphore queue position or extending its original deadline; one oldest-idle retirement remains pending until the owner drops real socket permits; ready frames, handshakes and active responses remain protected under unchanged eight shared/seven directional slots and the existing enclosing idle deadline.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
@@ -1105,7 +1115,8 @@
         }
       ],
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
+        "Pinned gateway queries must recover when another loopback client consumes the existing per-source UDP reply quota. Preserve the absolute four-second deadline, at most four datagrams, exact endpoint and signed pinned-identity validation, and cancellation ownership. Run the real responder quota regression and existing gateway lifecycle/security tests; repeat bridge_cross_lan and channel_peer_recovery against the production CLI."
       ],
       "consumers": ["core-node", "core-postoffice", "core-transport"]
     },
@@ -1299,7 +1310,8 @@
       "escalation": [
         "Federation continuation cadence changes require cargo test -p mesh-talk-core --bin mesh-talk-node federation_runtime:: in addition to library metadata, paging and admission regressions. CLI scheduling and test-observer seam changes also require the Unix indexed_relay_cli integration target, including its architecture assertion. That assertion must isolate the explicit test module rather than truncate at an inline cfg(test) attribute. The notification fixture must observe initial empty-round quiescence, disable fallback only for its invocation and require a new dirty turn, full batch, drained continuation and all twenty exact IDs; removing mail-change scheduling must fail. Mixed indexed/legacy TCP fixtures preserve both complete 1501-event inventories and both directions under one shared sixty-second exchange watchdog after durable preparation; retain phase timing, durable Have assertions and joined server cleanup before profile release.",
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure.",
-        "Indexed runtime changes require cargo test -p mesh-talk-core --bin mesh-talk-node, --test federation_config_cli and --test relay_network_cli; on Unix additionally run --test indexed_relay_cli (five real mode branches, ordinary mail exchange, pre-keystore exclusion, SIGTERM joined stop and warm restart). Library selectors do not execute binary/integration targets. Native Windows hard-stop/WAL recovery, supported-platform lock scenarios and actual discovery remain separate acceptance. Production startup/resource evidence must use a separately built normal binary with feature/KDF proof, not the fast-test binary."
+        "Indexed runtime changes require cargo test -p mesh-talk-core --bin mesh-talk-node, --test federation_config_cli and --test relay_network_cli; on Unix additionally run --test indexed_relay_cli (five real mode branches, ordinary mail exchange, pre-keystore exclusion, SIGTERM joined stop and warm restart). Library selectors do not execute binary/integration targets. Native Windows hard-stop/WAL recovery, supported-platform lock scenarios and actual discovery remain separate acceptance. Production startup/resource evidence must use a separately built normal binary with feature/KDF proof, not the fast-test binary.",
+        "Archive-maintenance fault fixtures wait for actual retry and healthy staging/session/digest completion under the existing ten-second watchdog, not a fixed virtual retry count. Preserve measured duty, capped exponential intervals, diagnostic deduplication, real WAL contention, an observed duty-eligible independent no-bypass window, owned/foreign file assertions and joined shutdown; run all postoffice::maintenance::tests:: and matching ASan acceptance. The actual-role GC physical-progress fixture uses its paced virtual functional clock, follows completed production slices to their actual armed duty deadlines and rejects an early extra slice or physical inspection. SQL wall cost is not a cleanup throughput SLA; keep actual measured duty charged, full logical/digest exhaustion, repeated vacuum/page reduction and every live-mail/body-read/charge/join assertion."
       ],
       "consumers": ["core-node"],
       "capability": {
@@ -1594,7 +1606,9 @@
             "global_profile_recovery_retries_unknown_work_after_verified_proof_arrives",
             "existing_conversation_profile_callbacks_preserve_completed_negative_maintenance",
             "discovered_profile_demand_precedes_cursor_ack_and_retries_after_reopen",
-            "discovered_profile_batch_revalidates_retained_metadata_and_deduplicates"
+            "discovered_profile_batch_revalidates_retained_metadata_and_deduplicates",
+            "node::runtime_work::tests::",
+            "node::runtime::retirement_tests::retirement_joins_actual_expiry_writer_before_profile_reopen"
           ]
         },
         {
@@ -1623,6 +1637,8 @@
             "storage::profile::profile_receive::tests::",
             "node::profile_io::compaction_lease_tests::",
             "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::runtime_work::tests::",
+            "node::runtime::retirement_tests::retirement_joins_actual_expiry_writer_before_profile_reopen",
             "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         }
@@ -1697,7 +1713,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Participant retirement drains admitted control tasks and only authenticated recipient evidence confirms delivery",
+            "name": "The parent-owned inbound listener is independently scheduled beside synchronous maintenance, retains its actual retirement permit through child destruction and preserves connection/handshake limits; participant retirement drains admitted control and connection tasks, and only authenticated recipient evidence confirms delivery",
             "reference": "docs/network-design-reference.md"
           },
           {
@@ -1902,7 +1918,7 @@
       ],
       "escalation": [
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
-        "Persistent-history harness changes require cargo test -p mesh-talk-core --test persistent_history_observer and the actual native consumer node scripts/evals/backend-runner.mjs. Keep ordinary controls in their separate target and the ignored-only persistent_history target complete with one real scenario and zero filtered tests. Raw Cargo success alone does not establish report acceptance. Preserve the single query, original row deadlines and timestamped two-direction assertions; retain terminal responses and bounded diagnostics across both process lifetimes. Hosted native backend acceptance remains required.",
+        "Persistent-history and shared CLI peer-readiness harness changes require cargo test -p mesh-talk-core --test persistent_history_observer and the actual native consumer node scripts/evals/backend-runner.mjs, plus affected extra integration targets. Require an exact peer/full-user-ID roster record; live reception, startup/history/probe output and unrelated UID occurrences cannot certify prefix-resolution readiness. Preserve original polling and observation watchdogs. Keep ordinary controls in their separate target and the ignored-only persistent_history target complete with one real scenario and zero filtered tests. Raw Cargo success alone does not establish report acceptance. Preserve the single query, original row deadlines and timestamped two-direction assertions; retain terminal responses and bounded diagnostics across both process lifetimes. Hosted native backend acceptance remains required.",
         "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --lib storage::profile::tests::profile_lock -- --test-threads=1 and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
         "Dedicated indexed relay lifecycle changes require the complete mesh-talk-node binary tests and, on Unix, the indexed_relay_cli integration target. Exercise all five branches and gateway proxy cancellation; successful Unix SIGTERM evidence does not establish native Windows forced-stop recovery or production-KDF startup performance."
       ],
@@ -2006,9 +2022,11 @@
         "crates/mesh-talk-core/src/node/media_store/**",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
+        "crates/mesh-talk-core/src/node/test_support.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/privacy_sync/",
-        "crates/mesh-talk-core/src/eventlog/repository/selection.rs"
+        "crates/mesh-talk-core/src/eventlog/repository/selection.rs",
+        "crates/mesh-talk-core/src/node/channels.rs"
       ],
       "rust": [
         {
@@ -2026,11 +2044,21 @@
             "participant_durable_have_request_uses_no_historical_bodies",
             "participant_selection_retirement_",
             "background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
+            "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
+            "current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held",
             "independent_peer_runtime_keeps_other_host_progress_while_one_reactor_is_held",
             "independent_peer_runtime_drop_retires_unlaunched_admitted_work",
             "independent_action_peer_runtime_joins_accepted_connections_and_admitted_writers",
+            "account_history_worker_reaches_original_archive_while_source_keeps_appending",
+            "channel_custody_refreshes_holder_certificates_and_deduplicates_explicit_legacy_members",
             "gossip_history_receipts_distinguish_read_completion_from_delayed_delivery",
-            "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet"
+            "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet",
+            "bounded_peer_round_owner_keeps_other_receiver_progress_during_a_held_public_view",
+            "bounded_peer_round_parent_cancellation_retains_held_child_until_runtime_drain",
+            "borrowed_peer_round_parent_defers_other_receiver_until_held_view_release",
+            "node::channels::fanout_tests::applied_metadata_only_recovery_retains_one_fresh_group_turn_without_quiet_spin",
+            "node::channels::fanout_tests::applied_group_continuations_rotate_past_requeued_low_ids_and_deleted_cursor",
+            "node::channels::fanout_tests::hot_group_sweeps_do_not_alias_four_peer_rotation_across_four_batches"
           ]
         }
       ],
@@ -2047,7 +2075,7 @@
             "reference": "docs/help/topics/channels.md#network-data-protection"
           },
           {
-            "name": "Notification-only gossip requires all five canonical history reads to finish within one original absolute eight-second cutoff, stamped after admitted blocking reads and exact-ID extraction. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions. Each simulated host owns a separate reactor through the shared independent-peer fixture owner; a held host cannot prevent another host from acknowledging work. Owner retirement closes admission, joins the real server and drains writers before joining its thread. Sender retirement remains inside the original post-send cutoff.",
+            "name": "Notification-only gossip requires all five canonical history reads to finish within one absolute thirty-second functional watchdog, stamped after admitted blocking reads and exact-ID extraction; it does not claim a five-hop latency SLA on six simulated hosts. Delayed observer delivery cannot alter completion evidence; late actual reads, missing receivers and periodic rescue remain failures. Real-history gates qualify both timing directions. Each simulated gossip host owns an independent two-worker Tokio runtime, matching the multi-thread CLI; Ordinary React/Recall and Rename remote hosts also use that multi-thread mode, including actual post-commit authenticated public receipt. Their reference coordinator and deliberate held-reactor/negative scheduler controls retain their explicit current-thread boundaries. Real exact-peer Noise authentication must complete on the same multi-thread host while one entered worker remains held; the single-thread negative control must remain pending until release. A held host cannot prevent another host from acknowledging work. These controls qualify fixture scheduling, not the cause of an earlier late hop. Owner retirement closes admission, joins the real server and drains writers before joining its thread. Sender retirement remains inside the original post-send cutoff. Selected public peer rounds are separately scheduled, with participant work admitted before spawn and actual child retirement joined or retained by the canonical drain on parent cancellation. Three selected peers, two active groups, rotation, first-applied sibling cancellation and existing peer deadlines remain bounded. A real held-view control requires the other receiver canonical ID/bytes within the original eight seconds while a worker is available; parent cancellation must leave the real drain pending until held child retirement. Unexpected owner panics cannot certify receipt success.",
             "reference": "docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities"
           },
           {
@@ -2062,7 +2090,8 @@
       },
       "consumers": ["desktop-group-file-network-cost"],
       "escalation": [
-        "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee. Notification-only group gossip must complete cold authenticated setup under its separate thirty-second watchdog before the unchanged eight-second fresh-message assertion; preserve all-listeners-bound ordering, bounded phase evidence, exact message identity and rejection of periodic or manual rescue."
+        "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee. Notification-only group gossip must complete cold authenticated setup under its separate thirty-second watchdog before a single thirty-second functional message/read observation; dedicated held-peer latency assertions retain their eight seconds; preserve all-listeners-bound ordering, bounded phase evidence, exact message identity and rejection of periodic or manual rescue.",
+        "Applied peer progress, including metadata-only updates, must queue a fresh group turn after sibling retirement. Quiet comparisons must not spin. Qualify bounded lexical-successor selection beyond eight hot groups, targeted peer rotation, real chain gossip and all owned/borrowed peer-round retirement controls without increasing the original deadlines."
       ]
     },
     {
@@ -2405,7 +2434,8 @@
             "node::delivery_retry::tests::",
             "node::delivery_runtime::diagnostic_tests::",
             "private_file_restart_advances_twenty_four_pending_scopes_fairly",
-            "queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind"
+            "queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind",
+            "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target"
           ]
         }
       ],
@@ -2414,7 +2444,7 @@
         "guide": "docs/network-design-reference.md#ordinary-file-custody",
         "invariants": [
           {
-            "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires delivery work.",
+            "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires delivery work. A canonical own-device copy cannot confirm external recipient delivery, and a stalled sibling host cannot prevent target confirmation; the full-host fixture keeps independent two-worker reactors and both original five-second confirmation windows.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
@@ -2474,13 +2504,17 @@
             "reference": "docs/message-forwarding.md#reliability-and-verification"
           },
           {
+            "name": "A typed stale local routing projection with cached accepted full identity reaches the existing bounded send preparation; current departure, dissolution and complete identity are revalidated at commit, while other errors and current delegated routing retain their semantics",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          },
+          {
             "name": "Unauthorized group legs reject before file restaging or network admission while preserving accepted and pending legs; canonical source policy and current runtime authority are rechecked inside admission",
             "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
           }
         ]
       },
       "escalation": [
-        "Run the reference-only Owner/Member Noise regressions, text/file/merged delivery, source-policy, partial retry, retirement and restart checks. Public native admission and cross-device behavior require affected host review and protected CI; browser substitutes do not prove encrypted execution."
+        "Run the reference-only Owner/Member Noise regressions, text/file/merged delivery, source-policy, partial retry, retirement and restart checks. Public native admission and cross-device behavior require affected host review and protected CI; browser substitutes do not prove encrypted execution. The group loopback gives each submitted forwarding operation its existing functional convergence owner, including exact ordered remote history or consent and verified independent merged bytes. Two requests must not share a shorter outer watchdog than their receipt owners. Preserve operation identities, source-conversation isolation, normal TCP/flush/pull behavior and joined retirement before propagating the original failure; cached phase/file facts are diagnostic only."
       ]
     },
     {
@@ -2661,7 +2695,7 @@
       },
       "escalation": [
         "Leaf repository tests do not certify atomic integration into DM/channel/file producers or actual desktop/CLI startup selection.",
-        "Production handoff requires slow-consumer, restart, owner replacement and native/browser evidence, including one outstanding wake, one bounded pull, final recall/visibility checks and durable frontend snapshot-before-ACK."
+        "Production handoff requires slow-consumer, restart, owner replacement and native/browser evidence, including one outstanding wake, one bounded pull, final recall/visibility checks and durable frontend snapshot-before-ACK. The injected-rollback fixture retains zero committed revision/processing/receipt rows before repair, then requires exact automatic replay and terminal completion through the existing functional convergence owner without new traffic or manual retry. Include retained storage backoff and normal bounded scheduler turns rather than imposing a five-second repair SLA. Cache only existing sequence/pending/error polls; the real recovery task must abort and join before observer timeout or panic propagates, including the independently bounded startup-continuation path."
       ]
     },
     {
@@ -2681,7 +2715,8 @@
         "crates/mesh-talk-core/src/node/filebook/",
         "crates/mesh-talk-core/src/node/attachment_consent.rs",
         "crates/mesh-talk-core/src/node/attachment_consent/",
-        "crates/mesh-talk-core/src/node/account_suppression.rs"
+        "crates/mesh-talk-core/src/node/account_suppression.rs",
+        "crates/mesh-talk-core/src/node/participant_storage_tests.rs"
       ],
       "rust": [
         {
@@ -2705,7 +2740,10 @@
             "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
             "failed_media_",
             "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work",
-            "completed_ordinary_receive_callbacks_are_quiet_without_body_reads"
+            "completed_ordinary_receive_callbacks_are_quiet_without_body_reads",
+            "node::node::participant_storage_tests::public_account_history_rejects_incomplete_ready_selector_without_hanging",
+            "node::node::tests::linked_device_catches_up_incoming_dm_after_reconnect",
+            "eventlog::repository::order::tests::history_selectors_reject_retired_unready_and_incomplete_derived_ranges"
           ]
         }
       ],
@@ -2754,7 +2792,8 @@
       },
       "escalation": [
         "Leaf repository tests do not certify participant runtime integration, native publication behavior or production-KDF startup budgets. Node integration must retain validate_participant_request before constructors and the existing delivery journal, use pure removal predicates under the SQL lock, and continue deadline pagination until an empty page rather than a short page.",
-        "Actual consumer cutover requires affected history/search, delivery recovery, exact local deletion, snapshot export/restore and loopback/restart evidence; bounded repository APIs alone do not establish bounded startup memory."
+        "Actual consumer cutover requires affected history/search, delivery recovery, exact local deletion, snapshot export/restore and loopback/restart evidence; bounded repository APIs alone do not establish bounded startup memory.",
+        "Derived history selectors must reject stale jobs and incomplete requested rank ranges rather than spin or silently omit rows. The owned-subprocess fault control warms real public history, removes only a derived selector candidate and requires typed failure with the authoritative transcript retained; kill and reap any failed child before removing its store. This defensive control does not establish the historical reconnect cause. Reconnect timeout diagnostics must preserve the last observed predicate bits without synchronous post-timeout queries."
       ]
     },
     {

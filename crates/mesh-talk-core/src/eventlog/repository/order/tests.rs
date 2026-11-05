@@ -1198,6 +1198,98 @@ fn runtime_metadata_combined_history_keeps_delayed_parent_order_and_reuses_uncha
 }
 
 #[test]
+fn history_selectors_reject_retired_unready_and_incomplete_derived_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    let conversation = ConversationId::new([29; 32]);
+    repo.initialize_history_order().unwrap();
+    let pending = repo
+        .history_generation(&conversation, b"original", 0, None)
+        .unwrap();
+    assert!(matches!(
+        repo.history_selectors(pending.job, 0, 1, 4096),
+        Err(LogError::StaleCursor)
+    ));
+    for n in 0..3 {
+        repo.history_add(
+            &conversation,
+            pending.job,
+            combined::HistorySelector {
+                id: EventId::new([n + 1; 32]),
+                clock: u64::from(n),
+                source_kind: 2,
+                ordinal: i64::from(n) + 1,
+                priority: 2,
+                sequence: 0,
+                charged_bytes: 4,
+            },
+            None,
+        )
+        .unwrap();
+    }
+    let mut ready = repo.history_order_step(pending.job).unwrap();
+    while !ready.ready {
+        ready = repo.history_order_step(pending.job).unwrap();
+    }
+    assert_eq!(
+        repo.history_selectors(ready.job, 0, 3, 12).unwrap().len(),
+        3
+    );
+    assert!(
+        repo.history_selectors(ready.job, 1, 1, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        repo.history_selectors(ready.job, 0, 3, 11),
+        Err(LogError::PageBudgetTooSmall { required: 12 })
+    ));
+    db.transaction(|c| {
+        assert_eq!(
+            c.execute(
+                "DELETE FROM history_order_candidates WHERE job=?1 AND id=?2",
+                params![ready.job.as_slice(), [2u8; 32].as_slice()]
+            )?,
+            1
+        );
+        Ok(())
+    })
+    .unwrap();
+    // A nonempty joined page with a middle gap is invalid too; checking only
+    // empty pages would silently omit this selected real rank.
+    assert!(matches!(
+        repo.history_selectors(ready.job, 0, 3, 4096),
+        Err(LogError::CorruptFile(_))
+    ));
+    assert!(matches!(
+        repo.history_selectors(ready.job, 1, 2, 4096),
+        Err(LogError::CorruptFile(_))
+    ));
+    let next = repo
+        .history_generation(&conversation, b"replacement", 0, None)
+        .unwrap();
+    assert_ne!(next.job, ready.job);
+    assert!(matches!(
+        repo.history_selectors(ready.job, 0, 1, 4096),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        repo.history_selectors(next.job, 0, 1, 4096),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(
+        repo.history_selectors(ready.job, 0, 0, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        repo.history_selectors(next.job, 0, 0, 0),
+        Err(LogError::InvalidPageBudget)
+    ));
+}
+
+#[test]
 fn runtime_metadata_interrupted_history_retirement_cannot_reuse_partial_ready_generation() {
     let dir = tempfile::tempdir().unwrap();
     let db = database(&dir);

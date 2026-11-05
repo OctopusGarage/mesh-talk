@@ -321,7 +321,12 @@ runtime retirement. A network change cancels obsolete waves and starts fresh.
 Directory exchanges use the existing authenticated adaptive 15–60 second budget;
 failed relays wait at most the five-second refresh interval before eligibility.
 A slow relay cannot hold the refresh metadata lock while doing network or disk I/O.
-Existing origin authority and per-source response limits remain unchanged.
+Existing origin authority and per-source response limits remain unchanged. Pinned
+legacy-gateway UDP discovery queries send the same identity-free nonce in at
+most four datagrams within their existing four-second total query deadline. Their
+one-second retry base and nonce-derived jitter avoid permanently synchronized
+probes behind one source IP; inbound response allowances are unchanged. The
+query future owns its socket and timers, so cancellation leaves no retry task.
 
 The directory's fifteen-second recovery-membership expiry is separate from
 presentation history. Expiry revokes recovery admission but does not impersonate
@@ -705,7 +710,26 @@ wake advances one bounded checkpoint/presentation turn and yields. The network
 turn retains its original leases, cursors, ordering and deadlines. If local work
 consumed a notification, replay one coalesced wake after the network turn completes
 so queued network targets retain their next turn. No extra worker or queue owns
-this progress, and parent cancellation drops the active exchange.
+this local checkpoint progress. Selected public peer rounds retain their
+three-peer, two-group bounds but own separately scheduled child tasks; each child
+acquires the existing participant work permit before spawn. A synchronously busy
+peer must not strand another selected peer on an available runtime worker.
+First-applied progress cancels and joins the remaining rounds before the lane is
+released. Parent cancellation aborts those children, while the participant work
+drain retains their actual futures and captures through retirement. The custody
+turn itself still adds no task or connection allowance.
+
+The inbound listener runs as one separately scheduled, parent-owned child of the
+accept-loop host. Synchronous maintenance in the parent's other branches cannot
+prevent an available worker from polling inbound Noise authentication. Connection
+limits, handshake deadlines and authorization remain unchanged. Parent cancellation
+aborts the child; its participant work permit survives until the actual listener
+future and captures are destroyed, and accepted connections retain their own
+permits. Normal parent completion joins listener cancellation. Hosts retire and
+drain participant work before closing or reopening stores. This scheduling seam
+does not promise progress through a shared blocked journal or on a held single-worker
+host; the actual maintenance-hold positive and single-worker negative regressions
+retain that distinction.
 
 New account-group creation gives invitation-target verification one twenty-second
 deadline across the complete selected account set and its device routes. Every
@@ -1228,6 +1252,15 @@ read receipts and DM controls; appearance consent gates
 libraries/photos. Shared settings retain the existing per-key preference owner.
 The native account adapter rejects stale owner/runtime/account admissions, releases
 blob bytes only for the requested current version, and uses compare-and-set writes.
+
+Bounded local group-directory preparation returns a local continuation. It must
+not announce a document change or requeue every remote document lane. The serial
+local-maintenance owner retains pending work across inventory pages and cursor
+wraps, while later groups and other local work keep their ordinary turns. Each
+inventory page remains limited to sixteen groups; each directory step retains
+its 128-row, 512-edge and 8 MiB work limits. Source changes invalidate partial
+selectors through their existing owner. Actual signed inventory publication
+retains the normal document-change notification and network Wake.
 
 Device hostnames are private account-directory metadata, separate from public
 nicknames, discovery announcements, certificates and ordinary peer profiles.
@@ -2391,7 +2424,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Indexed physical page reclamation         | Mode 2; start at 256 free pages, drain to at most 64, up to 64 iterations per eligible slice; 100 ms successful cooldown plus measured duty.                                                                                                                                              | Only already-free pages. One background PASSIVE completion attempt can copy uncapped WAL work; partial transfer/typed contention retries independently at 100 ms–5 s. Page counts and file lengths are distinct from filesystem block release.                                                                                                                                                                                      |
 | Maximum relay event age                   | Thirty days from retained original arrival semantics.                                                                                                                                                                                                                                     | Upper age bound, not minimum guaranteed retention. Forwarding/restart must preserve expiry behavior.                                                                                                                                                                                                                                                                                                                                |
 | Group initial text/sticker seeding        | Small-group threshold five members; larger groups normally seed two peers.                                                                                                                                                                                                                | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                                                                                                                                                                                                                                           |
-| Group recovery                            | Three peers per channel recovery step; coalesced wakes visit up to eight joined channels; jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                                                                                       | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                                                                                                                                                                                                                                                                 |
+| Group recovery                            | At most two active groups, each selecting three peers; coalesced wakes visit up to eight joined channels. Jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                                                                       | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                                                                                                                                                                                                                                                                 |
 | Group control fanout                      | At most four concurrent contacts.                                                                                                                                                                                                                                                         | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                                                                                                                                                                                                                                          |
 
 The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
@@ -2744,7 +2777,12 @@ session owner may retire the oldest such session under capacity pressure, before
 waiting for the listener's connection reservation. At most one retirement is
 pending until the owning server future drops its actual socket and TCP permits.
 No permit is manufactured or released early, and the eight shared/seven directional
-budgets remain unchanged.
+budgets remain unchanged. Admission that is already waiting for a directional or
+shared permit must also observe new inbound idle eligibility and recheck retirement
+pressure. Register that transition before inspecting capacity, retain semaphore
+queue ownership across eligibility wakes, and keep the original single two-second
+admission deadline. An idle transition requests retirement; only actual socket
+owner destruction releases capacity.
 
 Non-consuming readiness ends the idle registration before framed reception starts;
 ready bytes win a simultaneous retirement signal. Handshakes, frame reads and active
@@ -2986,6 +3024,12 @@ True stream multiplexing, trust of unapproved discovered relays, hot federation 
 The guiding question for future changes is: **Does this preserve local-first communication, explicit authority, equal trusted relay roles, endpoint-owned delivery truth and bounded recoverable work across the actual reachable graph?** If not, revise the design deliberately before presenting the behavior as compatible.
 
 ## Push-driven reconciliation and recovery
+
+Group recovery retains a fresh queued turn after an authenticated peer applies
+metadata or content and stale sibling rounds have retired. Quiet comparisons do
+not requeue themselves. Targeted turns rotate across pending group identities
+in batches of at most eight and rotate selected peers independently of periodic
+fallback turns; two active groups and three selected peers remain the bounds.
 
 Durable state is authoritative. Notifications schedule reconciliation; they never
 serve as delivery proof, replace signed membership, or transfer plaintext authority.

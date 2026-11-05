@@ -91,12 +91,56 @@ pub(super) fn settle_group_metadata(node: &Node, group: crate::eventlog::Convers
 // Each simulated remote host owns its reactor and retirement independently.
 pub(super) struct IndependentPeerRuntime {
     launch: Option<tokio::sync::oneshot::Sender<()>>,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<PeerRuntimeShutdown>>,
     thread: Option<std::thread::JoinHandle<()>>,
     handle: tokio::runtime::Handle,
 }
+
+enum PeerRuntimeShutdown {
+    Retire,
+    Pause,
+}
 impl IndependentPeerRuntime {
     pub(super) async fn start(node: Arc<Node>, listener: TcpListener) -> Self {
+        Self::start_with_workers(node, listener, false, |node, listener| {
+            node.run_accept_loop(listener)
+        })
+        .await
+    }
+
+    // Match the CLI's multi-thread Tokio host while retaining the explicitly
+    // single-thread account-action fixtures' scheduling and ownership contract.
+    pub(super) async fn start_multithreaded(node: Arc<Node>, listener: TcpListener) -> Self {
+        Self::start_multithreaded_with(node, listener, |node, listener| {
+            node.run_accept_loop(listener)
+        })
+        .await
+    }
+
+    // Custom protocol providers use the same reactor and retirement owner as
+    // ordinary peers; invoke their handler only after the explicit launch.
+    pub(super) async fn start_multithreaded_with<F, Fut>(
+        node: Arc<Node>,
+        listener: TcpListener,
+        handler: F,
+    ) -> Self
+    where
+        F: FnOnce(Arc<Node>, TcpListener) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        Self::start_with_workers(node, listener, true, handler).await
+    }
+
+    async fn start_with_workers<F, Fut>(
+        node: Arc<Node>,
+        listener: TcpListener,
+        multithreaded: bool,
+        handler: F,
+    ) -> Self
+    where
+        F: FnOnce(Arc<Node>, TcpListener) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let listener = listener.into_std().unwrap();
         let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
         let (launch, launched) = tokio::sync::oneshot::channel();
@@ -104,25 +148,38 @@ impl IndependentPeerRuntime {
         let thread = std::thread::Builder::new()
             .name("account-action-peer".into())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
+                let mut builder = if multithreaded {
+                    let mut builder = tokio::runtime::Builder::new_multi_thread();
+                    builder.worker_threads(2);
+                    builder
+                } else {
+                    tokio::runtime::Builder::new_current_thread()
+                };
+                let runtime = builder.enable_all().build().unwrap();
                 runtime.block_on(async move {
                     let listener = TcpListener::from_std(listener).unwrap();
                     ready.send(tokio::runtime::Handle::current()).unwrap();
+                    let mut shutdown_mode = PeerRuntimeShutdown::Retire;
                     let launched = tokio::select! {
-                        _ = &mut stopped => false,
+                        result = &mut stopped => {
+                            shutdown_mode = result.unwrap_or(PeerRuntimeShutdown::Retire);
+                            false
+                        },
                         result = launched => result.is_ok(),
                     };
                     let task = if launched {
-                        let task = tokio::spawn(node.clone().run_accept_loop(listener));
-                        let _ = stopped.await;
+                        let server_node = node.clone();
+                        let task = tokio::spawn(async move {
+                            handler(server_node, listener).await;
+                        });
+                        shutdown_mode = stopped.await.unwrap_or(PeerRuntimeShutdown::Retire);
                         Some(task)
                     } else {
                         None
                     };
-                    node.runtime_work.close();
+                    if matches!(shutdown_mode, PeerRuntimeShutdown::Retire) {
+                        node.runtime_work.close();
+                    }
                     if let Some(task) = task {
                         task.abort();
                         if let Err(error) = task.await {
@@ -150,9 +207,17 @@ impl IndependentPeerRuntime {
     pub(super) fn launch(&mut self) {
         self.launch.take().unwrap().send(()).unwrap();
     }
-    pub(super) async fn stop(mut self) {
+    pub(super) async fn stop(self) {
+        self.finish(PeerRuntimeShutdown::Retire).await;
+    }
+    // A network-offline cut joins actual producers and admitted work while
+    // retaining the same profile for a later explicit listener relaunch.
+    pub(super) async fn pause(self) {
+        self.finish(PeerRuntimeShutdown::Pause).await;
+    }
+    async fn finish(mut self, mode: PeerRuntimeShutdown) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+            let _ = shutdown.send(mode);
         }
         let thread = self.thread.take().unwrap();
         let joined = tokio::task::spawn_blocking(move || thread.join())
@@ -167,7 +232,7 @@ impl IndependentPeerRuntime {
 impl Drop for IndependentPeerRuntime {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+            let _ = shutdown.send(PeerRuntimeShutdown::Retire);
         }
         if let Some(thread) = self.thread.take() {
             let joined = thread.join();

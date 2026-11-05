@@ -86,6 +86,8 @@ impl AccountGroupAccess {
 mod tests;
 
 #[cfg(test)]
-pub(in crate::node) use tests::ControlTestPages;
+pub(in crate::node) use tests::{
+    ControlTestPages, FUNCTIONAL_ACCOUNT_CONVERGENCE_BUDGET, functional_account_convergence,
+};
 
 pub(in crate::node) use access::{DirectoryView, RawViewCache};

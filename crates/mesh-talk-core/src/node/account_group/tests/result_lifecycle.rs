@@ -310,6 +310,7 @@ async fn modern_leave_wake_during_real_noise_timeout_recovers_within_operation_b
 struct DuringAttemptWake {
     revision: Option<u64>,
     received_before_failure: bool,
+    received_matching: bool,
     failed: bool,
 }
 impl DuringAttemptWake {
@@ -320,9 +321,11 @@ impl DuringAttemptWake {
         if self
             .revision
             .is_some_and(|revision| event == format!("wake_received revision={revision}"))
-            && !self.failed
         {
-            self.received_before_failure = true;
+            self.received_matching = true;
+            if !self.failed {
+                self.received_before_failure = true;
+            }
         }
     }
 }
@@ -352,6 +355,11 @@ fn during_attempt_wake_uses_exact_reception_order_not_ack_return() {
         if revision == Some(7) {
             rejected.observe("wake_received revision=7");
         }
+        assert_eq!(
+            rejected.received_matching,
+            revision == Some(7),
+            "only the exact token survives as authenticated reception, including after failure"
+        );
         assert!(
             !rejected.received_before_failure,
             "missing, stale and late wake evidence must fail"
@@ -814,6 +822,9 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
     );
     let mut reference_worker = None;
     let mut source_worker = None;
+    let receipt_phase = std::cell::Cell::new("cold_preparation");
+    let mut wake_triggered = false;
+    let mut wake_acknowledged = false;
     let outcome = std::panic::AssertUnwindSafe(async {
         source.publish_account_group_access_for(group);
         pull_group_control(&reference, &source, source_address, group).await;
@@ -844,7 +855,9 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
         reference_worker = Some(tokio::spawn(reference.clone().run_account_history_loop()));
         if !wake_during_attempt { source_worker = Some(tokio::spawn(source.clone().run_account_history_loop())); }
         let receipt = tokio::time::timeout(Duration::from_secs(8), async {
+            receipt_phase.set("await_original_control_failure");
             if wake_during_attempt {
+                receipt_phase.set("publish_original_intent_and_terminal");
                 dispatch.entered.notified().await;
                 let intent_key = crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device: reference.user_id() };
                 loop {
@@ -877,14 +890,19 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
             } else {
                 while !timeout_seen.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(10)).await; }
             }
+            receipt_phase.set("publish_newer_wake");
             source.set_device_hostname(Some(if wake_during_attempt { "Published during failed control attempt" } else { "Published after failed control attempt" })).unwrap();
             let (epoch, revision) = source.account_wake_token_for_test();
             during.lock().unwrap().revision = Some(revision);
+            wake_triggered = true;
+            receipt_phase.set("authenticate_newer_wake");
             use crate::node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
             let mut wake = source.begin_account_exchange(&source.routing_peer(&reference.user_id()).unwrap(), AccountSyncVersion::V2,
                 AccountHistoryFrame::Wake { account_id: account.account_id(), epoch, revision }).await.unwrap();
+            receipt_phase.set("await_newer_wake_ack");
             let ack = wake.recv().await.unwrap();
             assert!(matches!(AccountHistoryFrame::decode_versioned(&ack), Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: observed_epoch, revision: observed_revision })) if observed_epoch == epoch && observed_revision == revision));
+            wake_acknowledged = true;
             wake.recycle(&source);
             if wake_during_attempt {
                 let received_during = during.lock().unwrap().received_before_failure;
@@ -892,6 +910,7 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
                 assert!(received_during, "the exact authenticated wake reception must precede the original attempt failure; phases={phases:?}");
                 while !timeout_seen.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(10)).await; }
             }
+            receipt_phase.set("await_private_leave_receipt");
             release.close();
             loop {
                 let status = reference.list_account_group_operations(&account.account_id(), AccountGroupOperationQuery { group: Some(group), pending_only: false, after: None, limit: 64 }).unwrap()
@@ -907,6 +926,23 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
             .into_iter().find(|row| row.id == id).map(|row| row.phase);
         (receipt, source_phase, started.elapsed())
     }).catch_unwind().await;
+    let receipt_phase = receipt_phase.get();
+    // Snapshot authoritative witnesses before cleanup can release a wait or
+    // evict the human-readable trace's earlier reception rows.
+    let phases = trace.lock().unwrap().clone();
+    let received_matching = during.lock().unwrap().received_matching;
+    let noise_failed = noise_timeout_seen.load(Ordering::Acquire);
+    let page_failed = timeout_seen.load(Ordering::Acquire);
+    let socket_held = held_control.load(Ordering::Acquire);
+    let claimed = fault.state.lock().unwrap().claimed;
+    let receipt_succeeded = outcome
+        .as_ref()
+        .is_ok_and(|(receipt, _, _)| receipt.is_ok());
+    if !receipt_succeeded {
+        eprintln!(
+            "Noise recovery before cleanup phase={receipt_phase} receipt_success={receipt_succeeded} wake_triggered={wake_triggered} wake_acknowledged={wake_acknowledged} matching_received={received_matching} noise_failed={noise_failed} page_failed={page_failed} socket_held={socket_held} phases={phases:?}"
+        );
+    }
     // Open every fixture wait before cancellation; tracked children retain the
     // nodes through actual retirement, including admitted blocking work.
     dispatch.release();
@@ -943,25 +979,19 @@ async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
     }
     let (receipt, source_phase, elapsed) =
         outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-    let phases = trace.lock().unwrap().clone();
-    let claimed = fault.state.lock().unwrap().claimed;
     assert!(
-        timeout_seen.load(Ordering::Acquire)
-            && held_control.load(Ordering::Acquire)
-            && claimed.is_some(),
+        receipt.is_ok(),
+        "original Leave receipt and Left access must recover within unchanged 8s from admission; phase={receipt_phase} wake_triggered={wake_triggered} wake_acknowledged={wake_acknowledged} matching_received={received_matching} elapsed={elapsed:?}; phases={phases:?}"
+    );
+    assert!(
+        page_failed && noise_failed && socket_held && claimed.is_some(),
         "a real exact Control Noise timeout must precede recovery; claimed={claimed:?}; phases={phases:?}"
     );
     assert!(
-        phases
-            .iter()
-            .any(|(_, _, _, event)| event.starts_with("wake_received")),
-        "a real newer authenticated wake must arrive"
+        received_matching,
+        "the exact newer authenticated wake must arrive before cleanup"
     );
     assert_eq!(source_phase, Some(AccountGroupOperationPhase::Committed));
-    assert!(
-        receipt.is_ok(),
-        "original Leave receipt and Left access must recover within unchanged 8s from admission; elapsed={elapsed:?}; phases={phases:?}"
-    );
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Left
