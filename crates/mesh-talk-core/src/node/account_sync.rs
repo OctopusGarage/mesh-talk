@@ -3459,7 +3459,11 @@ impl Node {
                         Some(tick) => { tick.tick().await; }
                         None => std::future::pending::<()>().await,
                     }
-                } => { enqueue_all = true; }
+                } => {
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || "periodic_account_repair_tick".into());
+                    enqueue_all = true;
+                }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     maintenance_requested = true;

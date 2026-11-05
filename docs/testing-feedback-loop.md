@@ -606,8 +606,19 @@ readiness while every matching Wake remains held. Its separate five-second
 arrival watchdog still bounds reaching the authenticated Wake hook. Only then
 may the pending-setup assertion test acknowledgement gating; releasing the hold
 must permit real setup completion. Preparation timeout diagnostics retain the
-individual predicates and bounded phase trace. Prepare all routes and observers before launching independent
-participant hosts. Network-only offline cuts join producers and admitted work
+individual predicates and bounded phase trace.
+
+This finite acknowledgement control excludes the unrelated account-history
+periodic repair tick through the existing full-host test seam. Notification-driven
+document synchronization, real Wake publication/acknowledgement, inbound serving
+and the remaining host services still run. Its observer must witness real Optional
+work and zero actually selected repair ticks before and after the held exchange.
+Repeated periodic sweeps can invalidate already completed preparation; their
+concurrent idle gaps are not an acknowledgement prerequisite. Other autonomous
+recovery scenarios retain periodic repair and their existing deadlines.
+
+Prepare all routes and observers before launching independent participant hosts.
+Network-only offline cuts join producers and admitted work
 while preserving the Node for an explicit relaunch; permanent retirement closes
 work admission. A same-lane DmRecall or GroupActivity hold keeps setup pending.
 An independent Directory hold may keep aggregate document status catching up;

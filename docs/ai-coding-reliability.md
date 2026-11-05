@@ -386,6 +386,14 @@ scenario drives requests directly; keep full-host recovery tests separate. The
 requires no prior sibling negotiation or imported custody key, then positively
 witnesses its real explicit negotiation and durable projection.
 
+A finite acknowledgement control must not depend on concurrent periodic workers
+being idle together. The [Wake setup control](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+retains the full notification-driven scheduler and real protocol services while
+excluding its unrelated account-repair clock. Require zero actually selected
+repair ticks and positively observed Optional work. Keep current whole-Optional
+readiness, signed floors and acknowledgement assertions; do not latch an older
+completion as current readiness. Autonomous recovery controls retain their clocks.
+
 Browser device options express intent; they do not observe native input state.
 Establish the required device mode through the browser's supported emulation
 owner, then verify actual media queries and touch capabilities before measuring

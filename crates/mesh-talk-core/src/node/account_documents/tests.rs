@@ -1674,6 +1674,9 @@ async fn custody_channel_setup_waits_for_authenticated_wake_acknowledgement() {
             })
             .unwrap();
     }
+    // This control observes finite publication work, not simultaneous idle gaps
+    // between independent periodic sweeps. Keep the real notification-driven
+    // scheduler and Wake/inbound services while excluding that repair clock.
     let mut hosts = Vec::new();
     for current in [&source, &sibling] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1693,14 +1696,28 @@ async fn custody_channel_setup_waits_for_authenticated_wake_acknowledgement() {
             &observer.user_id(),
         );
         hosts.push(
-            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded_with(
                 current.clone(),
                 listener,
+                |node, listener| node.run_accept_loop_without_account_repair(listener),
             )
             .await,
         );
     }
     let release = Arc::new(Semaphore::new(0));
+    let repair_ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let optional_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for current in [&source, &sibling] {
+        let repair_ticks = repair_ticks.clone();
+        let optional_starts = optional_starts.clone();
+        *current.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if phase == "periodic_account_repair_tick" {
+                repair_ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            } else if phase == "document_scope_started scope=Optional" {
+                optional_starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }));
+    }
     let mut observation = CustodySetupObservation::new(&source, &sibling);
     let outcome = std::panic::AssertUnwindSafe(async {
         for host in &mut hosts {
@@ -1712,6 +1729,15 @@ async fn custody_channel_setup_waits_for_authenticated_wake_acknowledgement() {
             .unwrap();
         observation.mark_channel_created();
         wait_custody_channel_setup(&source, &sibling, channel, &observation).await;
+        assert!(
+            optional_starts.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the repair observer must witness actual notification-driven Optional work"
+        );
+        assert_eq!(
+            repair_ticks.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "finite publication setup must not race unrelated periodic repair"
+        );
         let (arrived, entered) = oneshot::channel();
         let arrived = Arc::new(std::sync::Mutex::new(Some(arrived)));
         *sibling.account_session_test_hook.lock().unwrap() = Some(Arc::new({
@@ -1794,6 +1820,11 @@ async fn custody_channel_setup_waits_for_authenticated_wake_acknowledgement() {
         )
         .await;
         assert!(observation.wake_ready());
+        assert_eq!(
+            repair_ticks.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "real Wake completion must not depend on periodic repair"
+        );
     })
     .catch_unwind()
     .await;
