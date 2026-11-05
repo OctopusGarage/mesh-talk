@@ -378,7 +378,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation; original cold/readiness and operation deadlines remain unchanged, and first failures plus admitted-work retirement survive setup panics.",
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation. Post-publication document preparation uses the existing thirty-second setup owner while real Wake responses remain held; the separate five-second authenticated-Wake arrival and custody operation deadlines remain unchanged. First failures plus admitted-work retirement survive setup panics.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -2333,7 +2333,8 @@
             "relay_custody_releases_slots_for_more_than_eight_pending_files",
             "stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_member",
             "channel_media_source_keeps_signed_chunks_when_local_preview_completes",
-            "node::delivery_store::tests::"
+            "node::delivery_store::tests::",
+            "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target"
           ]
         }
       ],
@@ -2342,7 +2343,7 @@
         "guide": "docs/network-design-reference.md#ordinary-file-custody",
         "invariants": [
           {
-            "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires delivery work.",
+            "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires delivery work. A canonical own-device copy cannot confirm external recipient delivery, and a stalled sibling host cannot prevent target confirmation; the full-host fixture keeps independent two-worker reactors and both original five-second confirmation windows.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {

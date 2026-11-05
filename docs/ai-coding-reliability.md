@@ -125,6 +125,10 @@ reactor. The growing-history regression in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
 holds the actual source writer until a receiver page imports, then measures
 continuation progress separately from setup and checks advancing cursors.
+Full-host file fixtures retain a separate two-worker reactor for each simulated
+application. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+holds both sibling workers after its durable copy completes and requires target
+confirmation while they remain held; unrelated devices cannot share that stall.
 
 **Evidence:** pause actual expensive work after admission and assert availability
 of the unrelated guard or operation. Release the pause and verify the final data.

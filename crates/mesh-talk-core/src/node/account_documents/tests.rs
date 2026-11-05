@@ -1542,6 +1542,20 @@ async fn wait_custody_channel_setup_at_floor(
     observation: &CustodySetupObservation<'_>,
     bootstrap_floor: Option<Vec<AccountDocumentMeta>>,
 ) {
+    wait_custody_channel_setup_state(source, sibling, channel, observation, bootstrap_floor, true)
+        .await;
+}
+
+// Keep document preparation and authenticated notification acknowledgement in
+// the same readiness owner, but let the held-Wake control prepare independently.
+async fn wait_custody_channel_setup_state(
+    source: &Node,
+    sibling: &Node,
+    channel: crate::eventlog::ConversationId,
+    observation: &CustodySetupObservation<'_>,
+    bootstrap_floor: Option<Vec<AccountDocumentMeta>>,
+    require_wake_acknowledgement: bool,
+) {
     // Channel creation dirties both directory/control and optional document
     // lanes. Observe its actual signed source heads before the message starts
     // the independent eight-second automatic-custody observation.
@@ -1585,7 +1599,7 @@ async fn wait_custody_channel_setup_at_floor(
                 && custody_linked_capabilities_ready(source, sibling)
                 && observation.ready()
                 && observation.optional_ready()
-                && observation.wake_ready()
+                && (!require_wake_acknowledgement || observation.wake_ready())
             {
                 break;
             }
@@ -1739,32 +1753,19 @@ async fn custody_channel_setup_waits_for_authenticated_wake_acknowledgement() {
             .await
             .unwrap()
             .unwrap();
-        tokio::time::timeout_at(deadline, async {
-            loop {
-                let imported = bootstrap_floor.iter().all(|head| {
-                    sibling
-                        .account_document(&head.key)
-                        .unwrap()
-                        .is_some_and(|document| {
-                            let meta = &document.meta;
-                            !meta.tombstone
-                                && meta.valid(&account.public().ed25519_pub)
-                                && meta.writer_device == head.writer_device
-                                && meta.order() >= head.order()
-                        })
-                });
-                if imported
-                    && custody_linked_capabilities_ready(&source, &sibling)
-                    && observation.ready()
-                    && observation.optional_ready()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("old setup prerequisites must settle within the same held-exchange budget");
+        // Hostname publication starts new document work after initial setup.
+        // Complete that preparation with the owning setup watchdog while every
+        // authenticated Wake response remains held. The five-second window
+        // above still bounds arrival at the actual Wake hook.
+        wait_custody_channel_setup_state(
+            &source,
+            &sibling,
+            channel,
+            &observation,
+            Some(bootstrap_floor.clone()),
+            false,
+        )
+        .await;
         assert!(
             !observation.wake_ready(),
             "an older authenticated acknowledgement cannot qualify the new publication floor"

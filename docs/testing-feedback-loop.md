@@ -599,7 +599,14 @@ both directions. Capture each publisher's post-create wake revision once and
 require a real authenticated acknowledgement at or above that floor in both
 directions; settled document reads alone do not qualify the notification path.
 A held real Wake response keeps setup pending while the other prerequisites
-remain ready. Prepare all routes and observers before launching independent
+remain ready. A new hostname publication may restart document preparation after
+initial setup. The held-Wake control therefore uses this same thirty-second
+preparation owner for signed head floors, reciprocal capabilities and Optional
+readiness while every matching Wake remains held. Its separate five-second
+arrival watchdog still bounds reaching the authenticated Wake hook. Only then
+may the pending-setup assertion test acknowledgement gating; releasing the hold
+must permit real setup completion. Preparation timeout diagnostics retain the
+individual predicates and bounded phase trace. Prepare all routes and observers before launching independent
 participant hosts. Network-only offline cuts join producers and admitted work
 while preserving the Node for an explicit relaunch; permanent retirement closes
 work admission. A same-lane DmRecall or GroupActivity hold keeps setup pending.
@@ -627,7 +634,6 @@ identities, original-source isolation and normal TCP/flush/pull behavior.
 The existing multithread executor and fifteen-second owned-retirement watchdog
 remain unchanged. Bounded phase and cached file-state observations explain
 failures; every exit joins admitted producers before propagating the primary.
-
 
 After an injected reception transaction failure, the rollback fixture first
 requires zero committed revision, processing and receipt rows. Removing the
@@ -1697,7 +1703,7 @@ The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
-runs the thirteen exact critical recovery regressions from that same sealed,
+runs the fifteen exact critical recovery regressions from that same sealed,
 extracted archive: notification-only gossip, held-request and archive-readiness
 self controls, independent merged forwarding, storage-rollback replay, actual
 role-GC physical progress, the three authenticated custody setup controls and

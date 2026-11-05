@@ -941,6 +941,8 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target() {
+    use super::test_support::IndependentPeerRuntime;
+
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let cd = tempfile::tempdir().unwrap();
@@ -1010,6 +1012,11 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let mut ct = None;
     let mut bob_rejector = None;
     let mut stop_rejector = None;
+    // Retain release senders outside catch_unwind so failure releases blocked
+    // fixture workers before the runtime owner joins them.
+    let mut own_copy_releases = Vec::new();
+    let mut own_copy_holds = Vec::new();
+    let held_workers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut phase = "own_copy";
     let mut confirmed_status = None;
     let mut pending_destination = None;
@@ -1037,8 +1044,15 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
             assert_eq!(tokio::io::AsyncReadExt::read(&mut probe, &mut byte).await.unwrap(), 0);
         }).await;
         assert!(unavailable.is_ok(), "offline endpoint must close actual connections");
-        at = Some(tokio::spawn(a.clone().run_accept_loop(al)));
-        ct = Some(tokio::spawn(c.clone().run_accept_loop(cl)));
+        // Each simulated application keeps its own protocol workers and I/O
+        // reactor. Synchronous durable work on another device must not consume
+        // this host's workers or the observer's confirmation window.
+        let mut source = IndependentPeerRuntime::start_multithreaded(a.clone(), al).await;
+        let mut own_copy = IndependentPeerRuntime::start_multithreaded(c.clone(), cl).await;
+        source.launch();
+        own_copy.launch();
+        at = Some(source);
+        ct = Some(own_copy);
         let mut own_copy_pending = true;
         let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -1081,11 +1095,30 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
             own_received.is_ok(),
             "own-copy confirmation failed: phase={phase} pending_destination={own_copy_pending}"
         );
+        // Once its copy is durable, the sibling may become unresponsive. Hold
+        // both of its actual host workers: target delivery must still progress.
+        // The real-time cutoff only retires a broken negative-control fixture;
+        // successful delivery must observe both workers still held.
+        for _ in 0..2 {
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            own_copy_releases.push(release);
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let held = held_workers.clone();
+            own_copy_holds.push(ct.as_ref().unwrap().runtime_handle().spawn(async move {
+                held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = entered.send(());
+                let _ = released.recv_timeout(super::delivery_runtime::FILE_EXCHANGE_TIMEOUT);
+                held.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+            ready.await.unwrap();
+        }
         phase = "target_confirmation";
         stop_rejector.take().unwrap().send(()).unwrap();
         let bl = bob_rejector.take().unwrap().await.unwrap();
         assert_eq!(bl.local_addr().unwrap(), bob_address);
-        bt = Some(tokio::spawn(b.clone().run_accept_loop(bl)));
+        let mut target = IndependentPeerRuntime::start_multithreaded(b.clone(), bl).await;
+        target.launch();
+        bt = Some(target);
         let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while {
                 confirmed_status = a.delivery_status(id);
@@ -1100,8 +1133,14 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
             }
         })
         .await;
+        if confirmed.is_err() {
+            eprintln!("target file state: recipient_progress={:?} consent={:?}",
+                b.file_progress(file), a.outgoing_file_consent_status(id, actual));
+        }
         assert!(confirmed.is_ok(),
             "target confirmation failed: phase={phase} status={confirmed_status:?} pending_destination={pending_destination:?}");
+        assert_eq!(held_workers.load(std::sync::atomic::Ordering::SeqCst), 2,
+            "target confirmation must not depend on the sibling resuming");
         let history = a.account_history(&b.account_id(), 10).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, id);
@@ -1112,6 +1151,10 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
         assert_eq!(a.delivery_status(actual), None);
         assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
     }).catch_unwind()).await;
+    drop(own_copy_releases);
+    for hold in own_copy_holds {
+        hold.await.unwrap();
+    }
     for current in [&a, &b, &c] {
         current.runtime_work.close();
     }
@@ -1122,11 +1165,11 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
             server_failed |= !error.is_cancelled();
         }
     }
-    for task in [at, bt, ct].into_iter().flatten() {
-        task.abort();
-        if let Err(error) = task.await {
-            server_failed |= !error.is_cancelled();
-        }
+    for server in [at, bt, ct].into_iter().flatten() {
+        server_failed |= std::panic::AssertUnwindSafe(server.stop())
+            .catch_unwind()
+            .await
+            .is_err();
     }
     let mut retired = true;
     for current in [&a, &b, &c] {
