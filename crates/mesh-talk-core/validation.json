@@ -120,7 +120,6 @@
             "node::account_sync::wake::tests::control_wakes_bound_full_identities_and_prune_changed_bindings",
             "a_new_terminal_publication_retries_a_locally_busy_wake_without_remote_cooldown",
             "local_capacity_retry_requires_a_new_publication_but_remote_failure_keeps_its_cooldown",
-            "selected_source_receipt_overtakes_its_own_preoperation_background_control_read",
             "selected_source_lower_key_receipt_preserves_both_partial_control_comparisons",
             "another_selected_executor_overtakes_a_completed_operations_paired_background_page",
             "selected_executor_preparation_waits_for_real_a_inputs_and_pair_retirement",
@@ -166,7 +165,7 @@
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
-            "name": "Same-source prefix preparation requires exact current signed metadata and normally verified consumed-input hashes on every node, current directional capabilities and retired comparison-pair debt; it must not depend on redundant reverse full-scope digest equality, synthetic completions or cache marks. Queued publication retirement still requires current settlement.",
+            "name": "Same-source prefix preparation requires exact current signed metadata and normally verified consumed-input hashes on every node, current directional capabilities and retired comparison-pair debt; it must not depend on redundant reverse full-scope digest equality, synthetic completions or cache marks. Queued publication retirement still requires current settlement. The five same-source Noise scenarios share the prepared partial corpus; retain the lower-key receipt, both exact comparison checkpoints, live original child at admission, eight-second receipt, one owned cancellation and post-release recovery. Do not add a duplicate empty-corpus whole-host scenario whose setup assumes an earlier natural read survives unrelated bootstrap publication.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {

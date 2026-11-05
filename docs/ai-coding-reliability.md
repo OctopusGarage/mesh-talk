@@ -388,6 +388,16 @@ backoff spacing; real measured database duty time cannot imply a fixed number of
 attempts inside an arbitrary virtual-time window. Preserve cancellation, other
 maintenance-class progress and the no-early-retry assertions.
 
+Prefer one qualified scenario for a requirement over repeated whole-host
+variants with weaker preparation. The same-source control receipt owner retains
+its five prepared partial-corpus Noise scenarios, including the exact live child
+at admission, both preserved checkpoints, unchanged eight-second receipt,
+cancellation and post-release recovery. Its former empty-corpus duplicate could
+lose a natural read between setup notification and admission; removing that
+variant does not qualify a separate fresh empty-corpus timing boundary. Keep the
+retired-child observer and interrupted-preparation controls rather than adding
+sleep, suppressing publication or accepting a stale child to rescue setup.
+
 Functional browser scenarios should use the smallest data set that exercises
 all named state transitions. Recovery-batch navigation needs distinct partial
 and terminal deliveries plus concurrent live and duplicate signals; repeated
