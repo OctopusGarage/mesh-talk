@@ -51,6 +51,14 @@ reference-only siblings. An already executable local device retains sequential
 text acceptance through the existing send owner. Logical siblings delegate text,
 and all group individual files and merged records enter the existing account-group
 operation journal and execute through its selected eligible physical device. Reference metadata does not install membership or sender keys.
+Local routing is only a candidate decision. If the canonical projection is stale
+and the cached accepted membership contains this device's complete public identity,
+the existing send owner prepares current metadata within its original budget and
+rechecks account departure, dissolution, membership and identity under the membership
+commit guard before writing a receipt. A stale routing read must not prevent that
+preparation. Other read errors still fail, and a current nonlocal result still uses
+delegation. Signed rename, dissolution and same-user/different-key regressions cover
+successful preparation and rejection without a message or durable send receipt.
 A group leg remains pending until its verified committed result supplies the
 original public message identity. Unknown or unauthorized group legs fail before
 file restaging or network admission; other accepted or pending legs remain intact.

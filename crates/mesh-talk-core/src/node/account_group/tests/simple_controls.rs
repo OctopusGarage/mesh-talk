@@ -395,7 +395,7 @@ async fn assert_reference_controls(modern: bool) {
         if modern {
             assert!(canonical_source.authority.authority.is_some());
         }
-        let status = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let status = super::functional_account_convergence(async {
             loop {
                 if let Some(status) = reference
                     .account_group_operation_status(&account.account_id(), id)
@@ -462,7 +462,7 @@ async fn assert_reference_controls(modern: bool) {
         assert_eq!(
             effects.len(),
             1,
-            "modern={modern}, kind={kind:?}, status={status:?}, actual_policy={:?}",
+            "modern={modern}, kind={kind:?}, actual_policy={:?}",
             owner.channel_history_policy(group).unwrap()
         );
         assert!(effects[0].verify_integrity() && effects[0].verify_signature());

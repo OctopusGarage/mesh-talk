@@ -3371,6 +3371,7 @@ impl Node {
                 result = local_tasks.join_next(), if !local_tasks.is_empty() => {
                     match result {
                         Some(Ok(turn)) => {
+                            maintenance_requested |= turn.more_inventory;
                             local_maintenance = Some(turn.state);
                             #[cfg(test)]
                             self.trace_account_client(&self.identity.public(), ||
@@ -3458,7 +3459,9 @@ impl Node {
                         Some(tick) => { tick.tick().await; }
                         None => std::future::pending::<()>().await,
                     }
-                } => { enqueue_all = true; }
+                } => {
+                    enqueue_all = true;
+                }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     maintenance_requested = true;

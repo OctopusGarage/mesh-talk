@@ -1,6 +1,8 @@
 //! Ordinary controls for the real-process persistence rig's output observer.
 #[path = "support/history_observer.rs"]
 mod history_observer;
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 
 use history_observer::{
     HistoryObservationError, read_cli_lines, retain_line, wait_for_history_line,
@@ -121,4 +123,35 @@ fn history_observer_requires_query_rows_and_retains_bounded_nonmatching_output()
     assert_eq!(retained.len(), 64);
     assert!(retained.front().unwrap().starts_with("stderr: 36 "));
     assert!(retained.iter().all(|line| line.len() <= 1024));
+}
+
+#[test]
+fn peer_readiness_requires_the_exact_roster_record() {
+    let uid = "ad44d7da4ab5144fb10a79c839d61cd5";
+    for line in [
+        format!("peer {uid} Bob 127.0.0.1:49214"),
+        format!("peer {uid} Bob with spaces 127.0.0.1:49214"),
+    ] {
+        assert!(peer_observer::is_peer_listing(&line, uid));
+    }
+    // This actual replay arrived after `(no peers yet)` in the restart failure.
+    // It proves message reception, not CLI prefix-resolution readiness.
+    for (case, line) in [
+        format!("from {uid} (Bob): pong-from-bob"),
+        format!("[123] {uid}: pong-from-bob"),
+        format!("node {uid} listening on tcp/49214"),
+        format!("probe {uid} 127.0.0.1:49214"),
+        format!("no peer matches prefix '{uid}'"),
+        format!("peer other-user Bob {uid}"),
+        format!("peer {uid}extra Bob 127.0.0.1:49214"),
+        "(no peers yet)".to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !peer_observer::is_peer_listing(&line, uid),
+            "non-roster case {case} must remain unready"
+        );
+    }
 }

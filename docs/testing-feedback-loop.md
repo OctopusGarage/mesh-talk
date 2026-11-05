@@ -39,6 +39,27 @@ scenario with a component test that captures the real handler or effect task;
 select both through the owning validation contract. Preserve browser interaction,
 current-operation success, native-bridge identity, visual and strict error checks.
 
+Registered IPC fixtures that install a real `NodeRuntime` must take it under the
+runtime slot lock, release that lock and await `stop()` before offline persistence
+reads, mock-app destruction or temporary-store removal. `Drop` requests
+best-effort cancellation; it does not join producers or drain admitted blocking
+work. A controlled admitted-work probe retains its real participant permit and
+SDK handle through entry, release and join, and rejects cleanup that returns
+while that work remains held. Keep business assertions inside owned cleanup:
+release held work, await retirement and then propagate the original panic.
+Cleanup must also complete when the body fails before its intended mutation.
+Do not require a final business value from a cleanup probe. Collect its outcome,
+release its gate and await the same retirement future before checking the probe
+or propagating an error. An original-failure regression must preserve the exact
+panic payload and independently witness retirement; retaining a store and
+rethrowing that payload alone does not prove joined cleanup. A registered
+graceful host task provides a separate witness: observe actual shutdown entry
+while its cleanup remains held, release it, then require completion and the
+awaited stop owner. Drop-only cancellation cannot stand in for that sequence.
+Retain stores whenever retirement is unverified. A Rust assertion summary alone
+cannot certify process success while native connection teardown remains active;
+require the complete test process exit status as well.
+
 Favorites navigation, initial App presentation and ConversationView attachment
 acquisition follow this paired contract. Hold consumer progress independently of
 transport completion, retire its owner, then release and await that exact task.
@@ -98,7 +119,14 @@ Report, receipt and lifecycle-control fixtures control only external Cargo, Rust
 and npm version queries, using stable fixture identities rather than benchmarking
 host startup.
 Their selected tests, process owners, retirement receipts, source invalidation
-and report assertions still execute normally under the original watchdogs.
+and report assertions still execute normally. Functional CLI report fixtures
+wait for actual command closure through the canonical process owner and delete
+temporary repositories only after verified retirement. A verified forced
+retirement is an ownership diagnostic; the command exit status and execution
+error determine command success. Their
+sixty-second whole-test watchdog is a deadlock bound, not a startup performance
+assertion; report state and candidate readiness remain the acceptance evidence.
+Intentional cancellation and queued-lock scenarios retain their own watchdogs.
 The shared tool-version fixture retains the same environment across receipt-reuse
 invocations. Queued resource tests observe their actual waiting owner under the
 existing whole-test watchdog rather than a separate startup cutoff.
@@ -112,8 +140,15 @@ independently required. Failed outer invocations must retain the launch error
 and termination signal as well as stdout/stderr; a null status is not a cause.
 
 Persistent-history CLI acceptance sends one history query after identity recovery
-and peer rediscovery. Require its timestamped sent and received rows; live message
-output cannot certify the query. Preserve terminal query errors, bounded stdout
+and peer rediscovery. Across CLI rigs, only the exact `peer <full user ID>` roster
+record certifies peer readiness; live reception, startup, history rows, probe output
+and occurrences inside a name cannot replace that record. Gateway-client setup
+requires the pinned hub's validated route through the configured gateway, not
+only the gateway's local roster row, within the existing setup watchdog. Share
+the roster matcher and keep its ordinary negative controls outside ignored-only
+scenario targets.
+Require timestamped sent and received history rows; live message output cannot
+certify the query. Preserve terminal query errors, bounded stdout
 and stderr, and both process lifetimes' stop evidence. Do not retry the query or
 warm storage to hide an unavailable response. A passing diagnostic run alone does
 not establish the cause of an earlier discarded response.
@@ -188,10 +223,15 @@ Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
-Desktop browser shards start after Health completes, limiting the initial runner
-burst. Portable Health and independent backend jobs use the standard
-`macos-26-intel` pool. All browser suites, the Rust workspace and real native
-desktop acceptance retain `macos-latest` Apple Silicon execution. Measure both
+Desktop browser shards start after Health and WebKit complete, with at most three
+desktop shards active at once. Linux retains four concurrent shards. These job
+dependencies and admission limits reduce macOS runner demand while retaining all
+four shards per OS and their complete same-attempt evidence. Portable Health and
+independent backend jobs use the standard `macos-26-intel` pool. The complete Rust workspace, all browser suites and real native desktop
+acceptance retain `macos-latest` Apple Silicon execution. The workspace retains
+all default targets, doc-tests, native lint/build checks and coverage. Keep these
+compute-heavy protocol tests on ARM; desktop browser admission limits their
+simultaneous demand for macOS runners. Measure both
 queue and execution before moving a workload: Intel qualification substantially
 increased full Chromium execution time, and cold WebKit startup left too little
 of the existing scenario budget for its assertions. Vite warmup did not show a
@@ -283,6 +323,16 @@ paid GroupActivity continuation on that same Optional lane must also keep setup
 pending while its real response is held; release it before admitting the window.
 The channel-specific heads establish post-create freshness; do not require an extra
 periodic bootstrap pass or manually warm the data path.
+The three-node setup controls use the existing independent peer runtime owner:
+each simulated remote has two workers, all routes and observation hooks are
+installed before launch, and synchronous fixture reads cannot occupy every
+remote reactor. Retain the real Noise single-worker negative and multi-worker
+positive controls. Reciprocal Optional readiness can change concurrently, so
+the fixed authenticated-floor positive control awaits its bounded setup helper
+while the independent Directory response remains held; an immediate first poll
+is not a completion contract. Open response gates before stopping hosts, and
+join the external holder's runtime before the offline cut releases its custody
+response. Keep original cold-setup and eight-second custody deadlines.
 Aggregate document status includes independent lanes and is not this setup proof.
 After actual startup, a held Directory/DeviceHostname update must allow setup and
 fresh message/custody progress without releasing the unrelated handler. Capture and
@@ -455,7 +505,7 @@ checks before adding retries or global obligations. A policy change needs an
 explicit rationale and review; this process does not automatically rewrite rules,
 relax thresholds or infer a speedup or zero omissions from a small sample.
 
-Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. The generic History-off/signed-provenance functional fixture uses a thirty-second watchdog around source and requester commitment, exact effect IDs and durable private projections. This is a functional completion bound, not an eight-second business latency guarantee. Dedicated request/result and held-traffic performance fixtures retain their independent eight-second assertions. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
+Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. The generic History-off/signed-provenance functional fixture uses a thirty-second watchdog around source and requester commitment, exact effect IDs and durable private projections. This is a functional completion bound, not an eight-second business latency guarantee. Ordinary Text/Sticker, Policy/Dissolve, owner Rename and file-result provenance fixtures share this existing owner: each submitted turn has one bound covering its private commitment and required public projection, including any deliberate persistence-fault repair. A matching file retry has its own invocation bound. These fixtures do not claim an eight-second admission-to-receipt SLA. Dedicated request/result and held-traffic performance fixtures retain their independent eight-second assertions. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
 
 Selected-source fixtures retain the eight-second foreground receipt assertion.
 The two-executor fixture keeps A's repeated public status polling. B's timed
@@ -481,14 +531,20 @@ deadlines remain unchanged. The departure watchdog is not a new end-to-end
 latency guarantee.
 The dedicated notification-driven gossip fixture excludes both periodic recovery
 clocks and expired fallback work in its existing worker, then requires all five
-receivers to expose the same canonical message within an eight-second functional
-watchdog. Setup queues its channel before the worker starts; no post-send manual
+receivers to expose the same canonical message within the existing thirty-second
+functional watchdog. Setup queues its channel before the worker starts; no post-send manual
 recovery, resend, or roster change is allowed. The fixture also rejects fallback
 or custody-tick work during propagation. Its recorded two-second comparison is a
 performance observation, not an end-to-end latency SLA; disabling periodic rescue
 proves notification-driven progress directly instead of inferring it from timing.
+The earlier short watchdog came from that removed timing inference; it is not a
+five-hop product latency SLA for six debug/coverage hosts sharing one machine.
+Dedicated held-peer and foreground latency controls keep their own eight-second
+bounds. Retain first per-host Noise, signed ciphertext append and committed
+plaintext/UI-publication milestones separately from the bounded recent trace.
+Those diagnostics explain progress but cannot replace the exact history reads.
 Timestamp each canonical history read on its admitted blocking worker after the
-read and exact-ID extraction finish, against the same absolute eight-second
+read and exact-ID extraction finish, against the same absolute functional
 cutoff. Async resumption after that cutoff cannot change the immutable completion
 witness. Cleanup may join and inspect only the original pending read; it cannot
 start another read or accept a completion after the cutoff. Real-history controls
@@ -539,7 +595,19 @@ This controlled fault does not establish an unobserved historical timeout cause.
 Post-create custody setup requires the selected channel's authenticated inventory
 and control head floors plus exact bidirectional device capabilities within its
 thirty-second watchdog, with the current whole-Optional bootstrap complete in
-both directions. A same-lane DmRecall or GroupActivity hold keeps setup pending.
+both directions. Capture each publisher's post-create wake revision once and
+require a real authenticated acknowledgement at or above that floor in both
+directions; settled document reads alone do not qualify the notification path.
+Preparation timeout diagnostics retain the individual predicates and bounded
+phase trace. The real custody scenarios own these setup requirements. Keep Wake
+protocol acceptance in the existing linked-Noise identity, revision deduplication,
+local-edit propagation and legacy periodic-repair controls; do not construct an
+extra full-host scenario merely to prove that this fixture helper waits.
+
+Prepare all routes and observers before launching independent participant hosts.
+Network-only offline cuts join producers and admitted work
+while preserving the Node for an explicit relaunch; permanent retirement closes
+work admission. A same-lane DmRecall or GroupActivity hold keeps setup pending.
 An independent Directory hold may keep aggregate document status catching up;
 its later display-only heads do not replace the authenticated bootstrap floor.
 Before taking a real holder offline or changing its certificate binding, observe
@@ -554,12 +622,27 @@ the source's valid signed observation at the captured or newer order under the
 original custody deadline. Independent held document lanes stay held throughout.
 The custody scenario's independent eight-second assertions remain unchanged.
 The group-forwarding loopback completes profile and signed-membership setup
-under a thirty-second setup watchdog before its existing twenty-second
-content-operation watchdog; fixture retirement has a separate fifteen-second
-watchdog that retains the original failure phase. Independent hosts
-use the production multithread executor; all original ordered-text, archive,
-exact-history and consent assertions remain. Failure reports retain the last
-operation phase, and every exit joins admitted fixture producers before teardown.
+under its thirty-second setup watchdog. Each submitted forwarding operation then
+uses the existing functional convergence owner: individual acceptance and exact
+ordered remote history form one operation; merged acceptance, the new archive,
+consent and verified independent bytes form the second. The earlier compound
+content watchdog mixed two user operations and could truncate the existing
+per-request receipt owner. It is not a forwarding latency SLA. Preserve operation
+identities, original-source isolation and normal TCP/flush/pull behavior.
+The existing multithread executor and fifteen-second owned-retirement watchdog
+remain unchanged. Bounded phase and cached file-state observations explain
+failures; every exit joins admitted producers before propagating the primary.
+
+After an injected reception transaction failure, the rollback fixture first
+requires zero committed revision, processing and receipt rows. Removing the
+fault permits the existing background recovery owner to replay the same retained
+batch without new signed traffic or a manual plaintext retry. One functional
+convergence window includes its retained retry eligibility, normal scheduler and
+bounded content/terminal turns; this is not a five-second repair SLA. Cache only
+the actual sequence, terminal and error observations already made by the poll.
+Abort and join the owned recovery task before propagating timeout or panic,
+including startup-continuation probes. Their independent observation bounds and
+production retry/pacing clocks remain unchanged.
 
 The mandatory account-wake fixture also separates its synchronous SQL observer
 from the two simulated hosts with two protocol workers. The positive case's first
@@ -568,13 +651,37 @@ Appearance policy write. The negative control first establishes actual Owner
 access and equal signed source/receiver inventory inside the existing cold setup
 watchdog. It then measures a real display-name publication under the original
 five seconds, retaining the normal durable preference and self-history triggers.
-Hold only a strictly newer signed header for that same source key. Require its
-version to match the first actual new source floor and changed member label,
-with the hook task still alive, Owner access intact and the receiver retaining
-exactly the old baseline. Owner access cannot certify that newer inventory.
+Hold only strictly newer signed headers for that same source key. Retain the
+first actual new source floor and changed member label. A bounded registry of
+all actual server-hook holders must contain a live, same-peer/account/key/writer
+header at least as new as that floor, with the hold gate still armed and the
+receiver retaining exactly the old baseline. Prune only retired holders and
+fail closed on overflow. A later request's retirement or a valid superseding
+source head cannot erase an earlier qualifying live response. At setup, require actual public Owner access and capture the received
+source's validated signed GroupControl grant. At the held cutoff, independently
+require a current, signed Owner grant for the same group, source/account and
+physical owner binding. Do not require the old MembershipLifetime: normal
+same-account auto-enrollment and authority migration can select another physical
+member as the account grant's representative while that source remains Owner.
+Validate the current signed grant independently; ordinary canonical-generation,
+epoch or representative-lifetime changes cannot substitute for fresh inventory. Classify live projection readiness
+separately: only explicit StaleCursor or Unknown/Reconciling may accompany that
+retained grant; unexpected errors and terminal or changed roles fail. Reject
+signed unavailable, terminal and unrelated heads. Log only safe role/execution
+and error classes. Received Owner permission cannot certify newer inventory.
 Release and join before asserting. Keep bounded local-publication and actual
 header/completion timing; executor alignment alone does not prove a historical
 timeout mechanism.
+
+A cold directory-publication control consumes the creation trigger's legitimate
+network notification, then requires actual typed local preparation pending with
+no signed inventory head and no new generic network refresh. Drive the retained
+local-maintenance continuation through real publication, without periodic repair
+or synthetic cache readiness. Pending work must survive inventory cursor wraps;
+a deferred group must not prevent other groups on its bounded page from making
+progress. Keep source-change invalidation, abandoned-selector isolation and
+ordinary local-work fairness. The mandatory-wake fixture retains its original
+setup and both five-second publication/policy windows.
 
 Custody recovery must progress independently of unrelated history and fallback
 network waits. Hold an actual unrelated Noise exchange, bind its accepted port
@@ -613,14 +720,63 @@ producers, clears idle sessions, drains admitted writers and joins every owned
 thread, including panic cleanup. A same-source topology comparison diagnoses a
 fixture constraint; it does not establish the cause of every CI timing failure.
 
-Modern self-control fixtures allow thirty seconds for cold, bidirectional
-capability and role readiness before admission, matching the existing owner-rename
-setup boundary. This is a bounded setup watchdog, not an operation latency claim:
-retain every full-identity capability and signed-provenance predicate, record
-setup duration and complete/capacity diagnostics, and keep the independent
-admitted-action deadline at eight seconds. The archive-marker setup and dedicated
-held-traffic latency assertions also retain their existing eight-second bounds.
-Cold authentication and control exchanges keep their production network limits.
+A public channel peer-round owner must retain the existing three selected peers,
+two active groups, rotation and per-peer deadlines while scheduling admitted
+children independently. The controlled loopback commits a fresh signed event
+through the real producer before invoking that same owner. A held real public
+view must observe both receivers still missing the event, then admit the second
+exchange. Require its exact canonical ID and bytes, stamped after the actual
+read within the original eight seconds, while the first view remains held; a
+managed synchronous hold leaves executor work schedulable. A free-worker
+acknowledgement and a borrowed-parent counterfactual separate parent coupling
+from executor starvation: the counterfactual must keep the second round unstarted
+while held, then the same un-aborted owner must establish the canonical receipt
+after release. First-applied progress cancels and joins siblings. Parent cancellation cannot
+certify child retirement: the canonical participant drain must remain pending
+while actual child work is held, then complete only after release and retirement.
+Release gates, join owners and drain hosts before propagating a primary failure;
+an unexpected owner panic cannot qualify a successful receipt. These controls
+prove a scheduling mechanism, not the sole cause of an earlier delayed hop.
+
+A local recovery content/batch terminal does not certify that the independently
+scheduled peer-round owner has joined its children and recorded `checked_at`.
+Fixtures must observe that exact channel's completed recovery status separately,
+within the original shared content/history deadline, retaining all batch, event
+identity, phase and history assertions. Reject a status first observed after that
+deadline; do not add a new window or substitute a delay for the state predicate.
+
+Modern self-control fixtures use one absolute thirty-second cold-setup owner,
+starting before archive preparation. The exact archive ID must reach every
+physical source through real history before reference enrollment; the same
+remaining budget covers authenticated old Member provenance, final topology,
+capabilities and the original held read. Cached endpoint observations distinguish
+present, missing, pending and unobserved archive state. Setup does not restart its
+budget at a phase transition and cannot certify a late synchronous observation.
+This is functional fixture preparation, not an operation latency claim.
+
+All four rigs retain the independent absolute eight-second private action bound
+from admission, including a validated Committed receipt with exactly one original
+effect. The held-request rig must additionally capture its causal proof inside
+that same private bound: the exact original client child has retired, the newer
+authenticated Wake caused owned cancellation and a distinct request delivered the
+operation header, and the exact server hook remains live behind its unreleased
+gate. A later observation cannot repair missing or late private/causal evidence.
+The server hold has its own lifetime witness; it is distinct from the client child
+whose retirement is required.
+
+After that immutable private proof, exact external public effect, both canonical
+roles and the first ready history use the existing post-receipt
+`functional_account_convergence` owner. The original response stays held and live
+through this public tail; no resubmission, manual pull or injected event qualifies
+it. The previous compound public/history eight-second cutoff was a fixture policy,
+not an independently specified product latency SLA. Phase controls must reject
+late private or causal proof and missing or late public completion, while accepting
+timely private proof followed by real functional convergence beyond the action
+cutoff. Retain separate first phase timestamps and history-pending counts outside
+the verbose trace budget so an early request burst cannot erase this evidence.
+Use actual phase-entry and completion gates; advancing time alone proves no
+business predicate. Real Noise-fault operations and dedicated held-traffic latency
+assertions retain their existing bounds and production network limits.
 
 Reference self-control fixtures hold requester-side public membership recovery
 for the selected group through the remote action proof. Disabling account History
@@ -876,16 +1032,26 @@ propagation phase begins only after all nodes have disabled periodic work and
 retains its original deadline, exact message evidence and zero periodic-work
 assertion. A failed cold connection must not silently remove the fixture's only
 remaining preparation path.
-The six simulated hosts use the existing shared independent-peer runtime owner,
-with one reactor per host. Bind every listener before launching those owners.
+The six simulated gossip hosts use the shared independent-peer runtime owner's
+explicit two-worker Tokio mode, matching the real CLI's multi-thread host.
+Ordinary React/Recall and Rename remote hosts use the same two-worker mode,
+including the external node's post-commit authenticated public receipt. Their
+reference coordinator retains its current-thread synchronous capability-override
+boundary. Deliberate held-reactor and negative scheduler controls retain the
+owner's single-thread mode. Bind every listener before launching owners.
+Require real exact-peer Noise authentication while one worker of the same
+multi-thread host remains synchronously held. The corresponding single-thread
+control must keep that actual authentication pending until release; a task
+acknowledgement alone does not qualify the serving boundary. Release the hold,
+join the client and held task, then stop and drain the runtime on either outcome.
 A controlled held reactor must keep its own queued task pending while a second
 host acknowledges work; release and join both tasks and runtime owners on every
 exit. Cancellation before server launch must also close admission and join the
 host only after its actual admitted-work permit retires. Verify the runtime is
 stopped when Drop returns and retain stores if retirement is unverified.
-Keep the original absolute eight-second post-send cutoff, including sender
+Keep one absolute thirty-second functional post-send cutoff, including sender
 retirement, and the existing admitted-read completion timestamps. Host isolation
-corrects the simulation boundary; it does not establish why a historical hop
+and explicit scheduling correct the simulation boundary; they do not establish why a historical hop
 was late. All remaining server owners retire before fixture storage.
 
 The modern Leave Noise-fault fixture has an explicit preparation boundary: finish
@@ -956,20 +1122,28 @@ fixture retains its separate eight-second operation, receipt and recovery proofs
 Both fault controllers belong to their fixture task sets, with drop guards that
 release held responses and cleanup that joins tasks and drains admitted writers.
 
-Queued-source fixtures retain the independent eight-second private operation
-receipt assertion. After that receipt and release of A, replay of all 66 signed
-rows, real public receipt and actual B comparison-pair retirement use the shared
-thirty-second functional convergence watchdog from the message-action fixture
-owner. This is an explicit correction of the original queued fixture's auxiliary
-eight-second recovery bound, not a product latency relaxation: after paid
-prefix/resume credit and terminal operation, the two retained comparisons follow
-ordinary cross-peer fairness. The product requires both scans to finish without
-combining checkpoints; it does not promise full-corpus convergence in eight
-seconds. Keep every recovery predicate, signature, continuation and lifetime
-check. The original selected-source recovery, other checkpoint/archive progress,
-Wake deadlines and production read clocks retain their existing bounds. Paused
-time controls require all recovery observations, allow convergence after eight
-seconds, and fail when pair retirement is absent at thirty seconds.
+Queued-source controls retain the independent eight-second private operation
+receipt assertion. After that receipt and release of A, every signed prepared
+row, the real public receipt and actual B comparison-pair retirement must converge
+under the shared thirty-second functional watchdog. The two live scenarios cover
+new terminal reuse of a completed background prefix and dispatch while unrelated
+local maintenance remains held. Their corpus uses a real signed higher-key
+operation projection and two newly published legacy rows. The normal provider's
+operation-before-legacy boundary supplies the actual partial page; the new result
+must sort strictly behind its retained checkpoint. Preserve exact A/B checkpoint
+replay, signature, executor and child-lifetime assertions.
+
+The independent real-Noise controls
+`known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages`
+and `terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows`
+retain full-page sizing, capability validation and complete replay coverage.
+Padding a scheduler scenario with a full durable page is not a prerequisite for
+its ordering assertion. Observe the natural A request live before publication;
+that publication may legitimately cancel it before the publisher returns. Require
+the exact protected resumed request to be live at operation admission instead of
+blocking cancellation to preserve an artificial setup interleaving. Keep every
+post-receipt recovery predicate. Paused-time recovery controls require all those
+predicates and reject missing pair retirement at the existing functional cutoff.
 
 Capture account document health before closing runtime admission or stopping
 peers. The test-local `capture_account_sync_before_cleanup` owns that observation
@@ -1035,20 +1209,13 @@ once a live hold is captured; never retry the measured operation. The fault
 regression must prove cancellation, retirement and capture of a distinct live
 request before admission.
 
-Queued-source fixtures that publish a real head to retire an old natural request
-must invalidate the earlier empty-source settlement before publication. Reuse the
-shared `ColdControlScope` observation: every new Control task invalidates prior
-settlement, and a completed prefix cannot pay outstanding comparison-pair debt.
-Before capturing the next unpaired natural hold, require the exact published
-source key on the requester, current Control settlement, pair retirement and
-rejection of the retired callback by its exact request identity and child lifetime.
-Carry the captured hold's task identity through setup and verify that child is
-still live when the canonical partial-page corpus is published. These observations
-stay within the existing cold budget and issue no extra requests; preserve the
-real signed exchange, protected-resume checks and operation/recovery deadlines.
+Captured request descriptors bind the current child task, lifetime and nonce.
+Retired callbacks cannot qualify a live hold; independent request-observer
+lifecycle controls establish that boundary without an additional live queued
+operation variant.
 
-Except for the explicitly classified queued post-receipt functional convergence
-phase above, once the original operation is admitted, or the external possession
+Except for the explicitly classified queued and ordinary self-control post-receipt
+functional convergence phases above, once the original operation is admitted, or the external possession
 proof starts, the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
 Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
@@ -1492,14 +1659,44 @@ and its existing command/test watchdog; remove competing compiler work rather
 than extending deadlines when a contract waits for a sibling fixture's lock.
 Portable diagnostics and independent CI jobs retain their existing scheduling.
 
-Linux/macOS coverage runs the desktop Host package with pinned Nextest in separate
-case processes, retaining the exact metadata IPC watchdog. The remaining default
-workspace targets run with Cargo and expose test output immediately, so one stuck
-case cannot hide another case's panic until suite completion. Both passes accumulate
-into one workspace report, with doctests checked separately. This bounds case failure
-and improves diagnostics;
-it does not establish the cause of a previously observed Host hang. The real-tool
-`scripts/ci/native-host-coverage.test.mjs` checks both partitions and failure propagation.
+Linux/macOS coverage runs both the desktop Host and remaining complete workspace
+partitions with pinned Nextest, four concurrent case processes and no retries.
+The partitions collect independently: a Host failure still permits the remaining
+workspace tests to finish, and either failure preserves a nonzero result. The
+timing-log path applies the same rule. This collection cannot authorize a
+coverage report from an incomplete or failed workspace.
+Both use the same repository default process-hang profile. Ordinary cases have
+a fifteen-minute termination limit, sized above measured multi-minute Windows
+stress cases; the registered metadata IPC and reconnect cases retain their
+stricter sixty-second and five-minute limits. A slow report alone does not bound
+a hung process. The real-tool parked-case control derives its policy from the
+repository default, accelerates only the period in its isolated fixture, and
+requires termination plus continued collection of a later test. Unit, binary, integration and
+test-enabled example targets retain their default selection and ignored policy;
+doctests remain separate. Successful partitions accumulate into one report; any
+partition failure prevents that report and cannot qualify partial coverage.
+The real-tool `scripts/ci/native-host-coverage.test.mjs` requires actual target
+coverage, single and simultaneous partition failures, report-destination failure,
+empty-selection rejection and genuine
+parked-process termination while collection continues. Its short controlled
+watchdog exists only in the isolated fixture; production case budgets remain
+unchanged. Source-shape checks do not replace this hosted pinned-tool evidence.
+
+Linux workspace CI preserves native process-exit crashes separately from test
+assertions. A body that prints a passing result but exits by signal still fails.
+The diagnostic owner uses a dedicated two-GiB loop filesystem and a per-process
+256-MiB core limit, records the checked-out source, tools and executable digest,
+and collects bounded GDB traces with automatic loading and argument printing
+disabled. An actual C exit-handler crash verifies core delivery and symbolization
+on the same Linux VM before product execution. Recovery state publishes atomically
+before global mutation; controlled incomplete
+and rejected writes preserve the prior restoration receipt. Collection always
+restores the prior kernel pattern and retires its storage; raw cores do not enter
+artifacts.
+Portable path and output-limit controls do not establish Linux kernel behavior.
+Missing, mismatched, truncated or timed-out crash evidence remains explicit and
+cannot certify the failing test. No-crash collection is normal. This diagnostic
+does not retry failed product tests or change their acceptance criteria.
 
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
@@ -1507,10 +1704,10 @@ workspace test binaries once with pinned cargo-nextest 0.9.150 and
 cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
-another test on that machine. Actual CI consumers set `MESH_WINDOWS_FAIL_FAST=1`
-and end a failed serial shard after its first failing case; the matrix keeps
-independent shards running. This avoids hiding a known failure behind the rest of
-a long partition. The default diagnostic CLI retains collection of all failures.
+another test on that machine. Actual CI consumers set `MESH_WINDOWS_FAIL_FAST=0`
+and collect every selected terminal result after a failure; independent matrix
+shards also continue. Failed, timed-out and incomplete cases still reject the
+whole consumer, while one completed cohort exposes its complete failure frontier.
 A successful consumer must still execute every selected case exactly once and
 pass complete execution/coverage validation. Early failed or incomplete runs
 retain diagnostic evidence and never receive an acceptance receipt. Each
@@ -1567,6 +1764,16 @@ helper paths, default ignored case, clean source, offline LCOV and captured timi
 exercise the same helper. Run its tests with the pinned nextest/coverage tools and
 LLVM tools matching rustc; portable Health does not install those tools.
 
+The CLI profile-compaction loopback must close runtime admission, abort and join
+its accept owner, clear sessions and drain actual admitted work before exclusive
+profile close/reopen. Parent cancellation does not stop a running blocking writer.
+Hold the real accept-loop expiry writer through parent join: its drain must remain
+Pending until that same writer is released, then exclusive close and exact
+persisted message/profile assertions must succeed. Release the hold and perform
+this cleanup on every body failure; preserve the original panic and retain the
+fixture directory if retirement cannot be verified. Existing delivery and
+compaction deadlines remain unchanged.
+
 AddressSanitizer and LeakSanitizer retain the complete default core-library
 inventory and instrumented standard library across four independent Linux
 partitions. Each runner executes one test at a time with no retries. The exact
@@ -1582,8 +1789,11 @@ source/run/attempt/shard artifact names, matching compiler/config identities,
 identical full inventories, and a disjoint exhaustive selected union. It
 revalidates each successful execution and the raw clean/error smoke channels;
 missing, altered, stale, failed or partial evidence cannot certify acceptance.
-Default ignored cases retain their original policy. A failed shard stops at its
-first failing case while independent shards continue. Build-cache publication
+Default ignored cases retain their original policy. A failed shard continues its remaining selected cases with zero retries while
+independent shards also continue; every failure still rejects the entire shard
+and prevents its acceptance receipt. A real first-case failure followed by
+all later selected cases proves complete collection without success laundering.
+Build-cache publication
 remains main-only.
 
 `scripts/ci/asan-cli.test.mjs` uses the pinned Nextest with an already installed
@@ -1661,9 +1871,8 @@ that current terminal. Publication contention is an observed unit-lock
 the higher-revision stale head; publication-unit poison tests keep underlying
 journal and document owners unpoisoned.
 Lifetime observation is scoped to synchronous test hooks and expires on return,
-abort or panic without calling fixture code during destruction. The delayed-server
-regression uses a real signed sibling publication to retire an older request and
-requires a fresh live request before measuring the existing receipt deadline.
+abort or panic without calling fixture code during destruction. Dedicated request-observer lifecycle controls reject retired descriptors before a
+current hold qualifies.
 
 ### Protocol fixture response epochs
 

@@ -85,6 +85,17 @@ from test execution: each required consumer still supplies its own assertions.
 Keep production, coverage, sanitizer and mutation configurations distinct unless
 their compatibility has been established.
 
+Hosted Ubuntu Rust jobs prepare disk capacity before restoring Cargo outputs.
+The [runner storage owner](../scripts/ci/runner-storage.mjs) reclaims only three
+fixed unused SDK directories from disposable image contents and reports actual
+free bytes before and after. Each heavy job uploads that small measurement before
+cache expansion, so a later exhausted runner does not erase the preparation evidence.
+It preserves the workspace, build caches and tools
+used by compilation and analysis; local/self-hosted contexts and redirected paths
+are not cleanup targets. Its real filesystem controls cover preservation and
+idempotence. Inspect those measurements and cache expansion before responding
+to disk exhaustion; a failed runner may be unable to upload its own logs.
+
 A cache is an optional accelerator. A cold or evicted cache must still allow
 correct execution. Measure restored bytes, restore/save time, useful hits and
 eviction; a reported hit alone does not prove a faster build. Preserve the

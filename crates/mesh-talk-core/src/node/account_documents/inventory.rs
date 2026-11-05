@@ -12,6 +12,17 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_MEMBERS: usize = 256;
 const MAX_GROUP_NAME_BYTES: usize = 1024;
 const PUBLICATION_SLICE: usize = 16;
+
+pub(in crate::node) enum InventoryPublication {
+    Complete,
+    Pending,
+}
+impl InventoryPublication {
+    pub(in crate::node) fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
 pub(in crate::node) const MAX_DIRECTORY_IDS: usize = 512;
 const MAX_DIRECTORY_SOURCES: usize = 65;
 const DIRECTORY_DOMAIN: &[u8] = b"mesh-talk-group-directory-v1";
@@ -688,7 +699,10 @@ impl Node {
 
     /// Publish only physical local groups, with canonical facts and their witness
     /// derived together from the existing complete public reducer.
-    pub(in crate::node) fn publish_group_inventory(&self, after: &mut Option<ConversationId>) {
+    pub(in crate::node) fn publish_group_inventory(
+        &self,
+        after: &mut Option<ConversationId>,
+    ) -> InventoryPublication {
         let mut ids = self.channels.lock().expect("channels mutex").channel_ids();
         ids.sort_by_key(|id| *id.as_bytes());
         let ids: Vec<_> = ids
@@ -696,12 +710,13 @@ impl Node {
             .filter(|id| after.is_none_or(|previous| id.as_bytes() > previous.as_bytes()))
             .take(PUBLICATION_SLICE)
             .collect();
-        self.publish_group_inventory_groups(&ids);
+        let publication = self.publish_group_inventory_groups(&ids);
         *after = if ids.len() == PUBLICATION_SLICE {
             ids.last().copied()
         } else {
             None
         };
+        publication
     }
 
     /// Canonical metadata for an accepted effect shares the normal signed owner.
@@ -709,27 +724,36 @@ impl Node {
         self.publish_group_inventory_groups(&[group]);
     }
 
-    fn publish_group_inventory_groups(&self, ids: &[ConversationId]) {
+    fn publish_group_inventory_groups(&self, ids: &[ConversationId]) -> InventoryPublication {
         #[cfg(test)]
         self.trace_account_client(&self.identity.public(), || {
             "inventory_publication_begin".into()
         });
-        if let Err(error) = self.try_publish_group_inventory_groups(ids) {
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
+        let mut publication = InventoryPublication::Complete;
+        // One pending group cannot reserve the rest of this bounded page.
+        for id in ids {
+            if let Err(error) = self.try_publish_group_inventory_groups(&[*id]) {
                 let outcome = match &error {
-                    NodeError::Log(LogError::StaleCursor) => "source_pending",
+                    NodeError::Log(LogError::StaleCursor) => {
+                        publication = InventoryPublication::Pending;
+                        "source_pending"
+                    }
                     NodeError::Log(LogError::Io(error))
                         if error.kind() == std::io::ErrorKind::WouldBlock =>
                     {
+                        publication = InventoryPublication::Pending;
                         "directory_pending"
                     }
                     _ => "error",
                 };
-                format!("inventory_publication_deferred outcome={outcome}")
-            });
-            log::debug!("group inventory publication deferred: {error}");
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    format!("inventory_publication_deferred outcome={outcome}")
+                });
+                log::debug!("group inventory publication deferred ({outcome}): {error}");
+            }
         }
+        publication
     }
     pub(in crate::node) fn try_publish_group_inventory_groups(
         &self,

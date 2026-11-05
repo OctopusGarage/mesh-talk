@@ -1519,7 +1519,7 @@ async fn file_result_roundtrip(mode: u8) {
         .unwrap()
         .record(initial_clock, "fixture", "initial_file_admitted".into());
     let initial_started = std::time::Instant::now();
-    let initial_outcome = tokio::time::timeout(Duration::from_secs(8), async {
+    let initial_outcome = super::functional_account_convergence(async {
         loop {
             let status = origin
                 .account_group_operation_status(&account.account_id(), id)
@@ -1921,7 +1921,7 @@ async fn file_result_roundtrip(mode: u8) {
         while tasks.join_next().await.is_some() {}
         return;
     }
-    let fresh_status = tokio::time::timeout(Duration::from_secs(8), async {
+    let fresh_status = super::functional_account_convergence(async {
         loop {
             let status = fresh
                 .account_group_operation_status(&account.account_id(), id)

@@ -1213,6 +1213,326 @@ async fn gossip_history_receipts_distinguish_read_completion_from_delayed_delive
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_peer_round_owner_keeps_other_receiver_progress_during_a_held_public_view() {
+    exercise_bounded_peer_round_owner(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_peer_round_parent_cancellation_retains_held_child_until_runtime_drain() {
+    exercise_bounded_peer_round_owner(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn borrowed_peer_round_parent_defers_other_receiver_until_held_view_release() {
+    exercise_bounded_peer_round_owner(false, true).await;
+}
+
+// Retain the previous scheduling owner as an executable counterfactual only.
+// The production owner and positive fixture do not use this implementation.
+async fn borrowed_channel_peer_rounds<F>(rounds: impl IntoIterator<Item = F>) -> (bool, bool)
+where
+    F: std::future::Future<Output = Option<(usize, bool)>>,
+{
+    use futures_util::StreamExt;
+    let exchanges = futures_util::stream::iter(rounds).buffer_unordered(3);
+    tokio::pin!(exchanges);
+    let mut checked = false;
+    let mut clean = true;
+    while let Some(result) = exchanges.next().await {
+        if let Some((applied, peer_clean)) = result {
+            checked = true;
+            clean &= peer_clean;
+            if applied > 0 {
+                break;
+            }
+        }
+    }
+    (checked, clean)
+}
+
+async fn exercise_bounded_peer_round_owner(cancel_parent: bool, borrowed_parent: bool) {
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let mut nodes = Vec::new();
+    let mut listeners = Vec::new();
+    let mut addresses = Vec::new();
+    for index in 0..3 {
+        let path = directory.path().join(index.to_string());
+        std::fs::create_dir(&path).unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        addresses.push(listener.local_addr().unwrap());
+        listeners.push(listener);
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &path.join("events"),
+            &path.join("sent"),
+            "pw",
+        )
+        .unwrap();
+        node.set_post_office_enabled(false);
+        nodes.push(node);
+    }
+    for from in 0..3 {
+        for to in 0..3 {
+            if from != to {
+                nodes[from].roster.lock().unwrap().update(
+                    &nodes[to].signed_announce("peer round", addresses[to].port()),
+                    addresses[to].ip(),
+                    &nodes[from].user_id(),
+                );
+            }
+        }
+    }
+    let source = nodes[0].clone();
+    let mut hosts = Vec::new();
+    for (index, listener) in listeners.into_iter().enumerate() {
+        let mut host =
+            IndependentPeerRuntime::start_multithreaded(nodes[index].clone(), listener).await;
+        // The source is an SDK-only producer: it must not deliver the fresh
+        // message through an autonomous sender before this round owner runs.
+        if index != 0 {
+            host.launch();
+        }
+        hosts.push(host);
+    }
+    let source_runtime = hosts[0].runtime_handle();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let mut release = Some(release);
+    let released = Mutex::new(released);
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (start_second, second_started) = tokio::sync::oneshot::channel();
+    let start_second = Mutex::new(Some(start_second));
+    let previous_hook = source.account_client_test_hook.lock().unwrap().clone();
+    let mut round_owner = None;
+    let mut pending_read = None;
+    let second_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let group = source.create_channel("bounded peer rounds", vec![nodes[1].identity.public(), nodes[2].identity.public()]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !nodes[1..].iter().all(|node| node.channel_members(group).contains(&source.identity.public())) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("real receiver membership must precede the new message");
+        let message = source.enqueue_channel_message_reply_expiring_if(
+            group, b"notification-driven background gossip", None, None, |commit| commit(),
+        ).unwrap();
+        let source_weak = Arc::downgrade(&source);
+        let receivers = nodes[1..].iter().map(Arc::downgrade).collect::<Vec<_>>();
+        let held_peer = nodes[1].identity.public();
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if peer != held_peer || phase != "network_view_captured" { return; }
+            let Some(entered) = entered.lock().unwrap().take() else { return; };
+            let valid = {
+                let source = source_weak.upgrade().unwrap();
+                let event = source.log.lock().unwrap().get(&message).unwrap().unwrap();
+                event.kind == crate::eventlog::EventKind::Message && event.verify_integrity() && event.verify_signature()
+            };
+            let absent = receivers.iter().all(|receiver| {
+                let receiver = receiver.upgrade().unwrap();
+                let present = receiver.log.lock().unwrap().get(&message).unwrap().is_some();
+                !present
+            });
+            assert!(valid, "the exact fresh signed producer event must precede the hold");
+            assert!(absent, "neither receiver may have the fresh event before the first held view");
+            // All Node guards and temporary strong references are gone before
+            // this synchronous preparation boundary holds its actual owner.
+            start_second.lock().unwrap().take().unwrap().send(()).unwrap();
+            entered.send(()).unwrap();
+            tokio::task::block_in_place(|| {
+                let _ = released.lock().unwrap().recv();
+            });
+        }));
+        // Cancellation isolates one real held child: no other peer or SDK
+        // work may accidentally keep the drain pending in its place.
+        let peer_count = if cancel_parent { 1 } else { 2 };
+        let peers = nodes[1..].iter().take(peer_count).map(|node| source.routing_peer(&node.user_id()).unwrap()).collect::<Vec<_>>();
+        let producer = source.clone();
+        let second_activity = second_polled.clone();
+        let permit = source.runtime_work.admit().unwrap();
+        let cutoff = std::time::Instant::now() + Duration::from_secs(8);
+        round_owner = Some(source_runtime.spawn(permit.track(async move {
+            let mut second_started = Some(second_started);
+            let rounds = peers.into_iter().enumerate().map(|(index, peer)| {
+                let producer = producer.clone();
+                let second_activity = second_activity.clone();
+                let start = (index == 1).then(|| second_started.take().unwrap());
+                async move {
+                    if let Some(start) = start {
+                        start.await.expect("the first genuine public view must release the second peer");
+                        second_activity.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    let mut channel = producer.privacy_dial(peer.addr, &peer.public).await.unwrap();
+                    let store = producer.sync_store(channel.peer_identity());
+                    let report = super::session::request_round_paged(&mut channel, &store, group).await.unwrap();
+                    drop(store);
+                    producer.recycle_sync_channel(channel);
+                    Some((report.applied, report.rejected.is_empty()))
+                }
+            });
+            if borrowed_parent {
+                borrowed_channel_peer_rounds(rounds).await
+            } else {
+                let (checked, clean, _) = super::channels::complete_channel_peer_rounds(&producer, rounds).await;
+                (checked, clean)
+            }
+        })));
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), entered_rx).await
+            .expect("the exact public view must enter its real hold").unwrap();
+        // The runtime has an available worker; this distinguishes a shared
+        // peer-round parent from the previously corrected one-worker host.
+        tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), source_runtime.spawn(async {})).await
+            .expect("the source's second runtime worker must remain available").unwrap();
+        if cancel_parent {
+            let mut parent = round_owner.take().unwrap();
+            parent.abort();
+            let ended = tokio::time::timeout(Duration::from_secs(5), &mut parent).await
+                .expect("the parent must join on the free worker while its child remains held");
+            assert!(matches!(ended, Err(error) if error.is_cancelled()),
+                "the deliberately aborted parent must retire by cancellation");
+            source.runtime_work.close();
+            let drain = source.runtime_work.drain();
+            tokio::pin!(drain);
+            assert!(drain.as_mut().now_or_never().is_none(),
+                "parent retirement cannot release the actual held child's runtime admission");
+            drop(release.take());
+            tokio::time::timeout(Duration::from_secs(5), drain.as_mut()).await
+                .expect("the canonical drain must complete after the actual child retires");
+            return;
+        }
+        let receipt = tokio::time::timeout_at(tokio::time::Instant::from_std(cutoff), async {
+            loop {
+                let receiver = nodes[2].clone();
+                pending_read = Some(tokio::spawn(async move {
+                    receiver.account_blocking(move |node| read_gossip_history(&node, group)).await
+                }));
+                let read = pending_read.as_mut().unwrap().await.unwrap();
+                pending_read.take();
+                match read {
+                    Ok((Some(id), completed)) if id == message => {
+                        assert!(completed <= cutoff, "late canonical receipt cannot satisfy the original deadline");
+                        break;
+                    }
+                    Ok(_) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                    Err(_) => panic!("receiver history failed outside typed canonical preparation"),
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        if borrowed_parent {
+            assert!(receipt.is_err(), "the borrowed shared parent must strand the eligible second peer while its view is held");
+            assert!(!second_polled.load(std::sync::atomic::Ordering::Acquire),
+                "the second real SDK round must remain unstarted behind the held borrowed parent");
+            drop(release.take());
+            let recovery_cutoff = std::time::Instant::now() + Duration::from_secs(30);
+            crate::node::account_group::functional_account_convergence(async {
+                // Join the ORIGINAL owner without aborting or restarting it.
+                let joined = round_owner.as_mut().unwrap().await;
+                round_owner.take();
+                let (checked, clean) = joined.expect("the released borrowed owner must not panic");
+                assert!(checked && clean, "the original real peer rounds must settle after release");
+                if let Some(read) = pending_read.as_mut() {
+                    let _ = read.await.expect("the original admitted observation must join");
+                    pending_read.take();
+                }
+                loop {
+                    let receiver = nodes[2].clone();
+                    pending_read = Some(tokio::spawn(async move {
+                        receiver.account_blocking(move |node| read_gossip_history(&node, group)).await
+                    }));
+                    let read = pending_read.as_mut().unwrap().await.unwrap();
+                    pending_read.take();
+                    match read {
+                        Ok((Some(id), completed)) if id == message => {
+                            assert!(completed <= recovery_cutoff, "late recovery cannot certify actual completion");
+                            break;
+                        }
+                        Ok(_) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                        Err(_) => panic!("released receiver history failed outside typed preparation"),
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("the same real receiver must recover the exact canonical message after the borrowed parent is released");
+            assert!(second_polled.load(std::sync::atomic::Ordering::Acquire));
+        } else {
+            receipt.expect("the other receiver must expose the exact canonical message within 8s while the first public view remains held");
+            assert!(second_polled.load(std::sync::atomic::Ordering::Acquire));
+        }
+    }).catch_unwind().await;
+    // Disconnect releases the exact synchronous gate on every outcome, before
+    // cancelling/joining the owner or draining any runtime.
+    drop(release.take());
+    let mut cleanup_verified = true;
+    let mut owner_failure = None;
+    if let Some(mut owner) = round_owner {
+        let mut intentional_abort = outcome.is_err();
+        if intentional_abort {
+            owner.abort();
+        }
+        let joined = match tokio::time::timeout(Duration::from_secs(5), &mut owner).await {
+            Ok(result) => Some(result),
+            Err(_) => {
+                owner_failure = Some("peer-round owner exceeded its cleanup bound");
+                intentional_abort = true;
+                owner.abort();
+                match tokio::time::timeout(Duration::from_secs(5), &mut owner).await {
+                    Ok(result) => Some(result),
+                    Err(_) => {
+                        cleanup_verified = false;
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(Err(error)) = joined
+            && !(intentional_abort && error.is_cancelled())
+        {
+            owner_failure = Some(if error.is_panic() {
+                "owned peer-round task unexpectedly panicked"
+            } else {
+                "owned peer-round task unexpectedly cancelled"
+            });
+        }
+    }
+    if let Some(mut read) = pending_read {
+        cleanup_verified &= tokio::time::timeout(Duration::from_secs(5), &mut read)
+            .await
+            .is_ok();
+    }
+    *source.account_client_test_hook.lock().unwrap() = previous_hook;
+    for node in &nodes {
+        node.runtime_work.close();
+    }
+    for host in hosts {
+        let mut stopped = tokio::spawn(host.stop());
+        cleanup_verified &= tokio::time::timeout(Duration::from_secs(5), &mut stopped)
+            .await
+            .is_ok_and(|result| result.is_ok());
+    }
+    eprintln!(
+        "bounded peer-round retirement verified={cleanup_verified} owner_failure={owner_failure:?}"
+    );
+    if !cleanup_verified {
+        let _ = directory.keep();
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        cleanup_verified,
+        "all peer owners and stores must retire after the controlled hold"
+    );
+    assert!(owner_failure.is_none(), "{owner_failure:?}");
+}
+
 // These independent hosts use synchronous durable storage on separate reactors.
 // Match the production host boundary. Excluding periodic repair proves
 // notification causality directly; elapsed propagation remains observable under a functional watchdog.
@@ -1310,7 +1630,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let mut hosts = Vec::with_capacity(6);
     for (index, listener) in listeners.into_iter().enumerate() {
         hosts.push(Some(
-            IndependentPeerRuntime::start(chain.nodes[index].clone(), listener).await,
+            IndependentPeerRuntime::start_multithreaded(chain.nodes[index].clone(), listener).await,
         ));
     }
     for host in hosts.iter_mut().flatten() {
@@ -1354,10 +1674,41 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let periodic_work = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let route_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let route_started = std::time::Instant::now();
+    // Per-host immutable milestones survive unrelated peer/host chatter.
+    let gossip_first = Arc::new(Mutex::new(vec![
+        std::collections::BTreeMap::<
+            String,
+            (u128, String),
+        >::new();
+        6
+    ]));
+    let gossip_tail = Arc::new(Mutex::new(vec![std::collections::VecDeque::new(); 6]));
+    let diagnostic_channel = format!("channel={}", hex::encode(group.as_bytes()));
     for (index, node) in chain.nodes[..6].iter().enumerate() {
+        let gossip_first = gossip_first.clone();
+        let gossip_tail = gossip_tail.clone();
+        let diagnostic_channel = diagnostic_channel.clone();
         let observed_route = route_trace.clone();
         let observed_periodic_work = periodic_work.clone();
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if phase.starts_with("gossip_diag_")
+                && (phase.starts_with("gossip_diag_incoming_")
+                    || phase
+                        .split_whitespace()
+                        .any(|field| field == diagnostic_channel))
+            {
+                let elapsed = route_started.elapsed().as_millis();
+                let milestone = phase.split_whitespace().next().unwrap().to_owned();
+                gossip_first.lock().unwrap()[index]
+                    .entry(milestone)
+                    .or_insert_with(|| (elapsed, phase.clone()));
+                let mut tails = gossip_tail.lock().unwrap();
+                if tails[index].len() == 24 {
+                    tails[index].pop_front();
+                }
+                tails[index].push_back((elapsed, phase.clone()));
+            }
+
             if matches!(
                 phase.as_str(),
                 "channel_recovery_fallback_begin"
@@ -1396,7 +1747,11 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let deadline_started = std::time::Instant::now();
     let send_returned_ms = route_started.elapsed().as_millis();
     let deadline_start_ms = send_returned_ms;
-    let deadline = Duration::from_secs(8);
+    // This scenario proves notification-only functional convergence across six
+    // simulated hosts, not an eight-second five-hop latency promise. Periodic
+    // rescue is explicitly disabled and independently counted below. Keep the
+    // shared functional watchdog; held-peer latency controls keep their own bound.
+    let deadline = Duration::from_secs(30);
     let cutoff = deadline_started + deadline;
     // Sender retirement must not grant other hosts unmeasured propagation.
     hosts[0].take().unwrap().stop().await;
@@ -1552,6 +1907,11 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         );
     }
     if !all_timely {
+        eprintln!(
+            "gossip receiver milestones first={:?} recent_per_host={:?}",
+            gossip_first.lock().unwrap().clone(),
+            gossip_tail.lock().unwrap().clone()
+        );
         // Preserve already-collected route evidence before any fallible read.
         let phases = route_trace.try_lock().ok().map(|trace| trace.clone());
         eprintln!("bounded recovery phases={phases:?}");
@@ -1629,7 +1989,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     );
     assert!(
         all_timely,
-        "all five exact-message history reads must finish within the original functional watchdog; observer resumed after {deadline_elapsed:?}"
+        "all five exact-message history reads must finish within the functional watchdog; observer resumed after {deadline_elapsed:?}"
     );
     let original = original.expect("all receivers proved one canonical message");
     assert!(

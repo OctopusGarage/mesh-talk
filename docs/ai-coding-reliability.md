@@ -112,6 +112,24 @@ branches of a scheduler if that scheduler still waits for the entire scan inside
 one completion branch. Synchronous final persistence can still block; document
 that boundary instead of claiming a timer can preempt it.
 
+Branches of one `select!` share a task; adding runtime workers does not let a
+blocked branch poll another branch of that same future. Independently scheduled
+work must keep an explicit parent cancellation owner and retain the actual
+child's retirement permit. The [inbound serving owner](../crates/mesh-talk-core/src/node/serving.rs)
+is exercised by the real maintenance-hold Noise regression in
+[account action tests](../crates/mesh-talk-core/src/node/account_group/tests/message_action_reference.rs),
+alongside stalled-handshake retirement and the single-worker negative control.
+Custom protocol fixtures must retain that same independent host and retirement
+owner. A source's synchronous durable append must not run on the receiver's
+reactor. The growing-history regression in
+[account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+holds the actual source writer until a receiver page imports, then measures
+continuation progress separately from setup and checks advancing cursors.
+Full-host file fixtures retain a separate two-worker reactor for each simulated
+application. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+holds both sibling workers after its durable copy completes and requires target
+confirmation while they remain held; unrelated devices cannot share that stall.
+
 **Evidence:** pause actual expensive work after admission and assert availability
 of the unrelated guard or operation. Release the pause and verify the final data.
 See the attachment preparation and document-scheduler regressions in
@@ -178,7 +196,12 @@ Review fairness across successive turns, not only the batch size. Use the existi
 cursor, coalescing and admission owners; distinguish independent lanes where
 needed. Failed publication must not indefinitely prevent later eligible work.
 Recheck conditions with the synchronization primitive's correct waiter protocol;
-a notification alone is not the durable condition. Preserve startup, wake,
+a notification alone is not the durable condition. Admission must observe both
+permit release and transitions that make retained resources reclaimable. A one-time
+pressure check can miss a busy connection becoming idle after the waiter starts.
+The [session pool](../crates/mesh-talk-core/src/node/session_pool.rs) owns this
+handoff: idle eligibility requests retirement, while the actual connection keeps
+its permits until destruction. Preserve startup, wake,
 shutdown and missed-notification recovery behavior.
 
 Keep independent reasons for continuing work separate. A worker can finish a
@@ -225,6 +248,14 @@ Capture the owner's exact session/runtime installation and relevant revision at
 entry. Revalidate through the existing atomic commit seam before side effects
 and before publishing private results. Treat frontend generation guards as UI
 ownership, not host authorization. Read commands can expose stale private data too.
+
+A routing or capability preview must not become a second admission owner. When
+the canonical reader reports a typed stale projection, preserve its existing
+bounded preparation path before deciding authorization. Any cached local candidate
+still needs full identity and current authority checks at the real commit seam.
+The [forwarding owner](message-forwarding.md#source-admission-and-lifecycle) tests a
+signed rename that needs preparation, plus dissolution and same-user/different-key
+controls that must never produce a message or send receipt.
 
 Account for reentrant store subscribers and callbacks that can retire an owner
 synchronously during publication. Lock once when combining sensitive proof and
@@ -312,6 +343,12 @@ do not remove backpressure to make a benchmark look faster.
 wrong-owner requests, saturation and recovery after capacity returns. Include
 real loopback assertions for changed networking/crypto boundaries as required by
 the [network review matrix](network-design-reference.md#minimum-feature-review-matrix).
+Physical execution resources need the same ownership discipline. A hosted runner
+can exhaust disk while expanding a cache or compiling a second profile, before
+it can publish failure logs. The [runner storage owner](../scripts/ci/runner-storage.mjs)
+measures real capacity and reclaims only fixed disposable image SDK payloads;
+[its filesystem controls](../scripts/diagnostics/runner-storage.test.mjs) protect
+workspace/toolchain data, redirected paths and non-hosted environments.
 Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
@@ -333,12 +370,61 @@ Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to rechec
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
 
+An offline fixture that needs prompt connection failure must own and observe
+actual transport closure; reserving a TCP port does not guarantee refusal or
+retire a pending dial. The [own-copy fixture](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+qualifies real accept-and-close behavior, joins its unavailable-endpoint owner,
+then hands the same listener to the cold application without changing its
+confirmation budget.
+
+A direct protocol fixture must own its cold-start preconditions. Starting every
+background repair loop can negotiate or import the claimed first request before
+the explicit operation and consume its transport capacity. Reuse the bounded
+[inbound connection owner](../crates/mesh-talk-core/src/node/serving.rs) when the
+scenario drives requests directly; keep full-host recovery tests separate. The
+[certificate refresh fixture](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+requires no prior sibling negotiation or imported custody key, then positively
+witnesses its real explicit negotiation and durable projection.
+
+Keep fixture validation at the narrow boundary it owns. A full-host scenario
+whose only assertion concerns another test helper adds unrelated synchronization
+and scheduling prerequisites without a product oracle. Reuse the real protocol
+and business scenarios instead: [Wake authentication and recovery controls](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+own linked identity, revision deduplication and notification-driven convergence;
+[custody scenarios](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+own authenticated preparation, held-domain independence and durable custody.
+Do not add a clock switch solely to rescue a helper's self-test.
+
+Keep a scheduling control's corpus at the protocol boundary it needs. The
+[queued-source controls](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)
+use a normal short partial page and retain strict result/checkpoint ordering;
+separate real-protocol tests own full-page durability and replay. Qualify request
+liveness before its cancellation trigger and the actual resumed owner before
+admission. A cancellation-triggering publication need not leave the old request
+alive after the publisher returns.
+
+Browser device options express intent; they do not observe native input state.
+Establish the required device mode through the browser's supported emulation
+owner, then verify actual media queries and touch capabilities before measuring
+responsive hit areas. Do not replace `matchMedia` with a JavaScript mock. The
+[touch fixture](../frontend/e2e/touch-targets.spec.ts) exercises controlled native
+state loss, actual CSS target sizes and a real tap through that same owner.
+A negative control must observe the capability it removes; disabling touch does
+not require every host to become hover-capable or shrink its CSS targets.
+
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an
 outer deadline when a synchronous lock cycle cannot be safely unwound. An async
 timeout inside the blocked thread is not sufficient. Avoid port-selection races
 and process-global fixtures that assume serial execution; respect the repository's
 test environment and resource controls.
+
+Intentional cancellation and output-limit controls need an independent process
+owner. Inheriting the real runner's owner marker can terminate the enclosing
+validation instead of only the synthetic command. The
+[process-owner fixture](../scripts/diagnostics/windows-process-owner.test.mjs)
+checks both the retained output-limit failure and successful enclosing supervisor
+through an actual nested execution.
 
 Treat a lock-order suspicion, a reproduced bug and a passing regression as
 different evidence. A stack sample or total suite duration alone does not prove

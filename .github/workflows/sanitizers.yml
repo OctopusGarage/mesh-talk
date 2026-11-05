@@ -79,6 +79,21 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Prepare hosted Linux build storage
+        id: runner_storage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
+
+      - name: Preserve runner storage measurements
+        if: always() && steps.runner_storage.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-storage.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Install exact nightly cohort
         uses: dtolnay/rust-toolchain@nightly
         with:

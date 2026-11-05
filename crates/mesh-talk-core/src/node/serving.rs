@@ -363,8 +363,11 @@ impl Node {
     }
 
     /// Accept inbound connections and maintain deferred profile compactions.
-    /// Maintenance runs on the blocking pool and stops when this future is dropped;
+    /// Deferred compactions run on the blocking pool; dropping this future stops
+    /// new maintenance scheduling.
     /// CLI and SDK hosts get the same log maintenance as the desktop runtime.
+    /// Dropping this future requests listener cancellation; participant retirement
+    /// drains its actual child work before stores may be closed or reopened.
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
         Box::pin(self.run_accept_loop_inner(
             listener,
@@ -380,6 +383,17 @@ impl Node {
         listener: TcpListener,
     ) {
         Box::pin(self.run_accept_loop_inner(listener, false)).await;
+    }
+
+    /// Direct protocol fixtures retain the bounded production connection owner
+    /// while their independent runtime owns retirement. Autonomous host tests
+    /// continue to use run_accept_loop and its complete background services.
+    #[cfg(test)]
+    pub(in crate::node) async fn run_inbound_connections_for_test(
+        self: Arc<Self>,
+        listener: TcpListener,
+    ) {
+        self.accept_connections(listener).await;
     }
 
     async fn run_accept_loop_inner(
@@ -405,6 +419,15 @@ impl Node {
             .lock()
             .expect("roster mutex not poisoned")
             .changes();
+        // select! branches share one task. A synchronous maintenance turn must
+        // not prevent an available host worker from accepting a new connection.
+        // The parent owns cancellation; the actual child owns its retirement
+        // permit through destruction of its listener and captured Node.
+        let Some(accept_work) = self.runtime_work.admit() else {
+            return;
+        };
+        let mut inbound = tokio::task::JoinSet::new();
+        inbound.spawn(accept_work.track(Arc::clone(&self).accept_connections(listener)));
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
             _ = Arc::clone(&self).run_delivery_loop() => {}
@@ -413,8 +436,18 @@ impl Node {
             _ = account_history => {}
             _ = Arc::clone(&self).run_account_wake_loop() => {}
             _ = Arc::clone(&self).run_expiry_loop() => {}
-            _ = self.accept_connections(listener) => {}
+            result = inbound.join_next() => {
+                if let Some(Err(error)) = result {
+                    if error.is_panic() {
+                        std::panic::resume_unwind(error.into_panic());
+                    }
+                    log::warn!("inbound listener task cancelled: {error}");
+                }
+            }
         }
+        // Preserve completed-parent retirement too. Cancellation of this parent
+        // drops the JoinSet; runtime_work retains the child's actual lifetime.
+        inbound.shutdown().await;
     }
 
     async fn run_expiry_loop(self: Arc<Self>) {
@@ -531,7 +564,23 @@ impl Node {
                 if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
                     let _ = hook.send(());
                 }
-                if let Ok(channel) = node.privacy_accept_with_permits(stream, tcp_permits).await {
+                #[cfg(test)]
+                node.trace_account_client(&node.identity.public(), || {
+                    format!("gossip_diag_incoming_tcp sequence={observer_sequence}")
+                });
+                #[cfg(test)]
+                node.trace_account_client(&node.identity.public(), || {
+                    format!("gossip_diag_incoming_noise_begin sequence={observer_sequence}")
+                });
+                let accepted = node.privacy_accept_with_permits(stream, tcp_permits).await;
+                #[cfg(test)]
+                node.trace_account_client(&node.identity.public(), || {
+                    format!(
+                        "gossip_diag_incoming_noise_end sequence={observer_sequence} ok={}",
+                        accepted.is_ok()
+                    )
+                });
+                if let Ok(channel) = accepted {
                     node.serve_connection(channel).await;
                 }
                 #[cfg(test)]
@@ -1437,6 +1486,35 @@ impl Node {
         context: &'static str,
     ) -> Result<(), NodeError> {
         use super::reception_effects::{ArrivalKind, ReceptionMetadata};
+        #[cfg(test)]
+        struct PublishedMessages<'a> {
+            node: &'a Node,
+            channel: ConversationId,
+            ids: Vec<crate::eventlog::EventId>,
+        }
+        #[cfg(test)]
+        impl Drop for PublishedMessages<'_> {
+            fn drop(&mut self) {
+                // Declared before pending: callbacks run after its guard drops,
+                // including bounded-turn early returns and failure unwinding.
+                for id in &self.ids {
+                    self.node
+                        .trace_account_client(&self.node.identity.public(), || {
+                            format!(
+                                "gossip_diag_plaintext_published channel={} event={}",
+                                hex::encode(self.channel.as_bytes()),
+                                id.to_hex()
+                            )
+                        });
+                }
+            }
+        }
+        #[cfg(test)]
+        let mut published = PublishedMessages {
+            node: self,
+            channel: conv,
+            ids: Vec::new(),
+        };
         let mut pending = self
             .pending_channel_plaintext
             .lock()
@@ -1544,6 +1622,8 @@ impl Node {
                 )?;
                 if let Some(metadata) = committed {
                     self.note_reception_change();
+                    #[cfg(test)]
+                    published.ids.push(entry.event_id);
                     if !own && entry.from != self.user_id() {
                         self.note_account_local_change();
                     }

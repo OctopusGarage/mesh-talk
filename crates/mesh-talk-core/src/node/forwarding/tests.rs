@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     discovery::Roster,
+    eventlog::EventKind,
     identity::{account::Account, device::DeviceIdentity},
 };
 use std::sync::Mutex;
@@ -353,6 +354,154 @@ fn completed_batch_eviction_keeps_request_fingerprint_across_compaction() {
     assert!(store.fingerprints.contains_key(&format!("{now}-0000")));
 }
 
+#[derive(Clone, Copy)]
+enum RoutingSourceChange {
+    Rename,
+    Dissolve,
+    ReplaceFullIdentity,
+}
+
+#[tokio::test]
+async fn forwarding_prepares_stale_local_metadata_before_routing() {
+    forwarding_after_signed_source_change(RoutingSourceChange::Rename).await;
+}
+
+#[tokio::test]
+async fn forwarding_stale_local_metadata_cannot_bypass_dissolution() {
+    forwarding_after_signed_source_change(RoutingSourceChange::Dissolve).await;
+}
+
+#[tokio::test]
+async fn forwarding_stale_local_metadata_cannot_bypass_full_identity() {
+    forwarding_after_signed_source_change(RoutingSourceChange::ReplaceFullIdentity).await;
+}
+
+async fn forwarding_after_signed_source_change(change: RoutingSourceChange) {
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(directory.path(), &account);
+    let selected = source(&node);
+    let group = node
+        .create_channel("routing source", Vec::new())
+        .await
+        .unwrap();
+    let target = ForwardTarget {
+        kind: "channel".into(),
+        target: hex::encode(group.as_bytes()),
+    };
+    let request = ForwardRequest {
+        operation_id: format!("{}-source-change", super::super::node::now_millis()),
+        source: selected,
+        destinations: vec![target.clone()],
+        mode: "individual".into(),
+    };
+    let mut advanced = false;
+    let result = node
+        .forward_messages_if(request.clone(), |commit| {
+            commit()?;
+            let acceptance_started = {
+                let store = node.forwarding.lock().unwrap();
+                store
+                    .batches
+                    .get(&request.operation_id)
+                    .is_some_and(|batch| {
+                        batch
+                            .result
+                            .items
+                            .iter()
+                            .any(|item| item.error.as_deref() == Some("Acceptance started"))
+                    })
+            };
+            if !advanced && acceptance_started {
+                advanced = true;
+                // A real owner-signed source advances after the durable batch has
+                // begun but before local routing. There are no background workers
+                // that could silently prepare this source for the routing reader.
+                let (kind, payload) = match change {
+                    RoutingSourceChange::Rename => {
+                        (EventKind::ChannelRename, b"new routing name".to_vec())
+                    }
+                    RoutingSourceChange::Dissolve => (EventKind::ChannelDissolve, Vec::new()),
+                    RoutingSourceChange::ReplaceFullIdentity => {
+                        let mut replacement = node.identity.public();
+                        replacement.x25519_pub = DeviceIdentity::generate().public().x25519_pub;
+                        assert_eq!(replacement.user_id(), node.user_id());
+                        assert_ne!(replacement, node.identity.public());
+                        (
+                            EventKind::MembershipChange,
+                            crate::channel::ChannelMeta {
+                                name: "replacement physical key".into(),
+                                members: vec![replacement],
+                                epoch: 1,
+                                owner: node.user_id(),
+                            }
+                            .encode(),
+                        )
+                    }
+                };
+                node.append_event(group, kind, payload)?;
+                let book = node.channels.lock().unwrap();
+                assert!(
+                    matches!(
+                        node.channel_identity_is_current(book.state(&group).unwrap()),
+                        Err(crate::eventlog::LogError::StaleCursor)
+                    ),
+                    "the real source must invalidate routing readiness"
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        advanced,
+        "the signed control must precede actual item routing"
+    );
+    assert_eq!(result.items.len(), 2);
+    let should_accept = matches!(change, RoutingSourceChange::Rename);
+    for item in &result.items {
+        let stale = item
+            .error
+            .as_deref()
+            .is_some_and(|value| value.contains("stale event page cursor"));
+        assert_eq!(
+            item.status == "accepted",
+            should_accept,
+            "routing status={} stale_projection={stale}",
+            item.status
+        );
+        let id = item_identity(&request.operation_id, &target, &item.source_id);
+        let delivery = node.delivery.lock().unwrap();
+        let receipt = delivery.request(&id);
+        if should_accept {
+            let receipt =
+                receipt.expect("accepted forwarding must have its original durable send receipt");
+            assert_eq!(
+                item.message_id.as_deref(),
+                Some(receipt.message_id.to_hex().as_str())
+            );
+            assert!(item.error.is_none());
+        } else {
+            assert_eq!(item.status, "failed");
+            assert!(item.message_id.is_none());
+            assert!(
+                receipt.is_none(),
+                "a stale candidate cannot commit a rejected physical identity"
+            );
+        }
+    }
+    let messages = node
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Message)
+        .count();
+    assert_eq!(messages, if should_accept { 2 } else { 0 });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file() {
     use crate::discovery::Announce;
@@ -418,29 +567,82 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
     let recipient_task = tokio::spawn(recipient.clone().run_accept_loop(listener));
     let mut phase = "forwarding-start";
     let started = std::time::Instant::now();
+    let mut phase_entries = Vec::new();
+    let mut offer_observed = false;
+    let mut consent_accepted = false;
+    let mut last_file_ready = None;
+    let mut verified_bytes = None;
+    let mut individual_states = Vec::new();
+    let mut merged_states = Vec::new();
+    // Keep failure evidence free of targets, original IDs and message bodies.
+    let admission_states = |items: &[ForwardItem]| {
+        items
+            .iter()
+            .take(4)
+            .map(|item| {
+                let status = match item.status.as_str() {
+                    "pending" => "pending",
+                    "accepted" => "accepted",
+                    "failed" => "failed",
+                    _ => "other",
+                };
+                let error = match item.error.as_deref() {
+                    None => "none",
+                    Some(value) if value.contains("stale event page cursor") => "stale-projection",
+                    Some(value) if value.contains("requires review") => "group-review",
+                    Some(value) if value.contains("member") || value.contains("authority") => {
+                        "membership-authority"
+                    }
+                    Some(value) if value.contains("not found") || value.contains("unavailable") => {
+                        "unavailable-source"
+                    }
+                    Some(value)
+                        if value.contains("database")
+                            || value.contains("locked")
+                            || value.contains("I/O") =>
+                    {
+                        "storage"
+                    }
+                    Some(_) => "other",
+                };
+                (status, error)
+            })
+            .collect::<Vec<_>>()
+    };
     let observed = std::panic::AssertUnwindSafe(async {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            let mut request = ForwardRequest {
-                operation_id: format!("{}-group-text", super::super::node::now_millis()),
-                source: selected,
-                destinations: vec![ForwardTarget {
-                    kind: "channel".into(),
-                    target: hex::encode(group.as_bytes()),
-                }],
-                mode: "individual".into(),
-            };
+        let mut request = ForwardRequest {
+            operation_id: format!("{}-group-text", super::super::node::now_millis()),
+            source: selected,
+            destinations: vec![ForwardTarget {
+                kind: "channel".into(),
+                target: hex::encode(group.as_bytes()),
+            }],
+            mode: "individual".into(),
+        };
+        // Two distinct user submissions each own functional acceptance. The
+        // second operation does not inherit time spent delivering the first.
+        crate::node::account_group::functional_account_convergence(async {
             phase = "individual-admission";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let accepted = sender
                 .forward_messages_if(request.clone(), |commit| commit())
                 .await
                 .unwrap();
+            individual_states = admission_states(&accepted.items);
+            assert_eq!(
+                accepted.items.len(),
+                2,
+                "individual admission item count: {individual_states:?}"
+            );
             assert!(
                 accepted
                     .items
                     .iter()
-                    .all(|item| item.status == "pending" || item.status == "accepted")
+                    .all(|item| item.status == "pending" || item.status == "accepted"),
+                "individual admission: {individual_states:?}"
             );
             phase = "individual-acceptance";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let accepted = wait_forward_receipts(&sender, &request).await;
             for item in &accepted.items {
                 let id = crate::eventlog::EventId::new(
@@ -454,6 +656,7 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                     .await;
             }
             phase = "individual-history";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             loop {
                 match recipient.channel_history(group, 10) {
                     Ok(history) if history.len() >= 2 => break,
@@ -470,18 +673,33 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                     .collect::<Vec<_>>(),
                 vec![b"first".to_vec(), b"second".to_vec()]
             );
-            request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
-            request.mode = "merged".into();
+        })
+        .await?;
+        request.operation_id = format!("{}-group-merged", super::super::node::now_millis());
+        request.mode = "merged".into();
+        crate::node::account_group::functional_account_convergence(async {
             phase = "merged-admission";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let merged = sender
                 .forward_messages_if(request.clone(), |commit| commit())
                 .await
                 .unwrap();
-            assert!(merged.items[0].status == "pending" || merged.items[0].status == "accepted");
+            merged_states = admission_states(&merged.items);
+            assert_eq!(
+                merged.items.len(),
+                1,
+                "merged admission item count: {merged_states:?}"
+            );
+            assert!(
+                merged.items[0].status == "pending" || merged.items[0].status == "accepted",
+                "merged admission: {merged_states:?}"
+            );
             phase = "merged-acceptance";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let merged = wait_forward_receipts(&sender, &request).await;
             let archive_id = merged.items[0].message_id.as_ref().unwrap();
             phase = "merged-history";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let archive = loop {
                 match sender.channel_history(group, 10) {
                     Ok(history) => {
@@ -498,18 +716,29 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                 tokio::time::sleep(Duration::from_millis(20)).await;
             };
             phase = "merged-transfer";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             sender.flush_channel_file(group, archive).await;
             phase = "merged-offer";
+            phase_entries.push((phase, started.elapsed().as_millis()));
             let offer = offers.recv().await.unwrap();
+            offer_observed = true;
             assert_eq!(offer.name, "Chat records.mtchat");
             recipient.decide_attachment(archive, true).unwrap();
+            consent_accepted = true;
             phase = "merged-bytes";
-            while !recipient.file_ready_to_save(archive).unwrap() {
+            phase_entries.push((phase, started.elapsed().as_millis()));
+            loop {
+                let ready = recipient.file_ready_to_save(archive).unwrap();
+                last_file_ready = Some(ready);
+                if ready {
+                    break;
+                }
                 recipient.pull_pending_files().await;
                 sender.pull_pending_files().await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             let received = recipient.read_file(archive).unwrap();
+            verified_bytes = Some(received.len());
             let record: serde_json::Value = serde_json::from_slice(&received).unwrap();
             assert_eq!(record["format"], "MTCHAT1");
             assert_eq!(record["messages"][0]["text"], "first");
@@ -531,6 +760,9 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
         node.clear_delivery_observations();
         node.sessions.clear();
     }
+    eprintln!(
+        "group forwarding cached evidence: individual_admission={individual_states:?} merged_admission={merged_states:?} phase_entries_ms={phase_entries:?} offer_observed={offer_observed} consent_accepted={consent_accepted} last_file_ready={last_file_ready:?} verified_bytes={verified_bytes:?}"
+    );
     let operation_outcome = match &observed {
         Ok(Ok(())) => "completed",
         Ok(Err(_)) => "timed out",

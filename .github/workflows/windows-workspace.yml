@@ -124,8 +124,8 @@ jobs:
       - name: Run validated serial shard and export partial coverage
         env:
           CARGO_NET_OFFLINE: 'true'
-          # End this failed serial shard promptly; other matrix shards continue.
-          MESH_WINDOWS_FAIL_FAST: '1'
+          # Collect every selected case so one failure does not hide later defects.
+          MESH_WINDOWS_FAIL_FAST: '0'
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs consume "${{ matrix.shard }}" "$RUNNER_TEMP/windows-workspace-archive" "$RUNNER_TEMP/windows-workspace-results"
