@@ -366,12 +366,26 @@ Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to rechec
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
 
+Browser device options express intent; they do not observe native input state.
+Establish the required device mode through the browser's supported emulation
+owner, then verify actual media queries and touch capabilities before measuring
+responsive hit areas. Do not replace `matchMedia` with a JavaScript mock. The
+[touch fixture](../frontend/e2e/touch-targets.spec.ts) exercises controlled native
+state loss, actual CSS size changes and a real tap through that same owner.
+
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an
 outer deadline when a synchronous lock cycle cannot be safely unwound. An async
 timeout inside the blocked thread is not sufficient. Avoid port-selection races
 and process-global fixtures that assume serial execution; respect the repository's
 test environment and resource controls.
+
+Intentional cancellation and output-limit controls need an independent process
+owner. Inheriting the real runner's owner marker can terminate the enclosing
+validation instead of only the synthetic command. The
+[process-owner fixture](../scripts/diagnostics/windows-process-owner.test.mjs)
+checks both the retained output-limit failure and successful enclosing supervisor
+through an actual nested execution.
 
 Treat a lock-order suspicion, a reproduced bug and a passing regression as
 different evidence. A stack sample or total suite duration alone does not prove
