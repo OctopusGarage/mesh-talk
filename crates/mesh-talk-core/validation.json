@@ -2761,7 +2761,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Empty file receive turns and completed exact-policy download discovery validate current ownership without rewriting unchanged tickets or scan progress; changed policy and new offers retain bounded discovery and transactional enqueueing. Channel-file read preflight validates the publication barrier without directory synchronization, while actual file publication retains its write barrier and transactional guards.",
+            "name": "Empty file receive turns, exact fully admitted global-tail retries and completed exact-policy download discovery validate current ownership without rewriting unchanged tickets or scan progress; interleaved conversations, new work and byte-skipped candidates retain fair rotation; changed policy and new offers retain bounded discovery and transactional enqueueing. Channel-file read preflight validates the publication barrier without directory synchronization, while actual file publication retains its write barrier and transactional guards.",
             "reference": "docs/module-boundaries.md"
           },
           {

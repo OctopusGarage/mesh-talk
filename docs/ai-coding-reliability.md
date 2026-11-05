@@ -273,6 +273,14 @@ An empty receive queue must not update an unchanged fair-turn ticket either;
 retain real unfinished rotation and terminal deletion. The settled ordinary and
 control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
 checks SQL mutations, committed writes and body reads together.
+Nonempty retry queues can also be unchanged: rewriting the numeric tickets of
+an already selected global suffix does not advance fairness. Prove the exact
+account-wide order with a bounded metadata read before skipping rotation;
+matching only the maximum ticket misses interleaved conversations. Keep byte
+admission, completed-row deletion and fresh ownership checks. The idle-tail and
+interleaved-conversation regressions in the
+[file receive owner](../crates/mesh-talk-core/src/node/filebook/indexed.rs)
+measure actual SQL changes and committed writes while preserving new-work turns.
 Apply this rule at shared lower owners too: terminal export polling must retain
 current selection/authority checks without republishing the same cursor for each
 ID page. The direct and mailbox consumers share that rule in

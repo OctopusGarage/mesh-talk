@@ -2252,6 +2252,12 @@ routing and disabled sibling policy before retry bodies are hydrated; skipped
 sources remain pending and final decoded authentication checks remain fresh.
 Index installation scans pending metadata once, without replaying ciphertext or
 completion facts. Scoped retry does not bypass the global discovery-page budget.
+File-manifest retries also preserve tickets when an owner-checked transaction
+proves that all admitted unfinished candidates already form the exact global
+account suffix. A bounded indexed suffix read includes one extra row to detect
+unselected or interleaved work. This changes no processing evidence: missing
+keys and blocked manifests remain pending. New work, partial pages and byte-skipped
+candidates retain ordinary fair rotation; completed rows still retire.
 Maintenance demand comes from newly discovered, retained active Profile headers,
 including the local author's sources, rather than unchanged network callbacks.
 The bounded page deduplicates conversations and commits demand before advancing

@@ -93,7 +93,7 @@ impl IndexedFileBook {
         }
         let (selected,required)=self.profile.database().transaction(|c| {
             self.check_receive_owner(c)?;
-            let mut statement=c.prepare_cached("SELECT p.event,p.bytes,EXISTS(SELECT 1 FROM file_book_processed d WHERE d.account=p.account AND d.event=p.event) FROM file_receive_pending p WHERE p.account=?1 AND p.conversation=?2 ORDER BY ticket,event LIMIT ?3")?;
+            let mut statement=c.prepare_cached("SELECT p.event,p.bytes,EXISTS(SELECT 1 FROM file_book_processed d WHERE d.account=p.account AND d.event=p.event),p.ticket FROM file_receive_pending p WHERE p.account=?1 AND p.conversation=?2 ORDER BY ticket,event LIMIT ?3")?;
             let mut found=statement.query(params![self.account.as_slice(),conversation.as_bytes().as_slice(),rows as i64])?;
             let mut candidates=Vec::new();let mut used=0usize;let mut required:Option<usize>=None;
             while let Some(row)=found.next()? {
@@ -102,16 +102,34 @@ impl IndexedFileBook {
                 let cost=usize::try_from(size).ok().and_then(|n|n.checked_mul(3)).and_then(|n|n.checked_add(std::mem::size_of::<Event>())).ok_or_else(||invalid("invalid file receive allocation cost"))?;
                 let admitted=!done && used.checked_add(cost).is_some_and(|n|n<=bytes);
                 if admitted {used+=cost;} else if !done {required=Some(required.map_or(cost,|old|old.min(cost)));}
-                candidates.push((id,done,admitted));
+                candidates.push((id,row.get::<_,i64>(3)?,done,admitted));
             }
             drop(found);drop(statement);
+            for (id,_,done,_) in &candidates {
+                if *done {c.execute("DELETE FROM file_receive_pending WHERE account=?1 AND event=?2",params![self.account.as_slice(),id.as_bytes().as_slice()])?;}
+            }
+            let unfinished:Vec<_>=candidates.iter().filter(|(_,_,done,_)| !done).collect();
+            // Renumbering an exact global suffix cannot change any fair turn.
+            // Compare the whole bounded suffix, not only its final ticket: a
+            // different conversation can lie between this page's candidates.
+            let unchanged_tail=if let Some((first,ticket,_,_))=unfinished.first()
+                && unfinished.iter().all(|(_,_,_,admitted)| *admitted)
+            {
+                let mut statement=c.prepare_cached("SELECT event FROM file_receive_pending WHERE account=?1 AND (ticket,event)>=(?2,?3) ORDER BY ticket,event LIMIT ?4")?;
+                let mut found=statement.query(params![self.account.as_slice(),ticket,first.as_bytes().as_slice(),(unfinished.len()+1) as i64])?;
+                let mut suffix=Vec::new();
+                while let Some(row)=found.next()? {suffix.push(EventId::new(blob(row,0)?));}
+                suffix.iter().eq(unfinished.iter().map(|(id,_,_,_)| id))
+            } else {false};
             let mut ticket:i64=c.query_row("SELECT next_ticket FROM file_receive_scan WHERE account=?1",[self.account.as_slice()],|r|r.get(0))?;
             let initial_ticket=ticket;
             let mut selected=Vec::new();
-            for (id,done,admitted) in candidates {
-                if done {c.execute("DELETE FROM file_receive_pending WHERE account=?1 AND event=?2",params![self.account.as_slice(),id.as_bytes().as_slice()])?;} else {
-                    c.execute("UPDATE file_receive_pending SET ticket=?1 WHERE account=?2 AND event=?3",params![ticket,self.account.as_slice(),id.as_bytes().as_slice()])?;
-                    ticket=ticket.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?;
+            for (id,_,done,admitted) in candidates {
+                if !done {
+                    if !unchanged_tail {
+                        c.execute("UPDATE file_receive_pending SET ticket=?1 WHERE account=?2 AND event=?3",params![ticket,self.account.as_slice(),id.as_bytes().as_slice()])?;
+                        ticket=ticket.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?;
+                    }
                     if admitted {selected.push(id);}
                 }
             }

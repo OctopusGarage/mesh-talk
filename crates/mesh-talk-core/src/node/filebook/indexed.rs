@@ -1692,6 +1692,132 @@ mod tests {
     }
 
     #[test]
+    fn file_receive_idle_tail_preserves_order_without_durable_rewrites() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        let other = ConversationId::new([13; 32]);
+        for sequence in 1..=3 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        let expected: Vec<_> = rows.iter().map(|row| row.header.id).collect();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            assert_eq!(
+                f.book.receive_candidates(conversation, 8, 4096).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "retrying an unchanged global tail must not rewrite its tickets"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(f.records.body_reads(), 0);
+
+        // Newly enqueued work must take its fair turn ahead of the old retry.
+        log.append_durable(Event::new(
+            &sender,
+            other,
+            1,
+            vec![],
+            4,
+            0,
+            EventKind::FileManifest,
+            vec![2; 100],
+        ))
+        .unwrap();
+        let after = f.book.receive_after().unwrap();
+        let added = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(after, 128)
+            .unwrap();
+        f.book.discover_receives(after, &added, own).unwrap();
+        assert_eq!(
+            f.book.receive_candidates(conversation, 8, 4096).unwrap(),
+            expected
+        );
+        assert_eq!(
+            f.book.receive_conversations().unwrap().first(),
+            Some(&other)
+        );
+        for id in &expected {
+            f.book.mark_processed(*id).unwrap();
+        }
+        assert!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_receive_interleaved_tail_retains_cross_conversation_fairness() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        let other = ConversationId::new([13; 32]);
+        for sequence in 1..=3 {
+            log.append_durable(Event::new(
+                &sender,
+                if sequence == 2 { other } else { conversation },
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        assert_eq!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            f.book.receive_conversations().unwrap().first(),
+            Some(&other),
+            "matching the last ticket cannot hide an interleaved conversation"
+        );
+    }
+
+    #[test]
     fn file_receive_empty_candidate_turns_reject_stale_owner_and_read_failure() {
         use crate::storage::profile::participant;
         let f = Fixture::new();

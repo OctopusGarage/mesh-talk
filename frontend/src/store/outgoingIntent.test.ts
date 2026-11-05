@@ -517,6 +517,42 @@ it("projects member and post-office custody separately for exact channel IDs", a
   });
 });
 
+it("preserves channel message references for unchanged custody while applying decreases and unknowns", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  const stable = { ...row("stable"), replicas: 2, postOfficeCopies: 1 };
+  const unknown = row("unknown");
+  const messages = { "channel:group": [stable, unknown] };
+  store.setState({ active: channel, messages });
+  invoke.mockResolvedValue([{ id: "stable", replicas: 2, post_offices: 1 }]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages).toBe(messages);
+  expect(store.getState().messages["channel:group"]).toBe(
+    messages["channel:group"],
+  );
+  expect(store.getState().messages["channel:group"][0]).toBe(stable);
+  expect(store.getState().messages["channel:group"][1]).toBe(unknown);
+
+  invoke.mockResolvedValue([{ id: "stable", replicas: 0, post_offices: 0 }]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages).not.toBe(messages);
+  expect(store.getState().messages["channel:group"][0]).toMatchObject({
+    replicas: 0,
+    postOfficeCopies: 0,
+  });
+  expect(store.getState().messages["channel:group"][1]).toBe(unknown);
+
+  invoke.mockResolvedValue([]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages["channel:group"][0]).toMatchObject({
+    replicas: undefined,
+    postOfficeCopies: undefined,
+  });
+  const absent = store.getState().messages;
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages).toBe(absent);
+});
+
 it("retires stale copy counts only for requested own channel messages omitted by status", async () => {
   const store = session();
   const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
