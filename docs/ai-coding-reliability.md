@@ -386,13 +386,14 @@ scenario drives requests directly; keep full-host recovery tests separate. The
 requires no prior sibling negotiation or imported custody key, then positively
 witnesses its real explicit negotiation and durable projection.
 
-A finite acknowledgement control must not depend on concurrent periodic workers
-being idle together. The [Wake setup control](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
-retains the full notification-driven scheduler and real protocol services while
-excluding its unrelated account-repair clock. Require zero actually selected
-repair ticks and positively observed Optional work. Keep current whole-Optional
-readiness, signed floors and acknowledgement assertions; do not latch an older
-completion as current readiness. Autonomous recovery controls retain their clocks.
+Keep fixture validation at the narrow boundary it owns. A full-host scenario
+whose only assertion concerns another test helper adds unrelated synchronization
+and scheduling prerequisites without a product oracle. Reuse the real protocol
+and business scenarios instead: [Wake authentication and recovery controls](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+own linked identity, revision deduplication and notification-driven convergence;
+[custody scenarios](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+own authenticated preparation, held-domain independence and durable custody.
+Do not add a clock switch solely to rescue a helper's self-test.
 
 Keep a scheduling control's corpus at the protocol boundary it needs. The
 [queued-source controls](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)

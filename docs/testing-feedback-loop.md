@@ -598,24 +598,11 @@ thirty-second watchdog, with the current whole-Optional bootstrap complete in
 both directions. Capture each publisher's post-create wake revision once and
 require a real authenticated acknowledgement at or above that floor in both
 directions; settled document reads alone do not qualify the notification path.
-A held real Wake response keeps setup pending while the other prerequisites
-remain ready. A new hostname publication may restart document preparation after
-initial setup. The held-Wake control therefore uses this same thirty-second
-preparation owner for signed head floors, reciprocal capabilities and Optional
-readiness while every matching Wake remains held. Its separate five-second
-arrival watchdog still bounds reaching the authenticated Wake hook. Only then
-may the pending-setup assertion test acknowledgement gating; releasing the hold
-must permit real setup completion. Preparation timeout diagnostics retain the
-individual predicates and bounded phase trace.
-
-This finite acknowledgement control excludes the unrelated account-history
-periodic repair tick through the existing full-host test seam. Notification-driven
-document synchronization, real Wake publication/acknowledgement, inbound serving
-and the remaining host services still run. Its observer must witness real Optional
-work and zero actually selected repair ticks before and after the held exchange.
-Repeated periodic sweeps can invalidate already completed preparation; their
-concurrent idle gaps are not an acknowledgement prerequisite. Other autonomous
-recovery scenarios retain periodic repair and their existing deadlines.
+Preparation timeout diagnostics retain the individual predicates and bounded
+phase trace. The real custody scenarios own these setup requirements. Keep Wake
+protocol acceptance in the existing linked-Noise identity, revision deduplication,
+local-edit propagation and legacy periodic-repair controls; do not construct an
+extra full-host scenario merely to prove that this fixture helper waits.
 
 Prepare all routes and observers before launching independent participant hosts.
 Network-only offline cuts join producers and admitted work

@@ -370,7 +370,10 @@
             "channel_custody_retry_skips_own_siblings_and_already_confirmed_account",
             "custody_retry_classes_each_rotate_through_all_competing_peers",
             "routed_offline_member_does_not_starve_sibling_custody_report_after_history_recovers",
-            "custody_report_progresses_while_unrelated_channel_recovery_is_held"
+            "custody_report_progresses_while_unrelated_channel_recovery_is_held",
+            "account_wake_requires_exact_linked_noise_identity_and_deduplicates_revisions",
+            "account_preference_local_edit_wakes_sibling_before_periodic_retry",
+            "legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs"
           ]
         }
       ],
@@ -379,7 +382,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation. Post-publication document preparation uses the existing thirty-second setup owner while real Wake responses remain held; the separate five-second authenticated-Wake arrival and custody operation deadlines remain unchanged. The finite acknowledgement control retains notification-driven full synchronization and real Wake/inbound services while excluding unrelated periodic repair; require zero actually selected repair ticks with positively observed Optional work, without latching historical readiness. Other autonomous-host cases retain periodic repair. First failures plus admitted-work retirement survive setup panics.",
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Paired fixture hosts use independent protocol workers alongside synchronous observation. Custody setup prerequisites are exercised by the real inventory, same-lane recall, independent Directory and durable custody scenarios. Wake authentication, exact revision deduplication, local-edit notification and legacy periodic repair retain their dedicated real-protocol controls rather than a full-host self-test of the preparation helper. First failures plus admitted-work retirement survive setup panics.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {

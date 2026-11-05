@@ -3460,8 +3460,6 @@ impl Node {
                         None => std::future::pending::<()>().await,
                     }
                 } => {
-                    #[cfg(test)]
-                    self.trace_account_client(&self.identity.public(), || "periodic_account_repair_tick".into());
                     enqueue_all = true;
                 }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
