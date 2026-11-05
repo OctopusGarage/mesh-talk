@@ -121,7 +121,12 @@ is exercised by the real maintenance-hold Noise regression in
 alongside stalled-handshake retirement and the single-worker negative control.
 Custom protocol and failed-initial-custody recovery fixtures must retain that
 same independent host and retirement owner, including separate reactors for both
-full-host participants and the synchronous history observer. A source's synchronous durable append must not run on the receiver's
+full-host participants and the synchronous history observer. The single-participant
+connection-limit/retirement fixture likewise uses the production two-worker host;
+retain its seven-slot saturation, original admission/retirement bounds and actual
+socket closure checks, alongside the held-worker positive and single-thread
+negative controls. This qualifies fixture capacity without attributing every
+historical late admission to scheduler starvation. A source's synchronous durable append must not run on the receiver's
 reactor. The growing-history regression in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
 holds the actual source writer until a receiver page imports, then measures
@@ -148,6 +153,16 @@ Transfer required ownership into the actual work. Dropping an observer or timing
 out a future is not evidence that external side effects stopped. Retain mutation
 serialization and cleanup responsibility until real completion; bound admission
 so repeated user retries cannot accumulate detached work.
+
+A permit declared inside a blocking closure drops before the closure's remaining
+captures. When those captures retain Node or storage handles, waking retirement
+at that point can make close-before-reopen fail. Use the existing blocking work
+owner in [runtime work](../crates/mesh-talk-core/src/node/runtime_work.rs) for
+[file/media maintenance](../crates/mesh-talk-core/src/node/participant_runtime.rs),
+so captures and undelivered results are destroyed before admission is released.
+Keep the direct capture-drop ordering regression, queued cancellation and
+undelivered-output controls, and the real native observer Node-release assertion;
+do not narrow that assertion to conceal another producer retaining the profile.
 
 Follow the existing retirement protocol: close admission, signal cancellation,
 release guards needed for completion, join owned tasks and drain admitted work.
@@ -354,16 +369,22 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
-Keep a test's observation scope equal to its named requirement. The native cost
-observer retirement test tracks that producer's captured Node lease rather than
-all unrelated owners of the shared Node. The growing-history fixture measures
-exact durable originals during continuation, then checks the full public
+Keep a test's observation scope equal to its named requirement. The
+growing-history fixture measures exact durable originals during continuation,
+then checks the full public
 projection after retiring its continuously appending peers. Its projection read
 must not compete with an endless writer inside the continuation latency bound.
 Paused-clock maintenance tests wait for actual retry attempts and assert minimum
 backoff spacing; real measured database duty time cannot imply a fixed number of
 attempts inside an arbitrary virtual-time window. Preserve cancellation, other
 maintenance-class progress and the no-early-retry assertions.
+
+Functional browser scenarios should use the smallest data set that exercises
+all named state transitions. Recovery-batch navigation needs distinct partial
+and terminal deliveries plus concurrent live and duplicate signals; repeated
+extra rows only multiply traced render work. Keep the separate large-history
+window case and deterministic announcement-coalescing/deduplication tests in
+[conversation reception](group-conversation-reception.md).
 
 Use barriers, deferred promises, injected provider/storage stalls and controlled
 clocks at the actual boundary. Prefer an observable progress assertion to an

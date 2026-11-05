@@ -400,6 +400,7 @@
     {
       "id": "core-startup-identity",
       "paths": [
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
         "crates/mesh-talk-core/src/node/runtime_work.rs",
@@ -420,6 +421,8 @@
             "startup_identity_rejection_stops_before_listener_and_durable_stores",
             "node::node::participant_storage_tests::",
             "node::runtime::retirement_tests::",
+            "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
+            "current_thread_peer_runtime_cannot_authenticate_while_its_worker_is_held",
             "node::runtime_work::",
             "node::node::tests::participant_event_"
           ]
@@ -434,7 +437,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Shared ownership precedes runtime keystore initialization; construction and admitted blocking captures plus undelivered outputs retain replacement admission until their actual destruction. Returned runtimes retain their consuming stop contract.",
+            "name": "Shared ownership precedes runtime keystore initialization; construction and admitted blocking captures plus undelivered outputs retain replacement admission until their actual destruction. File/media maintenance uses the same blocking owner so its captured Node is destroyed before retirement permits profile close; direct capture-drop ordering, queued cancellation and undelivered-output controls retain that contract. Returned runtimes retain their consuming stop contract.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

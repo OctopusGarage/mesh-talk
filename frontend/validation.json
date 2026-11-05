@@ -2175,6 +2175,7 @@
     {
       "id": "frontend-unread-recovery",
       "paths": [
+        "frontend/e2e/group-reception.spec.ts",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-1280x800.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-760x620.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-oled-760x620-win32.png",
@@ -2232,7 +2233,7 @@
         "guide": "docs/group-conversation-reception.md#unread-review-and-badge-recovery",
         "invariants": [
           {
-            "name": "Explicit source/global actions cover hidden, missing and unknown senders, preserve later arrivals and persist counters; incomplete history never proves deletion.",
+            "name": "Explicit source/global actions cover hidden, missing and unknown senders, preserve later arrivals and persist counters; incomplete history never proves deletion. Browser recovery-batch navigation uses distinct partial/terminal deliveries, live traffic and a duplicate signal; dedicated large-history navigation and deterministic announcement batching/deduplication controls retain their coverage.",
             "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
           },
           {

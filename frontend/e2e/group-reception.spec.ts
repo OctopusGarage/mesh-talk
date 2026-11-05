@@ -163,14 +163,12 @@ test("recovery batches remain discoverable alongside live messages without dupli
   });
   await expect(page.getByTestId("jump-to-latest")).toBeVisible();
   await page.getByTestId("composer-input").focus();
-  await receiveBatch(
-    page,
-    Array.from({ length: 8 }, (_, i) => ({
-      id: `Recovered batch ${i}`,
-      index: 1,
-      complete: i === 7,
-    })),
-  );
+  // A partial delivery and its terminal delivery exercise the batch boundary.
+  // Larger history windows and announcement coalescing have dedicated controls.
+  await receiveBatch(page, [
+    { id: "Recovered batch first", index: 1, complete: false },
+    { id: "Recovered batch last", index: 1, complete: true },
+  ]);
   await expect(page.getByTestId("earlier-messages")).toBeVisible();
   await page.evaluate(
     ({ channel, conversation, who }) => {
@@ -200,7 +198,7 @@ test("recovery batches remain discoverable alongside live messages without dupli
   );
   await expect(page.getByTestId("new-messages")).toBeVisible();
   await expect(page.getByTestId("reception-announcement")).toHaveText(
-    "9 unread messages",
+    "3 unread messages",
   );
   // Duplicate transport signal must leave the summary, row count and navigation intact.
   await page.evaluate(
@@ -213,9 +211,9 @@ test("recovery batches remain discoverable alongside live messages without dupli
         channel_id: channel,
         channel_name: "team",
         from: who,
-        text: "Recovered batch 7",
+        text: "Recovered batch last",
         reply_to: null,
-        event_id: "Recovered batch 7",
+        event_id: "Recovered batch last",
         arrival_kind: "catch_up",
         batch_id: "recovery-1",
         batch_complete: true,
@@ -224,7 +222,7 @@ test("recovery batches remain discoverable alongside live messages without dupli
     { channel: CHANNEL, who: BOB },
   );
   await expect(page.getByTestId("reception-announcement")).toHaveText(
-    "9 unread messages",
+    "3 unread messages",
   );
   await expect(page.getByTestId("composer-input")).toBeFocused();
   await page.getByTestId("new-messages").click();
