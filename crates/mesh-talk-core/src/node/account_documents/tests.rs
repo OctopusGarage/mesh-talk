@@ -571,6 +571,20 @@ async fn failed_initial_sibling_custody_recovery(with_offline_route: bool) {
         first: [Vec<(u128, String, String)>; 2],
         last: [std::collections::VecDeque<(u128, String, String)>; 2],
     }
+    // Each simulated application owns its two protocol workers and reactor.
+    // Synchronous history reads on the test runtime must not prevent the
+    // source or sibling from accepting and advancing the real recovery.
+    let mut source_server = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        source.clone(),
+        source_listener,
+    )
+    .await;
+    let mut sibling_server =
+        crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+            sibling.clone(),
+            sibling_listener,
+        )
+        .await;
     let phases = std::sync::Arc::new(std::sync::Mutex::new(RecoveryPhases::default()));
     let started = std::time::Instant::now();
     struct RestoreHooks<'a> {
@@ -614,8 +628,8 @@ async fn failed_initial_sibling_custody_recovery(with_offline_route: bool) {
                 }
             }));
     }
-    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
-    let sibling_server = tokio::spawn(sibling.clone().run_accept_loop(sibling_listener));
+    source_server.launch();
+    sibling_server.launch();
     let failure_snapshot = |stage: &str, history_ok: bool, repaired_ok: Option<bool>| {
         eprintln!(
             "failed-initial custody recovery stage={stage} elapsed={:?} history_ok={history_ok} repaired_ok={repaired_ok:?} offline_route={with_offline_route} source_observations={} sibling_observations={} phases={:?}",
@@ -677,15 +691,11 @@ async fn failed_initial_sibling_custody_recovery(with_offline_route: bool) {
     }
     source.runtime_work.close();
     sibling.runtime_work.close();
-    source_server.abort();
-    sibling_server.abort();
     let retired = tokio::time::timeout(Duration::from_secs(5), async {
         if let Some(route) = &mut offline {
             route.stop().await;
         }
-        for server in [source_server, sibling_server] {
-            let _ = server.await;
-        }
+        tokio::join!(source_server.stop(), sibling_server.stop());
         source.runtime_work.drain().await;
         sibling.runtime_work.drain().await;
     })
@@ -780,28 +790,29 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
             &owner.user_id(),
         );
     }
-    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
-    // Isolate the account-history/report boundary: use the existing inbound-only
-    // server owner and real account loop, without a channel-membership producer.
-    let serving = sibling.clone();
-    let sibling_server = tokio::spawn(async move {
-        let mut connections = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                result = sibling_listener.accept() => {
-                    let (stream, _) = result.unwrap();
-                    let serving = serving.clone();
-                    connections.spawn(Box::pin(async move {
-                        if let Ok(channel) = serving.privacy_accept(stream).await {
-                            serving.serve_connection(channel).await;
-                        }
-                    }));
+    let mut source_server = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        source.clone(),
+        source_listener,
+    )
+    .await;
+    // Retain real History and bounded inbound serving without introducing a
+    // channel-membership producer on the deliberately nonphysical sibling.
+    let mut sibling_server =
+        crate::node::test_support::IndependentPeerRuntime::start_multithreaded_with(
+            sibling.clone(),
+            sibling_listener,
+            |serving, listener| async move {
+                let mut tasks = tokio::task::JoinSet::new();
+                tasks.spawn(serving.clone().run_inbound_connections_for_test(listener));
+                tasks.spawn(serving.run_account_history_loop());
+                while let Some(result) = tasks.join_next().await {
+                    result.expect("owned nonphysical sibling service must not panic");
                 }
-                _ = connections.join_next(), if !connections.is_empty() => {}
-            }
-        }
-    });
-    let sibling_history = tokio::spawn(sibling.clone().run_account_history_loop());
+            },
+        )
+        .await;
+    source_server.launch();
+    sibling_server.launch();
     let mut history = false;
     let recovered = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
@@ -876,10 +887,9 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
     } else {
         None
     };
-    for task in [source_server, sibling_server, sibling_history] {
-        task.abort();
-        let _ = task.await;
-    }
+    source.runtime_work.close();
+    sibling.runtime_work.close();
+    tokio::join!(source_server.stop(), sibling_server.stop());
     source.runtime_work.drain().await;
     sibling.runtime_work.drain().await;
     assert!(
@@ -5412,8 +5422,18 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
         }
     }));
     source.schedule_channel_recovery(held_group);
-    tasks.spawn(source.clone().run_accept_loop(source_listener));
-    tasks.spawn(target.clone().run_accept_loop(target_listener));
+    let mut source_host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        source.clone(),
+        source_listener,
+    )
+    .await;
+    let mut target_host = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        target.clone(),
+        target_listener,
+    )
+    .await;
+    source_host.launch();
+    target_host.launch();
     let observed = std::panic::AssertUnwindSafe(async {
         tokio::time::timeout(Duration::from_secs(30), entry)
             .await
@@ -5536,6 +5556,7 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
                 failures += 1;
             }
         }
+        tokio::join!(source_host.stop(), target_host.stop());
         for node in [&source, &target, &peer] {
             node.runtime_work.drain().await;
         }
@@ -5716,11 +5737,20 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
             phase.store(value, std::sync::atomic::Ordering::Relaxed);
         }
     }));
-    let server = tokio::spawn(source.clone().run_accept_loop(listener));
-    // Both hosts must receive authenticated publication wakes. A target-only
-    // pull worker can finish an empty Directory sweep before source publication
-    // and then wait for the ten-second periodic repair instead of the live wake.
-    let worker = tokio::spawn(target.clone().run_accept_loop(target_listener));
+    let mut server = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        source.clone(),
+        listener,
+    )
+    .await;
+    // Both real hosts retain authenticated publication wakes and independent
+    // reactors while the observer reads their durable projections.
+    let mut worker = crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+        target.clone(),
+        target_listener,
+    )
+    .await;
+    server.launch();
+    worker.launch();
     let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         while !ids.iter().all(|id| {
             target
@@ -5799,10 +5829,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     *source.account_client_test_hook.lock().unwrap() = None;
     source.runtime_work.close();
     target.runtime_work.close();
-    worker.abort();
-    server.abort();
-    let _ = worker.await;
-    let _ = server.await;
+    tokio::join!(worker.stop(), server.stop());
     source.runtime_work.drain().await;
     target.runtime_work.drain().await;
     assert!(

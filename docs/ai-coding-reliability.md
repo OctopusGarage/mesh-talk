@@ -119,8 +119,9 @@ child's retirement permit. The [inbound serving owner](../crates/mesh-talk-core/
 is exercised by the real maintenance-hold Noise regression in
 [account action tests](../crates/mesh-talk-core/src/node/account_group/tests/message_action_reference.rs),
 alongside stalled-handshake retirement and the single-worker negative control.
-Custom protocol fixtures must retain that same independent host and retirement
-owner. A source's synchronous durable append must not run on the receiver's
+Custom protocol and failed-initial-custody recovery fixtures must retain that
+same independent host and retirement owner, including separate reactors for both
+full-host participants and the synchronous history observer. A source's synchronous durable append must not run on the receiver's
 reactor. The growing-history regression in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
 holds the actual source writer until a receiver page imports, then measures

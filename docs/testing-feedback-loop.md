@@ -587,6 +587,12 @@ An advertised unavailable external identity uses a fixture-owned TCP endpoint,
 which observes actual initiator bytes and closes before authentication or any
 Have/custody response. A held endpoint control binds the exact accepted socket,
 keeps authentication pending, then requires a typed transport failure on close.
+Each full-host recovery participant owns the existing independent two-worker
+peer runtime, prepared before observation and launched only after the failed-send
+and empty-custody checks. Synchronous observer reads and another device's durable
+work must not occupy its reactor. Join both host owners during bounded retirement. The same owner isolates paired
+nonphysical History/report and group-inventory fixtures: retain their actual
+History-only provider, held peer response, publication wakes and restart assertions.
 Preserve the original eight-second History and repair observers. Retain bounded
 passive recovery/dial evidence, the History-completion milestone and observed
 endpoint state; restore prior hooks and retire all owned work before teardown.
