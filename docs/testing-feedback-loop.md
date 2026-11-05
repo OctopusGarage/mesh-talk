@@ -1135,20 +1135,28 @@ fixture retains its separate eight-second operation, receipt and recovery proofs
 Both fault controllers belong to their fixture task sets, with drop guards that
 release held responses and cleanup that joins tasks and drains admitted writers.
 
-Queued-source fixtures retain the independent eight-second private operation
-receipt assertion. After that receipt and release of A, replay of all 66 signed
-rows, real public receipt and actual B comparison-pair retirement use the shared
-thirty-second functional convergence watchdog from the message-action fixture
-owner. This is an explicit correction of the original queued fixture's auxiliary
-eight-second recovery bound, not a product latency relaxation: after paid
-prefix/resume credit and terminal operation, the two retained comparisons follow
-ordinary cross-peer fairness. The product requires both scans to finish without
-combining checkpoints; it does not promise full-corpus convergence in eight
-seconds. Keep every recovery predicate, signature, continuation and lifetime
-check. The original selected-source recovery, other checkpoint/archive progress,
-Wake deadlines and production read clocks retain their existing bounds. Paused
-time controls require all recovery observations, allow convergence after eight
-seconds, and fail when pair retirement is absent at thirty seconds.
+Queued-source controls retain the independent eight-second private operation
+receipt assertion. After that receipt and release of A, every signed prepared
+row, the real public receipt and actual B comparison-pair retirement must converge
+under the shared thirty-second functional watchdog. The two live scenarios cover
+new terminal reuse of a completed background prefix and dispatch while unrelated
+local maintenance remains held. Their corpus uses a real signed higher-key
+operation projection and two newly published legacy rows. The normal provider's
+operation-before-legacy boundary supplies the actual partial page; the new result
+must sort strictly behind its retained checkpoint. Preserve exact A/B checkpoint
+replay, signature, executor and child-lifetime assertions.
+
+The independent real-Noise controls
+`known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages`
+and `terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows`
+retain full-page sizing, capability validation and complete replay coverage.
+Padding a scheduler scenario with a full durable page is not a prerequisite for
+its ordering assertion. Observe the natural A request live before publication;
+that publication may legitimately cancel it before the publisher returns. Require
+the exact protected resumed request to be live at operation admission instead of
+blocking cancellation to preserve an artificial setup interleaving. Keep every
+post-receipt recovery predicate. Paused-time recovery controls require all those
+predicates and reject missing pair retirement at the existing functional cutoff.
 
 Capture account document health before closing runtime admission or stopping
 peers. The test-local `capture_account_sync_before_cleanup` owns that observation
@@ -1214,17 +1222,10 @@ once a live hold is captured; never retry the measured operation. The fault
 regression must prove cancellation, retirement and capture of a distinct live
 request before admission.
 
-Queued-source fixtures that publish a real head to retire an old natural request
-must invalidate the earlier empty-source settlement before publication. Reuse the
-shared `ColdControlScope` observation: every new Control task invalidates prior
-settlement, and a completed prefix cannot pay outstanding comparison-pair debt.
-Before capturing the next unpaired natural hold, require the exact published
-source key on the requester, current Control settlement, pair retirement and
-rejection of the retired callback by its exact request identity and child lifetime.
-Carry the captured hold's task identity through setup and verify that child is
-still live when the canonical partial-page corpus is published. These observations
-stay within the existing cold budget and issue no extra requests; preserve the
-real signed exchange, protected-resume checks and operation/recovery deadlines.
+Captured request descriptors bind the current child task, lifetime and nonce.
+Retired callbacks cannot qualify a live hold; independent request-observer
+lifecycle controls establish that boundary without an additional live queued
+operation variant.
 
 Except for the explicitly classified queued and ordinary self-control post-receipt
 functional convergence phases above, once the original operation is admitted, or the external possession
@@ -1713,20 +1714,7 @@ does not retry failed product tests or change their acceptance criteria.
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.150 and
-cargo-llvm-cov 0.8.7, then publishes one immutable archive. Before publication it
-runs the fifteen exact critical recovery regressions from that same sealed,
-extracted archive: notification-only gossip, held-request and archive-readiness
-self controls, independent merged forwarding, storage-rollback replay, actual
-role-GC physical progress, the three authenticated custody setup controls and
-profile compaction with a held admitted writer, external-member reaction
-authentication, canonical own-copy file confirmation and the sender-sibling
-custody exclusion scenario.
-Every named case must execute exactly once, serially,
-with zero retries. Missing, duplicate, ignored or failed results reject the probe.
-Its bounded raw logs retain source/run/attempt identity and upload on failure. Diagnostic
-profiles stay outside canonical coverage/cache directories and never contribute
-to LCOV or consumer receipts. The complete fresh-consumer partitions remain the
-acceptance boundary; the early probe supplies earlier same-binary evidence. Four fresh consumers
+cargo-llvm-cov 0.8.7, then publishes one immutable archive. Four fresh consumers
 extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
 another test on that machine. Actual CI consumers set `MESH_WINDOWS_FAIL_FAST=0`
@@ -1896,9 +1884,8 @@ that current terminal. Publication contention is an observed unit-lock
 the higher-revision stale head; publication-unit poison tests keep underlying
 journal and document owners unpoisoned.
 Lifetime observation is scoped to synchronous test hooks and expires on return,
-abort or panic without calling fixture code during destruction. The delayed-server
-regression uses a real signed sibling publication to retire an older request and
-requires a fresh live request before measuring the existing receipt deadline.
+abort or panic without calling fixture code during destruction. Dedicated request-observer lifecycle controls reject retired descriptors before a
+current hold qualifies.
 
 ### Protocol fixture response epochs
 

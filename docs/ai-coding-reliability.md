@@ -394,6 +394,14 @@ repair ticks and positively observed Optional work. Keep current whole-Optional
 readiness, signed floors and acknowledgement assertions; do not latch an older
 completion as current readiness. Autonomous recovery controls retain their clocks.
 
+Keep a scheduling control's corpus at the protocol boundary it needs. The
+[queued-source controls](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)
+use a normal short partial page and retain strict result/checkpoint ordering;
+separate real-protocol tests own full-page durability and replay. Qualify request
+liveness before its cancellation trigger and the actual resumed owner before
+admission. A cancellation-triggering publication need not leave the old request
+alive after the publisher returns.
+
 Browser device options express intent; they do not observe native input state.
 Establish the required device mode through the browser's supported emulation
 owner, then verify actual media queries and touch capabilities before measuring

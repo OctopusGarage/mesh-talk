@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -263,150 +263,7 @@ export function verifyLayout(binaries) {
   }
 }
 
-export const criticalRecoveryProbeCases = Object.freeze([
-  "node::group_chain_tests::background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
-  "node::channels::account_self_control::tests::reference_modern_leave_request_overtakes_the_executors_held_requester_read",
-  "node::channels::account_self_control::tests::reference_modern_leave_keeps_left_over_old_member_head_and_reopen",
-  "node::forwarding::tests::forwarding_to_group_delivers_ordered_text_and_independent_merged_file",
-  "node::node::tests::group_reception_failed_rollback_retries_without_new_traffic",
-  "postoffice::maintenance::tests::actual_role_gc_supplies_free_pages_for_physical_progress",
-  "node::account_documents::tests::custody_channel_setup_waits_for_post_create_authenticated_inventory",
-  "node::account_documents::tests::custody_channel_setup_waits_for_same_lane_dm_recall_baseline",
-  "node::account_documents::tests::custody_channel_setup_does_not_wait_for_independent_directory",
-  "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
-  "node::account_group::tests::message_action_reference::reference_member_reacts_over_noise_with_private_projection_and_history_off",
-  "node::delivery_runtime_tests::account_file_own_copy_first_stays_canonical_and_never_confirms_target",
-  "node::account_documents::tests::channel_custody_never_counts_sender_sibling_as_other_member",
-  "node::account_sync::selection_tests::account_history_worker_reaches_original_archive_while_source_keeps_appending",
-  "node::account_documents::tests::channel_custody_refreshes_holder_certificates_and_deduplicates_explicit_legacy_members",
-]);
-export function criticalRecoveryProbeEnabled(env = process.env) {
-  const value = env.MESH_WINDOWS_CRITICAL_RECOVERY_PROBE;
-  assert.ok(
-    value === undefined || value === "0" || value === "1",
-    "MESH_WINDOWS_CRITICAL_RECOVERY_PROBE must be 0 or 1",
-  );
-  return value === "1";
-}
-
-// Diagnostic only: no consumer receipt or LCOV output. The full four-shard
-// acceptance remains mandatory even after this same-binary probe passes.
-export async function runCriticalRecoveryProbe(
-  { full, reuse, identity: sourceIdentity, archiveSha256, env = process.env },
-  run = command,
-) {
-  if (!criticalRecoveryProbeEnabled(env)) return;
-  const expectedNames = criticalRecoveryProbeCases.map(
-    (name) => `mesh-talk-core::mesh_talk_core$${name}`,
-  );
-  const matches = full.filter((row) => expectedNames.includes(row.eventName));
-  assert.equal(
-    matches.length,
-    expectedNames.length,
-    `Critical recovery probe requires all ${expectedNames.length} archived cases`,
-  );
-  for (const name of expectedNames) {
-    assert.equal(
-      matches.filter((row) => row.eventName === name).length,
-      1,
-      "Critical recovery probe requires one of each exact case",
-    );
-  }
-  assert.ok(
-    matches.every((row) => row.selected && !row.ignored),
-    "Critical recovery probe cases must be runnable",
-  );
-  assert.ok(
-    path.isAbsolute(env.RUNNER_TEMP ?? ""),
-    "Critical recovery probe requires absolute runner temp",
-  );
-  assert.match(
-    archiveSha256 ?? "",
-    /^[a-f0-9]{64}$/u,
-    "Critical recovery probe requires sealed archive digest",
-  );
-  const relative = path.relative(
-    realpathSync(process.cwd()),
-    realpathSync(env.RUNNER_TEMP),
-  );
-  assert.ok(
-    relative === ".." ||
-      relative.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(relative),
-    "Critical recovery profiles must remain outside the workspace/cache",
-  );
-  const directory = path.join(
-    env.RUNNER_TEMP,
-    "windows-critical-recovery-probe",
-  );
-  assert.ok(
-    !existsSync(directory),
-    "Critical recovery probe output already exists",
-  );
-  mkdirSync(directory);
-  const profiles = mkdtempSync(
-    path.join(env.RUNNER_TEMP, "windows-critical-recovery-profraw-"),
-  );
-  writeJson(path.join(directory, "input.json"), {
-    identity: sourceIdentity,
-    archiveSha256,
-    selected: matches,
-  });
-  let retired = false;
-  try {
-    const raw = await run(
-      [
-        "nextest",
-        "run",
-        ...nextestArgs,
-        ...reuse,
-        "-E",
-        `package(=mesh-talk-core) & binary(=mesh_talk_core) & (${criticalRecoveryProbeCases.map((name) => `test(=${name})`).join(" | ")})`,
-        "--test-threads",
-        "1",
-        "--retries",
-        "0",
-        "--no-fail-fast",
-        "--no-tests",
-        "fail",
-        "--message-format",
-        "libtest-json-plus",
-        "--message-format-version",
-        "0.1",
-      ],
-      {
-        env: {
-          ...env,
-          CARGO_NET_OFFLINE: "true",
-          RUST_TEST_THREADS: "1",
-          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1",
-          LLVM_PROFILE_FILE: path.join(profiles, "%m-%p.profraw"),
-        },
-        receipt: path.join(directory, "execution"),
-        progress: path.join(directory, "progress.jsonl"),
-        phase: "early-critical-recovery-probe",
-        liveStdout: true,
-        maxOutputBytes: 8 * 1024 * 1024,
-      },
-    );
-    retired = true;
-    verifyExecution(raw, matches);
-    writeJson(path.join(directory, "proof.json"), {
-      identity: sourceIdentity,
-      archiveSha256,
-      selected: matches,
-      executionSha256: digest(raw),
-      diagnosticOnly: true,
-    });
-  } finally {
-    // A rejected command may indicate unverified process-tree cleanup. Never
-    // delete its profile directory while ownership is uncertain; runner teardown
-    // owns that temporary residue. Raw logs remain available on every outcome.
-    if (retired) rmSync(profiles, { recursive: true });
-  }
-}
 export async function produce(directory) {
-  criticalRecoveryProbeEnabled();
   const before = await identity();
   const archive = path.join(directory, "workspace.tar.zst");
   assert.ok(!existsSync(archive), "Archive already exists");
@@ -436,7 +293,6 @@ export async function produce(directory) {
   verifyIdentity(before, await identity());
   const archiveSha256 = await fileHash(archive);
   writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256, inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
-  await runCriticalRecoveryProbe({ full: inventories[0], reuse, identity: before, archiveSha256 });
   rmSync(probe, { recursive: true });
   rmSync(binaryFile);
   console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);

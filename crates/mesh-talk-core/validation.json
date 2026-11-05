@@ -134,8 +134,9 @@
             "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
-            "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
-            "queued_source_retains_live_natural_hold_through_forced_early_cancellation",
+            "selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held",
+            "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
+            "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",
             "preparation_server_decisions_and_drop_release_preserve_child_lifetimes",
             "preparation_decision_inventory_prunes_retired_witnesses_and_rejects_live_overflow",
             "authenticated_preparation_wait_precedes_unchanged_document_read_clock",
@@ -161,7 +162,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Ordinary Text/Sticker, Policy/Dissolve, owner Rename and file-result provenance fixtures use the existing thirty-second functional convergence owner for each submitted turn; matching file retries have a separate invocation bound. Required private/public predicates and persistence-fault repair remain inside the same turn, while dedicated held-traffic, transfer and request/result latency bounds are unchanged. Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines.",
+            "name": "Ordinary Text/Sticker, Policy/Dissolve, owner Rename and file-result provenance fixtures use the existing thirty-second functional convergence owner for each submitted turn; matching file retries have a separate invocation bound. Required private/public predicates and persistence-fault repair remain inside the same turn, while dedicated held-traffic, transfer and request/result latency bounds are unchanged. Queued-source private receipts retain their eight-second latency assertion; after receipt and release, all signed rows, public receipt and actual pair retirement remain required under the shared thirty-second functional convergence watchdog without changing other performance or production deadlines. Two live queued controls retain terminal-prefix reuse and dispatch under held maintenance, using the production operation-before-legacy partial-page boundary with a signed higher-key projection and two new legacy rows. Preserve strict lower-result-key ordering, exact checkpoint replay and real signed receipts; separate real-Noise controls retain the 64-row page ceiling and complete replay. Natural A liveness qualifies publication start; publication-triggered cancellation may occur before the publisher returns. Dedicated observer and retirement controls retain rejection of stale child identities without extra queued-operation variants.",
             "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           },
           {
