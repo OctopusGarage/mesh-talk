@@ -5162,6 +5162,14 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
             })
             .unwrap();
     }
+    let cold_negotiations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_negotiations = cold_negotiations.clone();
+    *sibling.account_client_test_hook.lock().unwrap() =
+        Some(std::sync::Arc::new(move |_, phase| {
+            if phase.starts_with("negotiation_begin ") {
+                observed_negotiations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }));
     let mut servers = Vec::new();
     let mut addresses = Vec::new();
     for current in [&source, &sibling, &bob, &bob2] {
@@ -5192,15 +5200,19 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
             }
         }
         servers.push(
-            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded_with(
                 current.clone(),
                 listener,
+                |node, listener| node.run_inbound_connections_for_test(listener),
             )
             .await,
         );
     }
     let outcome = std::panic::AssertUnwindSafe(async {
-        // Populate every real route before any autonomous participant starts.
+        // Direct requests own this scenario. Keep the real bounded inbound
+        // dispatcher and independent hosts, without unrelated automatic repair
+        // racing the cold imports or consuming their connection capacity.
+        // Populate every real route before any listener starts.
         for server in &mut servers {
             server.launch();
         }
@@ -5240,11 +5252,24 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
             holder: bob.user_id(),
         };
         let before = source.account_document_meta(&key).unwrap();
+        assert_eq!(
+            cold_negotiations.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the explicit cold import must not race autonomous sibling negotiations"
+        );
+        assert!(
+            sibling.account_document_meta(&key).is_none(),
+            "the first manual import must not observe preloaded custody evidence"
+        );
         let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
         let mut cursor =
             sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
         eprintln!("certificate custody phase=legacy_import");
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
+        assert!(
+            cold_negotiations.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the cold-import witness must observe the real explicit negotiation"
+        );
         assert_eq!(
             sibling.channel_custody_count(channel, event).unwrap(),
             Some(2)

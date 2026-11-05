@@ -385,6 +385,17 @@ impl Node {
         Box::pin(self.run_accept_loop_inner(listener, false)).await;
     }
 
+    /// Direct protocol fixtures retain the bounded production connection owner
+    /// while their independent runtime owns retirement. Autonomous host tests
+    /// continue to use run_accept_loop and its complete background services.
+    #[cfg(test)]
+    pub(in crate::node) async fn run_inbound_connections_for_test(
+        self: Arc<Self>,
+        listener: TcpListener,
+    ) {
+        self.accept_connections(listener).await;
+    }
+
     async fn run_accept_loop_inner(
         self: Arc<Self>,
         listener: TcpListener,

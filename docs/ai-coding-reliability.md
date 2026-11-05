@@ -373,6 +373,15 @@ qualifies real accept-and-close behavior, joins its unavailable-endpoint owner,
 then hands the same listener to the cold application without changing its
 confirmation budget.
 
+A direct protocol fixture must own its cold-start preconditions. Starting every
+background repair loop can negotiate or import the claimed first request before
+the explicit operation and consume its transport capacity. Reuse the bounded
+[inbound connection owner](../crates/mesh-talk-core/src/node/serving.rs) when the
+scenario drives requests directly; keep full-host recovery tests separate. The
+[certificate refresh fixture](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
+requires no prior sibling negotiation or imported custody key, then positively
+witnesses its real explicit negotiation and durable projection.
+
 Browser device options express intent; they do not observe native input state.
 Establish the required device mode through the browser's supported emulation
 owner, then verify actual media queries and touch capabilities before measuring
