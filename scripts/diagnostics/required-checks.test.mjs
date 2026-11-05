@@ -66,8 +66,8 @@ test("Mac capacity allocation migrates Intel work while preserving ARM acceptanc
     assert.ok(names.includes(name.replace("macos-latest", "macos-26-intel")));
   }
   for (const name of armNames) assert.ok(names.includes(name));
-  assert.ok(names.includes(webkit));
-  assert.ok(!names.includes(webkit.replace("macos-latest", "macos-26-intel")));
+  assert.ok(!names.includes(webkit));
+  assert.ok(names.includes(webkit.replace("macos-latest", "macos-26-intel")));
   for (const name of ["health / Portable checks (macos-26-intel)", "Backend core (macos-26-intel)", ...armNames]) assert.ok(releaseSourceChecks.includes(name));
   assert.deepEqual(migrateRequiredChecks(policy), policy);
 });

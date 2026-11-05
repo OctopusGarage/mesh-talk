@@ -41,7 +41,7 @@ test("one reusable shard implementation retains twelve runners and all evidence 
   assert.match(reusable, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(reusable, /shard: \[1, 2, 3, 4\]/);
   assert.match(job("linux"), /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(job("desktop"), /operating_systems: '\["macos-latest","windows-latest"\]'/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
   assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 2);
   assert.ok(!root().includes("name: Run UI E2E"));
   assert.match(reusable, /npx playwright test --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4 --reporter=list,blob,json/);
@@ -52,15 +52,15 @@ test("one reusable shard implementation retains twelve runners and all evidence 
   assert.match(reusable, /if-no-files-found: error/);
 });
 
-test("browsers, Rust and native use ARM while Health and backend share Intel capacity", () => {
+test("macOS browsers, Health and backend use Intel while Rust and native retain ARM", () => {
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /operating_systems: '\["macos-latest","windows-latest"\]'/);
-  assert.match(job("portable"), /os: macos-latest, browser: webkit/);
-  assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-latest, windows-latest\]/);
-  assert.match(job("portable-evidence"), /macos-latest:darwin/);
-  assert.match(job("reports"), /for os in ubuntu-24.04 macos-latest windows-latest/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(job("portable"), /os: macos-26-intel, browser: webkit/);
+  assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
+  assert.match(job("portable-evidence"), /macos-26-intel:darwin/);
+  assert.match(job("reports"), /for os in ubuntu-24.04 macos-26-intel windows-latest/);
   assert.match(health, /os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
   assert.match(rust, /os: \[ubuntu-latest, macos-latest\]/);
   assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
@@ -78,7 +78,7 @@ test("desktop browser burst waits for Health and WebKit with bounded admission w
 });
 
 test("HTML reports require all four current-attempt shards for every admitted OS", () => {
-  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   const complete = { desktop: "success", platforms };
   assert.equal(renderReports(complete).status, 0);
   for (const os of platforms) {
@@ -89,7 +89,7 @@ test("HTML reports require all four current-attempt shards for every admitted OS
 });
 
 test("HTML presentation never substitutes for successful producer acceptance", () => {
-  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   for (const producer of ["LINUX", "DESKTOP"]) {
     for (const result of ["failure", "cancelled", "skipped", ""]) {
       assert.notEqual(gate("Require all full Chromium shards", { LINUX: "success", DESKTOP: "success", [producer]: result }), 0, `accepted ${producer} ${result}`);
@@ -193,7 +193,7 @@ test("HTML reports render admitted producers and distinguish skipped desktop fro
   const linuxOnly = renderReports();
   assert.equal(linuxOnly.status, 0, linuxOnly.stderr);
   assert.deepEqual(linuxOnly.rendered, ["playwright-report/ubuntu-24.04"]);
-  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   const complete = renderReports({ desktop: "success", platforms });
   assert.equal(complete.status, 0, complete.stderr);
   assert.deepEqual(complete.rendered, platforms.map(os => `playwright-report/${os}`));
@@ -212,6 +212,6 @@ test("HTML reports render admitted producers and distinguish skipped desktop fro
     assert.notEqual(renderReports({ linux: result }).status, 0, `unknown Linux conclusion ${result}`);
     assert.notEqual(renderReports({ desktop: result, platforms }).status, 0, `unknown desktop conclusion ${result}`);
   }
-  assert.equal(renderReports({ linux: "skipped", desktop: "success", platforms: ["macos-latest", "windows-latest"] }).status, 0);
+  assert.equal(renderReports({ linux: "skipped", desktop: "success", platforms: ["macos-26-intel", "windows-latest"] }).status, 0);
   assert.notEqual(renderReports({ linux: "skipped", desktop: "skipped", platforms: [] }).status, 0, "empty presentation cannot claim a rendered report");
 });
