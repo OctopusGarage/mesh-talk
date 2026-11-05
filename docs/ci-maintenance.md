@@ -76,6 +76,17 @@ purpose of each gate. A job timeout is a safety bound, not a performance target.
 Record material budget changes and their rationale in the owning configuration
 and review, rather than inventing universal minute limits in this guide.
 
+Stop an already failed candidate before starting another expensive compilation
+partition. Linux/macOS native coverage finishes all selected Host cases, then
+admits the remaining complete workspace only if Host passed. Both partitions
+still have to pass before reporting coverage; per-partition terminal result
+collection, independent matrix jobs, default targets and zero retries remain
+unchanged. The existing actual-tool coverage regression checks Host rejection,
+remaining-partition rejection, successful coverage accumulation, timing pipelines
+and report errors. Preserve partial backend evidence after a failure, while
+requiring evidence on passing jobs; a producer skipped by an upstream failure
+must not create a second missing-artifact error.
+
 ## Reuse compatible work with verifiable inputs
 
 Prefer one producer for an expensive output when consumers need the same inputs

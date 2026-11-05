@@ -155,19 +155,14 @@ jobs:
         run: |
           set -e -o pipefail
           run_coverage() {
-            local result=0 code
-            # Collect both independent partitions; preserve the first failure.
+            # Finish every selected case within a partition. A failed Host
+            # already rejects this candidate; do not compile another partition.
             if
               cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else result=$?; fi
+            then :; else return "$?"; fi
             if
               cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else
-              code=$?
-              if [ "$result" -eq 0 ]; then result=$code; fi
-            fi
-            # Failed partitions cannot authorize a complete coverage report.
-            if [ "$result" -ne 0 ]; then return "$result"; fi
+            then :; else return "$?"; fi
             cargo llvm-cov report --lcov --output-path lcov.info
           }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
@@ -187,19 +182,14 @@ jobs:
           set -e -o pipefail
           ulimit -c 262144
           run_coverage() {
-            local result=0 code
-            # Collect both independent partitions; preserve the first failure.
+            # Finish every selected case within a partition. A failed Host
+            # already rejects this candidate; do not compile another partition.
             if
               cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else result=$?; fi
+            then :; else return "$?"; fi
             if
               cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else
-              code=$?
-              if [ "$result" -eq 0 ]; then result=$code; fi
-            fi
-            # Failed partitions cannot authorize a complete coverage report.
-            if [ "$result" -ne 0 ]; then return "$result"; fi
+            then :; else return "$?"; fi
             cargo llvm-cov report --lcov --output-path lcov.info
           }
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
@@ -218,7 +208,7 @@ jobs:
         env:
           EVAL_SOURCE_SHA: ${{ github.sha }}
           EVAL_OUTPUT_DIR: ${{ runner.temp }}/backend-eval-results
-          EVAL_COVERAGE: '1'
+          EVAL_COVERAGE: "1"
         run: |
           node scripts/evals/backend-runner.mjs
           cargo llvm-cov --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
@@ -241,7 +231,7 @@ jobs:
         with:
           name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
           path: ${{ runner.temp }}/backend-eval-results/
-          if-no-files-found: error
+          if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
           retention-days: 14
 
       - name: Collect Linux native crash evidence and retire its storage
