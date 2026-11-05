@@ -604,6 +604,18 @@ protocol acceptance in the existing linked-Noise identity, revision deduplicatio
 local-edit propagation and legacy periodic-repair controls; do not construct an
 extra full-host scenario merely to prove that this fixture helper waits.
 
+The direct holder-certificate projection control commits one local message
+without fanout and requires zero existing custody. Its caller owns fresh authenticated
+group-sync and durable Have exchanges serially inside the same thirty-second
+setup bound. Require successful typed protocol results and a positive exact
+Have before the canonical custody publisher signs each legacy holder witness;
+a best-effort distribution admission result does not establish completion.
+An explicit group sync also installs the sibling's real message baseline while
+its account-document negotiation and custody key remain cold. Preserve
+certificate revision/hash changes, principal deduplication, unchanged-positive
+rechecks, rejected generic writes and durable reopen assertions. Autonomous
+custody recovery remains owned by the full-host scenarios.
+
 Prepare all routes and observers before launching independent participant hosts.
 Network-only offline cuts join producers and admitted work
 while preserving the Node for an explicit relaunch; permanent retirement closes

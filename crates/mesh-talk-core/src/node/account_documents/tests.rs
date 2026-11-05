@@ -5055,18 +5055,63 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
             )
             .await
             .unwrap();
-        source
-            .send_channel_message(channel, b"synthetic certificate refresh")
-            .await
+        // This direct-protocol fixture has no autonomous recovery owner.
+        // Commit without best-effort fanout, then own the real sync/Have rounds
+        // instead of waiting for an accepted send to imply remote custody.
+        let event = source
+            .enqueue_channel_message_reply_expiring_if(
+                channel,
+                b"synthetic certificate refresh",
+                None,
+                None,
+                |commit| commit(),
+            )
             .unwrap();
-        let event = source.channel_history(channel, 10).unwrap()[0].id;
-        wait_custody_source_count(
-            &source,
-            channel,
-            event,
-            2,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-        )
+        assert_eq!(
+            source.channel_custody_count(channel, event).unwrap(),
+            Some(0)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            for (index, (holder, address)) in [
+                (&bob, addresses[2]),
+                (&bob2, addresses[3]),
+                (&sibling, addresses[1]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // Own a fresh authenticated exchange: the best-effort fanout's
+                // admission result is not evidence that its protocol completed.
+                let public = holder.identity.public();
+                let mut connection = source
+                    .privacy_dial(address, &public)
+                    .await
+                    .expect("authenticate the baseline holder connection");
+                let store = source.sync_store(&public);
+                crate::node::session::request_round_paged(&mut connection, &store, channel)
+                    .await
+                    .expect("complete the baseline group-copy round");
+                let held =
+                    crate::node::session::request_durable_have(&mut connection, channel, event)
+                        .await
+                        .expect("complete the baseline durable Have request");
+                assert!(
+                    held,
+                    "each baseline holder must durably retain the exact message"
+                );
+                if index < 2 {
+                    // Sign only the actual authenticated positive Have result.
+                    source
+                        .publish_channel_custody(channel, event, &public, held, false, false)
+                        .unwrap();
+                    assert_eq!(
+                        source.channel_custody_count(channel, event).unwrap(),
+                        Some(index + 1),
+                        "each legacy holder must have its own durable custody witness"
+                    );
+                }
+            }
+        })
         .await
         .expect("both real legacy holders must confirm before their certificate bindings change");
         assert_eq!(

@@ -384,7 +384,10 @@ the explicit operation and consume its transport capacity. Reuse the bounded
 scenario drives requests directly; keep full-host recovery tests separate. The
 [certificate refresh fixture](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
 requires no prior sibling negotiation or imported custody key, then positively
-witnesses its real explicit negotiation and durable projection.
+witnesses its real explicit negotiation and durable projection. It commits its
+baseline without fanout and explicitly drives each real sync/Have exchange before
+observing custody. A passive observer cannot advance pending work when the
+fixture deliberately has no autonomous recovery owner.
 
 Keep fixture validation at the narrow boundary it owns. A full-host scenario
 whose only assertion concerns another test helper adds unrelated synchronization
