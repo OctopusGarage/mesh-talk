@@ -214,6 +214,7 @@ impl EventRepository {
         let (ids, required) = self.database.transaction(|c| {
             let owner=self.receive_owner_on(c)?;
             let mut ticket:i64=c.query_row("SELECT next_ticket FROM participant_receive_scan WHERE domain=?1",[self.domain.0.as_slice()],|r|r.get(0))?;
+            let original_ticket = ticket;
             // Keep the queue index as the outer driver. Without fixed join
             // order, cold statistics can scan the entire retained domain and
             // sort its matches before LIMIT bounds the returned queue page.
@@ -246,7 +247,9 @@ impl EventRepository {
                     ticket=advance(ticket)?;if admitted {ids.push(EventId::new(id));}
                 }
             }
-            c.execute("UPDATE participant_receive_scan SET next_ticket=?2 WHERE domain=?1",params![self.domain.0.as_slice(),ticket])?;
+            if ticket != original_ticket {
+                c.execute("UPDATE participant_receive_scan SET next_ticket=?2 WHERE domain=?1",params![self.domain.0.as_slice(),ticket])?;
+            }
             Ok((ids,required))
         })?;
         if ids.is_empty()

@@ -2225,7 +2225,9 @@ remains conservative. A failure rolls back retirement evidence with raw deletion
 Ordinary privacy deletion does not publish this semantic fact. Exact local-device
 Profile signatures also qualify the existing own-presentation exclusion; explicit
 causal-parent recovery still requires ordinary guarded raw admission.
-Empty Profile receive retry polls preserve the durable ticket unchanged. New
+Empty ordinary, control and Profile receive retry polls preserve durable tickets
+unchanged. Terminal rows still retire, and every unfinished attempt, including
+an oversized row, advances its fair turn. New
 pending work still rotates before expensive authentication, and accepted or
 definitively rejected sources retain their existing exact durable completion.
 Network callbacks retry only their actual conversation through a covering

@@ -747,6 +747,15 @@ impl Node {
                             .expect("profile receive work")
                             .processed(event.id)?)
                 {
+                    self.remember_semantic_profile(
+                        progress.mailbox.id(),
+                        outer_id,
+                        event.id,
+                        event.author
+                            == crate::eventlog::event::Author::from_ed25519(
+                                self.identity.public().ed25519_pub,
+                            ),
+                    )?;
                     processed.push(outer_id);
                     self.observe_mailbox_work(
                         super::work_observation::reason::SEMANTIC_PROFILE,

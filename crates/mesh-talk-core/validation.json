@@ -2691,7 +2691,8 @@
             "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
             "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
             "failed_media_",
-            "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work"
+            "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work",
+            "completed_ordinary_receive_callbacks_are_quiet_without_body_reads"
           ]
         }
       ],
@@ -2730,6 +2731,10 @@
           },
           {
             "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Settled ordinary and control receive callbacks preserve unchanged queue tickets without SQL mutations, committed writes or body reads; unfinished and oversized work still rotates fairly, terminal rows retire, and account fences remain current.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -2883,6 +2888,10 @@
           },
           {
             "name": "Optional progress observation uses fixed counters and a bounded exact recent-ID window, never logs identities or payloads, and cannot change transfer authority or persistence. Nonblocking hooks and reservation-qualified cursor publication keep observation outside owner guards; header-kind baselines skip history and retain finite upper cutoffs.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Account/mailbox/outer-bound signed semantic Profile mappings share the existing bounded wrapper bucket and require current repair epoch, account ownership and exact foreign processing facts before ordinary GET reuse. Own-device classification still checks the current account; dependency repair bypasses hints, real deletion invalidates them, optional failures fall back to GET, and no hint enters retained HAVE or custody.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]

@@ -14565,6 +14565,73 @@ fn append_pending_profile(
 }
 
 #[test]
+fn completed_ordinary_receive_callbacks_are_quiet_without_body_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let conversation = ConversationId::new([231; 32]);
+    // Retain a real ordinary conversation. Locally authored rows have no
+    // incoming presentation or control work after metadata discovery drains.
+    node.log
+        .lock()
+        .unwrap()
+        .append(Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Message,
+            vec![0; 64],
+        ))
+        .unwrap();
+    node.emit_new_messages(conversation);
+    node.project_private_dm_controls(conversation).unwrap();
+    let database = node.storage.database();
+    let pending: i64 = database
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM participant_receive_pending",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(pending, 0, "fixture must drain both receive purposes");
+    let body_reads = || {
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+    };
+    for controls_only in [false, true] {
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let reads = body_reads();
+        for _ in 0..8 {
+            if controls_only {
+                node.project_private_dm_controls(conversation).unwrap();
+            } else {
+                node.emit_new_messages(conversation);
+            }
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "empty ordinary receive callbacks must not mutate SQL state; controls_only={controls_only}"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(body_reads(), reads);
+    }
+}
+
+#[test]
 fn discovered_profile_demand_precedes_cursor_ack_and_retries_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let node = personal_message_node(

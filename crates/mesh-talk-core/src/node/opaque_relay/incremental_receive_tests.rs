@@ -982,6 +982,367 @@ async fn exchange_receive_with_cancellation(
 }
 
 #[tokio::test]
+async fn incremental_receive_processed_profile_transport_mapping_survives_fresh_operation_and_reopen()
+ {
+    assert_semantic_transport_mapping_reuse(false).await;
+}
+
+#[tokio::test]
+async fn incremental_receive_own_profile_transport_mapping_survives_fresh_operation_and_reopen() {
+    assert_semantic_transport_mapping_reuse(true).await;
+}
+
+async fn assert_semantic_transport_mapping_reuse(own: bool) {
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    let directory = tempfile::tempdir().unwrap();
+    let relay_directory = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let keys = identity.secret_bytes();
+    let account = Account::generate();
+    let account_key = account.secret_bytes();
+    let remote = DeviceIdentity::generate();
+    let remote_account = Account::generate();
+    let proof =
+        crate::discovery::Announce::new_with_account(&remote, &remote_account, "Remote", 47475);
+    let (node, _, _) =
+        super::super::test_support::node_with_files(directory.path(), identity, account, &proof);
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_post_office_permissions(false, true);
+    let relay = DeviceIdentity::generate();
+    let mut office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_directory.path()).unwrap(),
+        &relay_directory.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&node.identity.public(), &remote.public());
+    let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+    let (author, author_account, recipient) = if own {
+        (&node.identity, &node.account, remote.public())
+    } else {
+        (&remote, &remote_account, node.identity.public())
+    };
+    let payload = super::super::profile::ProfilePayload::new(author_account, None, 1);
+    let event = Event::new(
+        author,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::Profile,
+        crate::dm::seal(author, &recipient.x25519_pub, &payload.encode()).unwrap(),
+    );
+    let outer = mailbox.wrap(&event).unwrap();
+    let outer_id = outer.id;
+    office.ingest(outer).unwrap();
+    if !own {
+        // Exact durable presentation evidence may outlive its raw Profile.
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .complete(event.id)
+            .unwrap();
+    }
+    let key = bincode::serialize(&(
+        relay.public(),
+        remote.public(),
+        mailbox.id(),
+        Option::<ConversationId>::None,
+    ))
+    .unwrap();
+    let first_reads = office.state.body_read_counts();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    let classified_reads = office.state.body_read_counts();
+    assert_ne!(
+        classified_reads, first_reads,
+        "first classification must authenticate a real GET"
+    );
+    assert!(!node.log.lock().unwrap().has(&event.id).unwrap());
+    assert!(
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .retained_seen_selected(mailbox.id(), &[outer_id], &node.log.lock().unwrap(),)
+            .unwrap()
+            .is_empty(),
+        "semantic classification must not advertise retained HAVE or custody"
+    );
+    // Exact semantic reads are quiet and fail closed on absent facts or a
+    // corrupt optional mapping. Neither condition can become retained HAVE.
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    for _ in 0..8 {
+        assert!(node.semantic_profile_seen(mailbox.id(), outer_id).unwrap());
+    }
+    assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+    assert_eq!(database.successful_write_commits(), commits);
+    if !own {
+        database
+            .transaction(|c| {
+                c.execute(
+                    "DELETE FROM profile_receive_processed WHERE id=?1",
+                    [event.id.as_bytes().as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!node.semantic_profile_seen(mailbox.id(), outer_id).unwrap());
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .complete(event.id)
+            .unwrap();
+    }
+    let mut semantic_key = b"semantic-profile-v1".to_vec();
+    semantic_key.extend_from_slice(&node.account.public().ed25519_pub);
+    semantic_key.extend_from_slice(mailbox.id().as_bytes());
+    semantic_key.extend_from_slice(outer_id.as_bytes());
+    let saved = node
+        .opaque_receive_cache
+        .lock()
+        .unwrap()
+        .get_wrapper_hint(&semantic_key)
+        .unwrap()
+        .unwrap();
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .put_wrapper_hint(&semantic_key, b"corrupt semantic mapping")
+        .unwrap();
+    assert!(!node.semantic_profile_seen(mailbox.id(), outer_id).unwrap());
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .put_wrapper_hint(&semantic_key, &saved)
+        .unwrap();
+    let saved_account = node.account.public().ed25519_pub;
+    database
+        .transaction(|c| {
+            c.execute(
+                "UPDATE participant_profile SET account=?1 WHERE singleton=1",
+                [[199u8; 32].as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        node.semantic_profile_seen(mailbox.id(), outer_id),
+        Err(LogError::StaleCursor)
+    ));
+    database
+        .transaction(|c| {
+            c.execute(
+                "UPDATE participant_profile SET account=?1 WHERE singleton=1",
+                [saved_account.as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    database.transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_semantic_hint BEFORE INSERT ON opaque_wrapper_ids BEGIN SELECT RAISE(ABORT,'optional semantic hint unavailable'); END;")?;
+        Ok(())
+    }).unwrap();
+    let uncached_outer = EventId::new([197; 32]);
+    node.remember_semantic_profile(mailbox.id(), uncached_outer, event.id, own)
+        .unwrap();
+    assert!(
+        !node
+            .semantic_profile_seen(mailbox.id(), uncached_outer)
+            .unwrap()
+    );
+    database
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_semantic_hint")?;
+            Ok(())
+        })
+        .unwrap();
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .remove_checkpoint(&key)
+        .unwrap();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_eq!(
+        office.state.body_read_counts(),
+        classified_reads,
+        "a fresh operation must reuse exact durable semantic classification without GET"
+    );
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .remove_checkpoint(&key)
+        .unwrap();
+    drop(node);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        Account::from_secret_bytes(account_key),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_post_office_permissions(false, true);
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_eq!(
+        office.state.body_read_counts(),
+        classified_reads,
+        "relogin must reuse successful semantic classification without GET"
+    );
+    assert!(!node.log.lock().unwrap().has(&event.id).unwrap());
+    assert!(
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .retained_seen_selected(mailbox.id(), &[outer_id], &node.log.lock().unwrap(),)
+            .unwrap()
+            .is_empty(),
+        "reopened semantic mapping must remain outside retained HAVE/custody"
+    );
+
+    // Real retained-history deletion must revoke the new semantic shortcut,
+    // even when the exact presentation fact itself remains durable.
+    let ordinary = ConversationId::new([196; 32]);
+    node.log
+        .lock()
+        .unwrap()
+        .append(Event::new(
+            &node.identity,
+            ordinary,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![1],
+        ))
+        .unwrap();
+    let before_delete = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .receive_repair_revision()
+        .unwrap();
+    node.log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .drop_conversation(&ordinary)
+        .unwrap();
+    assert!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .receive_repair_revision()
+            .unwrap()
+            > before_delete
+    );
+    assert!(!node.semantic_profile_seen(mailbox.id(), outer_id).unwrap());
+    let reads_before_repair = office.state.body_read_counts();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_ne!(
+        office.state.body_read_counts(),
+        reads_before_repair,
+        "real deletion must force GET before reclassifying semantic transport progress"
+    );
+    assert!(!node.log.lock().unwrap().has(&event.id).unwrap());
+
+    // A new authenticated semantic event still finishes its real GET exchange
+    // when optional mapping publication fails; reopen must retry that GET.
+    let (author, author_account, recipient) = if own {
+        (&node.identity, &node.account, remote.public())
+    } else {
+        (&remote, &remote_account, node.identity.public())
+    };
+    let payload = super::super::profile::ProfilePayload::new(author_account, None, 2);
+    let next = Event::new(
+        author,
+        conversation,
+        2,
+        vec![],
+        2,
+        0,
+        EventKind::Profile,
+        crate::dm::seal(author, &recipient.x25519_pub, &payload.encode()).unwrap(),
+    );
+    let next_outer = mailbox.wrap(&next).unwrap();
+    let next_outer_id = next_outer.id;
+    office.ingest(next_outer).unwrap();
+    if !own {
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .complete(next.id)
+            .unwrap();
+    }
+    node.storage.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_semantic_transport_insert BEFORE INSERT ON opaque_wrapper_ids BEGIN SELECT RAISE(ABORT,'optional semantic transport insert unavailable'); END;")?;
+        Ok(())
+    }).unwrap();
+    let reads_before_failure = office.state.body_read_counts();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_ne!(office.state.body_read_counts(), reads_before_failure);
+    assert!(
+        !node
+            .semantic_profile_seen(mailbox.id(), next_outer_id)
+            .unwrap()
+    );
+    assert!(!node.log.lock().unwrap().has(&next.id).unwrap());
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_semantic_transport_insert")?;
+            Ok(())
+        })
+        .unwrap();
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .remove_checkpoint(&key)
+        .unwrap();
+    drop(node);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        Account::from_secret_bytes(account_key),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_post_office_permissions(false, true);
+    let retry_reads = office.state.body_read_counts();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_ne!(
+        office.state.body_read_counts(),
+        retry_reads,
+        "missing optional mapping must fall back to a successful GET after reopen"
+    );
+    assert!(
+        node.semantic_profile_seen(mailbox.id(), next_outer_id)
+            .unwrap()
+    );
+    assert!(
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .retained_seen_selected(
+                mailbox.id(),
+                &[outer_id, next_outer_id],
+                &node.log.lock().unwrap(),
+            )
+            .unwrap()
+            .is_empty(),
+        "repair and cache failure must never manufacture retained custody"
+    );
+}
+
+#[tokio::test]
 async fn incremental_receive_compacted_profiles_survive_missing_checkpoint() {
     assert_profile_semantic_replay(0).await;
 }

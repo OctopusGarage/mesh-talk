@@ -433,7 +433,13 @@ impl Node {
         if retained {
             self.observe_mailbox_work(reason::RETAINED_HIT, None);
         }
-        if !retained {
+        let semantic = !retained
+            && p.required_parent.is_none()
+            && self.semantic_profile_seen(p.mailbox.id(), id)?;
+        if semantic {
+            self.observe_mailbox_work(reason::SEMANTIC_HIT, None);
+        }
+        if !retained && !semantic {
             let seen = {
                 let cache = self.opaque_receive_cache.lock().expect("opaque cache");
                 let log = self.log.lock().expect("log lock");

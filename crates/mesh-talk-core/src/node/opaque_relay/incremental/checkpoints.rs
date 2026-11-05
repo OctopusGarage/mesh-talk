@@ -8,6 +8,14 @@ fn hint_key(mailbox: ConversationId, inner: EventId) -> Vec<u8> {
     key.extend_from_slice(inner.as_bytes());
     key
 }
+fn semantic_key(account: &[u8; 32], mailbox: ConversationId, outer: EventId) -> Vec<u8> {
+    let mut key = b"semantic-profile-v1".to_vec();
+    key.extend_from_slice(account);
+    key.extend_from_slice(mailbox.as_bytes());
+    key.extend_from_slice(outer.as_bytes());
+    key
+}
+
 fn bounded<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -180,6 +188,80 @@ fn receipt_valid(
 }
 
 impl Node {
+    /// A signed classification hint is transport evidence only. Its exact
+    /// presentation fact and account owner remain authoritative at every hit.
+    pub(in crate::node::opaque_relay) fn semantic_profile_seen(
+        &self,
+        mailbox: ConversationId,
+        outer: EventId,
+    ) -> Result<bool, LogError> {
+        let key = semantic_key(&self.account.public().ed25519_pub, mailbox, outer);
+        let bytes = {
+            self.opaque_receive_cache
+                .lock()
+                .expect("opaque cache")
+                .get_wrapper_hint(&key)
+                .ok()
+                .flatten()
+        };
+        let Some(body) = bytes
+            .as_deref()
+            .and_then(|bytes| self.open_mailbox_hint(&key, bytes))
+        else {
+            return Ok(false);
+        };
+        let Some((inner, own, epoch)) = bounded::<([u8; 32], bool, i64)>(&body) else {
+            return Ok(false);
+        };
+        let current = self
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .receive_repair_revision()?;
+        if epoch != current {
+            return Ok(false);
+        }
+        // Run the account/lifetime check even for own-author classifications,
+        // which deliberately have no presentation processed fact.
+        let processed = self
+            .profile_receive_work
+            .lock()
+            .expect("profile receive work")
+            .processed(EventId::new(inner))?;
+        Ok(own || processed)
+    }
+
+    pub(in crate::node::opaque_relay) fn remember_semantic_profile(
+        &self,
+        mailbox: ConversationId,
+        outer: EventId,
+        inner: EventId,
+        own: bool,
+    ) -> Result<(), LogError> {
+        let epoch = self
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .receive_repair_revision()?;
+        let key = semantic_key(&self.account.public().ed25519_pub, mailbox, outer);
+        let body = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize(&(*inner.as_bytes(), own, epoch))
+            .map_err(|error| LogError::Serialization(error.to_string()))?;
+        if let Some(value) = self.seal_mailbox_hint(&key, body)
+            && let Err(error) = self
+                .opaque_receive_cache
+                .lock()
+                .expect("opaque cache")
+                .put_wrapper_hint(&key, &value)
+        {
+            log::debug!("semantic Profile hint unavailable: {error}");
+        }
+        Ok(())
+    }
+
     pub(super) fn seal_mailbox_hint(&self, key: &[u8], body: Vec<u8>) -> Option<Vec<u8>> {
         let mut message = b"MeshTalkMailboxHintV1\0".to_vec();
         message.extend_from_slice(key);

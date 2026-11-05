@@ -246,6 +246,10 @@ request-before-cursor regressions in
 [node tests](../crates/mesh-talk-core/src/node/node_tests.rs) and atomic bootstrap
 regression in the [receive owner](../crates/mesh-talk-core/src/storage/profile/profile_receive.rs)
 exercise this boundary.
+An empty receive queue must not update an unchanged fair-turn ticket either;
+retain real unfinished rotation and terminal deletion. The settled ordinary and
+control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
+checks SQL mutations, committed writes and body reads together.
 
 Finite preparation must survive unrelated ordinary appends without relaxing its
 authority fences. Compare the owner's complete control and destructive revisions;

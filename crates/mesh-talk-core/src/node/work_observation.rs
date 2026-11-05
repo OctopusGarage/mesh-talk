@@ -119,6 +119,7 @@ pub(in crate::node) mod reason {
     pub const VIEW_RESUMED: usize = 25;
     pub const VIEW_NEW: usize = 26;
     pub const UPLOAD_RESET: usize = 27;
+    pub const SEMANTIC_HIT: usize = 28;
 }
 
 impl Node {
@@ -243,7 +244,7 @@ impl Node {
                     .map(|cache| cache.observed_len());
                 log::info!(target: "mesh_talk_core::node::node", "mailbox_cache usage_retained_records_bytes_session_records_checkpoints_records_bytes_wrappers_records_bytes={:?} hot_len={:?}", cache_usage, hot_len);
                 log::info!(target: "mesh_talk_core::node::node",
-                    "mailbox_work best_effort=true recent_window={} repeats={} counts={:?} header_kinds={:?} header_more={} header_reset={} labels=outer,open_failed,identity_handled,identity_deferred,consent_handled,consent_deferred,semantic_profile,retained_duplicate,admitted_retained,admitted_nonretained,admission_failed,staged,retained_hit,session_hit,get,get_retry,receipt_hot,receipt_durable,receipt_rejected,receipt_missing,view_skip,view_absent,view_stale,stamp_unknown,stamp_changed,view_resumed,view_new,upload_reset",
+                    "mailbox_work best_effort=true recent_window={} repeats={} counts={:?} header_kinds={:?} header_more={} header_reset={} labels=outer,open_failed,identity_handled,identity_deferred,consent_handled,consent_deferred,semantic_profile,retained_duplicate,admitted_retained,admitted_nonretained,admission_failed,staged,retained_hit,session_hit,get,get_retry,receipt_hot,receipt_durable,receipt_rejected,receipt_missing,view_skip,view_absent,view_stale,stamp_unknown,stamp_changed,view_resumed,view_new,upload_reset,semantic_hit",
                     recent, repeats, counts, headers.1, headers.2, headers.3);
             }
             Err(error) => {

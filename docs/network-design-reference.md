@@ -2543,6 +2543,20 @@ barrier but do not synchronize its parent directory. Changed writes retain the
 existing durability and retry rules. Missing, corrupt, foreign or evicted hints cause ordinary
 validated synchronization; they never grant admission or recipient delivery.
 
+A separate versioned namespace in that same bounded wrapper-map bucket records
+outer-to-inner semantic Profile classifications after successful authentication.
+The signed key binds the current account, mailbox and outer ID; its value binds
+the inner ID, local-device classification and incoming repair revision. Before
+skipping an ordinary GET, the receiver rechecks current receive policy, account
+ownership and repair revision. Foreign sources also require their exact durable
+Profile-processing fact; local-device classifications still check the current
+account owner. These mappings never enter retained pairs, HAVE or custody.
+Dependency repair bypasses them. Real destructive changes invalidate them, while
+authorized semantic compaction preserves their qualification. Missing, corrupt,
+evicted or failed optional mappings fall back to the original authenticated GET;
+a failed authoritative fact read cannot acknowledge an event. Unchanged hits
+perform no writes, and warm open does not load historical mappings.
+
 A page cursor is saved only after every ID is either admitted, supported by
 retained local evidence, exact account-scoped terminal Profile-processing or
 authorized superseded-source retirement evidence, the fully verified local-device
