@@ -250,6 +250,7 @@ impl Node {
             && receipt.runtime == runtime
             && receipt_valid(&receipt, conv, epoch, source, runtime)
         {
+            self.observe_mailbox_work(reason::RECEIPT_HOT, None);
             return Ok(receipt);
         }
         if let Ok(Some(bytes)) = cache.get_checkpoint(key) {
@@ -267,10 +268,14 @@ impl Node {
                     } else if let Some(repair) = receipt.repair.as_mut() {
                         repair.spent.fill(0);
                     }
+                    self.observe_mailbox_work(reason::RECEIPT_DURABLE, None);
                     return Ok(receipt);
                 }
             }
+            self.observe_mailbox_work(reason::RECEIPT_REJECTED, None);
             let _ = cache.remove_checkpoint(key);
+        } else {
+            self.observe_mailbox_work(reason::RECEIPT_MISSING, None);
         }
         Ok(Receipt {
             cursor: None,

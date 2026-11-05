@@ -2606,6 +2606,29 @@ tag. Stale selections remain visible without repairing or authorizing them.
 Tags can show sampled movement or replacement; snapshots do not prove every
 intervening transition or that all unchanged jobs are stuck.
 
+The same opt-in owner keeps cumulative, saturating mailbox reason counters and
+at most 4,096 exact recent mailbox/outer-ID pairs in memory. IDs are never logged;
+a first observation does not prove a newly created wrapper. Hooks use `try_lock`
+and may drop observations under contention, so zero is not proof of absence.
+Receive classification, hint/GET, receipt reuse/rejection and upload-view/stamp
+reasons do not replace or repeat protocol authorization. Counter snapshots and
+cursor reservations release the observer guard before storage access or logging.
+A cursor result is installed only for its matching observation reservation.
+
+New commit-kind counts anchor at the latest ordinal on their first observation,
+then inspect at most 64 indexed headers per interval without reading bodies or
+replaying the initial history. A captured upper ordinal excludes concurrent later
+appends; backlog and reset are reported separately. These counts and the live
+order/Profile pages are observations, not a consistent cross-owner snapshot.
+Scalar cache gauges read existing usage rows only. Their outer optional value
+indicates cache-lock acquisition; readiness contains source presence, checkpoint
+initialization and session-cleanup completion independently of the optional usage
+result. Usage lists retained records/bytes, session records, checkpoint
+records/bytes and wrapper-map records/bytes. Presence or initialization alone is
+not proof of current transfer authority. Hot-entry length is sampled separately.
+Diagnostics add no persistence, payload collection, grant or network exchange;
+normal resource acceptance keeps the observer disabled.
+
 ### Session reuse contract
 
 A fresh node dial, including Control-priority account synchronization, has one

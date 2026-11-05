@@ -624,9 +624,16 @@ impl Node {
         let mut retained = Vec::new();
         let mut semantic = Vec::new();
         for outer in wrappers {
+            self.observe_mailbox_work(
+                super::work_observation::reason::OUTER,
+                Some((progress.mailbox.id(), outer.id)),
+            );
             match progress.mailbox.open(&outer) {
                 Ok(event) => inner.push((outer.id, event)),
-                Err(_) => processed.push(outer.id),
+                Err(_) => {
+                    self.observe_mailbox_work(super::work_observation::reason::OPEN_FAILED, None);
+                    processed.push(outer.id);
+                }
             }
         }
         // A file's manifest is in its DM conversation and its chunks are in
@@ -667,17 +674,29 @@ impl Node {
                         || source != actor
                         || !self.known_account_allowed(&progress.recipient)
                     {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::IDENTITY_HANDLED,
+                            None,
+                        );
                         processed.push(outer_id);
                         continue;
                     }
                     match self.import_file_message_identity_checked(event) {
                         Ok(()) | Err(FileMessageIdentityImportError::Invalid(_)) => {
+                            self.observe_mailbox_work(
+                                super::work_observation::reason::IDENTITY_HANDLED,
+                                None,
+                            );
                             processed.push(outer_id)
                         }
                         Err(
                             FileMessageIdentityImportError::MissingProof
                             | FileMessageIdentityImportError::Persistence(_),
                         ) => {
+                            self.observe_mailbox_work(
+                                super::work_observation::reason::IDENTITY_DEFERRED,
+                                None,
+                            );
                             progress.defer_event(outer_id)?;
                         }
                     }
@@ -685,12 +704,20 @@ impl Node {
                 }
                 match self.accept_file_consent_event(&event, &progress.recipient) {
                     Ok(true) => {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::CONSENT_HANDLED,
+                            None,
+                        );
                         processed.push(outer_id);
                         continue;
                     }
                     Err(error) => {
                         // Retry this control after local storage recovers, while
                         // allowing unrelated messages in the same mailbox through.
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::CONSENT_DEFERRED,
+                            None,
+                        );
                         log::debug!("file consent persistence deferred: {error}");
                         // Do not re-download this failed control in every protocol
                         // step. This ID is deliberately absent from the node-wide seen cache:
@@ -721,6 +748,10 @@ impl Node {
                             .processed(event.id)?)
                 {
                     processed.push(outer_id);
+                    self.observe_mailbox_work(
+                        super::work_observation::reason::SEMANTIC_PROFILE,
+                        None,
+                    );
                     semantic.push((outer_id, event.id));
                     continue;
                 }
@@ -731,6 +762,10 @@ impl Node {
                     .has(&event.id)?
                 {
                     processed.push(outer_id);
+                    self.observe_mailbox_work(
+                        super::work_observation::reason::RETAINED_DUPLICATE,
+                        None,
+                    );
                     retained.push((outer_id, event.id));
                     continue;
                 }
@@ -743,6 +778,10 @@ impl Node {
                     (admission, staged)
                 };
                 if let Err(error) = admission {
+                    self.observe_mailbox_work(
+                        super::work_observation::reason::ADMISSION_FAILED,
+                        None,
+                    );
                     // Valid wrappers are only transport progress: missing parents,
                     // receive policy or storage failure may reject their contents.
                     // Recreating the round store must not make the same rejected
@@ -754,6 +793,7 @@ impl Node {
                     log::debug!("opaque event admission deferred: {error}");
                     progress.defer_event(outer_id)?;
                 } else if staged {
+                    self.observe_mailbox_work(super::work_observation::reason::STAGED, None);
                     // Staging is memory-only preparation. Cancellation drops it,
                     // so this wrapper must remain retryable without session hints.
                     progress.defer_event(outer_id)?;
@@ -765,7 +805,16 @@ impl Node {
                         .expect("log lock not poisoned")
                         .has(&inner_id)?
                     {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::ADMITTED_RETAINED,
+                            None,
+                        );
                         retained.push((outer_id, inner_id));
+                    } else {
+                        self.observe_mailbox_work(
+                            super::work_observation::reason::ADMITTED_NONRETAINED,
+                            None,
+                        );
                     }
                     self.emit_new_messages(conv);
                     self.process_channel_reception(conv, "catch_up");
@@ -859,6 +908,97 @@ mod permission_tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn work_observation_enabled_and_disabled_preserve_wrapper_receive_results() {
+        use crate::discovery::Announce;
+        for enabled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let remote = DeviceIdentity::generate();
+            let account = Account::generate();
+            let proof = Announce::new_with_account(&remote, &account, "Remote", 47475);
+            let (mut node, _, _) = super::super::test_support::node_with_files(
+                root.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            Arc::get_mut(&mut node)
+                .expect("fixture has one Node owner")
+                .order_work_observation =
+                enabled.then(super::super::work_observation::OrderWorkObserver::for_test);
+            let relay = DeviceIdentity::generate().public();
+            let mailbox = RelayMailbox::new(&node.identity, &remote.public(), &relay).unwrap();
+            let outer = Event::new(
+                &remote,
+                mailbox.id(),
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![0; 32],
+            );
+            let mut progress = OpaqueMailboxProgress::new(&relay, &remote.public(), None, mailbox);
+            let bodies = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts();
+            node.accept_opaque_wrappers(&mut progress, vec![outer.clone()])
+                .unwrap();
+            node.accept_opaque_wrappers(&mut progress, vec![outer.clone()])
+                .unwrap();
+            assert_eq!(progress.processed_events.get(&outer.id), Some(&None));
+            assert!(progress.deferred_events.is_empty());
+            assert!(!node.log.lock().unwrap().has(&outer.id).unwrap());
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts(),
+                bodies
+            );
+            let held = node.log.lock().unwrap();
+            let other = node.clone();
+            let (send, receive) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                other.observe_order_work();
+                let _ = send.send(());
+            });
+            let returned = receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+            drop(held);
+            worker.join().unwrap();
+            assert!(
+                returned,
+                "actual observation must not wait for the log owner"
+            );
+            if let Some(slot) = &node.order_work_observation {
+                let held = slot.lock().unwrap();
+                let other = node.clone();
+                let (send, receive) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    other.observe_mailbox_work(super::super::work_observation::reason::OUTER, None);
+                    let _ = send.send(());
+                });
+                let returned = receive
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_ok();
+                drop(held);
+                worker.join().unwrap();
+                assert!(
+                    returned,
+                    "actual branch recording must not wait for observer"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn opaque_receive_restart_skips_payload_and_recovers_missing_inner() {

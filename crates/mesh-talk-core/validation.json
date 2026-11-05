@@ -1204,6 +1204,10 @@
           {
             "name": "Production participant Nodes retain one indexed profile event owner without a body cache; owned fallible reads preserve storage errors, bounded network pages tolerate ordinary appends and revalidate policy, and delivery-journal recovery remains authoritative across independent source publication.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Only a complete current below-threshold Profile snapshot can follow an ordinary non-Profile append without a retained Profile parent; the exact revision rebinding and append commit or roll back together. New requests, Profile dependencies, stale or partial work and destructive changes retain invalidation; old tokens remain stale.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -1346,7 +1350,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
@@ -1578,7 +1582,10 @@
             "unrelated_profile_callbacks_leave_unknown_pending_work_quiet",
             "unknown_profile_callback_skips_body_then_verified_proof_resumes",
             "known_profile_callback_progresses_behind_blocked_other_conversation",
-            "global_profile_recovery_retries_unknown_work_after_verified_proof_arrives"
+            "global_profile_recovery_retries_unknown_work_after_verified_proof_arrives",
+            "existing_conversation_profile_callbacks_preserve_completed_negative_maintenance",
+            "discovered_profile_demand_precedes_cursor_ack_and_retries_after_reopen",
+            "discovered_profile_batch_revalidates_retained_metadata_and_deduplicates"
           ]
         },
         {
@@ -1651,6 +1658,10 @@
           {
             "name": "Verified contact nicknames survive stale public card labels, presence expiry and restart without personal aliases or changing signed claims",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Only newly discovered retained active Profile headers create maintenance demand, including own-author sources; bounded deduplicated demand commits before cursor acknowledgement. Account-fenced retry and atomic one-time legacy header bootstrap preserve pending tickets and completed receive facts without replaying completed payloads.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -2810,7 +2821,8 @@
         "crates/mesh-talk-core/src/eventlog/sync/network.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/current.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/replay.rs",
-        "crates/mesh-talk-core/src/node/channel/graph/preparing.rs"
+        "crates/mesh-talk-core/src/node/channel/graph/preparing.rs",
+        "crates/mesh-talk-core/src/node/work_observation.rs"
       ],
       "rust": [
         {
@@ -2829,7 +2841,10 @@
             "node::channel_account_authority::",
             "node::privacy_sync::principal::",
             "node::privacy_sync::admission_tests::",
-            "invisible_late_invitation_can_arrive_through_an_allowed_post_office"
+            "invisible_late_invitation_can_arrive_through_an_allowed_post_office",
+            "node::work_observation::tests::",
+            "work_observation_enabled_and_disabled_preserve_wrapper_receive_results",
+            "committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodies"
           ]
         }
       ],
@@ -2865,11 +2880,16 @@
           {
             "name": "Capability negotiation preserves legacy wire messages and authorization; malformed or unavailable modern exchanges never silently downgrade.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Optional progress observation uses fixed counters and a bounded exact recent-ID window, never logs identities or payloads, and cannot change transfer authority or persistence. Nonblocking hooks and reservation-qualified cursor publication keep observation outside owner guards; header-kind baselines skip history and retain finite upper cutoffs.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]
       },
       "escalation": [
-        "Exercise real Noise loopback negotiation, legacy fallback, unchanged populated sync, incremental append, interrupted/revoked permission, retry, restart, expiry and destructive reset. Run normal production node acceptance separately; synthetic tests do not certify installed desktop startup."
+        "Exercise real Noise loopback negotiation, legacy fallback, unchanged populated sync, incremental append, interrupted/revoked permission, retry, restart, expiry and destructive reset. Run normal production node acceptance separately; synthetic tests do not certify installed desktop startup.",
+        "Cancellation-repair fixtures independently bound setup and arm the unchanged progress deadline at exact repair-body admission. Held metadata must not consume that budget, while a held repair body must still cancel and retire the actual future and server. Preserve backward-ancestor recovery, optional-write faults, finite frontier progress and existing attempt/deadline limits."
       ]
     }
   ],

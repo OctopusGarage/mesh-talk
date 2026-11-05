@@ -231,6 +231,22 @@ Keep count, byte, task and concurrency budgets intact. Fair scheduling does not
 guarantee a successful write into a full store, justify eviction of durable intent
 or permit increasing capacity without reviewing consumers.
 
+A completed negative decision can be reusable work too. Prove that the mutation
+preserves its inputs and can only move its threshold farther from eligibility;
+rebind it atomically with that mutation. Include indirect dependencies: referencing
+a protected leaf can change which older leaf is protected. Partial, stale or
+positive decisions retain their original invalidation and publication rules.
+
+Create durable demand from changes to its actual inputs, not from a callback that
+can also report an unchanged round. Commit required demand before acknowledging
+discovery, and preserve idempotent retry across either commit failing. When older
+cursors did not certify the new obligation, supply a bounded, one-time backfill
+without discarding completed facts. The unchanged-conversation callback and
+request-before-cursor regressions in
+[node tests](../crates/mesh-talk-core/src/node/node_tests.rs) and atomic bootstrap
+regression in the [receive owner](../crates/mesh-talk-core/src/storage/profile/profile_receive.rs)
+exercise this boundary.
+
 Finite preparation must survive unrelated ordinary appends without relaxing its
 authority fences. Compare the owner's complete control and destructive revisions;
 an unfinished derived index cannot certify a concurrent append. Capture completed
@@ -408,6 +424,11 @@ A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
+
+The metadata-hold and repair-body-hold controls in the
+[opaque mailbox regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+qualify separate setup and admitted repair cancellation: setup cannot consume the
+progress budget, and that budget must still cancel actual owned work.
 
 A storage fault fixture must fail the currently selected persistence owner and
 observe that failure before asserting recovery. A hook on a neighboring journal

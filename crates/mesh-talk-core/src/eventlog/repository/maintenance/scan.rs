@@ -2,6 +2,39 @@
 use super::*;
 
 impl EventRepository {
+    /// Queue only currently retained active Profile sources from one discovery
+    /// page, including our own author. Presentation entitlement is independent.
+    pub(crate) fn request_discovered_profile_maintenance(
+        &self,
+        headers: &[CommittedHeader],
+    ) -> Result<(), LogError> {
+        if headers.len() > 128 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        if !headers
+            .iter()
+            .any(|row| row.active && row.header.kind == EventKind::Profile)
+        {
+            return Ok(());
+        }
+        let owner = self.receiving_owner()?;
+        self.database.transaction(|c| {
+            crate::storage::profile::participant::event_ownership::check_event_owner_on(c, &owner)?;
+            let mut conversations = std::collections::HashSet::new();
+            for row in headers {
+                if !row.active || row.header.kind != EventKind::Profile {
+                    continue;
+                }
+                let retained: bool = c.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM retained_events e JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE e.domain=?1 AND e.id=?2 AND e.commit_ordinal=?3 AND e.conversation=?4 AND e.kind=?5 AND s.lifecycle=0)"
+                )?.query_row(params![self.domain.0.as_slice(), row.header.id.as_bytes().as_slice(), row.ordinal, row.header.conversation.as_bytes().as_slice(), EventKind::Profile as i64], |r| r.get(0))?;
+                if retained && conversations.insert(row.header.conversation) {
+                    self.request_profile_maintenance_on(c, &row.header.conversation)?;
+                }
+            }
+            Ok(())
+        })
+    }
     /// Pending requests remain durable across snapshot invalidation and failed
     /// application. A duplicate request does not invalidate an active snapshot.
     pub(crate) fn request_profile_maintenance(

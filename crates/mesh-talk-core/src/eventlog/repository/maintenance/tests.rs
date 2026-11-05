@@ -87,6 +87,353 @@ fn finish(repo: &EventRepository, token: ProfileMaintenanceToken) -> Maintenance
     panic!("bounded scan did not finish")
 }
 #[test]
+fn completed_negative_profile_snapshot_survives_ordinary_appends_without_rescan() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    for seq in 1..=12 {
+        repo.append(&event(&author, seq, vec![], seq, EventKind::Profile))
+            .unwrap();
+    }
+    let ordinary = event(&author, 13, vec![], 13, EventKind::Message);
+    repo.append(&ordinary).unwrap();
+    let unrelated = Event::new(
+        &author,
+        ConversationId::new([9; 32]),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::Message,
+        vec![0; 64 * 1024],
+    );
+    repo.append(&unrelated).unwrap();
+    repo.request_profile_maintenance(&ordinary.conversation_id)
+        .unwrap();
+    let mut old = repo.begin_profile_maintenance().unwrap();
+    let complete = finish(&repo, old);
+    assert_eq!(complete.candidates, 10);
+    assert!(complete.candidate_bytes < repo.estimated_bytes().unwrap() / 8);
+    assert_eq!(repo.apply_profile_maintenance(old).unwrap().dropped, 0);
+    let bodies = repo.body_read_counts();
+    for (conv, parent, seq) in [
+        (ordinary.conversation_id, ordinary.id, 14),
+        (unrelated.conversation_id, unrelated.id, 2),
+    ] {
+        let before = repo.observe_profile_work().unwrap();
+        let appended = Event::new(
+            &author,
+            conv,
+            seq,
+            vec![parent],
+            seq,
+            seq,
+            EventKind::Message,
+            vec![42; 128],
+        );
+        repo.append(&appended).unwrap();
+        assert_eq!(
+            repo.apply_profile_maintenance(old).unwrap().state,
+            MaintenanceState::Stale
+        );
+        let fresh = repo.begin_profile_maintenance().unwrap();
+        assert_eq!(fresh.job, old.job);
+        let progress = repo
+            .step_profile_maintenance(
+                fresh,
+                PageBudget {
+                    rows: 1,
+                    bytes: 512,
+                },
+            )
+            .unwrap();
+        assert_eq!(progress.state, MaintenanceState::Ready);
+        assert_eq!((progress.examined, progress.charged_bytes), (0, 0));
+        assert_eq!(
+            (progress.candidates, progress.candidate_bytes),
+            (complete.candidates, complete.candidate_bytes)
+        );
+        let after = repo.observe_profile_work().unwrap();
+        let before_job = before.job.unwrap();
+        let after_job = after.job.unwrap();
+        assert_eq!(after_job.revision, after.source_revision);
+        assert!(after_job.complete);
+        assert_eq!(after_job.cursor_tag, before_job.cursor_tag);
+        assert!(after.requests_pending);
+        assert_eq!(repo.apply_profile_maintenance(fresh).unwrap().dropped, 0);
+        assert_eq!(repo.count(&ordinary.conversation_id).unwrap(), 14);
+        old = fresh;
+    }
+    assert_eq!(repo.body_read_counts(), bodies);
+}
+
+fn profile_snapshot_fixture(
+    repo: &EventRepository,
+    author: &DeviceIdentity,
+    byte_negative: bool,
+) -> (Vec<Event>, ProfileMaintenanceToken) {
+    let profiles: Vec<_> = (1..=12)
+        .map(|seq| event(author, seq, vec![], seq, EventKind::Profile))
+        .collect();
+    for profile in &profiles {
+        repo.append(profile).unwrap();
+    }
+    if byte_negative {
+        repo.append(&Event::new(
+            author,
+            ConversationId::new([9; 32]),
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Message,
+            vec![0; 64 * 1024],
+        ))
+        .unwrap();
+    }
+    repo.request_profile_maintenance(&profiles[0].conversation_id)
+        .unwrap();
+    let token = repo.begin_profile_maintenance().unwrap();
+    (profiles, token)
+}
+
+#[test]
+fn negative_profile_snapshot_below_count_gate_survives_ordinary_append() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    for seq in 1..=9 {
+        repo.append(&event(&author, seq, vec![], seq, EventKind::Profile))
+            .unwrap();
+    }
+    repo.request_profile_maintenance(&ConversationId::new([1; 32]))
+        .unwrap();
+    let old = repo.begin_profile_maintenance().unwrap();
+    let complete = finish(&repo, old);
+    assert_eq!(complete.candidates, 7);
+    assert!(complete.candidate_bytes >= repo.estimated_bytes().unwrap().div_ceil(8));
+    repo.append(&event(&author, 10, vec![], 10, EventKind::Message))
+        .unwrap();
+    assert_eq!(
+        repo.apply_profile_maintenance(old).unwrap().state,
+        MaintenanceState::Stale
+    );
+    let fresh = repo.begin_profile_maintenance().unwrap();
+    let progress = repo
+        .step_profile_maintenance(fresh, PageBudget::default())
+        .unwrap();
+    assert_eq!(progress.state, MaintenanceState::Ready);
+    assert_eq!(progress.examined, 0);
+    assert_eq!(progress.candidates, 7);
+    assert_eq!(repo.apply_profile_maintenance(fresh).unwrap().dropped, 0);
+}
+
+#[test]
+fn negative_profile_snapshot_invalidates_on_any_profile_parent() {
+    for parent_index in [0, 11] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+        let author = DeviceIdentity::generate();
+        let (profiles, old) = profile_snapshot_fixture(&repo, &author, true);
+        assert_eq!(finish(&repo, old).candidates, 10);
+        repo.append(&event(
+            &author,
+            13,
+            vec![profiles[parent_index].id],
+            13,
+            EventKind::Message,
+        ))
+        .unwrap();
+        assert_eq!(
+            repo.apply_profile_maintenance(old).unwrap().state,
+            MaintenanceState::Stale
+        );
+        let stale = repo.observe_profile_work().unwrap();
+        assert!(stale.job.unwrap().revision < stale.source_revision);
+        let fresh = repo.begin_profile_maintenance().unwrap();
+        assert_eq!(finish(&repo, fresh).candidates, 9);
+        assert_eq!(repo.apply_profile_maintenance(fresh).unwrap().dropped, 0);
+        repo.drop_conversation(&ConversationId::new([9; 32]))
+            .unwrap();
+        let actionable = repo.begin_profile_maintenance().unwrap();
+        finish(&repo, actionable);
+        assert_eq!(
+            repo.apply_profile_maintenance(actionable).unwrap().dropped,
+            9
+        );
+        assert!(repo.has(&profiles[parent_index].id).unwrap());
+        // Referencing a protected leaf promotes the previous candidate into
+        // the newest-two unreferenced leaves; it must survive the rebuilt job.
+        for index in if parent_index == 11 {
+            [9, 10]
+        } else {
+            [10, 11]
+        } {
+            assert!(repo.has(&profiles[index].id).unwrap());
+        }
+    }
+}
+
+#[test]
+fn negative_profile_snapshot_carry_excludes_invalidating_boundaries() {
+    for boundary in ["profile", "request", "partial", "stale", "positive"] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+        let author = DeviceIdentity::generate();
+        let (profiles, old) = profile_snapshot_fixture(&repo, &author, boundary != "positive");
+        if boundary != "partial" {
+            finish(&repo, old);
+        } else {
+            repo.step_profile_maintenance(
+                old,
+                PageBudget {
+                    rows: 2,
+                    bytes: 1024,
+                },
+            )
+            .unwrap();
+        }
+        let before = repo.observe_profile_work().unwrap();
+        match boundary {
+            "profile" | "stale" => {
+                repo.append(&event(&author, 13, vec![], 13, EventKind::Profile))
+                    .unwrap();
+            }
+            "request" => {
+                repo.request_profile_maintenance(&ConversationId::new([9; 32]))
+                    .unwrap();
+            }
+            _ => {}
+        }
+        if boundary != "profile" {
+            repo.append(&event(&author, 14, vec![], 14, EventKind::Message))
+                .unwrap();
+        }
+        let after = repo.observe_profile_work().unwrap();
+        assert_eq!(
+            after.job.as_ref().unwrap().revision,
+            before.job.unwrap().revision,
+            "{boundary}"
+        );
+        assert!(
+            after.job.unwrap().revision < after.source_revision,
+            "{boundary}"
+        );
+        assert_eq!(
+            repo.apply_profile_maintenance(old).unwrap().state,
+            MaintenanceState::Stale
+        );
+        assert!(repo.has(&profiles[0].id).unwrap());
+    }
+}
+
+#[test]
+fn negative_profile_snapshot_carry_rolls_back_with_late_append_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    let (_, token) = profile_snapshot_fixture(&repo, &author, true);
+    finish(&repo, token);
+    let before = repo.observe_profile_work().unwrap();
+    let charge = repo.estimated_bytes().unwrap();
+    db.transaction(|c| {
+        // This domain write follows the carry UPDATE. Require the job to have
+        // advanced already so the injected failure exercises actual rollback.
+        c.execute_batch("CREATE TEMP TRIGGER fail_after_profile_carry BEFORE UPDATE OF next_commit ON event_domains WHEN EXISTS(SELECT 1 FROM event_profile_jobs j WHERE j.domain=NEW.domain AND j.source_revision=NEW.source_revision) BEGIN SELECT RAISE(ABORT,'late append failure after carry'); END;")?;
+        Ok(())
+    }).unwrap();
+    let appended = event(&author, 13, vec![], 13, EventKind::Message);
+    assert!(repo.append(&appended).is_err());
+    assert_eq!(repo.observe_profile_work().unwrap(), before);
+    assert_eq!(repo.estimated_bytes().unwrap(), charge);
+    assert!(!repo.has(&appended.id).unwrap());
+    assert_eq!(
+        repo.step_profile_maintenance(token, PageBudget::default())
+            .unwrap()
+            .examined,
+        0
+    );
+    db.transaction(|c| {
+        c.execute_batch("DROP TRIGGER fail_after_profile_carry")?;
+        Ok(())
+    })
+    .unwrap();
+    repo.append(&appended).unwrap();
+    let fresh = repo.begin_profile_maintenance().unwrap();
+    assert_eq!(
+        repo.step_profile_maintenance(fresh, PageBudget::default())
+            .unwrap()
+            .examined,
+        0
+    );
+}
+
+#[test]
+fn negative_profile_snapshot_reopens_and_preserves_exact_token_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    let (_, old) = profile_snapshot_fixture(&repo, &author, true);
+    finish(&repo, old);
+    repo.append(&event(&author, 13, vec![], 13, EventKind::Message))
+        .unwrap();
+    let fresh = repo.begin_profile_maintenance().unwrap();
+    let before = repo.observe_profile_work().unwrap();
+    drop(repo);
+    drop(db);
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    assert_eq!(repo.observe_profile_work().unwrap(), before);
+    assert_eq!(
+        repo.step_profile_maintenance(fresh, PageBudget::default())
+            .unwrap()
+            .examined,
+        0
+    );
+    let other = EventRepository::new(db, EventDomainId([2; 16])).unwrap();
+    let other_dir = tempfile::tempdir().unwrap();
+    let other_store = EventRepository::new(database(&other_dir), EventDomainId([1; 16])).unwrap();
+    for wrong in [
+        old,
+        ProfileMaintenanceToken {
+            domain: other.domain,
+            ..fresh
+        },
+        ProfileMaintenanceToken {
+            store_uuid: other_store.store_uuid,
+            ..fresh
+        },
+        ProfileMaintenanceToken {
+            job: [0; 16],
+            ..fresh
+        },
+    ] {
+        assert_eq!(
+            repo.step_profile_maintenance(wrong, PageBudget::default())
+                .unwrap()
+                .state,
+            MaintenanceState::Stale
+        );
+        assert_eq!(
+            repo.apply_profile_maintenance(wrong).unwrap().state,
+            MaintenanceState::Stale
+        );
+    }
+    repo.drop_conversation(&ConversationId::new([9; 32]))
+        .unwrap();
+    assert_eq!(
+        repo.apply_profile_maintenance(fresh).unwrap().state,
+        MaintenanceState::Stale
+    );
+    let rebuilt = repo.begin_profile_maintenance().unwrap();
+    assert_eq!(finish(&repo, rebuilt).candidates, 10);
+    assert_eq!(repo.apply_profile_maintenance(rebuilt).unwrap().dropped, 10);
+}
+
+#[test]
 fn profile_snapshot_preserves_newest_two_and_referenced_parents() {
     let dir = tempfile::tempdir().unwrap();
     let db = database(&dir);
@@ -1020,4 +1367,51 @@ fn profile_compaction_defers_ready_order_reclamation(total: u64) {
         repo.body_decodes.load(std::sync::atomic::Ordering::Relaxed),
         0
     );
+}
+
+#[test]
+fn committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    repo.append(&event(&author, 1, vec![], 1, EventKind::Profile))
+        .unwrap();
+    let baseline = repo.observe_committed_kinds(None).unwrap();
+    assert_eq!(baseline.0, 0);
+    assert_eq!(
+        baseline.1, [0; 20],
+        "baseline must not enumerate historical headers"
+    );
+    for n in 2..=67 {
+        repo.append(&event(
+            &author,
+            n,
+            vec![],
+            n,
+            if n == 67 {
+                EventKind::Profile
+            } else {
+                EventKind::Message
+            },
+        ))
+        .unwrap();
+    }
+    let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = db.successful_write_commits();
+    let bodies = repo.body_read_counts();
+    let page = repo.observe_committed_kinds(Some(baseline.0)).unwrap();
+    assert_eq!(page.1[0], 64);
+    assert_eq!(page.1[8], 0);
+    assert!(page.2);
+    let tail = repo.observe_committed_kinds(Some(page.0)).unwrap();
+    assert_eq!(tail.1[0], 1);
+    assert_eq!(tail.1[8], 1);
+    assert!(!tail.2);
+    let reset = repo.observe_committed_kinds(Some(999)).unwrap();
+    assert!(reset.3);
+    assert_eq!(reset.1, [0; 20]);
+    assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+    assert_eq!(db.successful_write_commits(), commits);
+    assert_eq!(repo.body_read_counts(), bodies);
 }

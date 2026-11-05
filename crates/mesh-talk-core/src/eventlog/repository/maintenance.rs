@@ -49,6 +49,66 @@ pub(crate) struct MaintenanceApply {
 }
 
 impl EventRepository {
+    /// Baseline skips existing history. Later calls inspect at most 64 headers,
+    /// never bodies or mutable work state. Ordinals are observation only.
+    pub(crate) fn observe_committed_kinds(
+        &self,
+        after: Option<i64>,
+    ) -> Result<(i64, [u64; 20], bool, bool), LogError> {
+        let next = self.database.read(|c| {
+            let next: i64 = c.query_row(
+                "SELECT next_commit FROM event_domains WHERE domain=?1",
+                [self.domain.0.as_slice()],
+                |r| r.get(0),
+            )?;
+            nonnegative(next)
+        })?;
+        let latest = next - 1;
+        let mut counts = [0u64; 20];
+        let Some(after) = after else {
+            return Ok((latest, counts, false, false));
+        };
+        if after > latest || after < -1 {
+            return Ok((latest, counts, false, true));
+        }
+        let rows = self.committed_headers_page((after >= 0).then_some(after), 64)?;
+        let mut cursor = after;
+        for row in rows {
+            if row.ordinal > latest {
+                break;
+            }
+            let count = counts
+                .get_mut(row.header.kind as usize)
+                .ok_or_else(|| corrupt("unknown observed event kind"))?;
+            *count = count.saturating_add(1);
+            cursor = row.ordinal;
+        }
+        // Deleted header gaps do not pin this observational cursor forever.
+        let more = cursor < latest && counts.iter().sum::<u64>() == 64;
+        if !more {
+            cursor = latest;
+        }
+        Ok((cursor, counts, more, false))
+    }
+    /// A non-Profile append without Profile parents preserves every selected
+    /// leaf and its rank, and only increases the denominator of the byte gate.
+    /// Carry only a current, complete negative result; old tokens still fail
+    /// the domain revision fence. Caller owns the append transaction.
+    pub(super) fn carry_negative_profile_snapshot_on(
+        &self,
+        c: &Connection,
+        old_revision: i64,
+        new_revision: i64,
+        old_total: i64,
+    ) -> Result<(), LogError> {
+        c.execute(
+            "UPDATE event_profile_jobs SET source_revision=?3 WHERE domain=?1 AND source_revision=?2 AND complete=1 AND (candidate_count<8 OR candidate_bytes<?4)",
+            params![self.domain.0.as_slice(), old_revision, new_revision,
+                old_total / 8 + i64::from(old_total % 8 != 0)],
+        )?;
+        Ok(())
+    }
+
     /// One metadata row, including stale jobs which ordinary mutation fences
     /// reject. Observation never advances a cursor or authenticates deletion.
     pub(crate) fn observe_profile_work(&self) -> Result<ProfileWorkObservation, LogError> {

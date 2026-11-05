@@ -188,13 +188,7 @@ impl Node {
     /// Receive a bounded metadata discovery/retry page. Unknown devices and
     /// temporarily disabled sibling synchronization keep durable pending work.
     pub(in crate::node) fn process_profile_events(&self, conv: ConversationId) {
-        if let Err(error) = self.drain_profile_receptions(Some(conv)).and_then(|_| {
-            self.log
-                .lock()
-                .expect("log mutex not poisoned")
-                .request_profile_compaction(conv)?;
-            Ok(())
-        }) {
+        if let Err(error) = self.drain_profile_receptions(Some(conv)) {
             log::warn!("profile reception deferred after storage failure: {error}");
         }
     }
@@ -220,6 +214,13 @@ impl Node {
             .repository()?
             .committed_headers_page(after, 128)?;
         let discovering = headers.len() == 128;
+        // Commit raw maintenance demand before acknowledging discovery. A failed
+        // cursor commit retries this idempotent bounded metadata batch.
+        self.log
+            .lock()
+            .expect("log mutex not poisoned")
+            .repository()?
+            .request_discovered_profile_maintenance(&headers)?;
         work.discover(
             after,
             &headers,

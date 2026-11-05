@@ -1,5 +1,6 @@
 //! Bounded mailbox replication. Cursors record transport progress, never delivery.
 use super::*;
+use crate::node::work_observation::reason;
 
 mod checkpoints;
 mod confirmation;
@@ -74,6 +75,10 @@ impl Drop for Lease {
     }
 }
 impl UploadCache {
+    pub(in crate::node) fn observed_len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(in crate::node) fn clear_receive_repair_leases(&mut self) {
         for entry in self.entries.values() {
             let mut entry = entry.lock().expect("upload entry");
@@ -425,6 +430,9 @@ impl Node {
                 .unwrap_or_default()
                 .contains(&id)
         };
+        if retained {
+            self.observe_mailbox_work(reason::RETAINED_HIT, None);
+        }
         if !retained {
             let seen = {
                 let cache = self.opaque_receive_cache.lock().expect("opaque cache");
@@ -435,6 +443,7 @@ impl Node {
                     .contains(&id)
             };
             if seen && !retry {
+                self.observe_mailbox_work(reason::SESSION_HIT, None);
                 state_mut(p).receipt.session_only = true;
             } else {
                 let cursor = state(p)
@@ -443,6 +452,14 @@ impl Node {
                     .map(|page| page.cursor.clone())
                     .or_else(|| state(p).receipt.cursor.clone())
                     .ok_or(session::SessionError::UnexpectedMessage)?;
+                self.observe_mailbox_work(
+                    if retry {
+                        reason::GET_RETRY
+                    } else {
+                        reason::GET
+                    },
+                    None,
+                );
                 let events = mailbox::get(channel, p.mailbox.id(), &cursor, &[id]).await?;
                 // A policy change can arrive while the authenticated GET is in
                 // flight. Keep this ID queued without admitting its response.
@@ -1033,6 +1050,8 @@ impl Node {
                 .expect("repair page")
                 .clone();
             if let Some(outer) = page.ids.get(page.next).copied() {
+                #[cfg(test)]
+                self.trace_account_client(&p.recipient, || "mailbox_repair_body_admitted".into());
                 let wrappers =
                     mailbox::get(channel, p.mailbox.id(), &page.cursor, &[outer]).await?;
                 if !self.relay_receive_allowed(&p.relay) {
@@ -1218,6 +1237,7 @@ impl Node {
             state_mut(p).remote = Some(remote);
             state_mut(p).remote_floor = Some(floor);
             if page.reset && !own_creation {
+                self.observe_mailbox_work(reason::UPLOAD_RESET, None);
                 state_mut(p).receipt.pending.clear();
                 state_mut(p).receipt.repair = None;
                 state_mut(p).repair_generation = None;
@@ -1380,12 +1400,14 @@ impl Node {
                             && state(p).remote.as_ref() == Some(&completed.remote)
                     })
             }) {
+                self.observe_mailbox_work(reason::VIEW_SKIP, None);
                 state_mut(p).history_checked = true;
                 state_mut(p).history_done = true;
                 return Ok(());
             }
             let mut e = state(p).lease.0.lock().expect("upload entry");
             if e.view.is_none() {
+                self.observe_mailbox_work(reason::VIEW_ABSENT, None);
                 e.view = Some(store.open_history_upload(&conv)?);
                 e.rank = -1;
                 e.complete = false;
@@ -1394,6 +1416,7 @@ impl Node {
                 match store.validate_history_upload(e.view.as_ref().expect("upload view")) {
                     Ok(()) => {}
                     Err(LogError::StaleCursor) => {
+                        self.observe_mailbox_work(reason::VIEW_STALE, None);
                         e.view = Some(store.open_history_upload(&conv)?);
                         e.rank = -1;
                         e.last = None;
@@ -1402,7 +1425,23 @@ impl Node {
                     Err(error) => return Err(error.into()),
                 }
             } else if stamp.is_none() || e.stamp != stamp {
+                self.observe_mailbox_work(
+                    if stamp.is_none() {
+                        reason::STAMP_UNKNOWN
+                    } else {
+                        reason::STAMP_CHANGED
+                    },
+                    None,
+                );
                 let reused = store.resume_history_upload(e.view.as_mut().expect("upload view"))?;
+                self.observe_mailbox_work(
+                    if reused {
+                        reason::VIEW_RESUMED
+                    } else {
+                        reason::VIEW_NEW
+                    },
+                    None,
+                );
                 if !reused {
                     e.view = Some(store.open_history_upload(&conv)?);
                     e.rank = -1;

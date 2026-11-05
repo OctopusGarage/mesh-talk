@@ -2194,7 +2194,15 @@ per author and every referenced ancestor. Deleting a child does not make its
 parent eligible in the same snapshot. The existing minimum of eight candidates
 and reclaimed-cost threshold of one eighth of the domain estimate remain in
 force. Source changes invalidate an unfinished selection without losing pending
-requests. Applying a complete selection is atomic and updates metadata,
+requests. A complete, current below-threshold snapshot survives an ordinary
+non-Profile append only when no new parent is a retained Profile. The append
+transaction advances that exact snapshot binding with the domain revision;
+Profile leaf ranking stays unchanged and the larger domain estimate cannot turn
+a negative decision into eligible deletion. References to protected Profile
+leaves invalidate too, because they can change which older leaves are protected.
+New Profiles, new requests, partial or stale snapshots and destructive changes
+retain ordinary invalidation; old tokens remain stale. Applying a complete
+selection is atomic and updates metadata,
 fingerprints and ordering authority together; it may perform disk work
 proportional to the removed rows, without rewriting unrelated event bodies.
 Participant runtime maintenance now drives these bounded repository steps and
@@ -2228,6 +2236,15 @@ routing and disabled sibling policy before retry bodies are hydrated; skipped
 sources remain pending and final decoded authentication checks remain fresh.
 Index installation scans pending metadata once, without replaying ciphertext or
 completion facts. Scoped retry does not bypass the global discovery-page budget.
+Maintenance demand comes from newly discovered, retained active Profile headers,
+including the local author's sources, rather than unchanged network callbacks.
+The bounded page deduplicates conversations and commits demand before advancing
+the receive cursor; a failed acknowledgement safely retries that demand. Current
+account ownership and retained metadata are revalidated in the request transaction;
+presentation entitlement does not control physical source maintenance. A private
+per-account bootstrap marker atomically resets a legacy header cursor once while
+preserving pending tickets and processed facts. This backfill uses the same bounded
+header discovery and does not replay completed payloads or reset on warm reopen.
 
 Completed receiver download discovery validates its account and exact policy
 generation without rewriting scan bookkeeping. New offers retain transactional

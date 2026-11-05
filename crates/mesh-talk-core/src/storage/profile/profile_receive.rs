@@ -13,6 +13,7 @@ const SCHEMA: &str = "CREATE TABLE profile_receive_scan(account BLOB PRIMARY KEY
 CREATE TABLE profile_receive_pending(account BLOB NOT NULL CHECK(length(account)=32), id BLOB NOT NULL CHECK(length(id)=32), conversation BLOB NOT NULL CHECK(length(conversation)=32), ticket INTEGER NOT NULL CHECK(ticket>0), PRIMARY KEY(account,id));
 CREATE INDEX profile_receive_retry ON profile_receive_pending(account,ticket);
 CREATE TABLE profile_receive_processed(account BLOB NOT NULL CHECK(length(account)=32), id BLOB NOT NULL CHECK(length(id)=32), PRIMARY KEY(account,id));";
+const MAINTENANCE_BOOTSTRAP_SCHEMA: &str = "CREATE TABLE profile_receive_maintenance_bootstrap(account BLOB PRIMARY KEY CHECK(length(account)=32))";
 const SCOPED_RETRY_INDEX: &str = "CREATE INDEX profile_receive_conversation_retry ON profile_receive_pending(account,conversation,ticket,id)";
 /// Shared by receive-work startup and authorized source retirement. The exact
 /// processed fact means presentation terminal or superseded-source retirement;
@@ -36,6 +37,14 @@ pub(crate) fn ensure_schema_on(c: &Connection) -> Result<(), LogError> {
     if !indexed {
         c.execute_batch(SCOPED_RETRY_INDEX)?;
     }
+    let bootstrapped: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='profile_receive_maintenance_bootstrap')",
+        [], |r| r.get(0),
+    )?;
+    if !bootstrapped {
+        c.execute_batch(MAINTENANCE_BOOTSTRAP_SCHEMA)?;
+    }
+    super::manifest::validate_ddl(c, MAINTENANCE_BOOTSTRAP_SCHEMA)?;
     super::manifest::validate_ddl(c, SCHEMA)?;
     super::manifest::validate_ddl(c, SCOPED_RETRY_INDEX)
 }
@@ -129,6 +138,19 @@ impl ProfileReceiveWork {
                 "INSERT OR IGNORE INTO profile_receive_scan VALUES(?1,NULL,1)",
                 [account.as_slice()],
             )?;
+            // Earlier receive cursors did not certify maintenance demand. Replay
+            // only bounded headers once per account, preserving exact facts and
+            // pending tickets so historical payloads are never replayed.
+            if c.execute(
+                "INSERT OR IGNORE INTO profile_receive_maintenance_bootstrap VALUES(?1)",
+                [account.as_slice()],
+            )? != 0
+            {
+                c.execute(
+                    "UPDATE profile_receive_scan SET after_commit=NULL WHERE account=?1",
+                    [account.as_slice()],
+                )?;
+            }
             Ok(account)
         })?;
         Ok(Self { profile, account })
@@ -257,6 +279,65 @@ mod tests {
         identity::{account::Account, device::DeviceIdentity},
         storage::profile::ProfileStorageLease,
     };
+    #[test]
+    fn maintenance_bootstrap_resets_legacy_cursor_once_and_preserves_exact_work() {
+        let (_dir, work, own) = fixture();
+        let page = headers();
+        work.discover(None, &page, own).unwrap();
+        work.complete(page[0].header.id).unwrap();
+        let db = work.profile.database();
+        let ticket: i64 = db
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT next_ticket FROM profile_receive_scan", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        db.transaction(|c| {
+            c.execute("DELETE FROM profile_receive_maintenance_bootstrap", [])?;
+            c.execute_batch("CREATE TEMP TRIGGER fail_bootstrap_reset BEFORE UPDATE OF after_commit ON profile_receive_scan BEGIN SELECT RAISE(ABORT,'bootstrap reset failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(ProfileReceiveWork::open(work.profile.clone()).is_err());
+        assert_eq!(work.after().unwrap(), Some(80));
+        let markers: i64 = db
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM profile_receive_maintenance_bootstrap",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(markers, 0, "reset and marker must commit atomically");
+        db.transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_bootstrap_reset")?;
+            Ok(())
+        })
+        .unwrap();
+        let upgraded = ProfileReceiveWork::open(work.profile.clone()).unwrap();
+        assert_eq!(upgraded.after().unwrap(), None);
+        assert!(upgraded.processed(page[0].header.id).unwrap());
+        upgraded.discover(None, &page, own).unwrap();
+        let counts: (i64, i64) = db
+            .read(|c| {
+                Ok((
+                    c.query_row("SELECT count(*) FROM profile_receive_pending", [], |r| {
+                        r.get(0)
+                    })?,
+                    c.query_row("SELECT next_ticket FROM profile_receive_scan", [], |r| {
+                        r.get(0)
+                    })?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(counts, (79, ticket));
+        let reopened = ProfileReceiveWork::open(work.profile.clone()).unwrap();
+        assert_eq!(reopened.after().unwrap(), Some(80));
+    }
+
     #[test]
     fn scoped_retries_are_bounded_fair_and_global_recovery_keeps_other_work() {
         let (_dir, work, own) = fixture();

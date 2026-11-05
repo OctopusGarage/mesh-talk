@@ -305,6 +305,49 @@ impl OpaqueReceiveCache {
     }
 }
 
+impl OpaqueReceiveCache {
+    /// Readiness remains visible even when an optional usage row cannot be read.
+    pub(in crate::node) fn observation_readiness(&self) -> (bool, bool, bool) {
+        (
+            self.source.is_some(),
+            self.checkpoints_ready,
+            self.session_cleaned,
+        )
+    }
+    /// Scalar counter rows only; no hint enumeration or schema initialization.
+    pub(in crate::node) fn observe_usage(&self) -> Result<([i64; 7], bool), LogError> {
+        let Some(profile) = &self.profile else {
+            return Ok(([0; 7], self.session_cleaned));
+        };
+        profile.database().read(|c| {
+            let (records, bytes): (i64, i64) = c.query_row(
+                "SELECT records,bytes FROM opaque_hint_owner WHERE singleton=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let session: i64 = c.query_row(
+                "SELECT records FROM opaque_session_usage WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?;
+            let checkpoint = CHECKPOINTS.usage(c)?;
+            let wrappers = WRAPPERS.usage(c)?;
+            Ok((
+                [
+                    records,
+                    bytes,
+                    session,
+                    checkpoint.0,
+                    checkpoint.1,
+                    wrappers.0,
+                    wrappers.1,
+                ],
+                self.session_cleaned,
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

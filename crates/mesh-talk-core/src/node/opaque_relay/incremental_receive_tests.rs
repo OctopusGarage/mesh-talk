@@ -509,28 +509,39 @@ async fn assert_late_profile_parent_recovery(cache_mode: u8) {
 
 #[tokio::test]
 async fn incremental_receive_cancelled_parent_repair_resumes_after_node_restart() {
-    assert_cancelled_parent_repair_progress(false, false, false).await;
+    assert_cancelled_parent_repair_progress(false, false, false, 0).await;
 }
 
 #[tokio::test]
 async fn incremental_receive_cancelled_parent_repair_resumes_when_checkpoint_writes_fail() {
-    assert_cancelled_parent_repair_progress(true, false, false).await;
+    assert_cancelled_parent_repair_progress(true, false, false, 0).await;
 }
 
 #[tokio::test]
 async fn incremental_receive_cancelled_wide_parent_repair_protects_partial_parents() {
-    assert_cancelled_parent_repair_progress(true, true, false).await;
+    assert_cancelled_parent_repair_progress(true, true, false, 0).await;
 }
 
 #[tokio::test]
 async fn incremental_receive_cancelled_repair_recovers_backward_ancestor_without_hint_writes() {
-    assert_cancelled_parent_repair_progress(true, false, true).await;
+    assert_cancelled_parent_repair_progress(true, false, true, 0).await;
+}
+
+#[tokio::test]
+async fn incremental_receive_repair_progress_budget_excludes_held_initial_metadata() {
+    assert_cancelled_parent_repair_progress(true, false, true, 1).await;
+}
+
+#[tokio::test]
+async fn incremental_receive_repair_progress_deadline_cancels_held_body() {
+    assert_cancelled_parent_repair_progress(true, false, true, 2).await;
 }
 
 async fn assert_cancelled_parent_repair_progress(
     checkpoint_writes_fail: bool,
     wide: bool,
     nested: bool,
+    control: u8,
 ) {
     use crate::eventlog::sync::network::NetworkSyncStore;
     let directory = tempfile::tempdir().unwrap();
@@ -719,15 +730,37 @@ async fn assert_cancelled_parent_repair_progress(
     let before = office.state.body_read_counts();
     let mut cancelled = 0;
     let mut delivered = false;
-    for _ in 0..if nested { 32 } else { 16 } {
+    let mut attempts = Vec::new();
+    for attempt in 0..if nested { 32 } else { 16 } {
+        let attempt_before = office.state.body_read_counts();
         let completed = exchange_receive_with_cancellation(
             &node,
             office.clone(),
             &relay,
             &remote.public(),
             std::time::Duration::from_millis(120),
+            if attempt == 0 { control } else { 0 },
         )
         .await;
+        attempts.push((completed, attempt_before, office.state.body_read_counts()));
+        let completed = completed.0;
+        if attempt == 0 && control != 0 {
+            let observation = &attempts[0].0;
+            assert!(
+                observation.1,
+                "controlled attempt must admit exact repair body work: {observation:?}"
+            );
+            if control == 2 {
+                assert!(
+                    !completed,
+                    "held repair body must be cancelled by the actual deadline"
+                );
+                assert!(
+                    observation.3,
+                    "server must hold the admitted repair request"
+                );
+            }
+        }
         if !completed {
             cancelled += 1;
         }
@@ -785,23 +818,58 @@ async fn assert_cancelled_parent_repair_progress(
     );
     assert!(
         delivered,
-        "repeated deadline cancellation must advance the finite repair prefix; restarting from zero strands a recoverable late parent"
+        "repeated deadline cancellation must advance the finite repair prefix; restarting from zero strands a recoverable late parent; attempts={attempts:?}, frontier_tail={:?}",
+        frontier
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
     );
     assert!(node.log.lock().unwrap().has(&parent).unwrap());
 }
 
-// This uses the same cancellation boundary as the owning five-second exchange
-// watchdog, with a smaller controlled budget and delayed real relay responses.
+// Exercise cancellation of admitted repair work with delayed real responses.
+// Setup has its own watchdog; this phase fixture does not model the production
+// five-second watchdog's complete operation budget.
 async fn exchange_receive_with_cancellation(
     node: &Node,
     office: IndexedPostOffice,
     relay: &DeviceIdentity,
     peer: &PublicIdentity,
     deadline: std::time::Duration,
-) -> bool {
+    control: u8,
+) -> (bool, bool, usize, bool) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let admitted = std::sync::Arc::new(AtomicBool::new(false));
+    let admission = std::sync::Arc::new(tokio::sync::Notify::new());
+    let previous_hook = node.account_client_test_hook.lock().unwrap().clone();
+    let saved_hook = previous_hook.clone();
+    let body_admitted = admitted.clone();
+    let body_admission = admission.clone();
+    *node.account_client_test_hook.lock().unwrap() =
+        Some(std::sync::Arc::new(move |peer, stage| {
+            if stage == "mailbox_repair_body_admitted" {
+                body_admitted.store(true, Ordering::SeqCst);
+                body_admission.notify_one();
+            }
+            if let Some(hook) = &saved_hook {
+                hook(peer, stage);
+            }
+        }));
+    let metadata_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let requests = std::sync::Arc::new(AtomicUsize::new(0));
+    let held = std::sync::Arc::new(AtomicBool::new(false));
+    let server_admitted = admitted.clone();
+    let server_entered = metadata_entered.clone();
+    let server_release = release.clone();
+    let server_requests = requests.clone();
+    let server_held = held.clone();
     let keys = relay.secret_bytes();
     let (client, server) = tokio::io::duplex(256 * 1024);
-    let task = tokio::spawn(async move {
+    let mut task = tokio::spawn(async move {
         let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
         let mut channel = crate::transport::SecureChannel::accept(server, &identity)
             .await
@@ -811,6 +879,14 @@ async fn exchange_receive_with_cancellation(
         let mut authorized = None;
         while let Ok(bytes) = channel.recv().await {
             if bytes.starts_with(b"MTOM1") {
+                let index = server_requests.fetch_add(1, Ordering::SeqCst);
+                if control == 1 && index == 0 {
+                    server_entered.notify_one();
+                    server_release.notified().await;
+                } else if control == 2 && server_admitted.load(Ordering::SeqCst) {
+                    server_held.store(true, Ordering::SeqCst);
+                    server_release.notified().await;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
             if super::super::session::mailbox::serve(
@@ -827,24 +903,82 @@ async fn exchange_receive_with_cancellation(
             }
         }
     });
-    let mut channel =
-        crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public()))
-            .await
-            .unwrap();
-    let mailbox = RelayMailbox::federated(&node.identity, peer).unwrap();
-    let result = tokio::time::timeout(
-        deadline,
-        node.opaque_mailbox_round(&mut channel, peer, None, mailbox),
+    let connected = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public())),
     )
     .await;
+    let mut channel = match connected {
+        Ok(Ok(channel)) => channel,
+        failure => {
+            task.abort();
+            let _ = task.await;
+            *node.account_client_test_hook.lock().unwrap() = previous_hook;
+            panic!("repair fixture Noise setup failed: {:?}", failure.err());
+        }
+    };
+    let mailbox = RelayMailbox::federated(&node.identity, peer).unwrap();
+    // An explicit request-arrival signal controls the initial metadata hold.
+    let metadata_release = release.clone();
+    let controller = tokio::spawn(async move {
+        if control == 1
+            && tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                metadata_entered.notified(),
+            )
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(160)).await;
+            metadata_release.notify_one();
+        }
+    });
+    let mut setup_expired = false;
+    let result = {
+        let round = node.opaque_mailbox_round(&mut channel, peer, None, mailbox);
+        tokio::pin!(round);
+        let setup = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut round => Some(result),
+                _ = admission.notified() => None,
+            }
+        })
+        .await;
+        match setup {
+            Ok(Some(result)) => Ok(result),
+            Ok(None) => tokio::time::timeout(deadline, &mut round).await,
+            Err(error) => {
+                setup_expired = true;
+                Err(error)
+            }
+        }
+    };
+    // The scoped pinned round is dropped before releasing or joining the server.
+    controller.await.unwrap();
+    release.notify_one();
+    drop(channel);
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await;
+    if joined.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    *node.account_client_test_hook.lock().unwrap() = previous_hook;
+    joined.expect("relay cleanup watchdog").unwrap();
+    assert!(
+        !setup_expired,
+        "repair fixture setup watchdog expired before exact body admission"
+    );
     let completed = match result {
         Ok(Ok(_)) => true,
         Ok(Err(error)) => panic!("repair failed outside deadline cancellation: {error}"),
         Err(_) => false,
     };
-    drop(channel);
-    task.await.unwrap();
-    completed
+    (
+        completed,
+        admitted.load(Ordering::SeqCst),
+        requests.load(Ordering::SeqCst),
+        held.load(Ordering::SeqCst),
+    )
 }
 
 #[tokio::test]
