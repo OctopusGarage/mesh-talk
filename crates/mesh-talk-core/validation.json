@@ -1029,7 +1029,15 @@
             "participant_network_canonical_authority_respects_each_preparation_budget",
             "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
             "ancestor_preparation_obeys_caller_work_budget_across_wide_parents",
-            "ancestor_disposable_query_crash_retires_incrementally"
+            "ancestor_disposable_query_crash_retires_incrementally",
+            "channel_departure_retry_preserves_original_event_after_owner_reconnects",
+            "join_history_transferred_owner_can_invite_before_first_send",
+            "ownership_transfer_pins_observed_metadata_and_rejects_backdated_owner_fork",
+            "legacy_account_leave_commits_with_owner_offline",
+            "legacy_account_leave_coordinates_original_devices_over_noise_with_history_off",
+            "invisible_late_invitee_follows_an_accepted_owner_transfer",
+            "departed_peer_can_sync_transfer_needed_for_causal_reinvitation",
+            "channel_recall_by_member_is_visible_and_survives_removal"
           ]
         }
       ],
@@ -1060,6 +1068,10 @@
           {
             "name": "Indexed current-state installation preserves the canonical device-local acceptance cutoff and retry ticket without changing current-epoch sender retention or indexed receiver retirement; a fresh invitation clears the former cutoff while pure authority projections retain their separate semantics.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "The real member-invitation scenario owns epoch delivery, pre-join isolation and role rejection only. Ownership transfer and offline departure do not form a compound prerequisite chain: existing focused transfer/authority cases retain those contracts, while a two-node real-Noise departure case retains original signed-event and parent-cut retry after actual owner pause/relaunch. No fixture-only self-tests or broader host orchestration are added.",
+            "reference": "docs/testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress"
           }
         ]
       },
@@ -1318,7 +1330,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {

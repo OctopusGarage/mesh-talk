@@ -397,7 +397,13 @@ and business scenarios instead: [Wake authentication and recovery controls](../c
 own linked identity, revision deduplication and notification-driven convergence;
 [custody scenarios](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
 own authenticated preparation, held-domain independence and durable custody.
-Do not add a clock switch solely to rescue a helper's self-test.
+Do not add a clock switch solely to rescue a helper's self-test. Keep a loopback
+business scenario focused on its named behavior. The member-invitation proof
+ends after epoch delivery, pre-join isolation and role rejection. Existing
+focused transfer/authority controls own ownership changes; the small two-node
+departure proof owns actual offline pause/relaunch and retry of the original
+signed event and parent cut. Do not chain unrelated controls and reconnection
+requirements onto an already complete invitation scenario.
 
 Keep a scheduling control's corpus at the protocol boundary it needs. The
 [queued-source controls](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)

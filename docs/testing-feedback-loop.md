@@ -581,6 +581,19 @@ functional watchdog. A fixed startup sleep or a shorter wall-clock timeout does
 not prove notification ownership. Removing mail-change scheduling must fail this
 oracle; keep ordinary jitter and continuation pacing in the other fixtures.
 
+Keep the member-invitation loopback scenario focused on invitation, epoch
+message delivery, pre-join isolation and role rejection. Its peers use the
+existing independent runtime owner and retire before storage teardown. Observe
+the real invitation change before acceptance instead of assuming best-effort
+fanout is already projected. Ownership transfer/authority is covered by the
+existing focused join-history, metadata and privacy controls. The unique
+original-departure retry contract uses a separate two-node real-Noise scenario:
+prepare actual membership once, pause the real owner, prove the original signed
+leave is absent there, relaunch at a fresh route, then require canonical and
+physical removal of that exact event within the existing thirty-second retry
+budget. Do not add the former compound transfer/remove/reinvite chain or another
+readiness-helper self-test.
+
 Failed-initial-custody recovery fixtures retain the real failed send and empty
 custody observations before recovery; they must not use successful-custody warmup.
 An advertised unavailable external identity uses a fixture-owned TCP endpoint,
