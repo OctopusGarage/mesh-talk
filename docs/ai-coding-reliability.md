@@ -164,6 +164,15 @@ Keep the direct capture-drop ordering regression, queued cancellation and
 undelivered-output controls, and the real native observer Node-release assertion;
 do not narrow that assertion to conceal another producer retaining the profile.
 
+A same-profile restart fixture must consume the existing retired storage close
+before constructing its replacement. Joining producers through `stop()` alone
+is not the fixture's proof that all Node and storage handles have closed. Keep
+`stop_for_storage().await.close()` failure visible, including retained-handle
+rejection, and preserve the subsequent durable reopen assertions. The shared
+settings projection/restart scenario exercises this boundary with its old weak
+application token still present; do not replace closure with a sleep or remove
+the restart tail.
+
 Follow the existing retirement protocol: close admission, signal cancellation,
 release guards needed for completion, join owned tasks and drain admitted work.
 Uncancellable native work needs an explicit ownership boundary: retain the
