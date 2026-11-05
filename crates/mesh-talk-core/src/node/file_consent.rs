@@ -196,7 +196,24 @@ impl Node {
                 .lock()
                 .expect("log lock")
                 .event_conversation(&manifest)?;
-            let group_offer = self.group_file_offer(file, manifest, sender)?;
+            let direct_only = if parent == Some(scope) && self.known_account_allowed(sender) {
+                // Conversation IDs are not disjoint DM/group types. Use the
+                // receive scheduler's conservative metadata classification;
+                // mixed scopes retain full group authorization/completion.
+                let log = self.log.lock().expect("log lock");
+                !log.repository()?
+                    .has_kind(&scope, EventKind::MembershipChange)?
+                    && !self
+                        .channel_checkpoints
+                        .has_local_channel_checkpoint(scope)?
+            } else {
+                false
+            };
+            let group_offer = if direct_only {
+                None
+            } else {
+                self.group_file_offer(file, manifest, sender)?
+            };
             if !(parent == Some(scope) && self.known_account_allowed(sender))
                 && group_offer.is_none()
             {

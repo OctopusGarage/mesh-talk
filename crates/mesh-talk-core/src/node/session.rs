@@ -1113,9 +1113,13 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             conversation,
             event_id,
         } => {
-            let view = backend::open_prepared_view(backend, &conversation).await?;
+            let view = match backend.take_custody_view(&conversation)? {
+                Some(view) => view,
+                None => backend::open_prepared_view(backend, &conversation).await?,
+            };
             let stored = backend.durable_have_in_view(&view, &conversation, &event_id)?;
             backend.validate_view(&view)?;
+            let uncached_view = backend.retain_custody_view(view)?;
             channel
                 .send(&encode(&SyncWire::DurableHaveResponse {
                     conversation,
@@ -1123,6 +1127,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
                     stored,
                 })?)
                 .await?;
+            drop(uncached_view);
             Ok(Served::Handled(conversation))
         }
         SyncWire::Request(request)

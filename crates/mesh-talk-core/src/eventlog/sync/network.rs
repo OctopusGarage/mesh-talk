@@ -138,6 +138,21 @@ pub trait NetworkSyncStore {
         Ok(None)
     }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    /// Optionally transfer one already prepared, currently qualified custody-only
+    /// view to the caller. It must not share mutable export/Have state with any
+    /// other request. A miss uses ordinary bounded authorization preparation.
+    fn take_custody_view(
+        &mut self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        Ok(None)
+    }
+    /// Return ownership after the exact custody query and final validation.
+    /// Return an uncached view so its lease stays alive through response sending.
+    /// This never caches the custody answer.
+    fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        Ok(Some(view))
+    }
     /// Opening captures a finite source. Implementations with derived authority
     /// prepare it here; there is no collecting fallback in the session adapter.
     fn prepare_view_step(

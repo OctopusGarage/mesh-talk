@@ -1017,6 +1017,143 @@ mod tests {
     }
 
     #[test]
+    fn direct_consent_controls_validate_each_manifest_once_without_group_replay() {
+        let (_directory, node, sender) = consent_offer_fixture(8);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        assert_eq!(offers.len(), 8);
+        let scope = crate::node::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &sender.public(),
+        );
+        assert!(
+            !node
+                .channel_checkpoints
+                .has_local_channel_checkpoint(scope)
+                .unwrap()
+        );
+        {
+            let log = node.log.lock().unwrap();
+            for (_, manifest) in &offers {
+                assert_eq!(log.event_conversation(manifest).unwrap(), Some(scope));
+            }
+            assert!(
+                !log.repository()
+                    .unwrap()
+                    .has_kind(&scope, crate::eventlog::EventKind::MembershipChange)
+                    .unwrap()
+            );
+        }
+        let expected = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(expected.len(), 8);
+        let database = node.storage.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..3 {
+            let reads = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts();
+            let actual = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "direct routing preserves exact signed controls and sequences"
+            );
+            let after = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts();
+            assert_eq!(
+                (after.0 - reads.0, after.1 - reads.1),
+                (8, 8),
+                "each direct manifest still crosses incoming-offer validation once; group-only checks must not hydrate it a second time"
+            );
+        }
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(database.successful_write_commits(), commits);
+    }
+
+    #[test]
+    fn direct_consent_scope_with_raw_membership_preserves_group_readiness_fence() {
+        let (_directory, node, sender) = consent_offer_fixture(1);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        assert_eq!(offers.len(), 1);
+        let expected = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(expected.len(), 1);
+        let scope = crate::node::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &sender.public(),
+        );
+        // A real signed retained membership-kind event is enough to make the
+        // namespace ambiguous, even when its payload cannot establish a group.
+        let membership = Event::new(
+            &sender,
+            scope,
+            99,
+            vec![],
+            99,
+            1,
+            crate::eventlog::EventKind::MembershipChange,
+            vec![0],
+        );
+        node.log.lock().unwrap().append_durable(membership).unwrap();
+        assert!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .has_kind(&scope, crate::eventlog::EventKind::MembershipChange,)
+                .unwrap()
+        );
+        let reads = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        // Group content visibility requires checkpoint history readiness when
+        // retained membership exists; this scope must not take the DM shortcut.
+        assert!(matches!(
+            node.file_consent_controls(&sender.public(), &offers, false),
+            Err(LogError::StaleCursor)
+        ));
+        let after = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert_eq!(
+            (after.0 - reads.0, after.1 - reads.1),
+            (1, 1),
+            "group readiness must fail after group-offer validation, before the direct incoming-offer read"
+        );
+        assert_eq!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_control(offers[0].1)
+                .unwrap(),
+            Some(expected[0].clone()),
+            "failed group readiness must preserve prior signed evidence"
+        );
+    }
+
+    #[test]
     fn quiet_file_consent_rotating_iteration_has_bounded_checkpoint_writes() {
         let (_directory, node, sender) = consent_offer_fixture(33);
         let cycle = || {

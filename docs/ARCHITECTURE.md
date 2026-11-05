@@ -518,6 +518,16 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   compare scalar summaries before creating SQL selections. Missing observations
   and changed stamps use ordinary bounded preparation; cached summaries never
   authorize export, custody or admission.
+  Repeated exact custody queries may reuse one ready authorization selection
+  owned by their authenticated connection. The captured exact history stamp,
+  current denied state and ordinary view validation qualify reuse. Each query
+  still checks selected membership, synchronizes retained storage when required,
+  evaluates current historical completion and validates authority before replying;
+  no Boolean custody answer is cached. Missing or changed qualification evicts
+  before cold preparation. Export/Have staging never shares this selection.
+  Checked-out views drop on failure/cancellation; the connection releases its
+  retained view through existing bounded selection retirement. Its one slot
+  remains charged to the unchanged selection admission limit.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
@@ -930,6 +940,11 @@ reuses the exact event. Policy A→B→A still advances the generation and signe
 revision even if the final payload matches an older decision. Changed completion
 or recipient bindings retain their ordinary revision checks. Older binaries
 safely miss this marker and use their existing publication path.
+Allowed direct-offer controls exclude group-only preparation through retained
+membership-kind metadata and the local channel checkpoint. A direct conversation
+ID alone is insufficient: ambiguous scopes retain full group qualification and
+completion reservation. Each genuine direct offer still authenticates its
+manifest through the incoming-offer owner, without the duplicate group read.
 Warm open does not decrypt historical consent frames. Selected controls enforce the
 existing signed-format byte limit before allocation; persisted counters retain the
 existing admission quotas. Account adoption preserves the previous account's decisions

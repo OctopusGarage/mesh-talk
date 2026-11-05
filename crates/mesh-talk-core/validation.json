@@ -2045,7 +2045,7 @@
             "paged_preparation_yields_unlocked_and_observes_concurrent_revocation",
             "node::privacy_sync::causal_export_tests::",
             "node::session::paged_tests::",
-            "participant_durable_have_request_uses_no_historical_bodies",
+            "participant_durable_have_",
             "participant_selection_retirement_",
             "background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
             "multithreaded_peer_runtime_authenticates_while_one_worker_is_held",
@@ -2474,6 +2474,10 @@
           {
             "name": "Unchanged signed consent reuse survives reopen only with a durable-policy marker, exact persisted policy generation and complete fresh Decision equality. Legacy UUID/NULL generations refresh once; policy ABA, changed completion and owner retirement still invalidate reuse, and failed publication rolls back both event and marker.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Allowed direct-offer consent excludes redundant group hydration only when retained membership-kind metadata and the local checkpoint both exclude a group. Each direct manifest still crosses authenticated incoming-offer validation once; ambiguous signed membership scopes retain original group checks and exact completion behavior.",
+            "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
           }
         ]
       },
@@ -2911,7 +2915,8 @@
             "node::work_observation::tests::",
             "work_observation_enabled_and_disabled_preserve_wrapper_receive_results",
             "committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodies",
-            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress"
+            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress",
+            "participant_durable_have_"
           ]
         }
       ],
@@ -2959,6 +2964,10 @@
           {
             "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial cursor progress and failure rollback remain durable.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Repeated exact custody requests reuse at most one exclusively owned connection-local prepared selection under its exact current stamp, denied state and view authority. Every answer retains fresh selected/durable/historical completion checks; cold/default views keep their leases through response sending, mismatches evict before preparation, and disconnect releases the selection under unchanged admission quotas.",
+            "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
           }
         ]
       },

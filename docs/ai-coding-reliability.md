@@ -278,6 +278,14 @@ terminal deletion. The complete-page and partial-page regression in the
 checks fairness and SQL/commit/body-read costs together. The settled ordinary and
 control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
 checks SQL mutations, committed writes and body reads together.
+Compare repeated exact queries with their first preparation too. A metadata-only
+probe cache does not eliminate selection reconstruction in a different request
+path. Reuse an exclusively owned, bounded prepared view only under its complete
+current qualification; recompute mutable answers and preserve durability and
+authority checks. The connection-owned custody regression in the
+[participant network adapter](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+checks unchanged present/missing queries, unrelated and same-conversation appends,
+authority revocation and selection release on disconnect.
 Apply the same rule to empty selected federation slices: validate session,
 completion and resource authority, but do not rewrite unchanged session/global
 charges. The raw-selection regression in the

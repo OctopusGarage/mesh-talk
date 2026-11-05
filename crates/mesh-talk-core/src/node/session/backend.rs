@@ -19,6 +19,15 @@ pub(super) trait SessionBackend {
         conversation: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError>;
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    fn take_custody_view(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        Ok(None)
+    }
+    fn retain_custody_view(&self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        Ok(Some(view))
+    }
     fn prepare_view_step(
         &self,
         view: &Self::View,
@@ -338,6 +347,18 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .open_view(c)
+    }
+    fn take_custody_view(&self, c: &ConversationId) -> Result<Option<S::View>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .take_custody_view(c)
+    }
+    fn retain_custody_view(&self, view: S::View) -> Result<Option<S::View>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .retain_custody_view(view)
     }
     fn prepare_view_step(
         &self,

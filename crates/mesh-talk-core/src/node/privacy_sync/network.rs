@@ -688,6 +688,48 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .trace_account_client(&self.peer, || "network_view_captured".into());
         Ok(view)
     }
+    fn take_custody_view(
+        &mut self,
+        conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        let Some((denied, view)) = self.custody_view.take() else {
+            return Ok(None);
+        };
+        if view.conversation != *conversation || denied != self.denied {
+            return Ok(None);
+        }
+        let current = self.history_sync_stamp(conversation)?;
+        if current.is_none() || current.as_ref() != view.metadata_stamp.as_ref() {
+            return Ok(None);
+        }
+        match self.validate_view(&view) {
+            Ok(()) => Ok(Some(view)),
+            Err(LogError::StaleCursor) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        // Evict before admitting another selection. The existing SQL owner
+        // bounds both live selections and incremental retirement work.
+        self.custody_view = None;
+        let ready = view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready();
+        if !ready {
+            return Ok(Some(view));
+        }
+        self.validate_view(&view)?;
+        if let Some(stamp) = &view.metadata_stamp
+            && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
+        {
+            self.custody_view = Some((self.denied, view));
+            Ok(None)
+        } else {
+            Ok(Some(view))
+        }
+    }
     fn prepare_view_step(
         &self,
         view: &Self::View,
@@ -3362,6 +3404,200 @@ mod control_publication_tests {
             drop(channel);
             task.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn participant_durable_have_connection_reuses_selection_and_rechecks_authority() {
+        use crate::{
+            node::session::{Served, request_durable_have, serve_one_paged},
+            transport::SecureChannel,
+        };
+        async fn query(
+            channel: &mut SecureChannel<tokio::net::TcpStream>,
+            completed: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+            conversation: ConversationId,
+            event: EventId,
+        ) -> bool {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                request_durable_have(channel, conversation, event),
+            )
+            .await
+            .expect("custody request stalled")
+            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), completed.recv())
+                .await
+                .expect("serving completion stalled")
+                .expect("server exited");
+            result
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let peer_account = Account::generate();
+        let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.configure_privacy(
+            directory.path(),
+            "pw",
+            &node.own_group_proof(),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&proof)
+            .unwrap();
+        node.set_allowed(&peer_account.account_id(), true)
+            .await
+            .unwrap();
+        node.set_invisible(true).await.unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let append = |conversation, seq| {
+            let event = Event::new(
+                &node.identity,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                0,
+                EventKind::Message,
+                vec![7; 2048],
+            );
+            let id = event.id;
+            node.log.lock().unwrap().append_durable(event).unwrap();
+            id
+        };
+        let mut selected = None;
+        for seq in 1..=128 {
+            selected = Some(append(conversation, seq));
+        }
+        let selected = selected.unwrap();
+        let missing = EventId::new([93; 32]);
+        let counters = || {
+            (
+                node.storage
+                    .database()
+                    .read(|c| Ok(c.total_changes()))
+                    .unwrap(),
+                node.storage.database().successful_write_commits(),
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts(),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_node = node.clone();
+        let remote = peer.public();
+        let (served, mut completed) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let (server, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(server, &server_node.identity)
+                .await
+                .unwrap();
+            // Production owns one store for the lifetime of this connection.
+            let store = server_node.serve_sync_store(&remote);
+            loop {
+                if matches!(
+                    serve_one_paged(&mut channel, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+                served.send(()).unwrap();
+            }
+        });
+        let client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut channel = SecureChannel::connect(client, &peer, Some(&node.identity.public()))
+            .await
+            .unwrap();
+        // First preparation may have an unqualified cold metadata stamp.
+        for _ in 0..3 {
+            assert!(query(&mut channel, &mut completed, conversation, selected).await);
+        }
+        let warm = counters();
+        for _ in 0..3 {
+            assert!(query(&mut channel, &mut completed, conversation, selected).await);
+            assert!(!query(&mut channel, &mut completed, conversation, missing).await);
+        }
+        assert_eq!(
+            counters(),
+            warm,
+            "warm present/missing custody requests must not rewrite selections or read historical bodies"
+        );
+
+        append(ConversationId::new([203; 32]), 1);
+        let unrelated = counters();
+        assert!(query(&mut channel, &mut completed, conversation, selected).await);
+        assert_eq!(
+            counters(),
+            unrelated,
+            "unrelated ordinary append must retain custody preparation"
+        );
+
+        let tail = append(conversation, 129);
+        let changed = counters();
+        assert!(
+            query(&mut channel, &mut completed, conversation, tail).await,
+            "newly appended retained events must not be hidden by the old finite selection"
+        );
+        let prepared = counters();
+        assert!(
+            prepared.0 > changed.0 && prepared.1 > changed.1,
+            "changed conversation must prepare a current authorization selection"
+        );
+        for _ in 0..3 {
+            assert!(query(&mut channel, &mut completed, conversation, tail).await);
+        }
+        assert_eq!(
+            counters(),
+            prepared,
+            "refreshed custody preparation must become quiet again"
+        );
+
+        node.set_allowed(&peer_account.account_id(), false)
+            .await
+            .unwrap();
+        assert!(
+            !query(&mut channel, &mut completed, conversation, selected).await,
+            "warm positive custody must not outlive current peer authority"
+        );
+        drop(channel);
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("connection owner failed to retire")
+            .unwrap();
+        let active: i64 = node
+            .storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM participant_sync_views WHERE retired=0",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            active, 0,
+            "closed connection must release its cached selection lease"
+        );
     }
 
     #[tokio::test]

@@ -53,6 +53,9 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     inbound: bool,
     pending_channels: HashMap<ConversationId, PendingChannel>,
     pending_bytes: usize,
+    // One custody-only selection, owned by this authenticated connection. It is
+    // checked out during a query and never shared with mutable export state.
+    custody_view: Option<(bool, network::ParticipantView)>,
 }
 impl Node {
     pub(in crate::node) fn sync_store(
@@ -67,6 +70,7 @@ impl Node {
             inbound: false,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
+            custody_view: None,
         })
     }
     pub(in crate::node) fn pull_sync_store(
@@ -81,6 +85,7 @@ impl Node {
             inbound: false,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
+            custody_view: None,
         })
     }
 
@@ -96,6 +101,7 @@ impl Node {
             inbound: true,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
+            custody_view: None,
         })
     }
 
