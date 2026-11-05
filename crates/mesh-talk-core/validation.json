@@ -1315,7 +1315,7 @@
       ],
       "consumers": ["core-node"],
       "capability": {
-        "summary": "Authorize equal relay reconciliation and own bounded indexed dedicated-relay serving, maintenance and lifecycle without weakening event admission.",
+        "summary": "Authorize equal relay reconciliation and own bounded indexed dedicated-relay serving, maintenance and lifecycle without weakening event admission; empty selected slices preserve session validation without rewriting unchanged charges.",
         "guide": "docs/post-office-federation.md",
         "invariants": [
           {
@@ -2944,7 +2944,7 @@
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {
-            "name": "Account/mailbox/outer-bound signed semantic Profile mappings share the existing bounded wrapper bucket and require current repair epoch, account ownership and exact foreign processing facts before ordinary GET reuse. Own-device classification still checks the current account; dependency repair bypasses hints, real deletion invalidates them, optional failures fall back to GET, and no hint enters retained HAVE or custody.",
+            "name": "Account/mailbox/outer-bound signed semantic Profile and exact consent mappings share the existing bounded wrapper bucket and require current repair epoch, account ownership and exact foreign processing facts before ordinary GET reuse. Own-device classification still checks the current account; consent requires its exact current received event or full local recipient exclusion, never supersession inference; dependency repair bypasses hints, real deletion invalidates them, optional failures fall back to GET, and no hint enters retained HAVE or custody.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {

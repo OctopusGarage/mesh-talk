@@ -4,6 +4,276 @@ use crate::postoffice::{IndexedPostOffice, federation::IndexedRelayEndpoint};
 use crate::storage::profile::ProfileStorageLease;
 
 #[tokio::test]
+async fn incremental_receive_exact_consent_mapping_survives_reopen() {
+    assert_consent_mapping_survives_reopen(false).await;
+}
+
+#[tokio::test]
+async fn incremental_receive_own_consent_mapping_survives_reopen() {
+    assert_consent_mapping_survives_reopen(true).await;
+}
+
+async fn assert_consent_mapping_survives_reopen(own: bool) {
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    let directory = tempfile::tempdir().unwrap();
+    let relay_directory = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let keys = identity.secret_bytes();
+    let account = Account::generate();
+    let account_key = account.secret_bytes();
+    let remote = DeviceIdentity::generate();
+    let remote_account = Account::generate();
+    let proof =
+        crate::discovery::Announce::new_with_account(&remote, &remote_account, "Remote", 47475);
+    let (node, _, _) =
+        super::super::test_support::node_with_files(directory.path(), identity, account, &proof);
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_post_office_permissions(false, true);
+    let relay = DeviceIdentity::generate();
+    let mut office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_directory.path()).unwrap(),
+        &relay_directory.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+    let payload = super::super::file_consent::Decision {
+        file: ConversationId::new([181; 32]),
+        manifest: EventId::new([182; 32]),
+        sender: if own {
+            remote.public()
+        } else {
+            node.identity.public()
+        },
+        recipient: if own {
+            node.identity.public()
+        } else {
+            remote.public()
+        },
+        sender_account: Some(if own {
+            remote_account.public().account_id()
+        } else {
+            node.account_id()
+        }),
+        recipient_account: if own {
+            node.account_id()
+        } else {
+            remote_account.public().account_id()
+        },
+        decision: crate::node::ReceiveDecision::Accepted,
+        completion: None,
+    };
+    let event = payload
+        .event(if own { &node.identity } else { &remote }, 1)
+        .unwrap();
+    if !own {
+        // The exact durable application fact exists independently of raw log retention.
+        node.file_consent
+            .lock()
+            .unwrap()
+            .receive_control(event.clone())
+            .unwrap();
+    }
+    let outer = mailbox.wrap(&event).unwrap();
+    let outer_id = outer.id;
+    office.ingest(outer).unwrap();
+    let key = bincode::serialize(&(
+        relay.public(),
+        remote.public(),
+        mailbox.id(),
+        Option::<ConversationId>::None,
+    ))
+    .unwrap();
+    let before = office.state.body_read_counts();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    let classified = office.state.body_read_counts();
+    assert_ne!(
+        classified, before,
+        "first classification must perform authenticated GET"
+    );
+    assert!(!node.log.lock().unwrap().has(&event.id).unwrap());
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .remove_checkpoint(&key)
+        .unwrap();
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_eq!(
+        office.state.body_read_counts(),
+        classified,
+        "fresh operation must reuse classification"
+    );
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .remove_checkpoint(&key)
+        .unwrap();
+    drop(node);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        Account::from_secret_bytes(account_key),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_post_office_permissions(false, true);
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    assert_eq!(
+        office.state.body_read_counts(),
+        classified,
+        "reopen must reuse current durable consent evidence"
+    );
+    assert!(!node.log.lock().unwrap().has(&event.id).unwrap());
+    assert!(
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .retained_seen_selected(mailbox.id(), &[outer_id], &node.log.lock().unwrap(),)
+            .unwrap()
+            .is_empty(),
+        "consent classification must never grant retained custody"
+    );
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    for _ in 0..8 {
+        assert!(node.consent_transport_seen(mailbox.id(), outer_id).unwrap());
+    }
+    assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+    assert_eq!(database.successful_write_commits(), commits);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads
+    );
+    let mut hint_key = b"consent-v1".to_vec();
+    hint_key.extend_from_slice(&node.account.public().ed25519_pub);
+    hint_key.extend_from_slice(mailbox.id().as_bytes());
+    hint_key.extend_from_slice(outer_id.as_bytes());
+    let saved = node
+        .opaque_receive_cache
+        .lock()
+        .unwrap()
+        .get_wrapper_hint(&hint_key)
+        .unwrap()
+        .unwrap();
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .put_wrapper_hint(&hint_key, b"corrupt")
+        .unwrap();
+    assert!(!node.consent_transport_seen(mailbox.id(), outer_id).unwrap());
+    node.opaque_receive_cache
+        .lock()
+        .unwrap()
+        .put_wrapper_hint(&hint_key, &saved)
+        .unwrap();
+    database
+        .transaction(|c| {
+            c.execute(
+                "UPDATE participant_profile SET account=?1 WHERE singleton=1",
+                [[199u8; 32].as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        node.consent_transport_seen(mailbox.id(), outer_id),
+        Err(LogError::StaleCursor)
+    ));
+    database
+        .transaction(|c| {
+            c.execute(
+                "UPDATE participant_profile SET account=?1 WHERE singleton=1",
+                [node.account.public().ed25519_pub.as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    database
+        .transaction(|c| {
+            c.execute_batch(
+                "ALTER TABLE file_consent_received RENAME TO unavailable_consent_received",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        node.consent_transport_seen(mailbox.id(), outer_id).is_err(),
+        "authoritative failure cannot acknowledge an own echo either"
+    );
+    database
+        .transaction(|c| {
+            c.execute_batch(
+                "ALTER TABLE unavailable_consent_received RENAME TO file_consent_received",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    if own {
+        let mut malformed_identity = payload.clone();
+        malformed_identity.sender = node.identity.public();
+        malformed_identity.recipient.x25519_pub[0] ^= 1;
+        let other = malformed_identity.event(&node.identity, 1).unwrap();
+        let other_outer = EventId::new([183; 32]);
+        node.remember_consent_transport(mailbox.id(), other_outer, &other)
+            .unwrap();
+        assert!(
+            !node
+                .consent_transport_seen(mailbox.id(), other_outer)
+                .unwrap(),
+            "same Ed key with a different recipient X key is not an own echo"
+        );
+    } else {
+        node.file_consent
+            .lock()
+            .unwrap()
+            .receive_control(payload.event(&remote, 2).unwrap())
+            .unwrap();
+        assert!(
+            !node.consent_transport_seen(mailbox.id(), outer_id).unwrap(),
+            "supersession is not exact evidence"
+        );
+        database
+            .transaction(|c| {
+                c.execute(
+                    "DELETE FROM file_consent_received WHERE manifest=?1",
+                    [payload.manifest.as_bytes().as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!node.consent_transport_seen(mailbox.id(), outer_id).unwrap());
+    }
+    let ordinary = ConversationId::new([184; 32]);
+    node.append_event(ordinary, EventKind::Message, vec![0; 64])
+        .unwrap();
+    node.log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .drop_conversation(&ordinary)
+        .unwrap();
+    assert!(
+        !node.consent_transport_seen(mailbox.id(), outer_id).unwrap(),
+        "real destruction invalidates own classifications too"
+    );
+}
+
+#[tokio::test]
 async fn incremental_receive_profile_compaction_does_not_resurrect_retired_leaves() {
     use crate::eventlog::sync::network::NetworkSyncStore;
     let directory = tempfile::tempdir().unwrap();

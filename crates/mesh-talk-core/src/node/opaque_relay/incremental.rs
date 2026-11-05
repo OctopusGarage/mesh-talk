@@ -435,7 +435,8 @@ impl Node {
         }
         let semantic = !retained
             && p.required_parent.is_none()
-            && self.semantic_profile_seen(p.mailbox.id(), id)?;
+            && (self.semantic_profile_seen(p.mailbox.id(), id)?
+                || self.consent_transport_seen(p.mailbox.id(), id)?);
         if semantic {
             self.observe_mailbox_work(reason::SEMANTIC_HIT, None);
         }

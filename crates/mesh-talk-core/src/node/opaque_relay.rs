@@ -704,6 +704,7 @@ impl Node {
                 }
                 match self.accept_file_consent_event(&event, &progress.recipient) {
                     Ok(true) => {
+                        self.remember_consent_transport(progress.mailbox.id(), outer_id, &event)?;
                         self.observe_mailbox_work(
                             super::work_observation::reason::CONSENT_HANDLED,
                             None,

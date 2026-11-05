@@ -2504,6 +2504,11 @@ failures do not select older wire versions. The runtime stops admission on a
 faulted profile and joins owned work before releasing its lease during
 cooperative shutdown.
 
+Empty selected federation slices still validate session, snapshot completion and
+resource bounds, but do not rewrite unchanged staging charges. Nonempty slices
+retain entry accounting, including duplicate selection and terminal framing;
+this does not change event acceptance or persistence guarantees.
+
 ### Incremental opaque mailbox synchronization
 
 Modern participant-to-post-office exchanges negotiate the optional `MTOM1`
@@ -2604,10 +2609,20 @@ evicted or failed optional mappings fall back to the original authenticated GET;
 a failed authoritative fact read cannot acknowledge an event. Unchanged hits
 perform no writes, and warm open does not load historical mappings.
 
+Exact consent classifications use a separate namespace in the same bounded signed
+wrapper bucket. A successfully opened signed control qualifies only while its
+exact current received-control event remains stored, or when its full recipient
+identity equals this device and its sender consequently differs. The latter is
+an own-echo exclusion, not a received decision. Every hit rechecks the current
+account owner and incoming repair revision; ambiguous, missing or replaced
+received records miss. Authoritative read failures cannot acknowledge progress.
+Dependency repair bypasses these hints, and neither classification grants
+retained HAVE or custody. Optional mapping failures retain authenticated GET.
+
 A page cursor is saved only after every ID is either admitted, supported by
 retained local evidence, exact account-scoped terminal Profile-processing or
 authorized superseded-source retirement evidence, the fully verified local-device
-Profile presentation exclusion, or recorded in the same checkpoint's bounded retry set
+Profile presentation exclusion, an exact current consent classification, or recorded in the same checkpoint's bounded retry set
 of at most 256 IDs. The log is flushed before checkpoint publication. Missing
 causal parents and rejected admission remain retryable; exhaustion fails before
 advancing the page. Uninvited channel ancestry retains the existing 8-MiB

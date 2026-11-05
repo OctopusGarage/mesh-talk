@@ -15,6 +15,13 @@ fn semantic_key(account: &[u8; 32], mailbox: ConversationId, outer: EventId) -> 
     key.extend_from_slice(outer.as_bytes());
     key
 }
+fn consent_hint_key(account: &[u8; 32], mailbox: ConversationId, outer: EventId) -> Vec<u8> {
+    let mut key = b"consent-v1".to_vec();
+    key.extend_from_slice(account);
+    key.extend_from_slice(mailbox.as_bytes());
+    key.extend_from_slice(outer.as_bytes());
+    key
+}
 
 fn bounded<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     bincode::DefaultOptions::new()
@@ -188,6 +195,96 @@ fn receipt_valid(
 }
 
 impl Node {
+    pub(in crate::node::opaque_relay) fn consent_transport_seen(
+        &self,
+        mailbox: ConversationId,
+        outer: EventId,
+    ) -> Result<bool, LogError> {
+        let key = consent_hint_key(&self.account.public().ed25519_pub, mailbox, outer);
+        let bytes = self
+            .opaque_receive_cache
+            .lock()
+            .expect("opaque cache")
+            .get_wrapper_hint(&key)
+            .ok()
+            .flatten();
+        let Some(body) = bytes
+            .as_deref()
+            .and_then(|bytes| self.open_mailbox_hint(&key, bytes))
+        else {
+            return Ok(false);
+        };
+        let Some((manifest, inner, own, epoch)) = bounded::<([u8; 32], [u8; 32], bool, i64)>(&body)
+        else {
+            return Ok(false);
+        };
+        let current_epoch = self
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .receive_repair_revision()?;
+        if current_epoch != epoch {
+            return Ok(false);
+        }
+        // Even the unconditional own-recipient exclusion must cross the current
+        // account/generation fence. A missing current fact is safe only for it.
+        let current = self
+            .file_consent
+            .lock()
+            .expect("file consent lock")
+            .received_control(EventId::new(manifest))?;
+        Ok(own || current.is_some_and(|event| event.id == EventId::new(inner)))
+    }
+
+    pub(in crate::node::opaque_relay) fn remember_consent_transport(
+        &self,
+        mailbox: ConversationId,
+        outer: EventId,
+        event: &Event,
+    ) -> Result<(), LogError> {
+        let Some(payload) = crate::node::file_consent::Decision::open(event) else {
+            return Ok(());
+        };
+        // Decision::open proves sender != recipient. Full recipient equality
+        // therefore proves this node can never apply its own echoed decision.
+        let own = payload.recipient == self.identity.public();
+        let current = self
+            .file_consent
+            .lock()
+            .expect("file consent lock")
+            .received_control(payload.manifest)?;
+        if !own && current.is_none_or(|current| current.id != event.id) {
+            return Ok(());
+        }
+        let epoch = self
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .receive_repair_revision()?;
+        let key = consent_hint_key(&self.account.public().ed25519_pub, mailbox, outer);
+        let body = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize(&(
+                *payload.manifest.as_bytes(),
+                *event.id.as_bytes(),
+                own,
+                epoch,
+            ))
+            .map_err(|error| LogError::Serialization(error.to_string()))?;
+        if let Some(value) = self.seal_mailbox_hint(&key, body)
+            && let Err(error) = self
+                .opaque_receive_cache
+                .lock()
+                .expect("opaque cache")
+                .put_wrapper_hint(&key, &value)
+        {
+            log::debug!("consent transport hint unavailable: {error}");
+        }
+        Ok(())
+    }
+
     /// A signed classification hint is transport evidence only. Its exact
     /// presentation fact and account owner remain authoritative at every hit.
     pub(in crate::node::opaque_relay) fn semantic_profile_seen(

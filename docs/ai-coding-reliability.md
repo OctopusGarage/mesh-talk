@@ -273,6 +273,12 @@ An empty receive queue must not update an unchanged fair-turn ticket either;
 retain real unfinished rotation and terminal deletion. The settled ordinary and
 control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
 checks SQL mutations, committed writes and body reads together.
+Apply the same rule to empty selected federation slices: validate session,
+completion and resource authority, but do not rewrite unchanged session/global
+charges. The raw-selection regression in the
+[federation staging owner](../crates/mesh-talk-core/src/postoffice/storage/federation/tests.rs)
+checks mutation and commit counts while preserving framing and revoked-session
+rejection.
 Match cache persistence to its actual lifetime. Runtime-only hints should not
 pay durable WAL commits when restart deliberately invalidates their evidence.
 Keep volatile metadata bounded, preserve current-owner checks and prevent cache

@@ -100,11 +100,15 @@ impl SessionLease {
                 ])?;
             }
         }
-        c.execute("UPDATE relay_federation_sessions SET local_entries=?2,row_charge=?3,byte_charge=?4 WHERE session_id=?1",params![self.session_id,selected,session_rows,session_bytes])?;
-        c.execute(
-            "UPDATE relay_federation_runtime SET staged_rows=?1,staged_bytes=?2 WHERE singleton=1",
-            params![rows, bytes],
-        )?;
+        // Empty raw slices still validate the snapshot and charges above, but
+        // cannot change selection counts or staging ownership.
+        if !entries.is_empty() {
+            c.execute("UPDATE relay_federation_sessions SET local_entries=?2,row_charge=?3,byte_charge=?4 WHERE session_id=?1",params![self.session_id,selected,session_rows,session_bytes])?;
+            c.execute(
+                "UPDATE relay_federation_runtime SET staged_rows=?1,staged_bytes=?2 WHERE singleton=1",
+                params![rows, bytes],
+            )?;
+        }
         self.validate_on(c, false)
     }
     pub(crate) fn finish_local_frame_on(
