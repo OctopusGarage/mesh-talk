@@ -273,6 +273,13 @@ An empty receive queue must not update an unchanged fair-turn ticket either;
 retain real unfinished rotation and terminal deletion. The settled ordinary and
 control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
 checks SQL mutations, committed writes and body reads together.
+Match cache persistence to its actual lifetime. Runtime-only hints should not
+pay durable WAL commits when restart deliberately invalidates their evidence.
+Keep volatile metadata bounded, preserve current-owner checks and prevent cache
+hits from becoming custody. The runtime-hint regressions in the
+[opaque receive owner](../crates/mesh-talk-core/src/node/opaque_receive_cache.rs)
+deny persistent hint writes and exercise TEMP rollback, retry and configuration
+failure while retained evidence remains independently durable.
 Nonempty retry queues can also be unchanged: rewriting the numeric tickets of
 an already selected global suffix does not advance fairness. Prove the exact
 account-wide order with a bounded metadata read before skipping rotation;

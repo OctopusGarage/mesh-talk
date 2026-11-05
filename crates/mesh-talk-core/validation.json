@@ -2619,11 +2619,11 @@
       ],
       "consumers": ["core-node"],
       "capability": {
-        "summary": "Keep optional opaque receive mappings on encrypted disk and load only the active mailbox's bounded protocol identifiers.",
+        "summary": "Keep durable optional opaque receive mappings on encrypted disk and runtime-only progress in bounded in-memory TEMP tables; load only the active mailbox's bounded protocol identifiers.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress cannot survive restart, and corrupt or foreign optional sources remain preserved without blocking login. Reads and proven no-ops validate the fresh publication barrier without directory synchronization; changed writes retain durability checks and failed-sync retry.",
+            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress uses bounded memory-backed TEMP tables with UUID isolation and atomic cleanup/accounting, never renews persistent session tables, and cannot survive restart; TEMP failure or non-memory configuration remains a cache miss, and corrupt or foreign optional sources remain preserved without blocking login. Reads and proven no-ops validate the fresh publication barrier without directory synchronization; changed writes retain durability checks and failed-sync retry.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

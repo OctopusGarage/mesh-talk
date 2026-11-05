@@ -260,7 +260,7 @@ impl OpaqueReceiveCache {
         };
         let candidates = profile.database().read(|c| {
             let mut session = if include_session {
-                Some(c.prepare_cached("SELECT inner_id FROM opaque_session_hints WHERE mailbox=?1 AND outer_id=?2 AND session=?3")?)
+                Some(c.prepare_cached("SELECT inner_id FROM temp.opaque_runtime_session_hints WHERE mailbox=?1 AND outer_id=?2 AND session=?3")?)
             } else { None };
             let mut retained = if self.source.is_some() {
                 Some(c.prepare_cached("SELECT inner_id FROM opaque_retained_hints WHERE mailbox=?1 AND outer_id=?2")?)
@@ -326,7 +326,7 @@ impl OpaqueReceiveCache {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let session: i64 = c.query_row(
-                "SELECT records FROM opaque_session_usage WHERE singleton=1",
+                "SELECT records FROM temp.opaque_runtime_session_usage WHERE singleton=1",
                 [],
                 |r| r.get(0),
             )?;

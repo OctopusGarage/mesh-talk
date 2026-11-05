@@ -2614,7 +2614,16 @@ advancing the page. Uninvited channel ancestry retains the existing 8-MiB
 operation-local staging budget across frames. Staging remains retry evidence,
 never a session-only success hint; cancellation can therefore replay it safely.
 Receive revocation interrupts processing without consuming the current ID. Session-only transport and control evidence is fenced by a fresh runtime ID
-and cannot justify skipping data after restart. Terminal Profile-processing
+and cannot justify skipping data after restart. This volatile evidence uses
+explicitly named TEMP tables on the existing serialized profile connection,
+whose `temp_store=MEMORY` configuration is checked before use. Fixed-width rows
+retain the 250,000-entry limit and 128-row cleanup/page budget. TEMP state may
+outlive a cache handle, but UUID filtering prevents another runtime from using it.
+The deployed persistent session tables remain compatible and are no longer
+renewed. TEMP initialization or write failure leaves an ordinary cache miss;
+transaction rollback also restores cleanup and usage accounting. Durable retained
+hints, signed wrapper mappings, receipt publication and custody keep their own
+persistent authority and synchronization rules. Terminal Profile-processing
 facts classify authenticated wrappers without republishing old presentation
 state or granting retained custody. They remain effective when optional hints
 are missing, corrupt or evicted; an unknown older-sequence Profile still crosses

@@ -2252,6 +2252,15 @@ routing and disabled sibling policy before retry bodies are hydrated; skipped
 sources remain pending and final decoded authentication checks remain fresh.
 Index installation scans pending metadata once, without replaying ciphertext or
 completion facts. Scoped retry does not bypass the global discovery-page budget.
+Opaque session-only receive hints have no restart authority. They use bounded
+in-memory SQLite TEMP tables on the existing profile connection, with the same
+250,000 fixed-width row limit, 128-row pages/cleanup and per-runtime UUID checks.
+They do not renew the legacy persistent session tables or force their WAL to
+commit. A non-memory TEMP configuration disables this optional cache instead of
+falling back to disk; failed writes roll back cleanup and usage before retry.
+Retained-event mappings, signed transport receipts and ordinary message custody
+remain durable. The [mailbox contract](network-design-reference.md#incremental-opaque-mailbox-synchronization)
+owns the exact lookup and fallback rules.
 File-manifest retries also preserve tickets when an owner-checked transaction
 proves that all admitted unfinished candidates already form the exact global
 account suffix. A bounded indexed suffix read includes one extra row to detect
