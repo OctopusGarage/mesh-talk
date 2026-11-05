@@ -305,7 +305,7 @@
         "guide": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance",
         "invariants": [
           {
-            "name": "Selected-theme hydration uses verified owner/account scope; logout, replacement and stale async cache reads cannot retain private wallpaper CSS. Startup observation never grants runtime readiness.",
+            "name": "Selected-theme hydration uses verified owner/account scope; logout, replacement and stale async cache reads cannot retain private wallpaper CSS. Startup observation never grants runtime readiness. The startup browser scenario retains held gallery, readiness and real logout/relogin evidence; it cannot model account replacement by mutating a derived chat field while the authoritative identity fixture remains unchanged. Existing scoped pack and linked appearance controls retain replacement and stale-read acceptance.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance"
           },
           {

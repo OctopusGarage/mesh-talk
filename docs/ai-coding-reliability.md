@@ -411,6 +411,14 @@ departure proof owns actual offline pause/relaunch and retry of the original
 signed event and parent cut. Do not chain unrelated controls and reconnection
 requirements onto an already complete invitation scenario.
 
+A fixture with a live authoritative identity observer must not simulate account
+replacement by changing only a derived UI store. A later valid backend observation
+can restore that store. Keep the [startup browser proof](../frontend/e2e/theme-picker.spec.ts)
+focused on startup and real logout/relogin; the [scoped pack](../frontend/src/store/packs.test.ts)
+and [linked appearance](../frontend/src/lib/linkedAppearance.test.ts) controls own
+replacement and stale callbacks. A browser test of an actual account transition
+must change its authoritative identity boundary consistently.
+
 Keep a scheduling control's corpus at the protocol boundary it needs. The
 [queued-source controls](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)
 use a normal short partial page and retain strict result/checkpoint ordering;
