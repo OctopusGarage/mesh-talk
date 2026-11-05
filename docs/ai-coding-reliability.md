@@ -87,6 +87,9 @@ Rust [temporary scopes](https://doc.rust-lang.org/reference/destructors.html#tem
 can keep guards alive through the complete statement, including struct literals
 and tuples. Read repeated owner scalars under one explicit short guard,
 then release it before constructing a value that could acquire the owner again.
+Check the actual temporary scope before declaring a cycle: each operand of a lazy
+Boolean expression has its own temporary scope. An explicit short block can make
+an observation boundary clearer without changing an already-released guard.
 
 **Evidence:** exercise both competing paths and the real authorization variant.
 An ordinary admission fixture does not cover a sensitive proof that itself locks
@@ -182,6 +185,17 @@ waiter, leaving work asleep indefinitely.
 Review fairness across successive turns, not only the batch size. Use the existing
 cursor, coalescing and admission owners; distinguish independent lanes where
 needed. Failed publication must not indefinitely prevent later eligible work.
+Distinguish volatile discovery progress from durable acceptance. Rotating an
+unchanged historical page must not require a durable write on every poll. Where
+a cursor is only a replay hint, bound checkpoint frequency while preserving
+fairness across restarts, exact owner fences and retry after checkpoint failure.
+An in-memory cursor must not acknowledge a failed required checkpoint or override
+a newer durable cursor written by another owner.
+Separate due retries, cooled jobs and unfinished discovery or preparation.
+Reserve a retry deadline before cancellable work and retain its wake through the
+existing scheduler. A future deadline must not force fast polling; expired
+deadlines must not create zero-delay spins. Finite discovery still needs short
+turns while admission capacity remains, even when every queued job is cooling.
 Recheck conditions with the synchronization primitive's correct waiter protocol;
 a notification alone is not the durable condition. Preserve startup, wake,
 shutdown and missed-notification recovery behavior.
@@ -219,6 +233,14 @@ The `account_history_after_favorites_*` regressions in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
 cover successful and failed optional exchanges, retained refreshes, unfinished
 history pages and failure without pending work.
+The `quiet_file_consent_rotating_iteration_has_bounded_checkpoint_writes` and
+`rotating_offer_checkpoint_*` regressions in the
+[file-consent store](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
+check real multi-page rotation, restart progress, checkpoint failure, competing
+writers and bounded cursor eviction.
+The [group-file retry regressions](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+cover missing routes, cancellation, failed refill, full capacity and unfinished
+discovery alongside cooled jobs.
 
 ## R06: Exact authority and stale completions
 

@@ -17,6 +17,35 @@ use tokio::{
 
 const FILE_PULL_INTERVAL_SECS: u64 = 3;
 
+impl Node {
+    /// Observe retained work after a pull before scheduling this producer's wait.
+    pub(super) fn file_pull_schedule(&self, delay: Duration) -> (Duration, bool) {
+        let downloading = {
+            let files = self.files.lock().expect("files lock");
+            files.download_work_pending().unwrap_or_else(|error| {
+                log::warn!("download scheduling observation failed: {error}");
+                true
+            })
+        };
+        let pending = downloading
+            || self.group_file_work_pending()
+            || self.pending_channel_file().is_some()
+            || self.media_maintenance_pending().unwrap_or_else(|error| {
+                log::warn!("media scheduling observation failed: {error}");
+                true
+            });
+        let wait = if pending {
+            delay.min(Duration::from_secs(FILE_PULL_INTERVAL_SECS))
+        } else {
+            delay
+        };
+        let wait = self
+            .group_file_retry_delay()
+            .map_or(wait, |retry| wait.min(retry));
+        (wait, pending)
+    }
+}
+
 /// Network inventory supplied by the host; identity and roster come from Node.
 pub struct ParticipantConfig {
     pub discovery_port: u16,
@@ -174,16 +203,16 @@ impl PreparedParticipant {
                     }).await {
                         log::warn!("file receive worker failed: {error}");
                     }
-                    let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending() || node.pending_channel_file().is_some() || node.media_maintenance_pending().unwrap_or_else(|error|{log::warn!("media scheduling observation failed: {error}");true});
                     tokio::select! {
                         _ = node.pull_pending_files() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
                     }
+                    let (wait, pending) = node.file_pull_schedule(delay);
                     tokio::select! {
                         _ = node.file_pull_notify.notified() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
                         _ = roster.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
-                        _ = tokio::time::sleep(delay) => { delay = if pending { Duration::from_secs(FILE_PULL_INTERVAL_SECS) } else { (delay * 2).min(Duration::from_secs(60)) }; },
+                        _ = tokio::time::sleep(wait) => { delay = if pending { Duration::from_secs(FILE_PULL_INTERVAL_SECS) } else { (delay * 2).min(Duration::from_secs(60)) }; },
                     }
                 }
             }));

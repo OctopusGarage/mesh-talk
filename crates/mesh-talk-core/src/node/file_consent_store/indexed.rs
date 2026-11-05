@@ -20,7 +20,22 @@ use crate::{
 };
 use bincode::Options;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+const OFFER_SCAN_RUNTIME_LIMIT: usize = 512;
+const OFFER_SCAN_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+
+struct OfferScanProgress {
+    position: i64,
+    durable: i64,
+    checkpoint_at: Instant,
+    touched: Instant,
+}
 
 // Decision::open admits <=1024 ciphertext bytes, an empty parent list and a
 // canonical 64-byte signature. This includes every valid encoded Event header.
@@ -199,11 +214,13 @@ pub(crate) struct IndexedFileConsentStore {
     owner: Option<ParticipantEventOwner>,
     session: [u8; 16],
     limit: usize,
+    offer_scans: HashMap<[u8; 32], OfferScanProgress>,
     #[cfg(test)]
     fail_writes: bool,
 }
 impl IndexedFileConsentStore {
-    pub(crate) fn offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
+    fn durable_offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
             let owner = self.check_on(c)?;
             Ok(c.query_row(
@@ -216,37 +233,79 @@ impl IndexedFileConsentStore {
         })
     }
 
+    pub(crate) fn offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
+        let durable = self.durable_offer_scan_position(peer)?;
+        // Another live handle may have checkpointed this peer. Its durable
+        // position supersedes our hint; a fresh retry must still make progress.
+        Ok(self
+            .offer_scans
+            .get(peer)
+            .filter(|scan| scan.durable == durable)
+            .map_or(durable, |scan| scan.position))
+    }
+
     pub(crate) fn advance_offer_scan(
-        &self,
+        &mut self,
         peer: &[u8; 32],
         before: i64,
         after: i64,
     ) -> Result<(), LogError> {
-        if before == after {
-            // A completed single-page cycle revisits the same discovery cursor.
-            // Still validate the exact source and current account/cursor owner;
-            // unchanged polling neither publishes nor retries a directory entry.
-            self.source.check_barrier()?;
-            return if self.offer_scan_position(peer)? == before {
-                Ok(())
-            } else {
-                Err(LogError::StaleCursor)
-            };
+        let durable = self.durable_offer_scan_position(peer)?;
+        let previous = self
+            .offer_scans
+            .get(peer)
+            .filter(|scan| scan.durable == durable);
+        if previous.map_or(durable, |scan| scan.position) != before || after < 0 {
+            return Err(LogError::StaleCursor);
         }
-        // This rotating cursor is discovery progress, not control publication.
-        // The already-published source remains freshly fenced; SQLite commits
-        // the hint durably without republishing the unchanged barrier pathname.
-        #[cfg(test)]
-        self.check_write_failure()?;
-        self.source.check_barrier()?;
-        self.source.profile().database().transaction(|c| {
-            let owner=self.check_on(c)?;
-            c.execute("INSERT OR IGNORE INTO file_consent_offer_scan VALUES(?1,?2,0)",params![owner.namespace(),peer.as_slice()])?;
-            if c.execute("UPDATE file_consent_offer_scan SET after_ordinal=?3 WHERE account=?1 AND peer=?2 AND after_ordinal=?4",params![owner.namespace(),peer.as_slice(),after,before])?!=1 {
-                return Err(LogError::StaleCursor);
-            }
-            Ok(())
-        })
+        if before == after {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let checkpoint = after != durable
+            && previous.is_none_or(|scan| {
+                now.duration_since(scan.checkpoint_at) >= OFFER_SCAN_CHECKPOINT_INTERVAL
+            });
+        let checkpoint_at = previous.map_or(now, |scan| scan.checkpoint_at);
+        if checkpoint {
+            // Discovery is a replayable hint, never durable consent acceptance.
+            // Checkpoint the first changed page so repeated short restarts still
+            // progress; warm rotation only needs a bounded periodic checkpoint.
+            #[cfg(test)]
+            self.check_write_failure()?;
+            self.source.profile().database().transaction(|c| {
+                let owner = self.check_on(c)?;
+                c.execute("INSERT OR IGNORE INTO file_consent_offer_scan VALUES(?1,?2,0)", params![owner.namespace(), peer.as_slice()])?;
+                if c.execute("UPDATE file_consent_offer_scan SET after_ordinal=?3 WHERE account=?1 AND peer=?2 AND after_ordinal=?4", params![owner.namespace(), peer.as_slice(), after, durable])? != 1 {
+                    return Err(LogError::StaleCursor);
+                }
+                Ok(())
+            })?;
+        }
+        // Failed required writes never publish the runtime cursor or reset the
+        // checkpoint clock. Eviction may replay old discovery after re-admission,
+        // while preserving its already durable restart position.
+        if !self.offer_scans.contains_key(peer)
+            && self.offer_scans.len() >= OFFER_SCAN_RUNTIME_LIMIT
+        {
+            let oldest = *self
+                .offer_scans
+                .iter()
+                .min_by_key(|(_, scan)| scan.touched)
+                .expect("full offer scan cache")
+                .0;
+            self.offer_scans.remove(&oldest);
+        }
+        self.offer_scans.insert(
+            *peer,
+            OfferScanProgress {
+                position: after,
+                durable: if checkpoint { after } else { durable },
+                checkpoint_at: if checkpoint { now } else { checkpoint_at },
+                touched: now,
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn authenticate_legacy(
@@ -331,6 +390,7 @@ impl IndexedFileConsentStore {
             owner: None,
             session: *uuid::Uuid::new_v4().as_bytes(),
             limit,
+            offer_scans: HashMap::new(),
             #[cfg(test)]
             fail_writes: false,
         };
@@ -350,7 +410,9 @@ impl IndexedFileConsentStore {
         Ok(())
     }
     pub(crate) fn recapture(&mut self) -> Result<(), LogError> {
-        self.capture(false)
+        self.capture(false)?;
+        self.offer_scans.clear();
+        Ok(())
     }
     fn check_on<'a>(&'a self, c: &Connection) -> Result<&'a ParticipantEventOwner, LogError> {
         let owner = self.owner.as_ref().ok_or(LogError::StaleCursor)?;
@@ -742,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn quiet_file_consent_rotating_iteration_does_not_sync_publication_directory() {
+    fn quiet_file_consent_rotating_iteration_has_bounded_checkpoint_writes() {
         let (_directory, node, sender) = consent_offer_fixture(33);
         let cycle = || {
             let mut seen = std::collections::HashSet::new();
@@ -777,22 +839,119 @@ mod tests {
             cycle() == expected,
             "warm rotation must retain the same signed controls"
         );
-        assert!(
+        assert_eq!(
             database
                 .read(|connection| Ok(connection.total_changes()))
-                .unwrap()
-                > changes,
-            "this regression must exercise actual multi-page cursor mutation"
+                .unwrap(),
+            changes,
+            "warm multi-page rotation must advance in memory between durable checkpoints"
         );
-        assert!(
-            database.successful_write_commits() > commits,
-            "rotating discovery progress remains a durable SQL hint"
-        );
+        assert_eq!(database.successful_write_commits(), commits);
         assert_eq!(
             crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
             0,
             "cursor-only rotation must not republish an unchanged legacy-writer barrier"
         );
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_restarts_advance_and_failed_writes_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let peer = [42; 32];
+        for expected in 0..3 {
+            let mut store = IndexedFileConsentStore::open(&path, "pw").unwrap();
+            assert_eq!(store.offer_scan_position(&peer).unwrap(), expected);
+            store.fail_writes = true;
+            assert!(
+                store
+                    .advance_offer_scan(&peer, expected, expected + 1)
+                    .is_err()
+            );
+            assert_eq!(store.offer_scan_position(&peer).unwrap(), expected);
+            store.fail_writes = false;
+            store
+                .advance_offer_scan(&peer, expected, expected + 1)
+                .unwrap();
+            let commits = store.source.profile().database().successful_write_commits();
+            store.advance_offer_scan(&peer, expected + 1, 90).unwrap();
+            assert_eq!(store.offer_scan_position(&peer).unwrap(), 90);
+            assert_eq!(
+                store.source.profile().database().successful_write_commits(),
+                commits,
+                "subsequent runtime rotation must not checkpoint again immediately"
+            );
+        }
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_due_failure_preserves_runtime_and_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let peer = [42; 32];
+        let mut store = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        store.advance_offer_scan(&peer, 0, 1).unwrap();
+        store.fail_writes = true;
+        store.advance_offer_scan(&peer, 1, 2).unwrap();
+        assert_eq!(store.offer_scan_position(&peer).unwrap(), 2);
+        store.offer_scans.get_mut(&peer).unwrap().checkpoint_at -= OFFER_SCAN_CHECKPOINT_INTERVAL;
+        assert!(store.advance_offer_scan(&peer, 2, 3).is_err());
+        assert_eq!(store.offer_scan_position(&peer).unwrap(), 2);
+        store.fail_writes = false;
+        store.advance_offer_scan(&peer, 2, 3).unwrap();
+        drop(store);
+        let reopened = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        assert_eq!(reopened.offer_scan_position(&peer).unwrap(), 3);
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_recovers_from_another_writer_and_fences_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let peer = [42; 32];
+        let mut first = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        first.advance_offer_scan(&peer, 0, 1).unwrap();
+        first.advance_offer_scan(&peer, 1, 90).unwrap();
+        let mut second =
+            IndexedFileConsentStore::from_profile(first.source.profile().clone(), &path, "pw")
+                .unwrap();
+        second.advance_offer_scan(&peer, 1, 2).unwrap();
+        assert!(matches!(
+            first.advance_offer_scan(&peer, 90, 91),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(first.offer_scan_position(&peer).unwrap(), 2);
+        first.advance_offer_scan(&peer, 2, 3).unwrap();
+        assert_eq!(first.offer_scan_position(&peer).unwrap(), 3);
+        let barrier = std::fs::read(&path).unwrap();
+        std::fs::write(&path, vec![0; barrier.len()]).unwrap();
+        assert!(first.offer_scan_position(&peer).is_err());
+        assert!(first.advance_offer_scan(&peer, 3, 4).is_err());
+        std::fs::write(&path, barrier).unwrap();
+        assert_eq!(first.offer_scan_position(&peer).unwrap(), 3);
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_cache_bounds_peers_without_losing_restart_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let mut store = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        for number in 0..=OFFER_SCAN_RUNTIME_LIMIT {
+            let mut peer = [0; 32];
+            peer[..8].copy_from_slice(&(number as u64).to_be_bytes());
+            store.advance_offer_scan(&peer, 0, 1).unwrap();
+            store.advance_offer_scan(&peer, 1, 90).unwrap();
+            assert!(store.offer_scans.len() <= OFFER_SCAN_RUNTIME_LIMIT);
+        }
+        // The evicted first peer resumes from its durable hint, and its next
+        // admitted page immediately checkpoints, preserving restart fairness.
+        let peer = [0; 32];
+        assert_eq!(store.offer_scan_position(&peer).unwrap(), 1);
+        store.advance_offer_scan(&peer, 1, 2).unwrap();
+        assert_eq!(store.offer_scans.len(), OFFER_SCAN_RUNTIME_LIMIT);
+        drop(store);
+        let reopened = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        assert_eq!(reopened.offer_scan_position(&peer).unwrap(), 2);
     }
 
     #[test]
@@ -867,6 +1026,7 @@ mod tests {
             a.advance_offer_scan(&peer, 0, 92),
             Err(LogError::StaleCursor)
         ));
+        a.offer_scans.get_mut(&peer).unwrap().checkpoint_at -= OFFER_SCAN_CHECKPOINT_INTERVAL;
         a.fail_writes = true;
         assert!(a.advance_offer_scan(&peer, 91, 92).is_err());
         a.fail_writes = false;

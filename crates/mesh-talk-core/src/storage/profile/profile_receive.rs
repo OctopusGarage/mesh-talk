@@ -197,7 +197,9 @@ impl ProfileReceiveWork {
                 c.execute("UPDATE profile_receive_pending SET ticket=?1 WHERE account=?2 AND id=?3",params![ticket,self.account.as_slice(),row.id.as_bytes().as_slice()])?;
                 ticket=ticket.checked_add(1).ok_or_else(||invalid("profile retry ticket exhausted"))?;
             }
-            c.execute("UPDATE profile_receive_scan SET next_ticket=?1 WHERE account=?2",params![ticket,self.account.as_slice()])?;
+            if !result.is_empty() {
+                c.execute("UPDATE profile_receive_scan SET next_ticket=?1 WHERE account=?2",params![ticket,self.account.as_slice()])?;
+            }
             Ok(result)
         })
     }
@@ -269,6 +271,30 @@ mod tests {
             })
             .collect()
     }
+    #[test]
+    fn empty_profile_retry_polling_does_not_write_and_later_work_still_rotates() {
+        let (_dir, work, own) = fixture();
+        let database = work.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            work.discover(work.after().unwrap(), &[], own).unwrap();
+            assert!(work.candidates().unwrap().is_empty());
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "empty profile polling must not update the durable retry ticket"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        work.discover(None, &headers(), own).unwrap();
+        let first = work.candidates().unwrap();
+        let second = work.candidates().unwrap();
+        assert_eq!(first.len(), 16);
+        assert_eq!(second.len(), 16);
+        assert!(second.iter().all(|row| !first.contains(row)));
+    }
+
     #[test]
     fn bounded_retry_selection_rotates_and_exact_completion_survives_reopen() {
         let (_dir, work, own) = fixture();

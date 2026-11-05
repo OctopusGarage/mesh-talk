@@ -56,11 +56,22 @@ impl Node {
                 let source = repository.source_revision()?;
                 let destructive = repository.destructive_policy_revision()?;
                 let repair = repository.receive_repair_revision()?;
+                let profile = repository.observe_profile_work()?;
                 let page = repository.observe_order_work(observer.cursor.as_ref(), ROWS)?;
-                Ok((page, source, destructive, repair))
+                Ok((page, source, destructive, repair, profile))
             });
         match page {
-            Ok((page, source, destructive, repair)) => {
+            Ok((page, source, destructive, repair, profile)) => {
+                if let Some(job) = profile.job {
+                    log::info!(target: "mesh_talk_core::node::node",
+                        "profile_work source={} selected={} complete={} candidates={} candidate_bytes={} cursor={} requests_pending={}",
+                        profile.source_revision, job.revision, job.complete, job.candidates,
+                        job.candidate_bytes, hex::encode(job.cursor_tag), profile.requests_pending);
+                } else {
+                    log::info!(target: "mesh_talk_core::node::node",
+                        "profile_work source={} job=absent requests_pending={}",
+                        profile.source_revision, profile.requests_pending);
+                }
                 log::info!(
                     target: "mesh_talk_core::node::node",
                     "order_work_page age_ms={} rows={} more={} source={} destructive={} receive_repair={}",

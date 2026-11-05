@@ -2198,6 +2198,9 @@ remains conservative. A failure rolls back retirement evidence with raw deletion
 Ordinary privacy deletion does not publish this semantic fact. Exact local-device
 Profile signatures also qualify the existing own-presentation exclusion; explicit
 causal-parent recovery still requires ordinary guarded raw admission.
+Empty Profile receive retry polls preserve the durable ticket unchanged. New
+pending work still rotates before expensive authentication, and accepted or
+definitively rejected sources retain their existing exact durable completion.
 
 Participant network sync uses `NetworkSyncStore` directly: retained Have and
 export pages bind a finite commit cutoff and destructive generation. Ordinary

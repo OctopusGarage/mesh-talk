@@ -1170,7 +1170,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Opt-in order-work observations read at most sixty-four physical metadata rows through a fenced indexed cursor without body hydration, writes, raw message identifiers or authority grants; default runtime operation performs no observation query.",
+            "name": "Opt-in work observations read at most sixty-four order metadata rows through a fenced indexed cursor and one Profile-maintenance job, including stale selection revisions and an opaque progress tag, without body hydration, writes, raw message identifiers or authority grants; default runtime operation performs no observation query.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {
@@ -1627,6 +1627,10 @@
           {
             "name": "Authenticated latest-per-account profiles survive restart, backup and device linking with bounded storage",
             "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Empty Profile retry polls preserve durable ticket state; later pending work retains bounded fair rotation and exact completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
             "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer",
@@ -2389,11 +2393,11 @@
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work.",
+            "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work. Cancellation reserves retry deadlines, failed routes back off, cooling jobs avoid authorization work, and unchanged discovery rests without discarding periodic eligibility repair or independent progress after scan failures.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks.",
+            "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks. Consent discovery coalesces replayable cursor checkpoints while preserving bounded fair rotation, restart progress and exact owner fencing.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           }
         ]

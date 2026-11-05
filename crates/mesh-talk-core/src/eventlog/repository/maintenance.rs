@@ -3,6 +3,23 @@
 //! removed disk rows. These APIs never load retained event bodies.
 use super::pages::PageBudget;
 use super::*;
+use sha2::{Digest, Sha256};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProfileWorkObservation {
+    pub source_revision: i64,
+    pub requests_pending: bool,
+    pub job: Option<ProfileJobObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProfileJobObservation {
+    pub revision: i64,
+    pub complete: bool,
+    pub candidates: i64,
+    pub candidate_bytes: i64,
+    pub cursor_tag: [u8; 8],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MaintenanceState {
@@ -32,6 +49,51 @@ pub(crate) struct MaintenanceApply {
 }
 
 impl EventRepository {
+    /// One metadata row, including stale jobs which ordinary mutation fences
+    /// reject. Observation never advances a cursor or authenticates deletion.
+    pub(crate) fn observe_profile_work(&self) -> Result<ProfileWorkObservation, LogError> {
+        self.database.read(|c| {
+            let mut statement = c.prepare_cached("SELECT d.source_revision,j.job,j.source_revision,j.complete,j.candidate_count,j.candidate_bytes,j.conversation,j.after_author,j.after_clock,j.after_id,EXISTS(SELECT 1 FROM event_profile_requests r WHERE r.domain=d.domain) FROM event_domains d LEFT JOIN event_profile_jobs j ON j.domain=d.domain WHERE d.domain=?1")?;
+            let mut rows = statement.query([self.domain.0.as_slice()])?;
+            let row = rows.next()?.ok_or_else(|| corrupt("observed maintenance domain missing"))?;
+            let source_revision = nonnegative(row.get(0)?)?;
+            let requests_pending = row.get(10)?;
+            let job = if let Some(job) = optional_blob::<16>(row, 1)? {
+                let revision = nonnegative(row.get(2)?)?;
+                let complete: i64 = row.get(3)?;
+                let candidates = nonnegative(row.get(4)?)?;
+                let candidate_bytes = nonnegative(row.get(5)?)?;
+                let conversation = optional_blob::<32>(row, 6)?;
+                let author = optional_blob::<32>(row, 7)?;
+                let clock = optional_blob::<8>(row, 8)?;
+                let id = optional_blob::<32>(row, 9)?;
+                if revision > source_revision || !(0..=1).contains(&complete)
+                    || author.is_some() != clock.is_some()
+                    || author.is_some() != id.is_some()
+                    || (author.is_some() && conversation.is_none()) {
+                    return Err(corrupt("invalid observed maintenance progress"));
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"mesh-talk-profile-work-v1");
+                hash.update(self.store_uuid);
+                hash.update(self.domain.0);
+                hash.update(job);
+                for field in [conversation.as_ref().map(|v| v.as_slice()),
+                    author.as_ref().map(|v| v.as_slice()),
+                    clock.as_ref().map(|v| v.as_slice()),
+                    id.as_ref().map(|v| v.as_slice())] {
+                    hash.update([u8::from(field.is_some())]);
+                    if let Some(bytes) = field { hash.update(bytes); }
+                }
+                let mut cursor_tag = [0; 8];
+                cursor_tag.copy_from_slice(&hash.finalize()[..8]);
+                Some(ProfileJobObservation { revision, complete: complete == 1,
+                    candidates, candidate_bytes, cursor_tag })
+            } else { None };
+            Ok(ProfileWorkObservation { source_revision, requests_pending, job })
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn estimated_bytes(&self) -> Result<u64, LogError> {
         self.database

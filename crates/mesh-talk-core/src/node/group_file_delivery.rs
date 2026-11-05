@@ -29,15 +29,23 @@ struct GroupFileUpload {
     manifest: EventId,
     recipient: PublicIdentity,
     retry_after: Option<std::time::Instant>,
+    retry_delay: std::time::Duration,
     // Bounded by the existing job count. Cloned retry selections share only
     // exact local outgoing-membership evidence, never remote custody proof.
     authorization_stamp: Arc<Mutex<Option<super::privacy_sync::HistorySyncStamp>>>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct GroupFileScan {
+    cursor: Option<i64>,
+    source: Option<(u64, u64)>,
+    repair_after: Option<std::time::Instant>,
+}
+
 #[derive(Default)]
 pub(super) struct GroupFileDelivery {
     gate: tokio::sync::Mutex<()>,
-    scan_cursor: Mutex<Option<i64>>,
+    scan: Mutex<GroupFileScan>,
     cursor: Mutex<Option<UploadKey>>,
     jobs: Mutex<BTreeMap<UploadKey, GroupFileUpload>>,
     authorization: Mutex<BTreeMap<AuthorizationKey, AuthorizationView>>,
@@ -198,32 +206,72 @@ impl Node {
 
     /// Rebuild bounded work from the durable group rows, including older sends.
     fn refill_group_file_delivery(&self) -> Result<(), LogError> {
-        let after = *self
+        let mut scan = *self
             .group_file_delivery
-            .scan_cursor
+            .scan
             .lock()
             .expect("group file scan lock");
-        let page = self
-            .received_files
-            .lock()
-            .expect("file rows lock")
-            .scan_page(
+        let page = {
+            let rows = self.received_files.lock().expect("file rows lock");
+            let source = (rows.revision(), rows.rewrite_revision());
+            if scan.source.is_none_or(|old| old.1 != source.1)
+                || (scan.repair_after.is_some() && scan.source != Some(source))
+            {
+                scan.cursor = None;
+                scan.repair_after = None;
+            }
+            scan.source = Some(source);
+            if scan
+                .repair_after
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            {
+                return Ok(());
+            }
+            // A full queue retains its discovery page; it must not certify EOF
+            // or skip a recipient which could not yet be admitted.
+            if self
+                .group_file_delivery
+                .jobs
+                .lock()
+                .expect("group file jobs lock")
+                .len()
+                >= MAX_GROUP_FILE_JOBS
+            {
+                return Ok(());
+            }
+            rows.scan_page(
                 None,
-                after,
+                scan.cursor,
                 super::transcript_repository::TranscriptPageLimit::default(),
-            )?;
+            )?
+        };
         for row in page.rows {
             if row.from == self.user_id()
                 && let Some(manifest) = super::files::validated_manifest(&row.plaintext)
             {
                 self.queue_group_file_delivery(manifest.file_conv(), row.event_id)?;
+                if self
+                    .group_file_delivery
+                    .jobs
+                    .lock()
+                    .expect("group file jobs lock")
+                    .len()
+                    >= MAX_GROUP_FILE_JOBS
+                {
+                    return Ok(());
+                }
             }
         }
+        scan.cursor = page.next;
+        scan.repair_after = page
+            .next
+            .is_none()
+            .then(|| std::time::Instant::now() + std::time::Duration::from_secs(60));
         *self
             .group_file_delivery
-            .scan_cursor
+            .scan
             .lock()
-            .expect("group file scan lock") = page.next;
+            .expect("group file scan lock") = scan;
         Ok(())
     }
 
@@ -274,6 +322,7 @@ impl Node {
                 manifest,
                 recipient,
                 retry_after: None,
+                retry_delay: std::time::Duration::from_secs(3),
                 authorization_stamp: Arc::new(Mutex::new(None)),
             };
             if !self.group_file_custody_allowed(&job)? {
@@ -295,19 +344,50 @@ impl Node {
     }
 
     pub(super) fn group_file_work_pending(&self) -> bool {
-        let jobs = !self
-            .group_file_delivery
+        let (due, count) = {
+            let jobs = self
+                .group_file_delivery
+                .jobs
+                .lock()
+                .expect("group file jobs lock");
+            (
+                jobs.values().any(|job| {
+                    job.retry_after
+                        .is_none_or(|deadline| std::time::Instant::now() >= deadline)
+                }),
+                jobs.len(),
+            )
+        };
+        let scanning = count < MAX_GROUP_FILE_JOBS
+            && self
+                .group_file_delivery
+                .scan
+                .lock()
+                .expect("group file scan lock")
+                .cursor
+                .is_some();
+        due || scanning
+            || self
+                .group_file_delivery
+                .authorization
+                .lock()
+                .expect("group file authorization lock")
+                .values()
+                .any(|view| !view.ready)
+    }
+
+    /// The existing producer owns the timer; cooled work retains its wake deadline.
+    pub(super) fn group_file_retry_delay(&self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        self.group_file_delivery
             .jobs
             .lock()
             .expect("group file jobs lock")
-            .is_empty();
-        jobs || self
-            .group_file_delivery
-            .authorization
-            .lock()
-            .expect("group file authorization lock")
             .values()
-            .any(|view| !view.ready)
+            .filter_map(|job| job.retry_after)
+            .filter(|deadline| *deadline > now)
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
     }
 
     fn group_file_custody_allowed(&self, job: &GroupFileUpload) -> Result<bool, LogError> {
@@ -553,7 +633,6 @@ impl Node {
         };
         if let Err(error) = preparation {
             log::warn!("Group file authorization deferred after storage failure: {error}");
-            return;
         }
         // Pending refill must not prevent queued jobs from advancing the
         // same finite authorization owners and releasing admission slots.
@@ -561,7 +640,6 @@ impl Node {
             && !matches!(error, LogError::StaleCursor)
         {
             log::warn!("Group file scan deferred after storage failure: {error}");
-            return;
         }
         let after = *self
             .group_file_delivery
@@ -596,7 +674,29 @@ impl Node {
                     .cursor
                     .lock()
                     .expect("group file cursor lock") = Some(key);
-                let allowed = match self.group_file_custody_allowed(&job) { Ok(allowed) => allowed, Err(LogError::StaleCursor) => continue, Err(error) => { log::warn!("Group file retry deferred after storage failure: {error}"); continue; } };
+                // Publish before any authorization/network await: cancellation,
+                // unavailable relays and failures must retain bounded backoff.
+                let retry_delay = {
+                    let mut jobs = self.group_file_delivery.jobs.lock().expect("group file jobs lock");
+                    let Some(pending) = jobs.get_mut(&key) else { continue; };
+                    let delay = pending.retry_delay;
+                    pending.retry_after = Some(std::time::Instant::now() + delay);
+                    pending.retry_delay = (delay * 2).min(std::time::Duration::from_secs(60));
+                    delay
+                };
+                let allowed = match self.group_file_custody_allowed(&job) {
+                    Ok(allowed) => allowed,
+                    Err(LogError::StaleCursor) => {
+                        // Finite preparation is local progress, not a failed
+                        // network attempt. Keep its existing short cadence.
+                        if let Some(pending) = self.group_file_delivery.jobs.lock().expect("group file jobs lock").get_mut(&key) {
+                            pending.retry_after = None;
+                            pending.retry_delay = std::time::Duration::from_secs(3);
+                        }
+                        continue;
+                    }
+                    Err(error) => { log::warn!("Group file retry deferred after storage failure: {error}"); continue; }
+                };
                 if !allowed {
                     self.group_file_delivery
                         .jobs
@@ -739,16 +839,18 @@ impl Node {
                         }
                     })
                     .await;
-                if held.load(Ordering::Relaxed)
-                    && let Some(pending) = self
+                if let Some(pending) = self
                         .group_file_delivery
                         .jobs
                         .lock()
                         .expect("group file jobs lock")
                         .get_mut(&key)
                 {
-                    pending.retry_after =
-                        Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                    let delay = if held.load(Ordering::Relaxed) {
+                        pending.retry_delay = std::time::Duration::from_secs(3);
+                        std::time::Duration::from_secs(30)
+                    } else { retry_delay };
+                    pending.retry_after = Some(std::time::Instant::now() + delay);
                 }
             }
         })

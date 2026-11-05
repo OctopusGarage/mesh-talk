@@ -943,8 +943,18 @@ sends and restarts. A pass launches at most two recipient jobs and races at most
 two relay exchanges at once under the existing whole-file deadline. Rotation
 advances at launch, failed paths do not pin later recipients, and exact durable
 chunk custody suppresses redundant inventory work for 30 seconds. The index
-contains outgoing group files, not historical private consent controls. Pending
-work keeps the producer's existing short retry interval. Payload pages recheck
+contains outgoing group files, not historical private consent controls. Due jobs
+and unfinished authorization preparation retain the producer's short cadence.
+Network failures and unavailable routes back off from three to sixty seconds;
+launch reserves a deadline before any await, and completed attempts measure their
+delay from completion. The existing producer retains the earliest future retry
+wake. Cooling jobs perform no repeated offer authorization. Completed discovery
+rests for sixty seconds, reopening immediately on changed file rows. Ordinary
+appends preserve unfinished ordinal scans; destructive rewrites restart them.
+Periodic repair still revisits eligibility changes without a new file row,
+including membership, consent and proof recovery. Failed preparation, failed scans
+and full capacity retain unfinished work while independent queued jobs advance.
+Payload pages recheck
 current authority, refusal, relay role and managed runtime I/O admission.
 
 Exact outgoing entitlement retains at most four heavy recipient/channel views.
@@ -958,6 +968,17 @@ history/authority stamp permits reuse. Missing or changed versions prepare and
 check exact membership again; only a positive selection with matching before
 and after versions publishes a qualification. Current offer, membership, bytes,
 consent and exact remote custody remain independently checked on every use.
+
+Recipient consent discovery rotates through eight retained offers per mailbox
+exchange. Its cursor is a replay hint, not proof of consent or delivery. The
+existing file-consent owner retains at most 512 peer cursors in memory. Each
+resident peer's first changed page is checkpointed immediately, so repeated
+short restarts advance; subsequent changed checkpoints are coalesced to at most
+once per 30 seconds. Eviction or restart can replay pages from the last durable
+hint. Every turn still validates the current source, account incarnation and
+durable cursor. A required checkpoint failure retains the previous progress;
+an independent writer's newer durable cursor supersedes the runtime hint.
+Decisions and completion remain freshly selected before sending signed controls.
 
 This worker deposits the original sender's retained chunks. Existing authorized
 sharing-member recovery still works over reachable application routes; it does
@@ -2578,7 +2599,12 @@ The observation is read-only, retains one store/domain-bound cursor and fetches
 no event bodies. It logs no message identifiers. It adds no network or messaging grant.
 Default operation performs no observation query or logging. Pages are live
 observations rather than a transactionally consistent snapshot across intervals;
-normal resource acceptance runs with this optional logging disabled.
+normal resource acceptance runs with this optional logging disabled. The same
+interval observes one Profile-maintenance job: current and selected source
+revisions, completion, candidate charges, pending requests and an opaque cursor
+tag. Stale selections remain visible without repairing or authorizing them.
+Tags can show sampled movement or replacement; snapshots do not prove every
+intervening transition or that all unchanged jobs are stuck.
 
 ### Session reuse contract
 

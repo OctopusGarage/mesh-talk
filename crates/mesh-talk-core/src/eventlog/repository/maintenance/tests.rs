@@ -2,6 +2,70 @@ use super::*;
 use crate::eventlog::repository::tests::{database, event};
 use crate::identity::device::DeviceIdentity;
 
+#[test]
+fn profile_work_observation_reports_stale_selection_without_writing_or_reading_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    for sequence in 1..=12 {
+        repo.append(&event(
+            &author,
+            sequence,
+            vec![],
+            sequence,
+            EventKind::Profile,
+        ))
+        .unwrap();
+    }
+    repo.request_profile_maintenance(&ConversationId::new([1; 32]))
+        .unwrap();
+    let absent = repo.observe_profile_work().unwrap();
+    assert!(absent.requests_pending);
+    assert!(absent.job.is_none());
+    let token = repo.begin_profile_maintenance().unwrap();
+    repo.step_profile_maintenance(
+        token,
+        PageBudget {
+            rows: 2,
+            bytes: 1024,
+        },
+    )
+    .unwrap();
+    let selected = repo.observe_profile_work().unwrap();
+    assert_eq!(
+        selected.job.as_ref().unwrap().revision,
+        selected.source_revision
+    );
+    repo.append(&event(&author, 100, vec![], 100, EventKind::Message))
+        .unwrap();
+    let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = db.successful_write_commits();
+    let bodies = repo.body_read_counts();
+    let stale = repo.observe_profile_work().unwrap();
+    assert!(stale.source_revision > stale.job.as_ref().unwrap().revision);
+    assert_eq!(
+        stale.job, selected.job,
+        "observation must expose, not repair, stale progress"
+    );
+    assert_eq!(repo.observe_profile_work().unwrap(), stale);
+    assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+    assert_eq!(db.successful_write_commits(), commits);
+    assert_eq!(repo.body_read_counts(), bodies);
+    let fresh = repo.begin_profile_maintenance().unwrap();
+    finish(&repo, fresh);
+    let complete = repo.observe_profile_work().unwrap();
+    assert!(complete.job.as_ref().unwrap().complete);
+    assert_eq!(
+        complete.job.as_ref().unwrap().revision,
+        complete.source_revision
+    );
+    assert_ne!(
+        complete.job.as_ref().unwrap().cursor_tag,
+        stale.job.as_ref().unwrap().cursor_tag
+    );
+}
+
 fn finish(repo: &EventRepository, token: ProfileMaintenanceToken) -> MaintenanceProgress {
     for _ in 0..1000 {
         let progress = repo

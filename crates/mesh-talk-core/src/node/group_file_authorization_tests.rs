@@ -707,3 +707,324 @@ async fn group_file_refused_and_completed_cold_recipients_skip_outgoing_preparat
         );
     }
 }
+
+#[tokio::test]
+async fn group_file_no_relay_retries_cool_all_five_jobs_without_repeated_reads() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    for _ in 0..3 {
+        node.retry_group_file_delivery().await;
+    }
+    assert!(
+        node.group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .all(|job| job.retry_after.is_some()),
+        "every recipient must get a fair attempt and a deadline even without an eligible relay"
+    );
+    for job in node.group_file_delivery.jobs.lock().unwrap().values_mut() {
+        job.retry_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+    }
+    assert!(
+        !node.group_file_work_pending(),
+        "cooled jobs must permit idle cadence"
+    );
+    let before = node.received_files.lock().unwrap().body_reads();
+    let sql = node
+        .storage
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    node.retry_group_file_delivery().await;
+    assert_eq!(
+        node.received_files.lock().unwrap().body_reads(),
+        before,
+        "cooled retries and stable EOF must not hydrate retained offers"
+    );
+    assert_eq!(
+        node.storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        sql
+    );
+    node.group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap()
+        .retry_after = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    assert!(
+        node.group_file_work_pending(),
+        "expired work must become eligible again"
+    );
+    node.retry_group_file_delivery().await;
+    assert!(!node.group_file_work_pending());
+}
+
+#[tokio::test]
+async fn group_file_stable_refill_eof_skips_unchanged_rows() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.refill_group_file_delivery().unwrap();
+    let before = node.received_files.lock().unwrap().body_reads();
+    node.refill_group_file_delivery().unwrap();
+    assert_eq!(
+        node.received_files.lock().unwrap().body_reads(),
+        before,
+        "unchanged EOF must sleep until its repair deadline or source revision changes"
+    );
+    node.group_file_delivery.scan.lock().unwrap().repair_after =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.received_files.lock().unwrap().body_reads() > before,
+        "periodic repair revisits eligibility without FILES appends"
+    );
+    let before = node.received_files.lock().unwrap().body_reads();
+    node.received_files
+        .lock()
+        .unwrap()
+        .record_durable(&unrelated_file_row(217))
+        .unwrap();
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.received_files.lock().unwrap().body_reads() > before,
+        "FILES append immediately reopens discovery"
+    );
+}
+
+#[tokio::test]
+async fn group_file_full_queue_retains_scan_backlog_and_independent_retry_progress() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let original_keys: Vec<_> = node
+        .group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .keys()
+        .copied()
+        .collect();
+    {
+        let mut jobs = node.group_file_delivery.jobs.lock().unwrap();
+        let template = jobs.values().next().unwrap().clone();
+        for index in 0..MAX_GROUP_FILE_JOBS - original_keys.len() {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            jobs.insert(
+                (EventId::new(bytes), template.recipient.ed25519_pub),
+                template.clone(),
+            );
+        }
+        assert_eq!(jobs.len(), MAX_GROUP_FILE_JOBS);
+    }
+    node.retry_group_file_delivery().await;
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .repair_after
+            .is_none(),
+        "a full queue cannot acknowledge the unvisited discovery page"
+    );
+    assert!(
+        node.group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|job| job.retry_after.is_some()),
+        "full discovery capacity must not prevent existing work advancing"
+    );
+    node.group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .retain(|key, _| original_keys.contains(key));
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .repair_after
+            .is_some(),
+        "discovery resumes after capacity returns"
+    );
+}
+
+fn unrelated_file_row(index: u64) -> super::super::received_log::ReceivedEntry {
+    let mut id = [217; 32];
+    id[..8].copy_from_slice(&index.to_be_bytes());
+    super::super::received_log::ReceivedEntry {
+        event_id: EventId::new(id),
+        conversation: ConversationId::new([216; 32]),
+        from: "unrelated".into(),
+        wall_clock: 1,
+        plaintext: vec![1],
+    }
+}
+
+#[tokio::test]
+async fn group_file_refill_failure_preserves_scan_and_attempts_independent_jobs() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let row = unrelated_file_row(218);
+    node.received_files
+        .lock()
+        .unwrap()
+        .record_durable(&row)
+        .unwrap();
+    node.storage.database().transaction(|c| {
+        c.execute("DELETE FROM transcript_bodies WHERE ordinal IN (SELECT ordinal FROM transcript_rows WHERE kind=3 AND row_key=?1)", [row.event_id.as_bytes().as_slice()])?;
+        Ok(())
+    }).unwrap();
+    assert!(node.refill_group_file_delivery().is_err());
+    node.retry_group_file_delivery().await;
+    assert!(
+        node.group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|job| job.retry_after.is_some()),
+        "scan corruption cannot starve independently retained work"
+    );
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .repair_after
+            .is_none(),
+        "failed scan must not certify EOF"
+    );
+}
+
+#[tokio::test]
+async fn group_file_cancelled_exchange_retains_launch_deadline_and_fair_cursor() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = DeviceIdentity::generate();
+    let proof = Announce::new_post_office(
+        &relay,
+        "Stalled relay",
+        listener.local_addr().unwrap().port(),
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let retry_node = Arc::clone(node);
+    let task = tokio::spawn(async move {
+        retry_node.retry_group_file_delivery().await;
+    });
+    let (_socket, _) = tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let key = node.group_file_delivery.cursor.lock().unwrap().unwrap();
+    let jobs = node.group_file_delivery.jobs.lock().unwrap();
+    assert!(
+        jobs.get(&key).unwrap().retry_after.is_some(),
+        "cancelling real pending handshake retains launch backoff"
+    );
+    assert!(
+        jobs.iter()
+            .any(|(other, job)| *other != key && job.retry_after.is_none()),
+        "later independent jobs remain ready"
+    );
+}
+
+#[tokio::test]
+async fn group_file_unfinished_discovery_keeps_short_cadence_until_eof() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    // Match the producer's maintenance phase so unrelated legitimate work does
+    // not invalidate the idle scheduling oracle below.
+    for _ in 0..32 {
+        node.retry_file_receives();
+        node.maintain_media().unwrap();
+        node.pull_pending_files().await;
+        let downloading = node.files.lock().unwrap().download_work_pending().unwrap();
+        if !downloading
+            && !node.media_maintenance_pending().unwrap()
+            && node.pending_channel_file().is_none()
+        {
+            break;
+        }
+    }
+    assert!(!node.files.lock().unwrap().download_work_pending().unwrap());
+    assert!(!node.media_maintenance_pending().unwrap());
+    assert!(node.pending_channel_file().is_none());
+    for job in node.group_file_delivery.jobs.lock().unwrap().values_mut() {
+        job.retry_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+    }
+    for index in 0..super::super::transcript_repository::MAX_PAGE_ROWS {
+        node.received_files
+            .lock()
+            .unwrap()
+            .record_durable(&unrelated_file_row(index as u64))
+            .unwrap();
+    }
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .cursor
+            .is_some()
+    );
+    assert!(
+        node.group_file_work_pending(),
+        "unfinished discovery retains short cadence despite cooled jobs"
+    );
+    let (wait, _) = node.file_pull_schedule(std::time::Duration::from_secs(60));
+    assert!(
+        wait <= std::time::Duration::from_secs(3),
+        "the producer must shorten its current idle wait after discovering unfinished work: {wait:?}"
+    );
+    node.refill_group_file_delivery().unwrap();
+    assert!(
+        node.group_file_delivery
+            .scan
+            .lock()
+            .unwrap()
+            .cursor
+            .is_none()
+    );
+    assert!(
+        !node.group_file_work_pending(),
+        "completed discovery and cooled jobs permit idle cadence"
+    );
+    let (wait, pending) = node.file_pull_schedule(std::time::Duration::from_secs(60));
+    assert!(!pending);
+    assert_eq!(
+        wait,
+        std::time::Duration::from_secs(60),
+        "cooled EOF work permits the full idle wait"
+    );
+    node.group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap()
+        .retry_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+    let (wait, _) = node.file_pull_schedule(std::time::Duration::from_secs(60));
+    assert!(
+        wait > std::time::Duration::ZERO && wait <= std::time::Duration::from_secs(10),
+        "a retained future retry bounds the current idle wait"
+    );
+}
