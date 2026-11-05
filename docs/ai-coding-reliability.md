@@ -269,8 +269,13 @@ request-before-cursor regressions in
 [node tests](../crates/mesh-talk-core/src/node/node_tests.rs) and atomic bootstrap
 regression in the [receive owner](../crates/mesh-talk-core/src/storage/profile/profile_receive.rs)
 exercise this boundary.
-An empty receive queue must not update an unchanged fair-turn ticket either;
-retain real unfinished rotation and terminal deletion. The settled ordinary and
+An empty receive queue must not update an unchanged fair-turn ticket either.
+When a bounded lookahead proves that the entire scoped queue was selected,
+rotating all unfinished rows preserves the same order and needs no durable
+mutation. Retain partial-page rotation, including oversized attempts, and
+terminal deletion. The complete-page and partial-page regression in the
+[receive repository tests](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+checks fairness and SQL/commit/body-read costs together. The settled ordinary and
 control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
 checks SQL mutations, committed writes and body reads together.
 Apply the same rule to empty selected federation slices: validate session,

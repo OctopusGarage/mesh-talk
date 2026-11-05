@@ -2250,8 +2250,11 @@ Ordinary privacy deletion does not publish this semantic fact. Exact local-devic
 Profile signatures also qualify the existing own-presentation exclusion; explicit
 causal-parent recovery still requires ordinary guarded raw admission.
 Empty ordinary, control and Profile receive retry polls preserve durable tickets
-unchanged. Terminal rows still retire, and every unfinished attempt, including
-an oversized row, advances its fair turn. New
+unchanged. Ordinary and control retries also preserve tickets when one bounded
+lookahead proves that the complete account/conversation/purpose queue was
+selected: rotating every remaining item would preserve the same relative order.
+Terminal rows still retire. Partial pages advance every unfinished attempt,
+including an oversized row, so unselected work keeps its fair turn. New
 pending work still rotates before expensive authentication, and accepted or
 definitively rejected sources retain their existing exact durable completion.
 Network callbacks retry only their actual conversation through a covering

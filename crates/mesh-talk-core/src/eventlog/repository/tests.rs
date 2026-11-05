@@ -1842,6 +1842,83 @@ fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
     assert_eq!(repo.body_read_counts(), (0, 0));
 }
 
+#[test]
+fn unresolved_complete_receive_pages_preserve_tickets_but_partial_pages_rotate() {
+    for controls in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (profile, repo, local, account) = receive_profile(&dir);
+        let peer = DeviceIdentity::generate();
+        let kind = if controls {
+            EventKind::React
+        } else {
+            EventKind::Message
+        };
+        let mut items = Vec::new();
+        for n in 0..3 {
+            let item = Event::new(
+                &peer,
+                ConversationId::new([1; 32]),
+                n + 1,
+                vec![],
+                n + 1,
+                1,
+                kind,
+                vec![1; if n == 0 { 262_145 } else { 64 }],
+            );
+            repo.append(&item).unwrap();
+            items.push(item);
+        }
+        let conv = items[0].conversation_id;
+        repo.initialize_receiving(
+            Author::from_ed25519(local.public().ed25519_pub),
+            &account.public(),
+        )
+        .unwrap();
+        let select = |limit, bytes| {
+            if controls {
+                repo.pending_control_ids(conv, limit, bytes)
+            } else {
+                repo.pending_receive_ids(conv, limit, bytes)
+            }
+        };
+        let database = profile.database();
+        let before = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let reads = repo.body_read_counts();
+        for limit in [3, 128].into_iter().cycle().take(8) {
+            assert_eq!(
+                select(limit, 4096).unwrap(),
+                vec![items[1].id, items[2].id],
+                "oversized first row cannot exclude later affordable rows in a complete page"
+            );
+            assert_eq!(
+                select(limit, 8 * 1024 * 1024).unwrap(),
+                items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                "deferred oversized rows remain eligible with a sufficient budget"
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before,
+            "rotating every unresolved row preserves relative order and must not mutate durable tickets"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(repo.body_read_counts(), reads);
+        assert!(matches!(
+            select(1, 1),
+            Err(LogError::PageBudgetTooSmall { .. })
+        ));
+        assert_eq!(
+            select(1, 4096).unwrap(),
+            vec![items[1].id],
+            "an oversized partial turn must still rotate before the next attempt"
+        );
+        assert_eq!(select(1, 4096).unwrap(), vec![items[2].id]);
+        assert_eq!(select(1, 8 * 1024 * 1024).unwrap(), vec![items[0].id]);
+        assert_eq!(repo.body_read_counts(), reads);
+    }
+}
+
 fn downgrade_event_schema_fixture(db: &EncryptedDatabase) {
     db.transaction(|c| {
         let sql: String = c.query_row(

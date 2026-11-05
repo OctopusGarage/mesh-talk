@@ -2749,6 +2749,7 @@
             "failed_media_",
             "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work",
             "completed_ordinary_receive_callbacks_are_quiet_without_body_reads",
+            "unresolved_complete_receive_pages_preserve_tickets_but_partial_pages_rotate",
             "node::node::participant_storage_tests::public_account_history_rejects_incomplete_ready_selector_without_hanging",
             "node::node::tests::linked_device_catches_up_incoming_dm_after_reconnect",
             "eventlog::repository::order::tests::history_selectors_reject_retired_unready_and_incomplete_derived_ranges"
@@ -2793,7 +2794,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Settled ordinary and control receive callbacks preserve unchanged queue tickets without SQL mutations, committed writes or body reads; unfinished and oversized work still rotates fairly, terminal rows retire, and account fences remain current.",
+            "name": "Settled ordinary and control receive callbacks and complete scoped unresolved pages preserve unchanged queue ordering without SQL mutations, committed writes or body reads. Bounded lookahead retains partial-page and oversized-attempt fairness; terminal rows retire and account fences remain current.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
