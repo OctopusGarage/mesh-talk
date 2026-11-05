@@ -6,6 +6,153 @@ use crate::{
 };
 
 #[test]
+fn ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress() {
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (node, _, _) = super::super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let conversation = ConversationId::new([202; 32]);
+    let mut expected = Vec::new();
+    for sequence in 1..=40 {
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            sequence,
+            vec![],
+            sequence,
+            0,
+            EventKind::Message,
+            vec![1; 32],
+        );
+        expected.push(event.id);
+        node.log.lock().unwrap().append_durable(event).unwrap();
+    }
+    let owner = node.sync_store(&peer.public());
+    let store = owner.lock().unwrap();
+    let upload = store.open_history_upload(&conversation).unwrap();
+    prepare_upload(&store, &upload);
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    let bodies = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    let mut rank = -1;
+    let mut actual = Vec::new();
+    for _ in 0..8 {
+        let step = store
+            .prepare_history_upload_step(&upload, PreparationBudget::default())
+            .unwrap();
+        assert!(step.ready);
+        assert_eq!((step.rows, step.edges, step.bytes), (0, 0, 0));
+        let page = store
+            .history_upload_id_page(
+                &upload,
+                rank,
+                IdPageBudget {
+                    ids: 16,
+                    examined: 64,
+                },
+            )
+            .unwrap();
+        actual.extend(page.ids);
+        rank = page.next_rank;
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "ready ID pages must not rewrite terminal export progress"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        if page.complete {
+            break;
+        }
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        bodies
+    );
+    // The direct network consumer shares the same deep export owner. Its
+    // terminal calls must be quiet too, rather than relying on an upload flag.
+    let direct = open_prepared(&store, &conversation);
+    let have = HashSet::new();
+    let mut reset_ready = false;
+    for _ in 0..1000 {
+        if NetworkSyncStore::reset_export_step(&*store, &direct, PreparationBudget::default())
+            .unwrap()
+            .ready
+        {
+            reset_ready = true;
+            break;
+        }
+    }
+    assert!(reset_ready);
+    let mut export_ready = false;
+    for _ in 0..1000 {
+        if NetworkSyncStore::prepare_export_step(
+            &*store,
+            &direct,
+            &have,
+            PreparationBudget::default(),
+        )
+        .unwrap()
+        .ready
+        {
+            export_ready = true;
+            break;
+        }
+    }
+    assert!(export_ready);
+    let direct_changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let direct_commits = database.successful_write_commits();
+    for _ in 0..8 {
+        let step = NetworkSyncStore::prepare_export_step(
+            &*store,
+            &direct,
+            &have,
+            PreparationBudget::default(),
+        )
+        .unwrap();
+        assert!(step.ready);
+        assert_eq!((step.rows, step.edges, step.bytes), (0, 0, 0));
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            direct_changes
+        );
+        assert_eq!(database.successful_write_commits(), direct_commits);
+    }
+    // Ready is a work fact, never permission to bypass current authority.
+    node.privacy.generation.fetch_add(1, Ordering::SeqCst);
+    assert!(matches!(
+        store.prepare_history_upload_step(&upload, PreparationBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        NetworkSyncStore::prepare_export_step(
+            &*store,
+            &direct,
+            &have,
+            PreparationBudget::default()
+        ),
+        Err(LogError::StaleCursor)
+    ));
+}
+
+#[test]
 fn participant_history_upload_finishes_captured_prefix_during_continuous_appends() {
     let directory = tempfile::tempdir().unwrap();
     let peer = DeviceIdentity::generate();

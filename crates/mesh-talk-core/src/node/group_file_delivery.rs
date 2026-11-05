@@ -35,6 +35,16 @@ struct GroupFileUpload {
     authorization_stamp: Arc<Mutex<Option<super::privacy_sync::HistorySyncStamp>>>,
 }
 
+// Owned only by one active retry future, never by queued/cooling jobs.
+#[derive(Clone)]
+struct IntrinsicOffer {
+    event: Event,
+    row: super::received_log::ReceivedEntry,
+    rewrite_revision: u64,
+    file: ConversationId,
+}
+type AttemptOffer = Mutex<Option<Arc<IntrinsicOffer>>>;
+
 #[derive(Clone, Copy, Default)]
 struct GroupFileScan {
     cursor: Option<i64>,
@@ -59,35 +69,93 @@ impl Node {
         manifest: EventId,
         peer: &PublicIdentity,
     ) -> Result<Option<(Event, super::received_log::ReceivedEntry)>, LogError> {
+        Ok(self
+            .group_file_offer_with_attempt(file, manifest, peer, None)?
+            .map(|offer| {
+                let offer = Arc::unwrap_or_clone(offer);
+                (offer.event, offer.row)
+            }))
+    }
+
+    fn group_file_offer_with_attempt(
+        &self,
+        file: ConversationId,
+        manifest: EventId,
+        peer: &PublicIdentity,
+        attempt: Option<&AttemptOffer>,
+    ) -> Result<Option<Arc<IntrinsicOffer>>, LogError> {
         if self.delivery_suspended.load(Ordering::Acquire) {
             return Ok(None);
         }
-        let Some(row) = self
-            .received_files
-            .lock()
-            .expect("file rows lock")
-            .entry(manifest)?
-        else {
-            return Ok(None);
+        let cached = attempt.and_then(|slot| slot.lock().expect("attempt offer lock").clone());
+        let offer = if let Some(cached) = cached.filter(|cached| {
+            cached.event.id == manifest
+                && self
+                    .received_files
+                    .lock()
+                    .expect("file rows lock")
+                    .rewrite_revision()
+                    == cached.rewrite_revision
+        }) {
+            // Retained existence remains live authority even when immutable
+            // ciphertext, integrity and signature work were already validated.
+            let present = self
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .header(&manifest)?;
+            if !present.is_some_and(|header| {
+                header.kind == EventKind::FileManifest
+                    && header.conversation == cached.event.conversation_id
+                    && header.author == cached.event.author
+            }) {
+                return Ok(None);
+            }
+            cached
+        } else {
+            let (row, rewrite_revision) = {
+                let rows = self.received_files.lock().expect("file rows lock");
+                (rows.entry(manifest)?, rows.rewrite_revision())
+            };
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            if super::files::validated_manifest(&row.plaintext)
+                .is_none_or(|decoded| decoded.file_conv() != file)
+                || self.recipient_expired(&row.plaintext, manifest, row.wall_clock)
+            {
+                return Ok(None);
+            }
+            let Some(event) = self.log.lock().expect("log lock").get(&manifest)? else {
+                return Ok(None);
+            };
+            if event.kind != EventKind::FileManifest
+                || event.conversation_id != row.conversation
+                || event.author.user_id() != row.from
+                || !event.verify_integrity()
+                || !event.verify_signature()
+            {
+                return Ok(None);
+            }
+            let offer = Arc::new(IntrinsicOffer {
+                event,
+                row,
+                rewrite_revision,
+                file,
+            });
+            if let Some(slot) = attempt {
+                *slot.lock().expect("attempt offer lock") = Some(offer.clone());
+            }
+            offer
         };
-        let Some(decoded) = super::files::validated_manifest(&row.plaintext) else {
-            return Ok(None);
-        };
-        if decoded.file_conv() != file
-            || self.recipient_expired(&row.plaintext, manifest, row.wall_clock)
-        {
+        let event = &offer.event;
+        let row = &offer.row;
+        if offer.file != file || self.recipient_expired(&row.plaintext, manifest, row.wall_clock) {
             return Ok(None);
         }
-        let Some(event) = self.log.lock().expect("log lock").get(&manifest)? else {
-            return Ok(None);
-        };
-        if event.kind != EventKind::FileManifest
-            || event.conversation_id != row.conversation
-            || event.author.user_id() != row.from
-            || (event.author.ed25519_pub() != &self.identity.public().ed25519_pub
-                && event.author.ed25519_pub() != &peer.ed25519_pub)
-            || !event.verify_integrity()
-            || !event.verify_signature()
+        if event.author.ed25519_pub() != &self.identity.public().ed25519_pub
+            && event.author.ed25519_pub() != &peer.ed25519_pub
         {
             return Ok(None);
         }
@@ -136,7 +204,7 @@ impl Node {
                 return Ok(None);
             }
         }
-        Ok(Some((event, row)))
+        Ok(Some(offer))
     }
 
     pub(super) fn group_mailbox_peers(&self) -> Vec<Announce> {
@@ -391,10 +459,20 @@ impl Node {
     }
 
     fn group_file_custody_allowed(&self, job: &GroupFileUpload) -> Result<bool, LogError> {
-        let Some((original, _)) = self.group_file_offer(job.file, job.manifest, &job.recipient)?
+        self.group_file_custody_with_attempt(job, None)
+    }
+
+    fn group_file_custody_with_attempt(
+        &self,
+        job: &GroupFileUpload,
+        attempt: Option<&AttemptOffer>,
+    ) -> Result<bool, LogError> {
+        let Some(offer) =
+            self.group_file_offer_with_attempt(job.file, job.manifest, &job.recipient, attempt)?
         else {
             return Ok(false);
         };
+        let original = &offer.event;
         if original.author.ed25519_pub() != &self.identity.public().ed25519_pub
             || self
                 .file_progress(job.file)
@@ -605,15 +683,20 @@ impl Node {
         Ok(())
     }
 
-    fn group_file_custody_current(&self, job: &GroupFileUpload) -> bool {
-        match self.group_file_custody_allowed(job) {
+    fn group_file_custody_current(&self, job: &GroupFileUpload, offer: &AttemptOffer) -> bool {
+        let current = match self.group_file_custody_with_attempt(job, Some(offer)) {
             Ok(current) => current,
             Err(LogError::StaleCursor) => false,
             Err(error) => {
                 log::warn!("Group file custody deferred after storage failure: {error}");
                 false
             }
-        }
+        };
+        #[cfg(test)]
+        self.trace_account_client(&job.recipient, || {
+            format!("group_file_custody_checked {current}")
+        });
+        current
     }
 
     /// One bounded pass; mailbox reconciliation resumes only missing signed chunks.
@@ -684,7 +767,8 @@ impl Node {
                     pending.retry_delay = (delay * 2).min(std::time::Duration::from_secs(60));
                     delay
                 };
-                let allowed = match self.group_file_custody_allowed(&job) {
+                let offer = AttemptOffer::new(None);
+                let allowed = match self.group_file_custody_with_attempt(&job, Some(&offer)) {
                     Ok(allowed) => allowed,
                     Err(LogError::StaleCursor) => {
                         // Finite preparation is local progress, not a failed
@@ -715,12 +799,13 @@ impl Node {
                     .for_each_concurrent(2, |relay| {
                         let job = &job;
                         let held = &held;
+                        let offer = &offer;
                         async move {
                             let _ = tokio::time::timeout(
                                 super::delivery_runtime::RELAY_EXCHANGE_TIMEOUT,
                                 async {
                                     if !self.relay_send_allowed(&relay.public)
-                                        || !self.group_file_custody_current(job)
+                                        || !self.group_file_custody_current(job, offer)
                                     {
                                         return;
                                     }
@@ -752,7 +837,7 @@ impl Node {
                                                 mailbox,
                                             );
                                         let current = || {
-                                            self.group_file_custody_current(job)
+                                            self.group_file_custody_current(job, offer)
                                                 && self.relay_send_allowed(&relay.public)
                                                 && (!federated
                                                     || (self.bridge_directory_allowed()

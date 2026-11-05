@@ -842,6 +842,10 @@
           {
             "name": "Compatible legacy migration requires established verified bindings and bounded capability checks; V4 sync protects older envelopes from new control kinds",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Account maintenance does not recreate a completed reception lane after actual drain: existing account/source/generation/presentation qualification runs under the same log guard before preparation, while exhausted initial budgets and changed sources retain durable retry demand.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -1129,7 +1133,8 @@
             "eventlog::",
             "node::node::tests::participant_event_",
             "participant_ciphertext_prefix_",
-            "participant_kind_metadata_"
+            "participant_kind_metadata_",
+            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress"
           ]
         }
       ],
@@ -1208,6 +1213,10 @@
           {
             "name": "Only a complete current below-threshold Profile snapshot can follow an ordinary non-Profile append without a retained Profile parent; the exact revision rebinding and append commit or roll back together. New requests, Profile dependencies, stale or partial work and destructive changes retain invalidation; old tokens remain stale.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial cursor progress and failure rollback remain durable.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]
       }
@@ -2423,6 +2432,10 @@
           {
             "name": "Private file failure reservations bind exact attempts and eligible routes, survive cancelled awaits, start bounded backoff at completion and cannot be evicted while active or cooling. Quiet wakes preserve durable destinations; clean steps and route replacements retain progress, while failed retirement remains cooled.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Each admitted retry shares one immutable validated offer descriptor without repeated hydration, decoding or signature work; row rewrites invalidate it, every callback retains live source and authority checks, and cancellation releases payloads instead of retaining them in the 10000-job index or cooldown state.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
           }
         ]
       },
@@ -2849,7 +2862,8 @@
             "invisible_late_invitation_can_arrive_through_an_allowed_post_office",
             "node::work_observation::tests::",
             "work_observation_enabled_and_disabled_preserve_wrapper_receive_results",
-            "committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodies"
+            "committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodies",
+            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress"
           ]
         }
       ],
@@ -2892,6 +2906,10 @@
           },
           {
             "name": "Account/mailbox/outer-bound signed semantic Profile mappings share the existing bounded wrapper bucket and require current repair epoch, account ownership and exact foreign processing facts before ordinary GET reuse. Own-device classification still checks the current account; dependency repair bypasses hints, real deletion invalidates them, optional failures fall back to GET, and no hint enters retained HAVE or custody.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial cursor progress and failure rollback remain durable.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]

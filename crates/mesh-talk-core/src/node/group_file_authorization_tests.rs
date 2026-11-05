@@ -1028,3 +1028,158 @@ async fn group_file_unfinished_discovery_keeps_short_cadence_until_eof() {
         "a retained future retry bounds the current idle wait"
     );
 }
+
+#[tokio::test]
+async fn group_file_live_exchange_reuses_immutable_offer_between_current_checks() {
+    assert_live_group_offer_checks("unchanged").await;
+}
+
+#[tokio::test]
+async fn group_file_live_exchange_rechecks_consent_membership_and_source() {
+    for change in ["consent", "membership", "source", "row_rewrite"] {
+        assert_live_group_offer_checks(change).await;
+    }
+}
+
+async fn assert_live_group_offer_checks(change: &'static str) {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.refill_group_file_delivery().unwrap();
+    let recipient = {
+        let mut jobs = node.group_file_delivery.jobs.lock().unwrap();
+        for job in jobs.values_mut() {
+            job.retry_after =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        }
+        let job = jobs.values_mut().next().unwrap();
+        job.retry_after = None;
+        job.recipient.clone()
+    };
+    let signer = fixture
+        .peers
+        .iter()
+        .find(|peer| peer.public() == recipient)
+        .unwrap();
+    let proof = node.historical_author(&recipient.ed25519_pub).unwrap();
+    let declined = super::super::file_consent::Decision {
+        file: fixture.file,
+        manifest: fixture.manifest,
+        sender: node.identity.public(),
+        recipient: recipient.clone(),
+        sender_account: Some(node.account_id()),
+        recipient_account: proof.account_id().unwrap(),
+        decision: ReceiveDecision::Declined,
+        completion: None,
+    }
+    .event(signer, 1)
+    .unwrap();
+    let leave = {
+        let log = node.log.lock().unwrap();
+        let (parents, lamport) = log.prepare(&fixture.channel).unwrap();
+        Event::new(
+            signer,
+            fixture.channel,
+            1,
+            parents,
+            lamport,
+            1,
+            EventKind::ChannelLeave,
+            vec![],
+        )
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = DeviceIdentity::generate();
+    let announce =
+        Announce::new_post_office(&relay, "Cost relay", listener.local_addr().unwrap().port());
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&announce, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let relay_root = tempfile::tempdir().unwrap();
+    let relay_keys = relay.secret_bytes();
+    let store = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(
+            &relay_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+        )
+        .unwrap(),
+    ));
+    let server = tokio::spawn(super::super::postbox::run_relay_accept_loop(
+        relay, listener, store,
+    ));
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let recorded = observations.clone();
+    let weak = Arc::downgrade(node);
+    let channel = fixture.channel;
+    let manifest = fixture.manifest;
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, stage| {
+        let Some(value) = stage.strip_prefix("group_file_custody_checked ") else {
+            return;
+        };
+        let node = weak.upgrade().unwrap();
+        let allowed = value == "true";
+        let mut observations = recorded.lock().unwrap();
+        let first = observations.is_empty();
+        observations.push((allowed, node.received_files.lock().unwrap().body_reads()));
+        drop(observations);
+        if first && allowed {
+            match change {
+                "consent" => {
+                    node.accept_file_consent_event(&declined, &recipient)
+                        .unwrap();
+                }
+                "membership" => {
+                    node.log.lock().unwrap().append(leave.clone()).unwrap();
+                    crate::node::test_support::settle_group_metadata(&node, channel);
+                }
+                "source" => {
+                    node.log
+                        .lock()
+                        .unwrap()
+                        .repository()
+                        .unwrap()
+                        .drop_conversation(&channel)
+                        .unwrap();
+                }
+                "row_rewrite" => {
+                    node.received_files
+                        .lock()
+                        .unwrap()
+                        .remove_where(|row| row.event_id == manifest)
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+    }));
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        node.retry_group_file_delivery(),
+    )
+    .await;
+    *node.account_client_test_hook.lock().unwrap() = None;
+    server.abort();
+    let joined = server.await;
+    assert!(joined.is_err_and(|error| error.is_cancelled()));
+    result.expect("live group mailbox cost fixture watchdog");
+    let observed = observations.lock().unwrap();
+    assert!(
+        observed.len() >= 2,
+        "must observe multiple real current checks in one admitted attempt: {observed:?}"
+    );
+    assert!(observed[0].0, "first current check must be authorized");
+    if change == "unchanged" {
+        assert!(observed.iter().all(|step| step.0));
+        assert_eq!(
+            observed.last().unwrap().1,
+            observed[0].1,
+            "one admitted exchange must hydrate its immutable offer once; repeated current checks must retain fresh authority without rereading it: {observed:?}"
+        );
+    } else {
+        assert!(
+            observed.iter().skip(1).all(|step| !step.0),
+            "{change} must revoke the next current check: {observed:?}"
+        );
+    }
+}

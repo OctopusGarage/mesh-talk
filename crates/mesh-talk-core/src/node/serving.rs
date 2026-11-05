@@ -1330,11 +1330,17 @@ impl Node {
         channel: ConversationId,
         budget: &mut crate::eventlog::sync::network::PreparationBudget,
     ) -> Result<(), LogError> {
-        self.channel_checkpoints.queue_runtime(channel)?;
+        // A caller without a preparation allowance must still retain durable
+        // retry demand. Otherwise qualify completed work under the same log
+        // guard as preparation, before any preparation mutation can run.
+        if budget.rows < 2 || budget.edges == 0 || budget.bytes < 512 {
+            self.channel_checkpoints.queue_runtime(channel)?;
+        }
         let mut advanced = false;
         while budget.rows >= 2 && budget.edges > 0 && budget.bytes >= 512 {
             let step = {
                 let log = self.log.lock().expect("log lock");
+                self.channel_checkpoints.queue_metadata_runtime(channel)?;
                 match self.channel_checkpoints.project_step_with_budget(
                     log.repository()?,
                     &self.identity,

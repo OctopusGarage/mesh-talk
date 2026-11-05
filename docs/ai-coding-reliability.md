@@ -250,6 +250,14 @@ An empty receive queue must not update an unchanged fair-turn ticket either;
 retain real unfinished rotation and terminal deletion. The settled ordinary and
 control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
 checks SQL mutations, committed writes and body reads together.
+Apply this rule at shared lower owners too: terminal export polling must retain
+current selection/authority checks without republishing the same cursor for each
+ID page. The direct and mailbox consumers share that rule in
+[selected export](../crates/mesh-talk-core/src/eventlog/repository/selection/export.rs).
+When measuring completed work, first assert its durable queue lane is absent;
+an existing lane can make insertion idempotent while hiding recreate/retire
+churn. The settled account-maintenance regression exercises actual reception
+drain before repeating maintenance and checking changed-source recovery.
 
 Finite preparation must survive unrelated ordinary appends without relaxing its
 authority fences. Compare the owner's complete control and destructive revisions;

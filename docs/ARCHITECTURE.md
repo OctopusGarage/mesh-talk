@@ -2248,6 +2248,12 @@ per-account bootstrap marker atomically resets a legacy header cursor once while
 preserving pending tickets and processed facts. This backfill uses the same bounded
 header discovery and does not replay completed payloads or reset on warm reopen.
 
+Account-channel maintenance uses the same current-source, generation and
+presentation-stamp qualification as metadata reception before queuing durable
+work. A completed reception lane stays retired across unchanged maintenance;
+absent or stale projections still queue before preparation can mutate or yield.
+An exhausted initial preparation allowance also retains durable retry demand.
+
 Completed receiver download discovery validates its account and exact policy
 generation without rewriting scan bookkeeping. New offers retain transactional
 enqueueing, while changed policy resumes the existing bounded scan. Pending claim

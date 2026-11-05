@@ -1978,6 +1978,121 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn settled_account_channel_maintenance_is_quiet_and_changed_source_retries() {
+        fn queued(node: &Node, channel: ConversationId) -> bool {
+            node.storage
+                .database()
+                .read(|c| {
+                    Ok(c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                        [channel.as_bytes().as_slice()],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap()
+        }
+        fn drain(node: &Node, channel: ConversationId) {
+            for _ in 0..64 {
+                node.process_channel_reception_inner(channel, "live")
+                    .unwrap();
+                if !queued(node, channel) {
+                    break;
+                }
+            }
+            assert!(
+                !queued(node, channel),
+                "fixture must retire its actual reception lane"
+            );
+        }
+        fn assert_quiet(
+            node: &Node,
+            channel: ConversationId,
+            work: &mut ChannelAccountMaintenance,
+        ) {
+            assert!(
+                !queued(node, channel),
+                "measure fully drained demand, not queue deduplication"
+            );
+            let database = node.storage.database();
+            let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+            let commits = database.successful_write_commits();
+            let reads = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts();
+            for _ in 0..8 {
+                assert!(
+                    node.commit_account_maintenance(channel, work)
+                        .unwrap()
+                        .is_none()
+                );
+                node.process_channel_reception_inner(channel, "live")
+                    .unwrap();
+                assert!(!queued(node, channel));
+            }
+            assert_eq!(
+                database.read(|c| Ok(c.total_changes())).unwrap(),
+                changes,
+                "settled account maintenance must not recreate and retire its durable lane"
+            );
+            assert_eq!(database.successful_write_commits(), commits);
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts(),
+                reads
+            );
+        }
+
+        let group = Group::new().await;
+        let node = &group.nodes[0];
+        let channel = node
+            .create_channel("quiet account maintenance", vec![])
+            .await
+            .unwrap();
+        let mut work = ChannelAccountMaintenance::default();
+        node.commit_account_maintenance(channel, &mut work).unwrap();
+        node.await_channel_metadata(channel).await.unwrap();
+        assert!(
+            node.account_group_projection(channel)
+                .unwrap()
+                .authority
+                .current_event()
+                .is_some()
+        );
+        drain(node, channel);
+        assert_quiet(node, channel, &mut work);
+
+        // A real source tail must still leave durable demand when this turn has
+        // no preparation allowance, then recover through the same entry point.
+        for _ in 0..8 {
+            node.append_event(channel, EventKind::Message, vec![0; 64])
+                .unwrap();
+        }
+        let mut exhausted = crate::eventlog::sync::network::PreparationBudget {
+            rows: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            node.commit_account_maintenance_with_budget(channel, &mut work, &mut exhausted),
+            Err(NodeError::Log(LogError::StaleCursor))
+        ));
+        assert!(
+            queued(node, channel),
+            "unfinished changed source must retain durable recovery demand"
+        );
+        node.await_channel_metadata(channel).await.unwrap();
+        drain(node, channel);
+        assert_quiet(node, channel, &mut work);
+    }
+
     #[test]
     fn account_migration_consent_survives_reopen_and_never_rebinds_account_or_full_device() {
         let dir = tempfile::tempdir().unwrap();

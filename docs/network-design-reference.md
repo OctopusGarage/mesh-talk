@@ -957,6 +957,16 @@ and full capacity retain unfinished work while independent queued jobs advance.
 Payload pages recheck
 current authority, refusal, relay role and managed runtime I/O admission.
 
+One admitted group retry owns a shared immutable offer descriptor until its
+future completes or is cancelled. It hydrates and validates the manifest once,
+then borrows that descriptor across its live authorization callbacks; it does
+not retain payloads in queued or cooling jobs. A received-row rewrite invalidates
+the descriptor. Every callback still checks retained source metadata, current
+expiry, erasure, recall, suppression, visibility, peer/account binding, signed
+group membership, consent, file progress and outgoing entitlement. Source
+removal or changed authority therefore stops the same attempt without waiting
+for the next retry.
+
 Exact outgoing entitlement retains at most four heavy recipient/channel views.
 Pending finite preparation advances through admission and periodic retry turns;
 only ready views may be evicted. Refill skips already queued keys without
@@ -2495,8 +2505,12 @@ the existing bounded cleanup owner. Cold preparation yields between bounded
 turns so other runtime work can progress.
 The node retains at most four scoped views, with at most 16 selected outgoing history
 IDs and 64 recent result hints per exchange. Bodies are fetched and wrapped
-only for selected IDs without confirmed wrapper custody. Supplemental identity
-and consent controls retain their independent bounded selectors. Incremental
+only for selected IDs without confirmed wrapper custody.
+Terminal export preparation rechecks selection and network authority without
+rewriting an unchanged export cursor. Direct framed export and incremental
+mailbox upload share this repository rule; consuming another ID page does not
+restart or republish completed preparation.
+Supplemental identity and consent controls retain their independent bounded selectors. Incremental
 control queues retain only selected IDs and consent offer references. Before
 sending, resolve the selected identity bundle or single consent offer through
 its current authorization owner and require the event ID to remain unchanged.
