@@ -354,6 +354,17 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Keep a test's observation scope equal to its named requirement. The native cost
+observer retirement test tracks that producer's captured Node lease rather than
+all unrelated owners of the shared Node. The growing-history fixture measures
+exact durable originals during continuation, then checks the full public
+projection after retiring its continuously appending peers. Its projection read
+must not compete with an endless writer inside the continuation latency bound.
+Paused-clock maintenance tests wait for actual retry attempts and assert minimum
+backoff spacing; real measured database duty time cannot imply a fixed number of
+attempts inside an arbitrary virtual-time window. Preserve cancellation, other
+maintenance-class progress and the no-early-retry assertions.
+
 Use barriers, deferred promises, injected provider/storage stalls and controlled
 clocks at the actual boundary. Prefer an observable progress assertion to an
 arbitrary sleep or a test that checks only that a timeout helper was called.

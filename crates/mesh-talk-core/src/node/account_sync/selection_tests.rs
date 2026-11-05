@@ -2738,21 +2738,8 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
     let progress_started = std::time::Instant::now();
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let ready = original_history_received(&receiver, original.clone()).await;
-            if ready {
-                let imported: HashSet<_> = receiver
-                    .account_blocking(move |node| {
-                        Ok(node
-                            .account_history(&node.account_id(), 20_000)?
-                            .into_iter()
-                            .map(|row| row.id)
-                            .collect())
-                    })
-                    .await
-                    .expect("the public history projection completes off the network runtime");
-                if original.is_subset(&imported) {
-                    break;
-                }
+            if original_history_received(&receiver, original.clone()).await {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -2776,6 +2763,15 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
     receiver.runtime_work.close();
     receiver.sessions.clear();
     receiver.runtime_work.drain().await;
+    // Check the public projection after stopping the ever-growing writer. Its
+    // full decrypting read is acceptance evidence, not continuation latency.
+    let imported: HashSet<_> = receiver
+        .account_history(&receiver.account_id(), 20_000)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert!(original.is_subset(&imported));
     admitted
         .expect("the source must admit its actual append writer before progress measurement")
         .expect("the source must publish append admission");

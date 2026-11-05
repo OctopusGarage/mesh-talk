@@ -59,12 +59,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let node = runtime.handle();
+        // Observe this producer's captured lease, not every background owner's
+        // reference to the shared Node. Cancellation must destroy this future.
+        let node = Arc::new(runtime.handle());
         let weak = Arc::downgrade(&node);
         let (started, ready) = tokio::sync::oneshot::channel();
         runtime.register_host_task(tokio::spawn(async move {
             let _ = started.send(());
-            observe(node).await;
+            observe(Arc::clone(&node)).await;
         }));
         ready.await.unwrap();
         tokio::task::yield_now().await;
@@ -73,7 +75,7 @@ mod tests {
             .unwrap();
         assert!(
             weak.upgrade().is_none(),
-            "native observers cannot retain a retired Node"
+            "retirement must destroy the native observer's captured Node lease"
         );
     }
 }
