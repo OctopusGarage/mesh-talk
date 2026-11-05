@@ -953,13 +953,11 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let other = DeviceIdentity::generate();
     let ca = Account::from_secret_bytes(aa.secret_bytes());
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    // Reserve Bob's identity endpoint without accepting queued TCP handshakes.
-    // Before the own-copy proof, Bob is genuinely offline, not half-started.
-    let bob_socket = tokio::net::TcpSocket::new_v4().unwrap();
-    bob_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let bob_address = bob_socket.local_addr().unwrap();
-    // A bound socket is not a listener. macOS may leave a connect pending
-    // rather than refuse it, so an errno cannot qualify this lifecycle state.
+    // Bob's application stays offline while its unavailable endpoint actively
+    // closes TCP attempts. A merely bound socket can leave an old Dial pending
+    // across the online cut for longer than the target-confirmation budget.
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_address = bob_listener.local_addr().unwrap();
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
     let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bob_address.port());
@@ -1010,10 +1008,35 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let mut at = None;
     let mut bt = None;
     let mut ct = None;
+    let mut bob_rejector = None;
+    let mut stop_rejector = None;
     let mut phase = "own_copy";
     let mut confirmed_status = None;
     let mut pending_destination = None;
     let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        stop_rejector = Some(stop);
+        bob_rejector = Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut stopped => break,
+                    accepted = bob_listener.accept() => {
+                        let (mut stream, _) = accepted.unwrap();
+                        let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+                    }
+                }
+            }
+            bob_listener
+        }));
+        // Qualify application unavailability by an actual accepted-and-closed
+        // connection, not platform-specific behavior of a merely bound socket.
+        let unavailable = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut probe = tokio::net::TcpStream::connect(bob_address).await.unwrap();
+            let mut byte = [0];
+            assert_eq!(tokio::io::AsyncReadExt::read(&mut probe, &mut byte).await.unwrap(), 0);
+        }).await;
+        assert!(unavailable.is_ok(), "offline endpoint must close actual connections");
         at = Some(tokio::spawn(a.clone().run_accept_loop(al)));
         ct = Some(tokio::spawn(c.clone().run_accept_loop(cl)));
         let mut own_copy_pending = true;
@@ -1059,7 +1082,9 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
             "own-copy confirmation failed: phase={phase} pending_destination={own_copy_pending}"
         );
         phase = "target_confirmation";
-        let bl = bob_socket.listen(1024).unwrap();
+        stop_rejector.take().unwrap().send(()).unwrap();
+        let bl = bob_rejector.take().unwrap().await.unwrap();
+        assert_eq!(bl.local_addr().unwrap(), bob_address);
         bt = Some(tokio::spawn(b.clone().run_accept_loop(bl)));
         let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while {
@@ -1091,6 +1116,12 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
         current.runtime_work.close();
     }
     let mut server_failed = false;
+    if let Some(task) = bob_rejector {
+        task.abort();
+        if let Err(error) = task.await {
+            server_failed |= !error.is_cancelled();
+        }
+    }
     for task in [at, bt, ct].into_iter().flatten() {
         task.abort();
         if let Err(error) = task.await {

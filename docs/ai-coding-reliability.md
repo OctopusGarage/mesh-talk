@@ -366,12 +366,21 @@ Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to rechec
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
 
+An offline fixture that needs prompt connection failure must own and observe
+actual transport closure; reserving a TCP port does not guarantee refusal or
+retire a pending dial. The [own-copy fixture](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+qualifies real accept-and-close behavior, joins its unavailable-endpoint owner,
+then hands the same listener to the cold application without changing its
+confirmation budget.
+
 Browser device options express intent; they do not observe native input state.
 Establish the required device mode through the browser's supported emulation
 owner, then verify actual media queries and touch capabilities before measuring
 responsive hit areas. Do not replace `matchMedia` with a JavaScript mock. The
 [touch fixture](../frontend/e2e/touch-targets.spec.ts) exercises controlled native
-state loss, actual CSS size changes and a real tap through that same owner.
+state loss, actual CSS target sizes and a real tap through that same owner.
+A negative control must observe the capability it removes; disabling touch does
+not require every host to become hover-capable or shrink its CSS targets.
 
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an
