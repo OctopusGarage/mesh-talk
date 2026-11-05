@@ -209,10 +209,15 @@ fn apply_on(c: &Connection, account: &str, record: Record, limit: usize) -> Resu
     Ok(())
 }
 
+// Versioned provenance for durable indexed attachment-policy generations.
+// The deployed session column previously held UUIDv4 values or migration NULLs;
+// this marker's version nibble is not 4, so neither can qualify accidentally.
+// Older binaries miss this marker and safely publish a new runtime-bound control.
+const DURABLE_POLICY_MARKER: &[u8; 16] = b"MTConsentPolicy1";
+
 pub(crate) struct IndexedFileConsentStore {
     source: PublishedHistorySource,
     owner: Option<ParticipantEventOwner>,
-    session: [u8; 16],
     limit: usize,
     offer_scans: HashMap<[u8; 32], OfferScanProgress>,
     #[cfg(test)]
@@ -388,7 +393,6 @@ impl IndexedFileConsentStore {
         let mut store = Self {
             source,
             owner: None,
-            session: *uuid::Uuid::new_v4().as_bytes(),
             limit,
             offer_scans: HashMap::new(),
             #[cfg(test)]
@@ -443,10 +447,14 @@ impl IndexedFileConsentStore {
     pub(crate) fn published_generation(&self, id: EventId) -> Result<Option<u64>, LogError> {
         self.source.profile().database().read(|c|{
             let owner=self.check_on(c)?;
-            let bytes:Option<Vec<u8>>=c.query_row("SELECT generation FROM file_consent_published WHERE account=?1 AND manifest=?2 AND session=?3",params![owner.namespace(),id.as_bytes().as_slice(),self.session.as_slice()],|r|r.get(0)).optional()?;
+            let bytes:Option<Vec<u8>>=c.query_row("SELECT generation FROM file_consent_published WHERE account=?1 AND manifest=?2 AND session=?3",params![owner.namespace(),id.as_bytes().as_slice(),DURABLE_POLICY_MARKER.as_slice()],|r|r.get(0)).optional()?;
             bytes.map(|bytes|bytes.try_into().map(u64::from_be_bytes).map_err(|_|invalid("invalid consent generation"))).transpose()
         })
     }
+    /// `generation` must come from the current owner-checked durable
+    /// IndexedAttachmentConsent policy while its guard remains held. The Node
+    /// caller also requires exact Decision equality before reusing publication;
+    /// this marker must never qualify a legacy launch-local generation.
     pub(crate) fn publish_control(
         &mut self,
         event: Event,
@@ -458,7 +466,7 @@ impl IndexedFileConsentStore {
         self.source.profile().database().transaction(|c|{
             let owner=self.check_on(c)?;let account=owner.namespace();
             apply_on(c,&account,Record::Published(event),self.limit)?;
-            c.execute("UPDATE file_consent_published SET session=?3,generation=?4 WHERE account=?1 AND manifest=?2",params![account,payload.manifest.as_bytes().as_slice(),self.session.as_slice(),generation.to_be_bytes().as_slice()])?;Ok(())
+            c.execute("UPDATE file_consent_published SET session=?3,generation=?4 WHERE account=?1 AND manifest=?2",params![account,payload.manifest.as_bytes().as_slice(),DURABLE_POLICY_MARKER.as_slice(),generation.to_be_bytes().as_slice()])?;Ok(())
         })
     }
     fn unique_recipient_on(
@@ -745,6 +753,211 @@ mod tests {
             .unwrap();
         }
         (directory, node, sender)
+    }
+
+    #[test]
+    fn node_consent_controls_reuse_durable_policy_after_reopen() {
+        let (directory, node, sender) = consent_offer_fixture(8);
+        let proof = node
+            .historical_author(&sender.public().ed25519_pub)
+            .unwrap();
+        let keys = node.identity.secret_bytes();
+        let account_key = node.account.secret_bytes();
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        assert_eq!(offers.len(), 8);
+        let expected = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(expected.len(), 8);
+        let generation = node
+            .attachment_consent
+            .lock()
+            .unwrap()
+            .generation()
+            .unwrap();
+        drop(node);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            Account::from_secret_bytes(account_key),
+            &proof,
+        );
+        assert_eq!(
+            node.attachment_consent
+                .lock()
+                .unwrap()
+                .generation()
+                .unwrap(),
+            generation
+        );
+        let database = node.storage.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..2 {
+            let actual = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|event| (event.id, event.seq))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|event| (event.id, event.seq))
+                    .collect::<Vec<_>>(),
+                "unchanged durable policy must preserve eight signed IDs/sequences across Node reopen"
+            );
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| Decision::open(a) == Decision::open(b)),
+                "reused controls must preserve the exact Decision payload"
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "reusing published controls must not republish SQL facts"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+
+        // Returning to the same payload is not permission to reuse a sequence
+        // across an intervening durable policy change.
+        node.set_attachment_global_auto(false).unwrap();
+        node.set_attachment_global_auto(true).unwrap();
+        let changed = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(changed.len(), expected.len());
+        for (before, after) in expected.iter().zip(&changed) {
+            assert!(Decision::open(before) == Decision::open(after));
+            assert_eq!(after.seq, before.seq + 1);
+            assert_ne!(
+                after.id, before.id,
+                "policy ABA requires fresh signed evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn node_consent_legacy_generation_refreshes_once_then_reuses() {
+        for legacy in [None, Some(*uuid::Uuid::new_v4().as_bytes())] {
+            let (_directory, node, sender) = consent_offer_fixture(8);
+            let offers = node.file_consent_offers(&sender.public()).unwrap();
+            let before = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            let database = node.storage.database();
+            database
+                .transaction(|c| {
+                    // Model deployed runtime UUIDs and migrated rows. Neither
+                    // attests that its generation was a durable policy version.
+                    c.execute(
+                        "UPDATE file_consent_published SET session=?1",
+                        [legacy.as_ref().map(|v| v.as_slice())],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let refreshed = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            assert_eq!(refreshed.len(), 8);
+            for (old, new) in before.iter().zip(&refreshed) {
+                assert!(Decision::open(old) == Decision::open(new));
+                assert_eq!(new.seq, old.seq + 1);
+                assert_ne!(new.id, old.id);
+            }
+            let markers = database
+                .read(|c| {
+                    let mut q = c.prepare("SELECT session FROM file_consent_published")?;
+                    Ok(q.query_map([], |r| r.get::<_, Vec<u8>>(0))?
+                        .collect::<Result<Vec<_>, _>>()?)
+                })
+                .unwrap();
+            assert_eq!(markers.len(), 8);
+            assert!(
+                markers.iter().all(|v| v.as_slice() == b"MTConsentPolicy1"),
+                "only newly published controls qualify for durable-policy reuse"
+            );
+            assert_ne!(
+                b"MTConsentPolicy1"[6] >> 4,
+                4,
+                "the versioned marker must be structurally distinct from legacy UUIDv4"
+            );
+            let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+            let commits = database.successful_write_commits();
+            for _ in 0..2 {
+                assert_eq!(
+                    node.file_consent_controls(&sender.public(), &offers, false)
+                        .unwrap(),
+                    refreshed
+                );
+            }
+            assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+            assert_eq!(database.successful_write_commits(), commits);
+        }
+    }
+
+    #[test]
+    fn node_consent_failed_policy_publication_preserves_prior_evidence() {
+        let (_directory, node, sender) = consent_offer_fixture(1);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        let before = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        let manifest = Decision::open(&before[0]).unwrap().manifest;
+        let database = node.storage.database();
+        let prior_generation = node
+            .file_consent
+            .lock()
+            .unwrap()
+            .published_generation(manifest)
+            .unwrap();
+        node.set_attachment_global_auto(false).unwrap();
+        database.transaction(|c| {
+            // Fail the generation/marker update after apply_on changed the
+            // published event, so rollback must restore the entire evidence.
+            c.execute_batch("CREATE TEMP TRIGGER fail_policy_marker BEFORE UPDATE OF session,generation ON main.file_consent_published BEGIN SELECT RAISE(ABORT,'injected policy marker failure'); END")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            node.file_consent_controls(&sender.public(), &offers, false)
+                .is_err()
+        );
+        assert_eq!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_control(manifest)
+                .unwrap(),
+            Some(before[0].clone())
+        );
+        assert_eq!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_generation(manifest)
+                .unwrap(),
+            prior_generation
+        );
+        database
+            .read(|c| {
+                c.execute_batch("DROP TRIGGER temp.fail_policy_marker")?;
+                Ok(())
+            })
+            .unwrap();
+        let after = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(
+            after[0].seq,
+            before[0].seq + 1,
+            "recovery must not consume a failed publication's sequence"
+        );
+        assert_ne!(after[0].id, before[0].id);
     }
 
     #[test]
@@ -1070,8 +1283,8 @@ mod tests {
         );
         assert_eq!(
             resumed.published_generation(payload.manifest).unwrap(),
-            None,
-            "launch-local generation must not survive reopening"
+            Some(8),
+            "qualified durable policy generation must survive reopening"
         );
         assert!(
             matches!(

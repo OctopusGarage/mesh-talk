@@ -230,6 +230,12 @@ pub(super) async fn run(
     let result;
     let worker_status;
     let session_failure;
+    let mut ingest_observation = office.ingest_observation().map(|_| {
+        let period = Duration::from_secs(30);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval
+    });
     {
         let worker = office.run_maintenance(rx);
         tokio::pin!(worker);
@@ -245,6 +251,17 @@ pub(super) async fn run(
                     signal=signals.wait()=>break signal.map_err(|e|Box::new(e) as Box<dyn std::error::Error>),
                     status=&mut worker=>{worker_finished=true; break status.map_err(|e|Box::new(e) as Box<dyn std::error::Error>);},
                     status=&mut outgoing=>break status.map_err(|e|Box::new(e) as Box<dyn std::error::Error>),
+                    _=async { match ingest_observation.as_mut() {
+                        Some(interval)=>{interval.tick().await;},
+                        None=>std::future::pending::<()>().await,
+                    } }, if ingest_observation.is_some()=>{
+                        // Only scalar atomics are sampled; no storage/collection
+                        // guards cross the CLI's existing stdout sink. Opt-in
+                        // operator tracing uses that sink's synchronous lifetime.
+                        if let Some([appended,duplicate,rejected,unavailable,failed])=office.ingest_observation() {
+                            super::emit(&format!("relay_ingest cumulative=true approximate=true appended={appended} duplicate={duplicate} peer_classified_rejection={rejected} locally_unavailable={unavailable} authoritative_failure={failed}"));
+                        }
+                    }
                     completed=sessions.join_next(), if !sessions.is_empty()=>{
                         match completed {
                             Some(Ok(Err(error))) => {

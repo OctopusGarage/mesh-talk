@@ -295,6 +295,24 @@ transaction, expiry and shutdown semantics. Functional fast-KDF tests and Unix
 joined-stop tests do not establish production unlock performance, native Windows
 hard-stop recovery or physical-network discovery acceptance.
 
+### Opt-in ingestion observation
+
+`MESH_TALK_TRACE_WORK=1` enables five fixed per-office cumulative counters:
+committed appends, duplicates, peer-classified rejections, expected local
+unavailability and authoritative failures. Both ordinary and federation ingestion
+classify the final transaction result after rollback and authority validation.
+Peer classification follows the protocol error taxonomy and can include local
+admission revocation; it does not assign blame. Appended totals do not measure
+current retained growth. Relaxed atomic snapshots are approximate under
+concurrency, have no storage reads or writes, and grant no protocol authority.
+
+The dedicated CLI samples enabled counters every 30 seconds in its existing
+owned loop, skips missed ticks, and emits scalar-only lines through its existing
+stdout sink outside storage guards. Enabled tracing inherits that synchronous
+sink's lifetime; it does not add a background logging task. Default-off operation
+creates no observation timer. Diagnostic traffic and log output must be separated
+from normal production resource acceptance.
+
 ### Unchanged federation refreshes
 
 Inventory negotiation V5 adds a constant-size conditional exchange while keeping

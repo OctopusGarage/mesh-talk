@@ -55,6 +55,7 @@ pub(crate) struct IndexedRelayState {
     work_changes: tokio::sync::watch::Sender<u64>,
     federation_cursors:
         std::sync::Mutex<std::collections::HashMap<FederationPeerKey, ConversationId>>,
+    ingest_observation: Option<[std::sync::atomic::AtomicU64; 5]>,
 }
 impl IndexedRelayState {
     /// Takes the existing shared profile; never opens another connection/KDF/cache.
@@ -74,7 +75,51 @@ impl IndexedRelayState {
             limits: capacity::RelayLimits::default(),
             work_changes: tokio::sync::watch::channel(0).0,
             federation_cursors: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ingest_observation: (std::env::var_os("MESH_TALK_TRACE_WORK").as_deref()
+                == Some(std::ffi::OsStr::new("1")))
+            .then(|| std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0))),
         })
+    }
+    /// Cumulative committed append, duplicate, peer-classified rejection, local
+    /// unavailability and authoritative failure counts. No storage access.
+    pub(crate) fn ingest_observation(&self) -> Option<[u64; 5]> {
+        // Independent relaxed loads are an approximate concurrent snapshot;
+        // cumulative committed appends are not current retained-store growth.
+        self.ingest_observation.as_ref().map(|counts| {
+            std::array::from_fn(|index| counts[index].load(std::sync::atomic::Ordering::Relaxed))
+        })
+    }
+    fn observe_ingest(&self, result: &Result<AppendOutcome, LogError>) {
+        let Some(counts) = &self.ingest_observation else {
+            return;
+        };
+        let index = match result {
+            Ok(AppendOutcome::Appended) => 0,
+            Ok(AppendOutcome::Duplicate) => 1,
+            Err(error) if error.is_peer_rejection() => 2,
+            Err(
+                LogError::RelayMailboxUnavailable
+                | LogError::ConversationRetiring
+                | LogError::StaleCursor
+                | LogError::RelayCapacityUnavailable
+                | LogError::RelayEventTooLarge,
+            ) => 3,
+            Err(_) => 4,
+        };
+        let mut current = counts[index].load(std::sync::atomic::Ordering::Relaxed);
+        while let Err(observed) = counts[index].compare_exchange_weak(
+            current,
+            current.saturating_add(1),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            current = observed;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_ingest_observation_for_test(&mut self, enabled: bool) {
+        self.ingest_observation =
+            enabled.then(|| std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)));
     }
     pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.subscribe()
@@ -201,9 +246,11 @@ impl IndexedRelayState {
         now: u64,
         origin: Option<u64>,
     ) -> Result<AppendOutcome, LogError> {
-        self.policy_transaction(now, |c, cutoff| {
+        let result = self.policy_transaction(now, |c, cutoff| {
             self.record_on(c, cutoff, event, now, origin)
-        })
+        });
+        self.observe_ingest(&result);
+        result
     }
     fn record_on(
         &self,

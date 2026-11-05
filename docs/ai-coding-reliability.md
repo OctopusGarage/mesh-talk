@@ -279,6 +279,14 @@ charges. The raw-selection regression in the
 [federation staging owner](../crates/mesh-talk-core/src/postoffice/storage/federation/tests.rs)
 checks mutation and commit counts while preserving framing and revoked-session
 rejection.
+A durable version must not be invalidated solely by a new process identifier.
+Qualify reuse through the current durable policy version and exact payload;
+legacy versions without that qualification need a deliberate migration boundary.
+Preserve policy ABA and direct-override invalidation rather than treating equal
+payloads alone as unchanged permission. The eight-offer reopen, legacy-marker
+and publication-rollback controls in the
+[consent owner](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
+exercise this boundary.
 Match cache persistence to its actual lifetime. Runtime-only hints should not
 pay durable WAL commits when restart deliberately invalidates their evidence.
 Keep volatile metadata bounded, preserve current-owner checks and prevent cache

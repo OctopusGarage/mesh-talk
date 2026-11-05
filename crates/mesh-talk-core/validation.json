@@ -1381,6 +1381,10 @@
           {
             "name": "Conditional V5 refresh uses bounded exact-peer scalar proofs only after bilateral complete zero-mismatch acknowledgment; unchanged populated inventories perform no repeated SQL staging or page writes while preserving origin-expiring presence. Append, source/visibility/origin/expiry, readiness, restart, cancellation and unsupported legacy peers cannot authorize an unsafe shortcut. Address aliases share one bounded identity scheduler without lost wakes or bypassed backoff.",
             "reference": "docs/post-office-federation.md#unchanged-federation-refreshes"
+          },
+          {
+            "name": "Default-off per-office ingestion observation counts final transaction outcomes after rollback/authority validation, uses five saturating atomics without SQL, and samples only enabled counters on an owned 30-second skipped-tick CLI timer outside core guards. Approximate cumulative appends are not retained growth or custody evidence.",
+            "reference": "docs/post-office-federation.md#opt-in-ingestion-observation"
           }
         ]
       }
@@ -2466,6 +2470,10 @@
           {
             "name": "Each admitted retry shares one immutable validated offer descriptor without repeated hydration, decoding or signature work; row rewrites invalidate it, every callback retains live source and authority checks, and cancellation releases payloads instead of retaining them in the 10000-job index or cooldown state.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Unchanged signed consent reuse survives reopen only with a durable-policy marker, exact persisted policy generation and complete fresh Decision equality. Legacy UUID/NULL generations refresh once; policy ABA, changed completion and owner retirement still invalidate reuse, and failed publication rolls back both event and marker.",
+            "reference": "docs/ARCHITECTURE.md"
           }
         ]
       },

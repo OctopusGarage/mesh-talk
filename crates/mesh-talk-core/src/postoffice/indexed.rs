@@ -19,6 +19,12 @@ pub struct IndexedPostOffice {
     pub(crate) state: Arc<IndexedRelayState>,
 }
 impl IndexedPostOffice {
+    /// Optional cumulative ingest outcomes in fixed order: appended, duplicate,
+    /// peer-classified rejection, locally unavailable, authoritative failure.
+    /// Peer classification includes admission revocation; it does not assign blame.
+    pub fn ingest_observation(&self) -> Option<[u64; 5]> {
+        self.state.ingest_observation()
+    }
     /// Consumes the caller's existing profile lease; never reacquires node.lock.
     pub fn open_with_lease(
         lease: ProfileStorageLease,
@@ -216,6 +222,96 @@ impl NetworkSyncStore for IndexedFederationStore {
 mod tests {
     use super::*;
     #[test]
+    fn relay_ingest_observation_counts_real_outcomes_without_changing_business_state() {
+        let mut business = Vec::new();
+        for enabled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            Arc::get_mut(&mut office.state)
+                .unwrap()
+                .set_ingest_observation_for_test(enabled);
+            let author = DeviceIdentity::generate();
+            let recipient = DeviceIdentity::generate();
+            let inner = Event::new(
+                &author,
+                ConversationId::new([186; 32]),
+                1,
+                vec![],
+                1,
+                1,
+                crate::eventlog::EventKind::Message,
+                vec![42],
+            );
+            let mailbox =
+                crate::postoffice::opaque::RelayMailbox::federated(&author, &recipient.public())
+                    .unwrap();
+            let event = mailbox.wrap(&inner).unwrap();
+            let profile = office.state.profile().clone();
+            let database = profile.database();
+            let before = database.read(|c| Ok(c.total_changes())).unwrap();
+            assert!(matches!(
+                office.ingest(event.clone()).unwrap(),
+                AppendOutcome::Appended
+            ));
+            assert!(matches!(
+                office.ingest(event.clone()).unwrap(),
+                AppendOutcome::Duplicate
+            ));
+            assert!(matches!(
+                office.ingest(inner),
+                Err(LogError::AdmissionRejected(_))
+            ));
+            database.transaction(|c| {
+                c.execute_batch("CREATE TEMP TRIGGER fail_observed_ingest BEFORE INSERT ON retained_events BEGIN SELECT RAISE(ABORT,'ingest fixture failure'); END;")?;
+                Ok(())
+            }).unwrap();
+            let next = Event::new(
+                &author,
+                ConversationId::new([186; 32]),
+                2,
+                vec![],
+                2,
+                1,
+                crate::eventlog::EventKind::Message,
+                vec![43],
+            );
+            assert!(matches!(
+                office.ingest(mailbox.wrap(&next).unwrap()),
+                Err(LogError::Database(_))
+            ));
+            assert!(
+                office
+                    .durable_have(&event.conversation_id, &event.id)
+                    .unwrap()
+            );
+            let after = database.read(|c| Ok(c.total_changes())).unwrap();
+            let reads = office.state.body_read_counts();
+            for _ in 0..8 {
+                assert_eq!(
+                    office.ingest_observation(),
+                    enabled.then_some([1, 1, 1, 0, 1])
+                );
+            }
+            assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), after);
+            assert_eq!(office.state.body_read_counts(), reads);
+            business.push((
+                after - before,
+                office.state.physical_charge().unwrap().event_count,
+            ));
+        }
+        assert_eq!(
+            business[0], business[1],
+            "observation must preserve SQL/business outcomes"
+        );
+    }
+
+    #[test]
     fn federation_store_cancellation_revokes_every_network_endpoint() {
         use crate::postoffice::storage::federation::{Direction, SessionOwner};
         use std::time::Instant;
@@ -294,6 +390,138 @@ mod tests {
         );
         assert!(store.ingest(event).is_err());
     }
+    #[test]
+    fn relay_session_ingest_observation_counts_only_final_transaction_outcomes() {
+        use crate::postoffice::storage::federation::{Direction, SessionOwner};
+        let mut business = Vec::new();
+        for enabled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            Arc::get_mut(&mut office.state)
+                .unwrap()
+                .set_ingest_observation_for_test(enabled);
+            let profile = office.state.profile().clone();
+            let database = profile.database();
+            let now = super::super::network::unix_now();
+            let owner = SessionOwner::begin(
+                profile.clone(),
+                Direction::Outbound,
+                now,
+                std::time::Instant::now(),
+            )
+            .unwrap();
+            let lease = owner.lease();
+            lease.receive_page(&[], true, now).unwrap();
+            let author = DeviceIdentity::generate();
+            let recipient = DeviceIdentity::generate();
+            let mailbox =
+                crate::postoffice::opaque::RelayMailbox::federated(&author, &recipient.public())
+                    .unwrap();
+            let event = mailbox
+                .wrap(&Event::new(
+                    &author,
+                    ConversationId::new([187; 32]),
+                    1,
+                    vec![],
+                    1,
+                    1,
+                    crate::eventlog::EventKind::Message,
+                    vec![42],
+                ))
+                .unwrap();
+            let next = mailbox
+                .wrap(&Event::new(
+                    &author,
+                    ConversationId::new([187; 32]),
+                    2,
+                    vec![],
+                    2,
+                    1,
+                    crate::eventlog::EventKind::Message,
+                    vec![43],
+                ))
+                .unwrap();
+            let before = database.read(|c| Ok(c.total_changes())).unwrap();
+            let mut store = IndexedFederationStore::new(&office, lease.clone());
+            assert!(matches!(
+                store.ingest(event.clone()).unwrap(),
+                AppendOutcome::Appended
+            ));
+            assert!(matches!(
+                store.ingest(event.clone()).unwrap(),
+                AppendOutcome::Duplicate
+            ));
+            database.transaction(|c| {
+                c.execute_batch("CREATE TEMP TRIGGER fail_observed_session AFTER INSERT ON retained_events BEGIN UPDATE relay_federation_sessions SET live=0; SELECT RAISE(FAIL,'observed authoritative failure'); END;")?;
+                Ok(())
+            }).unwrap();
+            assert!(matches!(
+                store.ingest(next.clone()),
+                Err(LogError::Database(_))
+            ));
+            database.read(|c| lease.validate_on(c, true)).unwrap();
+            assert!(
+                office
+                    .durable_have(&event.conversation_id, &event.id)
+                    .unwrap()
+            );
+            assert!(
+                !office
+                    .durable_have(&next.conversation_id, &next.id)
+                    .unwrap(),
+                "rolled-back insert must not grant custody"
+            );
+            owner.cancel().unwrap();
+            assert!(matches!(
+                store.ingest(next.clone()),
+                Err(LogError::AdmissionRejected(_))
+            ));
+            // A session from another actual profile fails before policy can
+            // classify admission revocation as a peer-facing rejection.
+            let foreign_root = tempfile::tempdir().unwrap();
+            let foreign = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(foreign_root.path()).unwrap(),
+                &foreign_root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            let foreign_owner = SessionOwner::begin(
+                foreign.state.profile().clone(),
+                Direction::Outbound,
+                now,
+                std::time::Instant::now(),
+            )
+            .unwrap();
+            let mut mismatched = IndexedFederationStore::new(&office, foreign_owner.lease());
+            assert!(matches!(
+                mismatched.ingest(next),
+                Err(LogError::StaleCursor)
+            ));
+            let after = database.read(|c| Ok(c.total_changes())).unwrap();
+            let reads = office.state.body_read_counts();
+            for _ in 0..8 {
+                assert_eq!(
+                    office.ingest_observation(),
+                    enabled.then_some([1, 1, 1, 1, 1])
+                );
+            }
+            assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), after);
+            assert_eq!(office.state.body_read_counts(), reads);
+            business.push((
+                after - before,
+                office.state.physical_charge().unwrap().event_count,
+            ));
+        }
+        assert_eq!(business[0], business[1]);
+    }
+
     #[test]
     fn authoritative_write_error_survives_simultaneous_session_authority_loss() {
         use crate::postoffice::storage::federation::{Direction, SessionOwner};

@@ -920,6 +920,16 @@ An unchanged cursor performs no SQL write. Rotating discovery hints validate
 the current publication barrier and account, then commit through SQLite's FULL
 WAL durability and the existing cursor comparison; they publish no filesystem
 entry. Signed consent publication retains its independent write barrier.
+Signed consent reuse is qualified by the durable attachment-policy generation
+and the complete current decision payload, under the existing policy, delivery
+and publication guards. A versioned non-UUIDv4 marker in the existing nullable
+`session` column identifies generations supplied by that durable policy owner;
+new publication writes it atomically with the event and generation. Legacy UUID
+or NULL rows require one fresh publication, while subsequent unchanged reopen
+reuses the exact event. Policy A→B→A still advances the generation and signed
+revision even if the final payload matches an older decision. Changed completion
+or recipient bindings retain their ordinary revision checks. Older binaries
+safely miss this marker and use their existing publication path.
 Warm open does not decrypt historical consent frames. Selected controls enforce the
 existing signed-format byte limit before allocation; persisted counters retain the
 existing admission quotas. Account adoption preserves the previous account's decisions
