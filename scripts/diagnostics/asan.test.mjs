@@ -8,7 +8,7 @@ import { versions } from "../ci/windows-coverage.mjs";
 
 const owner = new URL("../ci/asan.mjs", import.meta.url);
 const hash = value => createHash("sha256").update(value).digest("hex");
-const identity = { sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), runId: "123", runAttempt: "2", toolchain: "nightly-2026-11-02", rustcSha256: "c".repeat(64), cargoSha256: "d".repeat(64), nextest: versions.nextest, inputsSha256: "e".repeat(64), target: "x86_64-unknown-linux-gnu", rustflags: "-Zsanitizer=address", rustdocflags: "-Zsanitizer=address", asanOptions: "detect_leaks=1", testThreads: "1", profileEnvironment: {} };
+const identity = { platform: "linux", architecture: "x64", sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), runId: "123", runAttempt: "2", toolchain: "nightly-2026-11-02", rustcSha256: "c".repeat(64), cargoSha256: "d".repeat(64), nextest: versions.nextest, inputsSha256: "e".repeat(64), target: "x86_64-unknown-linux-gnu", rustflags: "-Zsanitizer=address", rustdocflags: "-Zsanitizer=address", asanOptions: "detect_leaks=1", testThreads: "1", profileEnvironment: {} };
 const full = Array.from({ length: 9 }, (_, index) => ({ id: `core::case_${index}`, eventName: `core::core$case_${index}`, ignored: index === 8, selected: index !== 8 }));
 const events = rows => {
   const nextest = { crate: "core", test_binary: "core", kind: "lib" };
@@ -76,7 +76,7 @@ test("ASan union rejects failed, retried, skipped, truncated and altered executi
   assert.throws(() => verifyAsanUnion(altered, identity), /digest/u);
 });
 
-test("ASan workflow retains required name as strict full-union check with eight independently instrumented runners", () => {
+test("ASan workflow retains required name as strict full-union check with one archive and eight independently instrumented runners", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
   assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
   assert.match(workflow, /fail-fast: false/u);
@@ -176,4 +176,23 @@ test("ASan artifact collector binds source, run, attempt and the receipt's actua
     writeFileSync(file, JSON.stringify(receipt));
   }
   assert.throws(() => collectAsan(root, identity), /folder/u);
+});
+
+test("ASan compiles once and binds every consumer to the current producer archive", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
+  const producer = workflow.split("  cohort:\n")[1].split("  shards:\n")[0];
+  const consumers = workflow.split("  shards:\n")[1].split("  asan:\n")[0];
+  assert.match(producer, /node scripts\/ci\/asan.mjs build tmp\/asan-build/u);
+  assert.ok(producer.indexOf("node --test scripts/ci/asan-cli.test.mjs") < producer.indexOf("node scripts/ci/asan.mjs build"), "actual archive protocol must reject regressions before the large compilation");
+  assert.match(producer, /archive_sha256: \$\{\{ steps.build.outputs.archive_sha256 \}\}/u);
+  assert.match(producer, /manifest_sha256: \$\{\{ steps.build.outputs.manifest_sha256 \}\}/u);
+  assert.match(producer, /compression-level: 0/u);
+  assert.match(producer, /retention-days: 1/u);
+  assert.doesNotMatch(consumers, /Swatinem\/rust-cache|runner-storage.mjs|cargo (?:build|test)/u);
+  for (const part of [producer, consumers]) assert.match(part, /asan-build-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/u);
+  for (const part of [consumers, workflow.split("  asan:\n")[1]]) {
+    assert.match(part, /MESH_ASAN_ARCHIVE_SHA256: \$\{\{ needs.cohort.outputs.archive_sha256 \}\}/u);
+    assert.match(part, /MESH_ASAN_MANIFEST_SHA256: \$\{\{ needs.cohort.outputs.manifest_sha256 \}\}/u);
+  }
+  assert.match(workflow, /MESH_ASAN_BUILD_RESULT: \$\{\{ needs.cohort.result \}\}/u);
 });

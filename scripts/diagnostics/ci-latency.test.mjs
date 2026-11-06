@@ -25,7 +25,7 @@ test("heavy hosted Linux builds reclaim only unused image SDKs before cache expa
     ["ci.yml", read("ci.yml")],
     ["hidden-contacts-native.yml", read("hidden-contacts-native.yml")],
     ["mutants.yml", read("mutants.yml")],
-    ["sanitizers.yml", read("sanitizers.yml").split("  shards:\n")[1].split("  asan:\n")[0]],
+    ["sanitizers.yml", read("sanitizers.yml").split("  cohort:\n")[1].split("  shards:\n")[0]],
     ["release.yml", read("release.yml").split("  build-release:\n")[1].split("  verify-release:\n")[0]],
   ];
   for (const [file, source] of sources) {

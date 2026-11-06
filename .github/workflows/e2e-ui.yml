@@ -295,7 +295,7 @@ jobs:
           EVAL_SOURCE_SHA: ${{ github.sha }}
           EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
       - name: Preserve scenario reports screenshots and traces
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: portable-ui-${{ matrix.os }}-${{ matrix.browser }}-${{ github.run_attempt }}

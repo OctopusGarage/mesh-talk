@@ -166,7 +166,10 @@ not merely create more apparent hits. Avoid publishing identical archives from
 every shard; preserve trusted write policy and existing producer ownership.
 
 Download pinned prebuilt development tools through the existing installer where
-available. Compiling tools with `go install` or `cargo install` is recurring setup
+available. Verify support in the repository-pinned installer version; an unknown
+tool can select an unintended source-build or registry fallback. Bind direct
+release downloads to a reviewed digest and execute the installed version check.
+Compiling tools with `go install` or `cargo install` is recurring setup
 work; retain source installation only when the required tool has no suitable
 trusted binary or the test explicitly validates its build.
 
@@ -273,12 +276,20 @@ a runner has no test result; preserve its infrastructure failure separately.
 UI coverage and reports require one complete attempt, so recover that workflow
 as a whole when an unallocated producer prevents its current-attempt evidence.
 
-ASan uses eight serial Nextest partitions to reduce the measured uneven execution
-tail of the former four partitions. Each runner retains the same case budgets,
-instrumented standard library and clean/error controls. The required collector
-checks the exhaustive disjoint inventory and current-attempt execution receipts;
-additional shards do not permit omitted cases or retries. Include the extra
-compilation and queue time when comparing hosted performance.
+ASan compiles its core library once into an official Nextest archive, then runs
+eight serial partitions. The producer seals the complete default inventory and
+source/compiler/config/platform identity. Trusted job outputs bind both the
+manifest and archive digests; consumers reject mismatches before extraction and
+compare the extracted inventory before execution. Each runner retains the same
+case budgets, instrumented standard library and real clean/error controls. The
+required collector checks producer success, the exhaustive disjoint inventory
+and every current-attempt execution receipt. Consumer jobs do not restore the
+full Rust cache or repeat the large core compilation. Keep the already compressed
+archive transient and transfer it without another compression pass. Compare
+producer compilation, artifact transfer, consumer preparation and queue time
+alongside test execution; more shards alone can duplicate the dominant setup.
+Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
+when recovering a failed attempt; do not mix a previous producer with new shards.
 
 Retain fresh process/context isolation, owned temporary directories, dynamically
 allocated ports where supported, and deterministic cleanup. Keep compile jobs,

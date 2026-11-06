@@ -29,6 +29,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Zsanitizer=address"
+  RUSTDOCFLAGS: "-Zsanitizer=address"
+  ASAN_OPTIONS: "detect_leaks=1"
+  RUST_TEST_THREADS: "1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
@@ -36,43 +40,14 @@ concurrency:
 
 jobs:
   cohort:
-    name: Resolve ASan nightly cohort
+    name: Build ASan test archive
     runs-on: ubuntu-latest
     outputs:
       toolchain: ${{ steps.cohort.outputs.toolchain }}
       rustc: ${{ steps.cohort.outputs.rustc }}
       cargo: ${{ steps.cohort.outputs.cargo }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - name: Resolve installed nightly manifest
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-      - name: Publish exact installed nightly cohort
-        id: cohort
-        run: node scripts/ci/asan.mjs cohort
-
-  shards:
-    name: ASan core shard (${{ matrix.shard }}/8)
-    needs: cohort
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    env:
-      MESH_ASAN_TOOLCHAIN: ${{ needs.cohort.outputs.toolchain }}
-      MESH_ASAN_RUSTC: ${{ needs.cohort.outputs.rustc }}
-      MESH_ASAN_CARGO: ${{ needs.cohort.outputs.cargo }}
-      RUSTFLAGS: "-Zsanitizer=address"
-      RUSTDOCFLAGS: "-Zsanitizer=address"
-      ASAN_OPTIONS: "detect_leaks=1"
-      # Keep production case budgets and one instrumented test per runner.
-      RUST_TEST_THREADS: "1"
+      archive_sha256: ${{ steps.build.outputs.archive_sha256 }}
+      manifest_sha256: ${{ steps.build.outputs.manifest_sha256 }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -94,20 +69,81 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Install exact nightly cohort
+      - name: Resolve installed nightly manifest
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: ${{ needs.cohort.outputs.toolchain }}
+          components: rust-src
+      - name: Publish exact installed nightly cohort
+        id: cohort
+        run: node scripts/ci/asan.mjs cohort
+      - name: Install exact producer nightly cohort
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ steps.cohort.outputs.toolchain }}
           components: rust-src
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: sanitizers
+          # Preserve the compatible cache prefix after moving compilation jobs.
+          shared-key: sanitizers-shards
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-nextest@0.9.150
+      - name: Verify pinned ASan archive protocol
+        run: node --test scripts/ci/asan-cli.test.mjs
+      - name: Compile and seal the ASan core archive once
+        id: build
+        env:
+          MESH_ASAN_TOOLCHAIN: ${{ steps.cohort.outputs.toolchain }}
+          MESH_ASAN_RUSTC: ${{ steps.cohort.outputs.rustc }}
+          MESH_ASAN_CARGO: ${{ steps.cohort.outputs.cargo }}
+        run: node scripts/ci/asan.mjs build tmp/asan-build
+      - name: Upload this attempt's compiled ASan archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: asan-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/asan-build/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  shards:
+    name: ASan core shard (${{ matrix.shard }}/8)
+    needs: cohort
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      MESH_ASAN_TOOLCHAIN: ${{ needs.cohort.outputs.toolchain }}
+      MESH_ASAN_RUSTC: ${{ needs.cohort.outputs.rustc }}
+      MESH_ASAN_CARGO: ${{ needs.cohort.outputs.cargo }}
+      MESH_ASAN_ARCHIVE_SHA256: ${{ needs.cohort.outputs.archive_sha256 }}
+      MESH_ASAN_MANIFEST_SHA256: ${{ needs.cohort.outputs.manifest_sha256 }}
+      # Keep production case budgets and one instrumented test per runner.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install exact nightly cohort
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ needs.cohort.outputs.toolchain }}
+          components: rust-src
+      - name: Install pinned Nextest
+        uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: cargo-nextest@0.9.150
+      - name: Download the current compiled ASan archive
+        uses: actions/download-artifact@v8
+        with:
+          name: asan-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/asan-build
       # Both controls use the same instrumented std target as the real core.
       # A genuine ASan diagnosis must fail the intentional use-after-free.
       - name: Prove actual AddressSanitizer instrumentation
@@ -117,7 +153,7 @@ jobs:
           MESH_ASAN_SHARD: ${{ matrix.shard }}
         run: node scripts/ci/asan.mjs shard "$MESH_ASAN_SHARD" tmp/asan-evidence
       - name: Preserve ASan inventory and raw execution evidence
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
@@ -133,11 +169,10 @@ jobs:
       MESH_ASAN_TOOLCHAIN: ${{ needs.cohort.outputs.toolchain }}
       MESH_ASAN_RUSTC: ${{ needs.cohort.outputs.rustc }}
       MESH_ASAN_CARGO: ${{ needs.cohort.outputs.cargo }}
+      MESH_ASAN_ARCHIVE_SHA256: ${{ needs.cohort.outputs.archive_sha256 }}
+      MESH_ASAN_MANIFEST_SHA256: ${{ needs.cohort.outputs.manifest_sha256 }}
       MESH_ASAN_SHARDS_RESULT: ${{ needs.shards.result }}
-      RUSTFLAGS: "-Zsanitizer=address"
-      RUSTDOCFLAGS: "-Zsanitizer=address"
-      ASAN_OPTIONS: "detect_leaks=1"
-      RUST_TEST_THREADS: "1"
+      MESH_ASAN_BUILD_RESULT: ${{ needs.cohort.result }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
