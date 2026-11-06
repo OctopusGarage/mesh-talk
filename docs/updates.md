@@ -134,6 +134,20 @@ replace isolated native or trusted published-release acceptance. CI collects wor
 in each operating system's existing test pass; Linux's full-only branch cannot represent the
 macOS/Windows delta preparation paths.
 
+### Release binary size
+
+macOS release producers discard local Mach-O symbols with the linker's `-x`
+option for both architectures and both desktop and headless binaries. This runs
+before Tauri native signing, installer creation and updater/delta generation;
+never strip an already signed or published artifact. Keep separate symbols when
+native address-level diagnosis is required. Rust release builds retain Thin LTO
+and symbol stripping, and desktop publication overrides the local four-unit
+code-generation setting with one unit.
+
+Changes to optimization levels, native crypto providers or decoder features need
+same-source size comparisons and affected runtime/compatibility evidence. A smaller
+uncompressed executable does not imply the same savings in compressed downloads.
+
 ### Free updater signing setup
 
 Desktop and post-office release ZIPs use `scripts/release/sign-blob.mjs` for keyless Cosign

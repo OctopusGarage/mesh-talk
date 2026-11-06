@@ -228,3 +228,30 @@ test("Stable mutation commands cannot run after a newly unsuccessful source chec
     rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+
+test("macOS release linking discards local symbols before native packaging", () => {
+  const producer = workflow.split("  build-release:")[1].split("  verify-release:")[0];
+  for (const target of ["AARCH64_APPLE_DARWIN", "X86_64_APPLE_DARWIN"]) {
+    assert.ok(producer.includes(`CARGO_TARGET_${target}_RUSTFLAGS: "-C link-arg=-Wl,-x"`));
+  }
+  assert.doesNotMatch(producer, /CARGO_TARGET_.*(?:WINDOWS|LINUX).*link-arg=-Wl,-x/);
+});
+
+
+test("macOS local-symbol stripping preserves executable output and native signature", { skip: process.platform !== "darwin", timeout: 30000 }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-release-symbols-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = join(root, "probe.rs");
+  writeFileSync(source, '#[inline(never)] fn local_probe(x: u64) -> u64 { std::hint::black_box(x) + 1 }\nfn main() { println!("{}", local_probe(41)); }\n');
+  for (const stripped of [false, true]) {
+    const binary = join(root, stripped ? "stripped" : "baseline");
+    execFileSync("rustc", ["--crate-name", "symbol_probe", "-C", "opt-level=3", ...(stripped ? ["-C", "link-arg=-Wl,-x"] : []), source, "-o", binary]);
+    assert.equal(execFileSync(binary, [], { encoding: "utf8" }).trim(), "42");
+    const symbols = execFileSync("nm", [binary], { encoding: "utf8" });
+    if (stripped) assert.doesNotMatch(symbols, / [tbs] /);
+    else assert.match(symbols, /local_probe/);
+    execFileSync("codesign", ["--force", "--sign", "-", binary]);
+    execFileSync("codesign", ["--verify", "--strict", binary]);
+  }
+});
