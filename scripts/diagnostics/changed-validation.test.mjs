@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
   rmSync,
   renameSync,
   chmodSync,
@@ -18,6 +19,7 @@ import { execute } from "../validation/stage.mjs";
 import {
   discoverChanges,
   executePlan,
+  executeCheapChecks,
   parseOptions,
   prepareRust,
   validateFrontendReport,
@@ -947,4 +949,51 @@ test("structured inventory and execution never accept stderr-only or partial pro
   await assert.rejects(executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/stderr-only.test.mjs"] }, {
     run: async () => ({ code: 0, stdout: "", stderr: tap, output: tap, outputTruncated: false }), log() {},
   }), /zero.*Node/i);
+});
+
+
+test("cheap execution admits only catalog static checks and propagates their failure", async () => {
+  const selected = {
+    blockers: [], rust: [{ package: "core", filters: ["fixture::"] }],
+    node: ["must-not-run.test.mjs"], frontend: ["src/must-not-run.test.ts"],
+    checks: [
+      { name: "format", command: ["cargo", "fmt", "--check"], cwd: "." },
+      { name: "lint", command: ["npm", "run", "lint"], cwd: "frontend" },
+      { name: "type", command: ["npm", "run", "typecheck"], cwd: "frontend" },
+      { name: "regression", kind: "test", command: ["python3", "-m", "unittest"], cwd: "." },
+      { name: "build", resource: "heavy", command: ["cargo", "build"], cwd: "." },
+    ],
+  };
+  const calls = [];
+  await executeCheapChecks(selected, { log: () => {}, run: async (program, args) => {
+    calls.push([program, args]); return completed("");
+  } });
+  assert.deepEqual(calls.map(([, args]) => args[1]), ["format", "lint", "type"]);
+  assert(calls.every(([program, args]) => program === process.execPath && args[0].endsWith("scripts/validation/stage.mjs")));
+  let attempted = 0;
+  await assert.rejects(executeCheapChecks(selected, { log: () => {}, run: async () => {
+    attempted++; return { ...completed("lint failure"), code: 7 };
+  } }), /lint failure/);
+  assert.equal(attempted, 1);
+  await assert.rejects(executeCheapChecks({ ...selected, blockers: ["unowned source"] }, {
+    run: async () => { throw Error("must not execute"); },
+  }), /unowned source/);
+});
+
+test("cheap CLI runs actual syntax owner while keeping selected tests and heavy locks pending", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
+  configureCLI(f, "throw Error('must not execute the selected test');");
+  for (const name of ["stage.mjs", "stage-inputs.mjs", "syntax.mjs", "windows-process-owner.mjs", "windows-process-owner.ps1", "windows-process-owner.cs"])
+    f.write(`scripts/validation/${name}`, readFileSync(new URL(`../validation/${name}`, import.meta.url), "utf8"));
+  f.write("scripts/fixture.test.mjs", "throw Error('must not execute the selected test'); // changed");
+  mkdirSync(path.join(f.root, ".git/validation-resources/heavy"), { recursive: true });
+  f.write(".git/validation-resources/heavy/owner.json", JSON.stringify({ pid: process.pid }));
+  const passed = await f.runCLI(["--cheap", "--json"]);
+  assert.equal(passed.code, 0, passed.stderr);
+  assert(JSON.parse(passed.stdout).node.includes("scripts/fixture.test.mjs"));
+  assert.match(passed.stderr, /candidate acceptance remain pending/);
+  f.write("scripts/fixture.test.mjs", "export const = ;");
+  const failed = await f.runCLI(["--cheap", "--json"]);
+  assert.notEqual(failed.code, 0);
+  assert.match(failed.stderr, /rejected syntax/);
 });

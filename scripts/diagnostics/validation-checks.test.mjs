@@ -9,6 +9,9 @@ test("test-only mode remains available and checks are explicitly requested", () 
   assert.equal(parseOptions(["--checks"]).checks, true);
   assert.equal(parseOptions(["--checks"]).run, false);
   assert.equal(parseOptions(["--managed"]).managed, true);
+  assert.equal(parseOptions(["--cheap"]).checks, true);
+  assert.equal(parseOptions(["--cheap"]).run, false);
+  assert.throws(() => parseOptions(["--cheap", "--run"]), /do not combine/);
 });
 test("documentation-only checks do not start compilers or browsers", () => {
   assert.deepEqual(buildStaticChecks(plan({ files: ["docs/ARCHITECTURE.md"] })), []);
@@ -44,6 +47,8 @@ test("frontend validation composes formatting, lint, source/E2E types and produc
   assert.deepEqual(checks.map(check => check.name), ["frontend-format", "frontend-lint", "frontend-types", "frontend-build"]);
   assert(checks.every(check => check.inputs === "frontend"));
   assert(!JSON.stringify(checks).includes("playwright"));
+  assert.deepEqual(checks.find(check => check.name === "frontend-format").command, ["npm", "run", "format:check"]);
+  assert(!checks.some(check => check.command[0] === "npx"), "cheap checks must not auto-install missing tools");
 });
 test("static failures stop test compilation and execution", async () => {
   const calls = [];

@@ -281,7 +281,7 @@
       },
       "escalation": [
         "Windows execution changes require real windows-process-owner.test.mjs execution on Windows: portable receipt-rejection controls alone do not establish native job membership or retirement. Preserve creation-time job ownership, argument/environment/byte-stream fidelity, cancellation and output/log failure cleanup, helper-death quarantine, unrelated-process isolation and declared-input cache invalidation. Qualify actual cold/cached Cargo test completion, original nonzero status and descendant retirement before subsequent real command admission. Hosted Windows Health remains required before merge. Functional CLI report fixtures await natural closure through the canonical process owner and verify descendant retirement before deleting temporary repositories. Verified forced retirement is an ownership diagnostic; preserve the actual command status and execution error separately. Their sixty-second watchdog prevents deadlock; startup latency is not report acceptance. Preserve passing/failing, empty/blocked, reused, invalidated and rejected-destination assertions, and leave explicit cancellation/deadline controls unchanged.",
-        "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
+        "Cheap-only preparation must reuse the static catalog, execute no tests/builds/heavy work, reject ownership blockers and source drift, and keep pending runtime requirements explicit. Verification-only stage reuse must never execute on a miss or wait for/reap a busy lease; no-work readers must not imply admitted Windows child work. Preserve log/artifact/input/environment verification and cancellation/dead-reader recovery controls. Frontend patch prechecks read the authoritative Codecov target, reject omitted changed files and partial branch false positives, and verify current stage evidence before reading LCOV. Raw reports do not establish freshness or Rust/browser-union acceptance. Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
     },
     {
@@ -303,6 +303,7 @@
     {
       "id": "pr-preparation",
       "paths": [
+        "specifications/git_standards.md",
         "scripts/prepare-pr.sh",
         "scripts/create-pr.sh",
         "scripts/pr-preflight.sh",

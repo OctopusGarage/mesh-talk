@@ -51,7 +51,8 @@ merge candidate, and independently on its weekly/manual triggers. All three
 platform unit and diagnostic suites remain mandatory; source-only formatting,
 type/lint and dependency policy run once. The Linux unit coverage producer seals
 its line map for same-run UI consumers; source, workflow, run, attempt and digest
-must all match. Superseded PR, merge and push candidate runs are cancelled automatically.
+must all match. Superseded PR and merge candidates are cancelled automatically. Every main push
+has its own verification group, preserving pending commits for release evidence.
 Health uses a distinct caller-workflow/event namespace, so independent manual or
 scheduled runs cannot cancel the UI caller or its same-run evidence producer.
 

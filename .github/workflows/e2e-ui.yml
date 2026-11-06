@@ -183,7 +183,6 @@ jobs:
 
   packs:
     name: Optional pack UI and asset check
-    needs: health
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:

@@ -63,7 +63,11 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 git diff --check "$base_ref"...HEAD
-node scripts/validation/syntax.mjs --base "$base_ref"
+mkdir -p target/validation
+if ! node scripts/validation/changed.mjs --cheap --base "$base_ref" --json > target/validation/pr-plan.json; then
+    echo "PR readiness is blocked. Resolve the cheap-check failures or affected-plan blockers in target/validation/pr-plan.json before publishing." >&2
+    exit 1
+fi
 if [ "$full_preflight" -eq 1 ]; then
     "$repo_root/scripts/prepare-pr.sh" ${preflight_args[@]+"${preflight_args[@]}"}
 else
@@ -71,6 +75,7 @@ else
     node scripts/validation/standards.mjs
     echo "Fast PR creation: full platform, browser and native checks run in CI. Merge only after CI passes."
 fi
+node scripts/patch-coverage.mjs --pre-pr "$base_ref"
 if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ] || [ "$(git rev-parse --verify "$base_ref")" != "$base_sha" ]; then
     echo "The candidate or comparison base changed during PR checks. Retry with the committed revision." >&2
     exit 1

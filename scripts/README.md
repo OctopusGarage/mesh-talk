@@ -20,6 +20,7 @@ below are explicit gates or environment-specific tools.
 | Build retention              | [`build-retention.py`](build-retention.py)                           | After managed builds/tests; five successful build sets and a 40 GiB cache budget; see [configuration](../docs/build-retention.md) |
 | Release                      | [`release/`](release/)                                               | CI release workflow and signed artifact validation                                                                                |
 | Owned full Chromium          | [`ci/ui-runner.mjs`](ci/ui-runner.mjs) | CI full shards; preserves progress and joined cleanup inside the workflow budget |
+| Cheap PR checks             | `make pr-check`, [`create-pr.sh`](create-pr.sh) | Static feedback and verified frontend patch precheck before publication; no implicit suites |
 | Changed syntax              | [`validation/syntax.mjs`](validation/syntax.mjs) | Pre-commit, affected validation and clean PR publication; no runtime suites |
 | Native coverage             | [`ci/workspace-coverage.sh`](ci/workspace-coverage.sh) | CI native partitions or their pinned-tool fixtures, from the declared workspace directory |
 | CI diagnostics               | [`diagnostics/`](diagnostics/) and [`evals/`](evals/)                | Their `.test.mjs` files are selected by CI globs, even when no script names them individually                                     |

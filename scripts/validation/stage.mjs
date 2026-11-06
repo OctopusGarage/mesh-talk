@@ -90,7 +90,7 @@ function environmentIdentity(env, profile) {
   // Values are hashed in memory; receipts never expose credentials/configuration.
   return Object.fromEntries(Object.entries(env).filter(([key]) => /^(PATH$|NODE_|RUST|CARGO_|MESH_|VITE_|VITEST_|PLAYWRIGHT_|EVAL_|PATCH_|FAST$|CI$|TZ$|LANG$|LC_|npm_config_|NPM_CONFIG_)/u.test(key) && !/^MESH_VALIDATION_/u.test(key) && !(profile !== "all" && /^MESH_PR_/u.test(key))).sort(([a], [b]) => a.localeCompare(b)));
 }
-async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
+async function lock(directory, { log, signal, timeoutMs = 7_200_000, nonblocking = false, noWork = false }) {
   await mkdir(path.dirname(directory), { recursive: true });
   const started = Date.now();
   let announced = 0;
@@ -99,10 +99,11 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
     try {
       await mkdir(directory);
       const owner = { pid: process.pid, started: Date.now() };
+      if (noWork) Object.assign(owner, { noWork: true, retirementRequired: false });
       // PID death cannot prove a crashed Windows job owner retired its work.
       // Only the live owner with its receipt may release these leases.
-      if (process.platform === "win32") owner.windowsRetirementRequired = true;
-      if (process.platform !== "win32" && process.env.MESH_VALIDATION_PROCESS_GROUP_OWNER) {
+      if (process.platform === "win32" && !noWork) owner.windowsRetirementRequired = true;
+      if (!noWork && process.platform !== "win32" && process.env.MESH_VALIDATION_PROCESS_GROUP_OWNER) {
         const probe = spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
         const group = Number(probe.stdout?.trim());
         if (probe.status === 0 && Number.isInteger(group) && group > 1) owner.group = group;
@@ -132,6 +133,7 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
       return release;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
+      if (nonblocking) throw Error(`Validation evidence is busy or has an unresolved lease: ${directory}; finish or recover its owner before verifying evidence`);
       try {
         const owner = JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
         try { process.kill(owner.pid, 0); }
@@ -293,7 +295,15 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
   });
 }
 
-export async function runStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }) {
+/** Verify existing local evidence through the normal reuse owner; never execute on a miss. */
+export async function verifyStageEvidence(options) {
+  const record = await runStage({ ...options, reuseOnly: true });
+  if (record.code !== 0 || !record.reused)
+    throw Error(record.error || "Stage evidence changed during verification; regenerate it for the clean candidate");
+  return record;
+}
+
+export async function runStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, reuseOnly = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }) {
   if (!/^[\w:.-]+$/u.test(name) || !command?.length) throw Error("A stage needs a safe name and command");
   if (!["all", "shared"].includes(profile)) throw Error("Unknown validation environment profile");
   // Cargo owns the repository's Rust thread budget. Preserve caller overrides
@@ -304,6 +314,8 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   const started = Date.now();
   let initial;
   try { initial = source(root); } catch { initial = { dirty: true }; }
+  if (reuseOnly && (initial.dirty || env.CI || fresh || env.MESH_VALIDATION_FRESH === "1"))
+    throw Error("Cannot verify reusable evidence for dirty source, CI, or fresh execution; produce successful local evidence for the clean candidate first");
   const declared = inputs === undefined ? undefined : await inputIdentity(root, inputs);
   const frontendEnvironment = await frontendEnvironmentIdentity(root);
   const frontendUnchanged = async () => JSON.stringify(await frontendEnvironmentIdentity(root)) === JSON.stringify(frontendEnvironment);
@@ -330,7 +342,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   const directory = path.join(root, "target/validation");
   const receipt = path.join(directory, "receipts", `${key}.json`);
   const reusable = !initial.dirty && !env.CI && !fresh && env.MESH_VALIDATION_FRESH !== "1";
-  const release = await lock(path.join(directory, "locks", key), { log, signal });
+  const release = await lock(path.join(directory, "locks", key), { log, signal, nonblocking: reuseOnly, noWork: reuseOnly });
   let releaseResource;
   let cleanupUnverified = false;
   let observation;
@@ -356,6 +368,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
         }
       } catch { /* Missing, stale or damaged evidence requires execution. */ }
     }
+    if (reuseOnly) throw Error(`Missing, stale, or invalid successful evidence for ${name}; run its existing validation command for this clean candidate first (${receipt})`);
     if (resource) {
       let shared = directory;
       try { shared = git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]); } catch { /* Non-Git development runs use their own directory. */ }

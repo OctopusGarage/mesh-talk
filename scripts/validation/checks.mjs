@@ -8,13 +8,15 @@ export function buildStaticChecks(plan) {
   if (syntax.length) add("changed-syntax", ["node", "scripts/validation/syntax.mjs", "--files", ...syntax]);
   const shells = plan.files.filter(file => !plan.deleted?.includes(file) && /^(?:scripts\/.*\.sh|hooks\/[^/]+)$/u.test(file));
   if (shells.length) add("shell-lint", ["shellcheck", "--severity=warning", "--", ...shells]);
-  if (plan.files.some(file => ["scripts/build-retention.py", "scripts/test_build_retention.py"].includes(file)))
+  if (plan.files.some(file => ["scripts/build-retention.py", "scripts/test_build_retention.py"].includes(file))) {
     add("build-retention-tests", ["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_build_retention.py", "-v"]);
+    checks.at(-1).kind = "test";
+  }
   if (packages.length) add("rust-format", ["cargo", "fmt", "--all", "--", "--check"]);
   const frontend = plan.frontend.length > 0 || plan.files.some(file =>
     /^(frontend\/|tools\/help\/|docs\/help\/|site\/market\/)/u.test(file));
   if (frontend) {
-    add("frontend-format", ["npx", "prettier", "--check", "src/"], "frontend", "frontend");
+    add("frontend-format", ["npm", "run", "format:check"], "frontend", "frontend");
     add("frontend-lint", ["npm", "run", "lint"], "frontend", "frontend");
     add("frontend-types", ["npm", "run", "typecheck"], "frontend", "frontend");
   }

@@ -686,3 +686,102 @@ test("process-group retirement bounds probes and pauses by one monotonic deadlin
   assert.deepEqual(pauses, [100, 100]);
   assert.equal(clock, 5000);
 });
+
+test("verification-only evidence never executes on missing, stale, tampered or busy receipts", async t => {
+  const f = await fixture(t);
+  const { verifyStageEvidence } = await import("../validation/stage.mjs");
+  const options = { root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    artifacts: ["artifact"], log: () => {},
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined } };
+  const verify = extra => verifyStageEvidence({ ...options, ...extra });
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await assert.rejects(readFile(path.join(f.root, "count")), /ENOENT/);
+  const first = await f.run({ artifacts: ["artifact"] });
+  const original = await readFile(first.receipt, "utf8");
+  const successful = await verify();
+  assert.equal(successful.reused, true);
+  assert.equal(successful.code, 0);
+  assert.deepEqual(successful.artifacts, first.artifacts);
+  assert.equal(await f.count(), 1);
+  const { createHash } = await import("node:crypto");
+  const heavyLease = path.join(f.root, ".git/validation-resources", createHash("sha256").update("verification-heavy").digest("hex"));
+  await mkdir(heavyLease, { recursive: true });
+  assert.equal((await verify({ resource: "verification-heavy" })).reused, true,
+    "verification must not acquire even a busy heavy resource lease");
+  const stale = JSON.parse(original); stale.finished = Date.now() - 86_400_001;
+  await writeFile(first.receipt, JSON.stringify(stale));
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await writeFile(first.receipt, original);
+  await writeFile(path.join(f.root, "artifact"), "tampered");
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await writeFile(path.join(f.root, "artifact"), "measured");
+  const log = await readFile(first.logPath);
+  await writeFile(first.logPath, "tampered log");
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await writeFile(first.logPath, log);
+  const lease = path.join(f.root, "target/validation/locks", first.key);
+  await mkdir(lease);
+  await writeFile(path.join(lease, "owner.json"), JSON.stringify({ pid: process.pid }));
+  await assert.rejects(verify(), /busy or has an unresolved lease/);
+  // A stale owner must not be reaped by a verification-only request.
+  await writeFile(path.join(lease, "owner.json"), JSON.stringify({ pid: 2147483647 }));
+  await assert.rejects(verify(), /busy or has an unresolved lease/);
+  assert.equal(JSON.parse(await readFile(path.join(lease, "owner.json"))).pid, 2147483647);
+  await rm(lease, { recursive: true });
+  await writeFile(path.join(f.root, "source"), "dirty");
+  await assert.rejects(verify(), /dirty source/);
+  await writeFile(path.join(f.root, "source"), "one");
+  for (const extra of [{ fresh: true }, { env: { ...options.env, CI: "1" } }, { env: { ...options.env, MESH_VALIDATION_FRESH: "1" } }])
+    await assert.rejects(verify(extra), /CI, or fresh execution/);
+  await writeFile(path.join(f.root, "source"), "new committed source");
+  f.git(["add", "source"]);
+  f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "source drift"]);
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  assert.equal(await f.count(), 1, "verification failures must never execute the producer");
+});
+
+test("verification-only finalization rejects source drift after successful receipt inspection", async t => {
+  const f = await fixture(t);
+  const { verifyStageEvidence } = await import("../validation/stage.mjs");
+  const { writeFileSync } = await import("node:fs");
+  await f.run();
+  await assert.rejects(verifyStageEvidence({ root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined },
+    log: () => writeFileSync(path.join(f.root, "source"), "changed during verification"),
+  }), /changed during validation finalization/);
+  assert.equal(await f.count(), 1);
+});
+
+test("verification-only leases declare no admitted work and dead readers do not quarantine producers", async t => {
+  const f = await fixture(t);
+  const { verifyStageEvidence } = await import("../validation/stage.mjs");
+  const { readFileSync } = await import("node:fs");
+  const first = await f.run();
+  const lease = path.join(f.root, "target/validation/locks", first.key);
+  let descriptor;
+  await verifyStageEvidence({ root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined },
+    log: () => { descriptor = JSON.parse(readFileSync(path.join(lease, "owner.json"), "utf8")); },
+  });
+  assert.equal(descriptor.noWork, true);
+  assert.equal(descriptor.retirementRequired, false);
+  assert.equal(descriptor.windowsRetirementRequired, undefined);
+  const cancelled = new AbortController();
+  await assert.rejects(verifyStageEvidence({ root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined },
+    signal: cancelled.signal, log: () => cancelled.abort(),
+  }));
+  await assert.rejects(readFile(path.join(lease, "owner.json")), /ENOENT/);
+  assert.equal(await f.count(), 1, "cancelled verification admits no child work");
+  // Model a verifier dying after publishing its actual no-work descriptor.
+  // Normal producer recovery may reap this lease on Windows as well as POSIX.
+  await mkdir(lease);
+  await writeFile(path.join(lease, "owner.json"), JSON.stringify({ ...descriptor, pid: 2147483647 }));
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const recovered = await f.run({ fresh: true, signal: controller.signal });
+    assert.equal(recovered.code, 0);
+    assert.equal(await f.count(), 2);
+  } finally { clearTimeout(deadline); }
+});

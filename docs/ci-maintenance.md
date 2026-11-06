@@ -62,6 +62,25 @@ Use Node 22, Bash and Python; install actionlint before changing workflows. No
 checker installs tools or contacts the network. Hook installation configures hooks
 without launching comprehensive health; request that gate explicitly.
 
+PR creation runs `make pr-check`'s cheap-check owner against its actual comparison
+base, rejects ownership blockers and checks applicable frontend patch coverage
+before publication. Version projections, contract references and hygiene already
+belong to structural standards; reuse that owner rather than adding duplicate
+gates. Do not install dependencies, compile Rust, launch browsers or run suites
+implicitly in the cheap mode. Source changes during checking invalidate it.
+
+The frontend precheck reads the target from `codecov.yml`, includes partially
+covered branches in the uncovered denominator and rejects omitted changed files.
+It verifies an existing clean-candidate `frontend-coverage` receipt through the
+canonical stage owner and rechecks LCOV bytes, rather than trusting a timestamp or
+raw report. Generate missing evidence explicitly with the reported command. A
+verification-only miss never starts coverage, waits for a heavy lock or claims a
+pass; a no-work verification lease must not imply admitted child work. Keep
+verified scope termination diagnostics separate from the actual test result.
+This frontend unit precheck is conservative; Rust and browser-union coverage
+still need their owning evidence. Native execution, dependency resolution and
+published-asset verification cannot be replaced by parsing or stale build output.
+
 Local feedback does not replace committed-candidate acceptance. Git documents
 that [hooks can be bypassed](https://git-scm.com/docs/githooks); web edits and other
 clients may not run them. Keep a compact authoritative remote check and necessary

@@ -239,7 +239,7 @@ test("optional pack job retains unique dist checks without repeating baseline br
   assert.match(packs, /name: Optional pack UI and asset check/);
   assert.match(packs, /npm run build && node .*check-variant-assets.mjs/);
   assert.match(packs, /npm run check:build-syntax/);
-  assert.doesNotMatch(packs, /playwright install|playwright test|coverage|codecov|download-artifact/);
+  assert.doesNotMatch(packs, /needs:|playwright install|playwright test|coverage|codecov|download-artifact/);
 });
 
 

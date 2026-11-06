@@ -5,7 +5,9 @@ boundary. The pre-commit hook checks staged whitespace, source formatting,
 structural ownership, hygiene and changed-script/workflow syntax; it does not
 launch test suites. It selects staged paths but validates worktree bytes. Record the focused commands and results in the
 PR. Commit the candidate and use `./scripts/create-pr.sh -- <gh pr create options>`
-for fast publication after cheap source, whitespace, structural and hygiene checks.
+for publication after cheap source/static checks, ownership planning, hygiene
+and applicable verified frontend patch-coverage checks. Use `make pr-check`
+first to run that cheap static phase without tests, builds or browser/native work.
 CI runs the comprehensive suites after publication; all required checks must pass
 on the current PR head before merge. Creating a PR does not certify acceptance.
 For comprehensive local validation, pass `--full-preflight` before the `--`
@@ -16,6 +18,7 @@ when explicitly requested or when the changed behavior needs process/browser evi
 
 | Changed boundary            | Fast local command                                                                                          | Broader trigger                                             |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Cheap PR preparation        | `make pr-check` | Only static checks; test/browser/native evidence remains pending |
 | Script / workflow syntax    | `node scripts/validation/syntax.mjs --base origin/main` | Clean committed candidate and required CI remain authoritative |
 | Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge             |
 | Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge             |
@@ -206,7 +209,7 @@ prove that presentation waits for layout rather than a fixed delay.
 
 PR Chromium portable core acceptance reuses the complete full-suite execution on
 each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
-core scenario paths from each of four shards, copies and validates screenshots,
+core scenario paths from each platform's complete shard set, copies and validates screenshots,
 success traces and raw scenario metadata, then validates the exact once-only
 union using the current source/run/attempt/platform identity. Missing, failed,
 flaky or skipped portable scenarios fail acceptance.
@@ -221,14 +224,14 @@ Windows uses the same `windows-latest` runner as the full suite; Chromium contex
 settings match the standalone portable configuration. The collector reopens evidence on Linux with
 an explicit expected source platform, rather than trusting a producer verdict.
 Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
-Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
+Linux, eight macOS and four Windows runners. Linux coverage depends on its own shards
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
 Desktop browser shards start after Health and WebKit complete, with at most three
-desktop shards active at once. Linux retains four concurrent shards. These job
+shards active per desktop OS at once. Linux retains four concurrent shards. These job
 dependencies and admission limits reduce macOS runner demand while retaining all
-four shards per OS and their complete same-attempt evidence. Portable Health and
+platform-specific partitions and their complete same-attempt evidence. Portable Health and
 independent backend jobs use the standard `macos-26-intel` pool, alongside
 WebKit and Chromium browser suites. The complete Rust workspace and real native
 desktop acceptance retain `macos-latest` Apple Silicon execution. The workspace
@@ -246,9 +249,9 @@ Staging desktop admission keeps full Chromium out of the initial ARM burst. Inte
 not a larger-runner purchase; both pools still require measured queue and execution
 evidence. Keep artifact consumers and app-bound required check names aligned when
 changing labels.
-The full suite keeps its existing harness budgets: Linux 90 seconds when collecting
-browser coverage, Windows 90 seconds and macOS 30 seconds; standalone portable uses
-Linux/macOS 30 seconds and Windows 120 seconds. These are harness watchdogs, not
+The full suite retains its existing 90-second functional-case watchdog on all
+platforms. Standalone portable retains 120 seconds on Windows and the full-suite
+allowance elsewhere. These are harness watchdogs, not
 product latency assertions. Chromium's device and timezone are aligned; the
 Windows image is the full suite's `windows-latest`, not the former standalone
 `windows-2022` image.
