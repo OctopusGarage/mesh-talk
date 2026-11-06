@@ -168,7 +168,10 @@ Both need compatible inputs and complete inventories, with isolation preserved.
 Cancel superseded verification for the same candidate when safe, with concurrency
 groups that separate caller workflows, event streams and branches. Reusable Health
 keeps a distinct prefix because GitHub exposes the caller workflow in its context;
-PR/merge/push candidates cancel their superseded source, while scheduled and manual
+PR/merge candidates cancel their superseded source. Push verification uses a unique
+run ID in its concurrency group: disabling cancellation alone still permits a
+newer pending run to replace an older pending run. Every main commit must retain
+its complete verification for release consumers, while scheduled and manual
 evidence streams remain isolated. Preserve
 publication and release ordering. Inspect the configured queue mode and
 cancellation semantics; do not assume workflow dispatch order is execution order.
