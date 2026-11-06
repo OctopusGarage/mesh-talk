@@ -686,6 +686,11 @@ When local storage cannot persist a received file-consent control, the current m
 
 ### D. Group creation, distribution and member recovery
 
+The runtime creates its signed self-binding proof once from its immutable device
+and account keys, then clones those certified bytes for group queries. Account
+adoption creates a new runtime and proof. This is not a membership or permission
+cache: current binding, source, owner and group authority checks remain fresh.
+
 Account-group capability maintenance probes certified account routes and existing
 group relationships only. An unrelated discovery entry must not create a background
 group connection or consume the connection budget reserved for ordinary delivery.
@@ -2557,7 +2562,8 @@ receive-only owners, with at most 16 selected outgoing history IDs and 64 recent
 result hints per exchange. Receive-only owners never acquire a history view;
 large outgoing history cannot consume their admission capacity. Each lane
 enforces its own bound and preserves busy ownership through cancellation.
-Group-file custody uses an explicit history-publication intent on indexed relays.
+Outgoing message, group-control and group-file custody use an explicit
+history-publication intent on indexed relays.
 It probes fresh remote incarnation/destructive metadata and publishes authorized
 history plus identity supplements, without processing incoming IDs, resuming inbox
 repairs or republishing unrelated receive-consent sweeps for every file. Its fresh

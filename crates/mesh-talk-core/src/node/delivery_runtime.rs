@@ -2040,10 +2040,10 @@ impl Node {
                             }
                             let exchange = async {
                                 let uploaded = self
-                                    .opaque_relay_round_for(
+                                    .opaque_history_publication_round_for(
                                         &mut channel,
                                         &destination.device,
-                                        Some(destination.event.conversation_id),
+                                        destination.event.conversation_id,
                                         Some(destination.event.id),
                                     )
                                     .await?;

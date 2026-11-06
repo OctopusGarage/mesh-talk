@@ -331,6 +331,8 @@ pub struct Node {
     /// account is injected by [`Node::open_with_account`]. Holds the secret so this
     /// device can serve a pairing request (transfer the account to a new device).
     pub(in crate::node) account: Account,
+    /// Certified self-binding bytes depend only on this runtime's immutable keys.
+    pub(in crate::node) own_group_proof: std::sync::OnceLock<crate::discovery::Announce>,
     pub(in crate::node) account_devices: Mutex<super::account_devices::AccountDevices>,
     pub(in crate::node) account_transitions:
         Mutex<super::account_transition_store::AccountTransitionStore>,
@@ -1280,6 +1282,7 @@ impl Node {
             privacy,
             identity,
             account,
+            own_group_proof: std::sync::OnceLock::new(),
             account_devices: Mutex::new(account_devices),
             account_transitions: Mutex::new(account_transitions),
             #[cfg(test)]

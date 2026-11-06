@@ -457,7 +457,8 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
         DeviceIdentity::generate(),
     )
     .unwrap();
-    let mailbox = RelayMailbox::new(&node.identity, &job.recipient, &relay.public()).unwrap();
+    let relay_public = relay.public();
+    let mailbox = RelayMailbox::new(&node.identity, &job.recipient, &relay_public).unwrap();
     let historical = node.log.lock().unwrap().events(&fixture.channel).unwrap();
     let mut seeded = 0;
     let mut pending_outer = None;
@@ -588,6 +589,53 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
             .get_checkpoint(&old_receipt_key)
             .unwrap()
             == Some(old_receipt_bytes.clone());
+        // Exercise the generic immediate group publisher through its owning
+        // consumer too, with unrelated incoming work in the same peer mailbox.
+        let mut generic_pending = None;
+        for event in historical
+            .iter()
+            .filter(|event| event.kind == EventKind::Message)
+            .take(8)
+        {
+            let outer = mailbox.wrap(event).unwrap();
+            office.ingest(outer.clone()).unwrap();
+            generic_pending.get_or_insert(outer.id);
+        }
+        let (generic_receipt_key, generic_receipt_bytes) = node
+            .seed_duplex_receipt_pending_for_test(
+                &relay_public,
+                &job.recipient,
+                fixture.channel,
+                generic_pending.unwrap(),
+            );
+        let manifest_event = node
+            .log
+            .lock()
+            .unwrap()
+            .get(&fixture.manifest)
+            .unwrap()
+            .unwrap();
+        let manifest_outer = mailbox.wrap(&manifest_event).unwrap().id;
+        assert!(!office.durable_have(&mailbox.id(), &manifest_outer).unwrap());
+        RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
+        let generic_confirmed = node
+            .replicate_to_post_office_targets_confirming(
+                fixture.channel,
+                vec![job.recipient.clone()],
+                Some(fixture.manifest),
+            )
+            .await
+            .unwrap();
+        let generic_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
+        let generic_held =
+            generic_confirmed && office.durable_have(&mailbox.id(), &manifest_outer).unwrap();
+        let generic_preserved = node
+            .opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_checkpoint(&generic_receipt_key)
+            .unwrap()
+            == Some(generic_receipt_bytes);
         let declined = Decision {
             file: fixture.file,
             manifest: fixture.manifest,
@@ -625,6 +673,9 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
             replacement_reads,
             restored_custody,
             preserved_after_reset,
+            generic_reads,
+            generic_held,
+            generic_preserved,
         )
     })
     .await;
@@ -640,6 +691,9 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
         replacement_reads,
         restored_custody,
         preserved_after_reset,
+        generic_reads,
+        generic_held,
+        generic_preserved,
     ) = result.unwrap();
     assert!(
         held,
@@ -672,6 +726,18 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
     assert!(
         preserved_after_reset,
         "remote replacement must preserve the original duplex receipt byte for byte"
+    );
+    assert!(
+        generic_held,
+        "generic publication must establish actual requested-manifest custody"
+    );
+    assert_eq!(
+        generic_reads, 0,
+        "generic immediate publication scanned {generic_reads} unrelated incoming mailbox IDs"
+    );
+    assert!(
+        generic_preserved,
+        "generic publication must preserve its old duplex Some(group) receipt byte for byte"
     );
 }
 

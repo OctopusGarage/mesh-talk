@@ -1045,7 +1045,7 @@ impl Node {
                 group,
                 projection,
                 device,
-                proof.as_ref().unwrap_or(&self.own_group_proof()),
+                proof.as_ref().unwrap_or(&own_proof),
             ) {
                 members.insert(source.device.user_id(), source);
             }
@@ -1185,6 +1185,49 @@ mod raw_view_tests {
     use super::*;
     use crate::{discovery::Roster, eventlog::Event, identity::device::DeviceIdentity};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn own_group_proof_is_signed_once_per_runtime_and_isolated_across_accounts() {
+        use crate::identity::account::Account;
+        use crate::node::channel_account_bootstrap::OWN_GROUP_PROOF_BUILDS;
+        let device = DeviceIdentity::generate();
+        let accounts = [Account::generate(), Account::generate()];
+        let mut proofs = Vec::new();
+        for account in accounts {
+            let root = tempfile::tempdir().unwrap();
+            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+            let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+            let (file, _) = tokio::sync::mpsc::unbounded_channel();
+            let node = Node::open_with_account(
+                DeviceIdentity::from_secret_bytes(device.secret_bytes().0, device.secret_bytes().1),
+                account,
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channel,
+                file,
+                &root.path().join("events.log"),
+                &root.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap();
+            OWN_GROUP_PROOF_BUILDS.with(|calls| calls.set(0));
+            let first = node.own_group_proof();
+            for _ in 0..32 {
+                assert_eq!(node.own_group_proof(), first);
+            }
+            assert!(first.verify());
+            assert_eq!(first.public(), device.public());
+            assert_eq!(first.account_id(), Some(node.account_id()));
+            proofs.push(first);
+            let builds = OWN_GROUP_PROOF_BUILDS.with(std::cell::Cell::get);
+            assert!(
+                builds <= 1,
+                "unchanged own account proof was signed {builds} times in one runtime"
+            );
+        }
+        assert_ne!(proofs[0].account_id(), proofs[1].account_id());
+        assert_ne!(proofs[0].sig, proofs[1].sig);
+    }
 
     #[tokio::test]
     async fn raw_authorization_cache_rechecks_noncontrol_reordering() {

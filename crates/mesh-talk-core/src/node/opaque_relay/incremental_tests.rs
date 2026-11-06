@@ -45,7 +45,14 @@ async fn exchange(
         .unwrap()
         .map(|header| header.id);
     let uploaded = node
-        .opaque_mailbox_round_confirmed(&mut channel, peer, Some(conversation), mailbox, confirm)
+        .opaque_mailbox_round_confirmed(
+            &mut channel,
+            peer,
+            Some(conversation),
+            mailbox,
+            confirm,
+            MailboxIntent::Duplex,
+        )
         .await
         .unwrap();
     if let Some(first) = confirm {
@@ -714,7 +721,7 @@ async fn counted_scope_exchange(
         RelayMailbox::new(&node.identity, peer, &relay.public()).unwrap()
     };
     let uploaded = node
-        .opaque_mailbox_round_confirmed(&mut channel, peer, Some(conversation), mailbox, confirm)
+        .opaque_mailbox_round_confirmed(&mut channel, peer, Some(conversation), mailbox, confirm, MailboxIntent::Duplex)
         .await
         .unwrap_or_else(|error| {
             panic!("counted scope exchange failed: federated={federated} confirm={confirm:?} conversation={conversation:?} error={error:?}")

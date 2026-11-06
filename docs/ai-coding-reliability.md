@@ -230,8 +230,9 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 Bound work across owners as well as inside a page. One physical mailbox must not
 be rescanned by every outgoing attachment merely because its export conversation
-differs. The [group publication regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
-drives actual indexed custody and requires zero unrelated receive steps, unchanged
+differs. The [publication regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+drives actual indexed file and immediate group-control custody and requires zero
+unrelated receive steps, unchanged
 old duplex receipt bytes, renewed custody after relay replacement, and refusal
 processing through the independent drain. Its history-publication intent retains
 identity supplements and fresh authority/remote checks under existing quotas;
@@ -583,6 +584,14 @@ must not classify its domain. Preserve later valid demand while retiring stale
 work. The ordinary-DM and delayed-membership regressions in
 [group metadata tests](../crates/mesh-talk-core/src/node/group_metadata_tests.rs)
 check that channel recovery does not prepare ordinary private conversations.
+
+Do not regenerate an immutable signed self-binding on every group query or in an
+eager fallback expression. The Node lifetime owns one proof derived only from
+its fixed device/account keys; account adoption creates a new owner. Initializing
+that proof must not acquire group, privacy or log owners. Current authority checks
+still run on every use. The [account-group access regression](../crates/mesh-talk-core/src/node/account_group/access.rs)
+counts actual proof construction and checks isolation across different accounts
+using the same device.
 
 Batch limits do not bound repeated expensive validation within each row. Trace
 the complete consumer path, including helpers that repeat another public query.

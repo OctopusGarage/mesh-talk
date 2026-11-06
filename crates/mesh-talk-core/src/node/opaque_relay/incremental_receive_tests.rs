@@ -141,7 +141,7 @@ async fn incremental_unfinished_upload_survives_fifth_scope_pressure() {
         let receive_mailbox_id = mailbox.id();
         let (mut channel, task) = connect(&node, relay, office.clone()).await;
         let received = node.opaque_mailbox_round_confirmed(&mut channel, &remote.public(),
-            None, mailbox, None).await;
+            None, mailbox, None, MailboxIntent::Duplex).await;
         drop(channel);
         join(task).await;
         assert!(received.is_ok(), "protected uploads must not starve receive-only GET: {received:?}");
@@ -221,7 +221,7 @@ async fn incremental_unfinished_upload_survives_fifth_scope_pressure() {
         let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
         let mailbox_id = mailbox.id();
         node.opaque_mailbox_round_confirmed(&mut channel, &remote.public(),
-            Some(conversation), mailbox, None).await.unwrap();
+            Some(conversation), mailbox, None, MailboxIntent::Duplex).await.unwrap();
         drop(channel);
         join(task).await;
         let page = office.mailbox_delta_page(&mailbox_id, None, 256).unwrap();

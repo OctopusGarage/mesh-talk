@@ -323,6 +323,51 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        self.opaque_relay_round_with_intent(
+            channel,
+            recipient,
+            conversation,
+            confirm,
+            MailboxIntent::Duplex,
+        )
+        .await
+    }
+
+    /// Publish history without making every outgoing scope drain the same inbox.
+    pub(in crate::node) async fn opaque_history_publication_round_for<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        confirm: Option<EventId>,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        if !self.relay_send_allowed(channel.peer_identity()) {
+            return Ok(Vec::new());
+        }
+        self.opaque_relay_round_with_intent(
+            channel,
+            recipient,
+            Some(conversation),
+            confirm,
+            MailboxIntent::HistoryPublication,
+        )
+        .await
+    }
+
+    async fn opaque_relay_round_with_intent<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        confirm: Option<EventId>,
+        intent: MailboxIntent,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         if !self.relay_send_allowed(channel.peer_identity())
             && !self.relay_receive_allowed(channel.peer_identity())
         {
@@ -331,7 +376,14 @@ impl Node {
         let legacy = RelayMailbox::new(&self.identity, recipient, channel.peer_identity())
             .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
         let mut uploaded = self
-            .opaque_mailbox_round_confirmed(channel, recipient, conversation, legacy, confirm)
+            .opaque_mailbox_round_confirmed(
+                channel,
+                recipient,
+                conversation,
+                legacy,
+                confirm,
+                intent,
+            )
             .await?;
         if self.bridge_directory_allowed() {
             let federated = RelayMailbox::federated(&self.identity, recipient)
@@ -343,6 +395,7 @@ impl Node {
                     conversation,
                     federated,
                     confirm,
+                    intent,
                 )
                 .await?,
             );
@@ -361,8 +414,15 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        self.opaque_mailbox_round_confirmed(channel, recipient, conversation, mailbox, None)
-            .await
+        self.opaque_mailbox_round_confirmed(
+            channel,
+            recipient,
+            conversation,
+            mailbox,
+            None,
+            MailboxIntent::Duplex,
+        )
+        .await
     }
 
     async fn opaque_mailbox_round_confirmed<IO>(
@@ -372,12 +432,25 @@ impl Node {
         conversation: Option<ConversationId>,
         mailbox: RelayMailbox,
         confirm: Option<EventId>,
+        intent: MailboxIntent,
     ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        let mut progress =
-            OpaqueMailboxProgress::new(channel.peer_identity(), recipient, conversation, mailbox);
+        let mut progress = match intent {
+            MailboxIntent::Duplex => OpaqueMailboxProgress::new(
+                channel.peer_identity(),
+                recipient,
+                conversation,
+                mailbox,
+            ),
+            MailboxIntent::HistoryPublication => OpaqueMailboxProgress::new_history_publication(
+                channel.peer_identity(),
+                recipient,
+                conversation.ok_or(super::session::SessionError::UnexpectedMessage)?,
+                mailbox,
+            ),
+        };
         while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
         if let Some(inner) = confirm {
             if !channel.io_admitted() {

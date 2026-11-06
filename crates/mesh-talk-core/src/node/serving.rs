@@ -293,7 +293,7 @@ impl Node {
                     continue;
                 }
                 let Ok(events) = self
-                    .opaque_relay_round_for(&mut channel, recipient, Some(conv), confirm)
+                    .opaque_history_publication_round_for(&mut channel, recipient, conv, confirm)
                     .await
                 else {
                     continue;
