@@ -340,6 +340,11 @@ test(
   "pre-PR gate consumes canonical stage proof and rejects altered coverage without running tests",
   { timeout: 30000 },
   async (t) => {
+    const originalCi = process.env.CI;
+    t.after(() => {
+      if (originalCi === undefined) delete process.env.CI;
+      else process.env.CI = originalCi;
+    });
     const { execFileSync } = await import("node:child_process");
     const { writeFile, readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
@@ -383,6 +388,11 @@ test(
           ],
           { cwd: root },
         );
+        process.env.CI = "1";
+        await assert.rejects(prePrPatchCoverage({ root }), /dirty source, CI, or fresh execution/);
+        // This isolated repository exercises local-only evidence, even when the
+        // regression itself is running in Actions. Production still rejects CI.
+        process.env.CI = "";
         await assert.rejects(prePrPatchCoverage({ root }), /Generate it with:/);
         const proof = await runStage({
           root,

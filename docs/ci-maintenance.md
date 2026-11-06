@@ -429,6 +429,8 @@ intentionally terminates even an empty job to close descendant admission.
 Actual CLI regression fixtures need private output directories as well as private
 source directories; parallel Playwright commands otherwise delete one another's
 traces and manufacture failures. Missing hosted logs do not identify a slow case.
+Local-only evidence fixtures must explicitly isolate and restore inherited CI
+flags, and separately assert that real CI cannot reuse local acceptance evidence.
 
 The [fixture timing guidance](testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress)
 owns concrete examples and permitted boundaries.
