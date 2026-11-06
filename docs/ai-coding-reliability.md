@@ -132,7 +132,12 @@ reactor. The growing-history regression in
 holds the actual source writer until a receiver page imports, then measures
 continuation progress separately from setup and checks advancing cursors.
 Full-host file fixtures retain a separate two-worker reactor for each simulated
-application. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+application. This includes the explicit account File result/retry rigs: use the
+existing independent peer owner for source, requester, recipient and the launched
+fresh sibling, keeping inactive retry phases and every byte/manifest assertion.
+Release fault helpers before joining hosts, and preserve body failure after
+actual retirement. A shared-reactor timeout does not by itself prove starvation
+caused that historical failure. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
 holds both sibling workers after its durable copy completes and requires target
 confirmation while they remain held; unrelated devices cannot share that stall.
 
