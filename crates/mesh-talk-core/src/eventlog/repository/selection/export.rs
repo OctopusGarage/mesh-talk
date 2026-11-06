@@ -72,7 +72,7 @@ impl EventRepository {
                 }
                 let sibling=candidate&&(!sibling_closure||selected&&sibling_closed);
                 let outgoing=sibling&&(!own_closure||own&&own_closed);
-                c.execute("UPDATE participant_sync_rows SET sibling=?3,outgoing=?4 WHERE view=?1 AND id=?2",params![selection.id.as_slice(),id,sibling,outgoing])?;
+                c.execute("UPDATE participant_sync_rows SET sibling=?3,outgoing=?4 WHERE view=?1 AND id=?2 AND (sibling<>?3 OR outgoing<>?4)",params![selection.id.as_slice(),id,sibling,outgoing])?;
                 after=rank;edge_after=None;sibling_closed=true;own_closed=true;step.rows+=1;step.bytes+=64;
             }
             // Terminal polling retains fresh selection/source checks above but

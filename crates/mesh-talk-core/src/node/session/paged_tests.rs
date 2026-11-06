@@ -139,7 +139,16 @@ async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
         let quiet = counters();
         let tail = append(2);
         let changed = request(&mut channel, conversation, vec![first]).await;
+        assert!(request_durable_have(&mut channel, conversation, tail).await.unwrap());
+        let alternate_warm = counters();
         let different_have = request(&mut channel, conversation, vec![tail]).await;
+        assert!(request_durable_have(&mut channel, conversation, tail).await.unwrap());
+        let mut alternate_responses = Vec::new();
+        for have in [vec![first], vec![], vec![first, tail]] {
+            alternate_responses.push(request(&mut channel, conversation, have).await);
+            assert!(request_durable_have(&mut channel, conversation, tail).await.unwrap());
+        }
+        let alternate_quiet = counters();
         node.set_allowed(&peer_account.account_id(), false).await.unwrap();
         // Privacy revocation may retire the authenticated socket itself. Either
         // closure or a freshly empty response must withhold the retained data.
@@ -157,14 +166,25 @@ async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
                 },
             },
         };
-        (warm, quiet, tail, changed, different_have, revoked)
+        (warm, quiet, tail, changed, different_have, revoked,
+            alternate_warm, alternate_quiet, alternate_responses)
     }).await;
     drop(channel);
     tokio::time::timeout(std::time::Duration::from_secs(10), task)
         .await
         .unwrap()
         .unwrap();
-    let (warm, quiet, tail, changed, different_have, revoked) = result.unwrap();
+    let (
+        warm,
+        quiet,
+        tail,
+        changed,
+        different_have,
+        revoked,
+        alternate_warm,
+        alternate_quiet,
+        alternate_responses,
+    ) = result.unwrap();
     assert_eq!(
         quiet, warm,
         "repeated identical ordinary Requests must not commit selection or export mutations after warming"
@@ -173,6 +193,15 @@ async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
         changed,
         vec![tail],
         "new server data must invalidate the finite selection"
+    );
+    assert_eq!(
+        alternate_responses,
+        vec![vec![tail], vec![first, tail], vec![]],
+        "every changed remote Have must filter the current source independently"
+    );
+    assert_eq!(
+        alternate_quiet, alternate_warm,
+        "closure-free inbound exports must not mutate SQL selection or export state when only remote Have changes"
     );
     assert_eq!(
         different_have,

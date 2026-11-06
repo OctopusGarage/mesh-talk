@@ -383,7 +383,12 @@ authority revocation and selection release on disconnect. The ordinary Request
 regressions in the [paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
 require unchanged warm requests to perform no SQL mutations or commits, while
 source appends, changed remote Have and revoked authority remain fresh. Reuse
-only completed export preparation under its exact Have and current source stamp;
+completed export preparation under its current source stamp. Require exact Have
+when ancestor closure depends on it; an independent plan may instead rebind its
+cursor digest and apply the fresh Have as a read filter, without persisting query
+IDs or rebuilding flags. The real TCP regression alternates Have sets and requires
+correct fresh responses with zero SQL mutations. Unprepared or closure-dependent
+views retain their existing staged preparation. In every case,
 authority-only view validation deliberately permits a finite old source cutoff.
 Do not leave a completed lookup reconstruction classified as protected unfinished
 bulk work. Retire a selection created only for that finished lookup without

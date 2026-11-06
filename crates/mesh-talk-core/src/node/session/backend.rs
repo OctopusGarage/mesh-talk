@@ -62,6 +62,9 @@ pub(super) trait SessionBackend {
     fn stage_export_have(&self, view: &Self::View, _ids: &[EventId]) -> Result<(), LogError> {
         self.validate_view(view)
     }
+    fn export_preparation_needs_have(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(true)
+    }
     fn prepare_export_step(
         &self,
         view: &Self::View,
@@ -338,6 +341,12 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
     type View = S::View;
     type HaveCursor = S::HaveCursor;
     type ExportCursor = S::ExportCursor;
+    fn export_preparation_needs_have(&self, view: &Self::View) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .export_preparation_needs_have(view)
+    }
     fn probe_metadata(
         &self,
         c: &ConversationId,
@@ -720,17 +729,19 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
             }
             tokio::task::yield_now().await;
         }
-        let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
-        for id in have {
-            have_batch.push(*id);
-            if have_batch.len() == PreparationBudget::default().rows {
-                backend.stage_export_have(view, &have_batch)?;
-                have_batch.clear();
-                tokio::task::yield_now().await;
+        if backend.export_preparation_needs_have(view)? {
+            let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
+            for id in have {
+                have_batch.push(*id);
+                if have_batch.len() == PreparationBudget::default().rows {
+                    backend.stage_export_have(view, &have_batch)?;
+                    have_batch.clear();
+                    tokio::task::yield_now().await;
+                }
             }
-        }
-        if !have_batch.is_empty() {
-            backend.stage_export_have(view, &have_batch)?;
+            if !have_batch.is_empty() {
+                backend.stage_export_have(view, &have_batch)?;
+            }
         }
         loop {
             if backend

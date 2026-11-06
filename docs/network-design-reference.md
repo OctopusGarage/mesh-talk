@@ -2545,7 +2545,12 @@ expiry, replacement and destructive changes reset the cursor through the
 existing post-office policy owner; a cursor cannot extend retention.
 
 Outgoing history first compares an exact authorization-qualified source stamp.
-Unchanged completed views read no historical bodies. Changed views prepare a
+Unchanged completed views read no historical bodies. When export eligibility has no
+peer-Have-dependent ancestor closure, changing the peer's Have only changes the
+read filter and cursor binding: it neither stages those IDs in SQL nor rebuilds
+completed export flags. Closure-dependent sibling/own exports retain exact-Have
+preparation. Source, policy and selection validation remain current, and unchanged
+row flags are not rewritten while the bounded worker still advances its cursor. Changed views prepare a
 finite canonical metadata prefix through the existing participant selection
 owner, retaining causal, privacy, sibling and file-consent checks. Ordinary
 appends extend a valid completed prefix; invalid authority or ordering rebuilds

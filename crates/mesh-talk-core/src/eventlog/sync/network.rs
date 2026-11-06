@@ -169,14 +169,20 @@ pub trait NetworkSyncStore {
         })
     }
     /// Reuse completed export preparation only for this exclusively owned view
-    /// and the exact Have under fresh source and authority qualification. This
-    /// never skips bounded export reads or their current validation.
+    /// under fresh source and authority qualification. Have-dependent plans
+    /// require exact Have; independent plans must rebind their page cursor to
+    /// the current Have. This never skips fresh filtering or bounded reads.
     fn reusable_export(
         &self,
         _view: &Self::View,
         _have: &HashSet<EventId>,
     ) -> Result<bool, LogError> {
         Ok(false)
+    }
+    /// Whether preparation needs staged peer IDs for ancestor closure. False
+    /// never removes the current Have filter from the final export pages.
+    fn export_preparation_needs_have(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(true)
     }
     /// Have-dependent closure has the same bounded, cancellable work boundary.
     fn reset_export_step(

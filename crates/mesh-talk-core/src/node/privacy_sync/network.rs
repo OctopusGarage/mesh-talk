@@ -891,8 +891,25 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         {
             return Ok(false);
         }
+        let needs_have = self.export_preparation_needs_have(view)?;
         let fingerprint = crate::eventlog::sync::fingerprint(have.iter().copied().collect());
-        Ok(*view.export_have.lock().expect("view export lock") == Some(fingerprint))
+        let mut prepared = view.export_have.lock().expect("view export lock");
+        let reusable = prepared.is_some() && (!needs_have || *prepared == Some(fingerprint));
+        if reusable {
+            // The plan is unchanged, but subsequent pages still bind the fresh
+            // query and reject a cursor from any other Have set.
+            *prepared = Some(fingerprint);
+        }
+        Ok(reusable)
+    }
+    fn export_preparation_needs_have(&self, view: &Self::View) -> Result<bool, LogError> {
+        self.validate_view(view)?;
+        let preparation = view.preparation.lock().expect("view preparation lock");
+        if !preparation.ready() {
+            return Err(LogError::StaleCursor);
+        }
+        preparation.selection()?;
+        Ok(view.sibling_closure || (!self.inbound && !preparation.replica_shared))
     }
     fn reset_export_step(
         &self,
