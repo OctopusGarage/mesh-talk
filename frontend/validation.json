@@ -305,7 +305,7 @@
         "guide": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance",
         "invariants": [
           {
-            "name": "Selected-theme hydration uses verified owner/account scope; logout, replacement and stale async cache reads cannot retain private wallpaper CSS. Startup observation never grants runtime readiness.",
+            "name": "Selected-theme hydration uses verified owner/account scope; logout, replacement and stale async cache reads cannot retain private wallpaper CSS. Startup observation never grants runtime readiness. The startup browser scenario retains held gallery, readiness and real logout/relogin evidence; it cannot model account replacement by mutating a derived chat field while the authoritative identity fixture remains unchanged. Existing scoped pack and linked appearance controls retain replacement and stale-read acceptance.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance"
           },
           {
@@ -511,6 +511,7 @@
     {
       "id": "frontend-delivery-details",
       "paths": [
+        "frontend/e2e/automatic-delivery.spec.ts",
         "frontend/src/features/chat/DeliveryDetails.tsx",
         "frontend/src/features/chat/DeliveryDetails.test.ts",
         "frontend/src/features/chat/DeliveryRecoveryProvider.tsx",
@@ -533,7 +534,7 @@
         "guide": "docs/help/topics/delivery.md#inspect-delivery-details",
         "invariants": [
           {
-            "name": "Missing or aged scheduling details do not establish recipient presence, failure, custody or delivery",
+            "name": "Missing or aged scheduling details do not establish recipient presence, failure, custody or delivery. Independent text, sticker and file-card browser scenarios require Awaiting before one explicit authoritative mock projection; the file scenario retains disclosure, keyboard and offer-receipt assertions without combining three send journeys inside one functional case budget.",
             "reference": "docs/network-design-reference.md#runtime-delivery-observations"
           },
           {
@@ -2175,6 +2176,7 @@
     {
       "id": "frontend-unread-recovery",
       "paths": [
+        "frontend/e2e/group-reception.spec.ts",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-1280x800.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-760x620.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-oled-760x620-win32.png",
@@ -2232,7 +2234,7 @@
         "guide": "docs/group-conversation-reception.md#unread-review-and-badge-recovery",
         "invariants": [
           {
-            "name": "Explicit source/global actions cover hidden, missing and unknown senders, preserve later arrivals and persist counters; incomplete history never proves deletion.",
+            "name": "Explicit source/global actions cover hidden, missing and unknown senders, preserve later arrivals and persist counters; incomplete history never proves deletion. Browser recovery-batch navigation uses distinct partial/terminal deliveries, live traffic and a duplicate signal; dedicated large-history navigation and deterministic announcement batching/deduplication controls retain their coverage.",
             "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
           },
           {

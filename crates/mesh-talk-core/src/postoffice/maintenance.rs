@@ -793,7 +793,14 @@ mod tests {
                 .state
                 .request_preparation_at(super::super::network::unix_now())
                 .unwrap();
-            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(350))=>{}}
+            // The measured duty gate includes real database execution time.
+            // A fixed virtual 350 ms window cannot predict its slice count on
+            // a slower filesystem. Wait for actual retries, then check spacing.
+            let until = tokio::time::Instant::now() + Duration::from_secs(10);
+            while VACUUM_ATTEMPTS.with(|v| v.borrow().len()) < 3 {
+                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
+                assert!(tokio::time::Instant::now() < until);
+            }
             assert!(
                 office
                     .state
@@ -806,18 +813,9 @@ mod tests {
                 0
             );
             let attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().clone());
-            assert!(
-                (2..=3).contains(&attempts.len()),
-                "physical attempts: {}",
-                attempts.len()
-            );
+            assert_eq!(attempts.len(), 3);
             for (index, pair) in attempts.windows(2).enumerate() {
                 assert!(pair[1] - pair[0] >= Duration::from_millis(100u64 << index));
-            }
-            let until = tokio::time::Instant::now() + Duration::from_secs(10);
-            while VACUUM_ATTEMPTS.with(|v| v.borrow().len()) < 3 {
-                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
-                assert!(tokio::time::Instant::now() < until);
             }
             let next =
                 VACUUM_ATTEMPTS.with(|v| *v.borrow().last().unwrap()) + Duration::from_millis(400);

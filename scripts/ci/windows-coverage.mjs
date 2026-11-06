@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const versions = Object.freeze({ nextest: "0.9.150", llvmCov: "0.8.7" });
-export const windowsPartitions = Object.freeze([1, 2, 3, 4]);
+export const windowsPartitions = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
 const buildArgs = ["--workspace", "--locked"];
 const nextestArgs = ["--profile", "default", "--user-config-file", "none"];
 const canonical = value => JSON.stringify(value);
@@ -136,8 +136,9 @@ export function inventory(listing) {
   return rows;
 }
 
-export function verifyPartition(all, shards) {
-  assert.equal(shards.length, windowsPartitions.length, "Expected four partitions");
+export function verifyPartition(all, shards, expectedPartitions = windowsPartitions.length) {
+  assert.ok(Number.isSafeInteger(expectedPartitions) && expectedPartitions > 0, "Invalid expected partition count");
+  assert.equal(shards.length, expectedPartitions, "Unexpected number of partitions");
   assert.ok(all.length && all.some(row => !row.ignored), "Empty full partition inventory");
   assert.ok(all.every(row => row.selected === !row.ignored), "Full partition has hidden filters or changed ignored behavior");
   const stable = rows => rows.map(({ selected: _selected, ...rest }) => rest);
@@ -305,7 +306,7 @@ export function consumerFailurePolicy(env = process.env) {
 }
 
 export async function consume(shard, directory, output) {
-  assert.ok(windowsPartitions.includes(shard), "shard must be an integer from 1 through 4");
+  assert.ok(windowsPartitions.includes(shard), "shard must be an integer from 1 through 8");
   mkdirSync(output, { recursive: true });
   const progress = path.join(output, "progress.jsonl");
   assert.ok(!existsSync(progress) && !existsSync(path.join(output, "receipt.json")), "Consumer output already contains a prior attempt");

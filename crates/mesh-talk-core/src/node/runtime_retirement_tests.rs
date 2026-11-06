@@ -487,20 +487,27 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     assert!(same_port);
 }
 
-#[tokio::test]
+// Exercise the full participant with the same available worker boundary as
+// desktop/headless hosts; synchronous maintenance cannot own its only reactor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_limit_releases_slots_and_retirement_closes_all_owned_connections() {
     use tokio::io::AsyncReadExt;
     let dir = tempfile::tempdir().unwrap();
     let runtime = start(dir.path()).await;
     let address = (std::net::Ipv4Addr::LOCALHOST, runtime.listen_tcp_port());
     let mut streams = Vec::new();
-    for _ in 0..crate::node::serving::MAX_CONCURRENT_CONNS {
+    for slot in 0..crate::node::serving::MAX_CONCURRENT_CONNS {
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         *runtime.node.accepted_hook.lock().unwrap() = Some(entered_tx);
         streams.push(tokio::net::TcpStream::connect(address).await.unwrap());
         tokio::time::timeout(Duration::from_secs(3), entered_rx)
             .await
-            .unwrap()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "connection slot {slot} was not admitted: {error}; capacity={:?}",
+                    runtime.node.sessions.test_capacity_snapshot()
+                )
+            })
             .unwrap();
     }
     let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();

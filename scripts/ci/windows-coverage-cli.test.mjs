@@ -59,7 +59,7 @@ pub fn branch(first: bool) -> u8 { assert!(std::env::var_os("MESH_ARCHIVE_FAIL_C
 `,
     );
     const shardCases = Array.from(
-      { length: 32 },
+      { length: 64 },
       (_, index) =>
         `#[test] fn partition_case_${index}() { assert_eq!(crate::branch(${index % 2 === 0}), ${index % 2 === 0 ? 7 : 9}); }`,
     ).join("\n");
@@ -307,7 +307,7 @@ pub fn branch(first: bool) -> u8 { assert!(std::env::var_os("MESH_ARCHIVE_FAIL_C
     mkdirSync(freshCargoHome);
     const receipts = [],
       logs = [];
-    for (const shard of [1, 2, 3, 4]) {
+    for (const shard of [1, 2, 3, 4, 5, 6, 7, 8]) {
       const output = path.join(temporary, `results-${shard}`);
       phase(["consume", String(shard), artifact, output], {
         ...env,
@@ -325,12 +325,12 @@ pub fn branch(first: bool) -> u8 { assert!(std::env::var_os("MESH_ARCHIVE_FAIL_C
     }
     assert.equal(
       receipts.reduce((total, receipt) => total + receipt.executedTests, 0),
-      36,
+      68,
     );
     assert.ok(
       receipts.every(
         (receipt) =>
-          receipt.totalTests === 37 && receipt.coverage.coveredLines > 0,
+          receipt.totalTests === 69 && receipt.coverage.coveredLines > 0,
       ),
     );
     assert.ok(

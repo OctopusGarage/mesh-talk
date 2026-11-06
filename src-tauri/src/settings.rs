@@ -1677,7 +1677,17 @@ mod tests {
             .is_err()
         );
         drop(handle);
-        nodes.0.write().await.take().unwrap().stop().await;
+        let retired = nodes
+            .0
+            .write()
+            .await
+            .take()
+            .unwrap()
+            .stop_for_storage()
+            .await;
+        retired
+            .close()
+            .expect("the previous settings runtime must close its profile before reopen");
         let restarted = NodeRuntime::start(
             root.path(),
             "shared-settings-owner",
@@ -1707,7 +1717,11 @@ mod tests {
         state.activate_at("shared-settings-owner", &path);
         assert_eq!(state.get().ringtone, "digital");
         assert_eq!(state.get().download_dir, "/this-device");
-        restarted.stop().await;
+        restarted
+            .stop_for_storage()
+            .await
+            .close()
+            .expect("the restarted settings runtime must release its profile");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

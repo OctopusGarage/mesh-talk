@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   versions,
+  windowsPartitions,
   command,
   consumerFailurePolicy,
   inventory,
@@ -22,6 +18,17 @@ import {
   validateProfilePath,
   verifyLayout,
 } from "../ci/windows-coverage.mjs";
+
+test("Windows execution partitions keep all eight native jobs directly required", () => {
+  assert.deepEqual(windowsPartitions, [1, 2, 3, 4, 5, 6, 7, 8]);
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /name: Windows workspace tests .*\/8\)/u);
+  assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
+  assert.doesNotMatch(workflow, /\n  qualify:|\n  acceptance:/u);
+});
 
 test("nextest security minimum and every CI installer follow the version owner", () => {
   // GHSA-vc25-qg58-w57c: portable recording parsing is patched in 0.9.150.
@@ -258,8 +265,8 @@ test(
   },
 );
 
-const listing = (selected) => ({
-  "test-count": 5,
+const listing = (selected, names = ["a", "b", "c", "d"]) => ({
+  "test-count": names.length + 1,
   "rust-suites": {
     lib: {
       "package-name": "pkg",
@@ -269,7 +276,7 @@ const listing = (selected) => ({
       kind: "lib",
       status: "listed",
       testcases: Object.fromEntries(
-        ["a", "b", "c", "d", "ignored"].map((name) => [
+        [...names, "ignored"].map((name) => [
           name,
           {
             kind: "test",
@@ -285,14 +292,14 @@ const listing = (selected) => ({
   },
 });
 
-test("four official partitions retain ignored rows and execute every runnable case exactly once", () => {
-  const names = ["a", "b", "c", "d"];
-  const all = inventory(listing(names));
-  const shards = names.map((name) => inventory(listing([name])));
-  assert.equal(all.length, 5);
+test("eight official partitions retain ignored rows and execute every runnable case exactly once", () => {
+  const names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+  const all = inventory(listing(names, names));
+  const shards = names.map((name) => inventory(listing([name], names)));
+  assert.equal(all.length, 9);
   assert.equal(all.filter((row) => row.ignored).length, 1);
   verifyPartition(all, shards);
-  for (const missing of [2, 3])
+  for (const missing of [0, 7])
     assert.throws(
       () =>
         verifyPartition(
@@ -302,18 +309,22 @@ test("four official partitions retain ignored rows and execute every runnable ca
       /partitions/,
     );
   assert.throws(
-    () => verifyPartition(all, [shards[0], shards[1], shards[2], shards[2]]),
-    /partition/,
-  );
-  assert.throws(
-    () => verifyPartition(all, [...shards.slice(0, 3), inventory(listing([]))]),
+    () => verifyPartition(all, [...shards.slice(0, 7), shards[0]]),
     /partition/,
   );
   assert.throws(
     () =>
       verifyPartition(all, [
-        ...shards.slice(0, 3),
-        inventory(listing(["d", "ignored"])),
+        ...shards.slice(0, 7),
+        inventory(listing([], names)),
+      ]),
+    /partition/,
+  );
+  assert.throws(
+    () =>
+      verifyPartition(all, [
+        ...shards.slice(0, 7),
+        inventory(listing(["h", "ignored"], names)),
       ]),
     /ignored/,
   );

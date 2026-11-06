@@ -63,7 +63,12 @@ test("native workspace test passes collect and upload their own platform coverag
     const pass = steps.find(value => value.startsWith(`name: Test + coverage (${platform})\n`));
     assert.ok(pass);
     assert.match(pass, /cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default/);
-    assert.match(pass, /cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4/);
+    if (platform === "Linux") {
+      assert.match(pass, /cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4/);
+    } else {
+      assert.match(pass, /cargo nextest run --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4/);
+      assert.doesNotMatch(pass, /cargo llvm-cov nextest --no-report --locked --workspace/);
+    }
     assert.match(pass, /cargo llvm-cov report --lcov --output-path lcov\.info/);
     assert.match(pass, /set -e -o pipefail/);
     assert.match(pass, /run_coverage 2>&1 \| tee/);
