@@ -128,6 +128,7 @@ mod relay_policy;
 mod route_timing;
 pub(crate) mod runtime;
 mod runtime_delivery;
+mod work_observation;
 pub use host_reception::{
     CurrentProfilePage, HostReception, HostReceptionPage, ReceptionConsumer, ReceptionCursor,
     ReceptionLimit,

@@ -22,6 +22,42 @@ fn invalid() -> io::Error {
 fn invalid_error(_: impl std::fmt::Display) -> io::Error {
     invalid()
 }
+#[derive(Debug)]
+enum RecordRejection {
+    InvalidPresence,
+    LinkedBindingConflict,
+    DeviceKeyConflict,
+    AccountRootChange,
+    DirectoryCapacity,
+}
+impl RecordRejection {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidPresence => "invalid_presence",
+            Self::LinkedBindingConflict => "linked_binding_conflict",
+            Self::DeviceKeyConflict => "device_key_conflict",
+            Self::AccountRootChange => "account_root_change",
+            Self::DirectoryCapacity => "directory_capacity",
+        }
+    }
+    fn error(self) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, self)
+    }
+}
+impl std::fmt::Display for RecordRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("invalid peer directory")
+    }
+}
+impl std::error::Error for RecordRejection {}
+
+/// Content-free diagnostic for the existing passive proof rejection boundary.
+pub(super) fn rejection_code(error: &io::Error) -> &'static str {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<RecordRejection>())
+        .map_or("invalid_data", RecordRejection::code)
+}
 fn codec() -> impl Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -474,10 +510,11 @@ impl PeerDirectory {
     }
 
     fn record_bound(&mut self, announce: &Announce, accept_account_change: bool) -> io::Result<()> {
-        if !valid(announce)
-            || (self.linked_binding(&announce.user_id).is_some() && !self.accepts_binding(announce))
-        {
-            return Err(invalid());
+        if !valid(announce) {
+            return Err(RecordRejection::InvalidPresence.error());
+        }
+        if self.linked_binding(&announce.user_id).is_some() && !self.accepts_binding(announce) {
+            return Err(RecordRejection::LinkedBindingConflict.error());
         }
         let mut next = self.records.clone();
         match next.binary_search_by(|a| a.user_id.cmp(&announce.user_id)) {
@@ -485,18 +522,21 @@ impl PeerDirectory {
                 let existing = &next[i];
                 if existing.ed25519_pub != announce.ed25519_pub
                     || existing.x25519_pub != announce.x25519_pub
-                    || (!accept_account_change
-                        && self.linked_binding(&announce.user_id).is_none()
-                        && existing
+                {
+                    return Err(RecordRejection::DeviceKeyConflict.error());
+                }
+                if !accept_account_change
+                    && self.linked_binding(&announce.user_id).is_none()
+                    && existing
+                        .account_cert
+                        .as_ref()
+                        .map(|c| c.account_ed25519_pub)
+                        != announce
                             .account_cert
                             .as_ref()
                             .map(|c| c.account_ed25519_pub)
-                            != announce
-                                .account_cert
-                                .as_ref()
-                                .map(|c| c.account_ed25519_pub))
                 {
-                    return Err(invalid());
+                    return Err(RecordRejection::AccountRootChange.error());
                 }
                 if existing == announce {
                     return Ok(());
@@ -505,7 +545,7 @@ impl PeerDirectory {
             }
             Err(i) => {
                 if next.len() == MAX_PEERS {
-                    return Err(invalid());
+                    return Err(RecordRejection::DirectoryCapacity.error());
                 }
                 next.insert(i, announce.clone());
             }
@@ -1379,5 +1419,128 @@ mod account_change_tests {
             renamed.ambiguous_historical_accounts().is_empty(),
             "a same-account metadata refresh must not manufacture historical ambiguity"
         );
+    }
+}
+
+#[cfg(test)]
+mod rejection_code_tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    fn rejected(directory: &mut PeerDirectory, announce: &Announce, code: &'static str) {
+        let records = directory.announcements();
+        let revision = directory.revision();
+        let durable = fs::read(&directory.path).unwrap();
+        let error = directory.record(announce).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "invalid peer directory");
+        assert_eq!(rejection_code(&error), code);
+        assert!(directory.announcements() == records);
+        assert_eq!(directory.revision(), revision);
+        assert!(fs::read(&directory.path).unwrap() == durable);
+    }
+
+    #[test]
+    fn record_rejection_code_invalid_presence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut directory = PeerDirectory::open(&root.path().join("proofs"), "pw").unwrap();
+        let mut announce = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            47475,
+        );
+        announce.sig[0] ^= 1;
+        rejected(&mut directory, &announce, "invalid_presence");
+    }
+
+    #[test]
+    fn record_rejection_code_linked_binding_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let mut directory = PeerDirectory::open(&root.path().join("proofs"), "pw").unwrap();
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        directory
+            .record(&Announce::new_with_account(
+                &identity, &account, "Peer", 47475,
+            ))
+            .unwrap();
+        directory
+            .authorize_linked_device(
+                crate::node::account_devices::AccountDevice {
+                    public: identity.public(),
+                    certificate: account.certify(&identity.public().ed25519_pub),
+                },
+                &account.account_id(),
+            )
+            .unwrap();
+        let changed = Announce::new_with_account(&identity, &Account::generate(), "Peer", 47475);
+        rejected(&mut directory, &changed, "linked_binding_conflict");
+    }
+
+    #[test]
+    fn record_rejection_code_device_key_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let mut directory = PeerDirectory::open(&root.path().join("proofs"), "pw").unwrap();
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        directory
+            .record(&Announce::new_with_account(
+                &identity, &account, "Peer", 47475,
+            ))
+            .unwrap();
+        let changed = DeviceIdentity::from_secret_bytes(
+            identity.secret_bytes().0,
+            DeviceIdentity::generate().secret_bytes().1,
+        );
+        rejected(
+            &mut directory,
+            &Announce::new_with_account(&changed, &account, "Peer", 47475),
+            "device_key_conflict",
+        );
+    }
+
+    #[test]
+    fn record_rejection_code_account_root_change() {
+        let root = tempfile::tempdir().unwrap();
+        let mut directory = PeerDirectory::open(&root.path().join("proofs"), "pw").unwrap();
+        let identity = DeviceIdentity::generate();
+        directory
+            .record(&Announce::new_with_account(
+                &identity,
+                &Account::generate(),
+                "Peer",
+                47475,
+            ))
+            .unwrap();
+        rejected(
+            &mut directory,
+            &Announce::new_with_account(&identity, &Account::generate(), "Peer", 47475),
+            "account_root_change",
+        );
+    }
+
+    #[test]
+    fn record_rejection_code_directory_capacity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut directory = PeerDirectory::open(&root.path().join("proofs"), "pw").unwrap();
+        let account = Account::generate();
+        // Populate valid sorted owner state without 1,024 unrelated disk saves.
+        directory.records = (0..MAX_PEERS)
+            .map(|_| {
+                Announce::new_with_account(&DeviceIdentity::generate(), &account, "Peer", 47475)
+            })
+            .collect();
+        directory.records.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        rejected(
+            &mut directory,
+            &Announce::new_with_account(&DeviceIdentity::generate(), &account, "Peer", 47475),
+            "directory_capacity",
+        );
+    }
+
+    #[test]
+    fn record_rejection_code_unknown_errors_are_generic() {
+        assert_eq!(rejection_code(&invalid()), "invalid_data");
     }
 }

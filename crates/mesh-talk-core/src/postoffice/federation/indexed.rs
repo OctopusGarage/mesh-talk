@@ -1,5 +1,6 @@
 //! Bounded SQL federation over the existing authenticated relay protocol.
 use super::*;
+mod conditional;
 use crate::{
     node::session::{
         RemoteHaveBudget, Served, request_round_budgeted, serve_one_budgeted,
@@ -14,6 +15,7 @@ use crate::{
         },
     },
 };
+use conditional::{ConditionalState, ProofContext, REQUEST_V5};
 
 /// Typed local failures survive negotiation and reach the runtime supervisor.
 #[derive(Debug)]
@@ -122,6 +124,7 @@ pub struct IndexedRelayEndpoint {
     directory: Option<FederationDirectory>,
     trust: Option<IndexedRelayTrust>,
     budget: RemoteHaveBudget,
+    conditional: Arc<ConditionalState>,
 }
 impl IndexedRelayEndpoint {
     pub fn new(
@@ -134,6 +137,7 @@ impl IndexedRelayEndpoint {
             directory,
             trust,
             budget: RemoteHaveBudget::default(),
+            conditional: Arc::new(ConditionalState::default()),
         }
     }
     /// Compatibility edge for existing SDK callers. Runtime uses checked methods.
@@ -190,17 +194,24 @@ impl IndexedRelayEndpoint {
             _ => None,
         };
         tokio::time::timeout(ROUND_TIMEOUT, async {
-            let versions: &[&[u8]] = if network.is_some() {
-                &[REQUEST_V4, REQUEST_V3, REQUEST_V2]
-            } else {
-                &[REQUEST_V4, REQUEST_V3, REQUEST_V2, REQUEST]
+            let modern = self.conditional.probe_version(expected);
+            let versions: &[&[u8]] = match (network.is_some(), modern) {
+                (true, true) => &[REQUEST_V5, REQUEST_V4, REQUEST_V3, REQUEST_V2],
+                (true, false) => &[REQUEST_V4, REQUEST_V3, REQUEST_V2],
+                (false, true) => &[REQUEST_V5, REQUEST_V4, REQUEST_V3, REQUEST_V2, REQUEST],
+                (false, false) => &[REQUEST_V4, REQUEST_V3, REQUEST_V2, REQUEST],
             };
             for request in versions {
                 match self
                     .sync_version(addr, identity, expected, request, network, started)
                     .await
                 {
-                    Err(IndexedRelayError::UnsupportedVersion) => continue,
+                    Err(IndexedRelayError::UnsupportedVersion) => {
+                        if *request == REQUEST_V5 {
+                            self.conditional.unsupported(expected);
+                        }
+                        continue;
+                    }
                     result => return result,
                 }
             }
@@ -218,6 +229,11 @@ impl IndexedRelayEndpoint {
         network: Option<&super::super::network::RelayNetwork>,
         started: Instant,
     ) -> Result<usize, IndexedRelayError> {
+        if request == REQUEST_V5 {
+            return self
+                .sync_conditional(addr, identity, expected, network, started)
+                .await;
+        }
         let owner = SessionOwner::begin(
             self.office.state.profile().clone(),
             Direction::Outbound,
@@ -225,7 +241,6 @@ impl IndexedRelayEndpoint {
             started,
         )
         .map_err(IndexedRelayError::from)?;
-        let lease = owner.lease();
         let stream = TcpStream::connect(addr)
             .await
             .map_err(IndexedRelayError::from)?;
@@ -237,19 +252,39 @@ impl IndexedRelayEndpoint {
             network.connect(&mut channel).await?;
         }
         send_frame(&mut channel, request).await?;
+        self.sync_inventory_on(&mut channel, expected, request, owner, None)
+            .await
+    }
+    async fn sync_inventory_on<IO: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        channel: &mut SecureChannel<IO>,
+        expected: &PublicIdentity,
+        request: &[u8],
+        owner: SessionOwner,
+        conditional: Option<&ProofContext>,
+    ) -> Result<usize, IndexedRelayError> {
+        let lease = owner.lease();
         let limit = presence_limit(request);
         let routed = request == REQUEST_V3 || request == REQUEST_V4;
         let origins = request == REQUEST_V4;
-        send_presence_pages(&mut channel, self.directory(), limit, routed, origins).await?;
+        send_presence_pages(channel, self.directory(), limit, routed, origins).await?;
         let view = self
             .office
             .state
             .inventory_view_at(unix_now())
             .map_err(IndexedRelayError::from)?;
-        self.send_inventory(&mut channel, &lease, &view).await?;
-        receive_inventory(&mut channel, &lease).await?;
+        self.send_inventory(channel, &lease, &view).await?;
+        receive_inventory(channel, &lease).await.map_err(|error| {
+            if conditional.is_some() && matches!(error, IndexedRelayError::UnsupportedVersion) {
+                IndexedRelayError::Protocol(
+                    "conditional federation closed after negotiation".into(),
+                )
+            } else {
+                error
+            }
+        })?;
         self.correct_origins(&lease).await?;
-        receive_presence_pages(&mut channel, self.directory(), limit, routed, origins).await?;
+        receive_presence_pages(channel, self.directory(), limit, routed, origins).await?;
         self.office
             .state
             .begin_inventory_mismatch_at(
@@ -283,9 +318,13 @@ impl IndexedRelayEndpoint {
         let store = Mutex::new(IndexedFederationStore::new(&self.office, lease));
         for id in &ids {
             self.office.state.advance_federation_cursor(expected, *id);
-            request_round_budgeted(&mut channel, &store, *id, &self.budget)
+            request_round_budgeted(channel, &store, *id, &self.budget)
                 .await
                 .map_err(IndexedRelayError::from)?;
+        }
+        if let Some(proof) = conditional {
+            self.finish_conditional_client(channel, proof, ids.is_empty())
+                .await?;
         }
         // `owner` remains live through every round and transport await. A cloned
         // store/view/lease cannot extend this authority after return/cancellation.
@@ -395,15 +434,18 @@ impl IndexedRelayEndpoint {
                 .await
                 .map_err(|_| "federation authorization deadline exceeded".to_string())?
                 .map_err(IndexedRelayError::from)?;
-            if !is_inventory_request(&first) {
+            if !is_inventory_request(&first) && first != REQUEST_V5 {
                 return Err("expected authorized federation inventory request".into());
             }
             network_authorized = true;
         }
-        if is_inventory_request(&first) {
+        if is_inventory_request(&first) || first == REQUEST_V5 {
             if !network_authorized
                 && !matches!(&self.trust, Some(IndexedRelayTrust::Pinned(pins)) if pins.contains(&channel.peer_identity().user_id()))
             {
+                if first == REQUEST_V5 {
+                    send_frame(&mut channel, conditional::DENIED).await?;
+                }
                 return Err("federation peer is not authorized".into());
             }
             return tokio::time::timeout_at(
@@ -419,9 +461,16 @@ impl IndexedRelayEndpoint {
                 .await;
         }
         let store = Mutex::new(self.office.clone());
+        let mut mailbox_authorized = None;
         match tokio::time::timeout(
             ROUND_TIMEOUT,
-            serve_wire_bytes_budgeted(&mut channel, &store, &first, &self.budget),
+            crate::node::session::mailbox::serve(
+                &mut channel,
+                &store,
+                &first,
+                &self.budget,
+                &mut mailbox_authorized,
+            ),
         )
         .await
         {
@@ -431,10 +480,20 @@ impl IndexedRelayEndpoint {
             Err(_) => return Err("relay round deadline exceeded".into()),
         }
         for _ in 1..10_000 {
-            match tokio::time::timeout(
-                ROUND_TIMEOUT,
-                serve_one_budgeted(&mut channel, &store, &self.budget),
-            )
+            match tokio::time::timeout(ROUND_TIMEOUT, async {
+                let bytes = match channel.recv().await {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Ok(Served::Closed),
+                };
+                crate::node::session::mailbox::serve(
+                    &mut channel,
+                    &store,
+                    &bytes,
+                    &self.budget,
+                    &mut mailbox_authorized,
+                )
+                .await
+            })
             .await
             {
                 Ok(Ok(Served::Handled(_))) => {}
@@ -450,6 +509,19 @@ impl IndexedRelayEndpoint {
         channel: &mut SecureChannel<IO>,
         request: &[u8],
         started: Instant,
+    ) -> Result<(), IndexedRelayError> {
+        if request == REQUEST_V5 {
+            return self.serve_conditional(channel, started).await;
+        }
+        self.serve_inventory_on(channel, request, started, None)
+            .await
+    }
+    async fn serve_inventory_on<IO: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        channel: &mut SecureChannel<IO>,
+        request: &[u8],
+        started: Instant,
+        conditional: Option<&ProofContext>,
     ) -> Result<(), IndexedRelayError> {
         self.prepared()?;
         let owner = SessionOwner::begin(
@@ -475,15 +547,34 @@ impl IndexedRelayEndpoint {
         send_presence_pages(channel, self.directory(), limit, routed, origins).await?;
         let store = Mutex::new(IndexedFederationStore::new(&self.office, lease));
         for _ in 0..10_000 {
-            match serve_one_budgeted(channel, &store, &self.budget)
-                .await
-                .map_err(IndexedRelayError::from)?
-            {
+            let served = if let Some(proof) = conditional {
+                let bytes = channel.recv().await?;
+                if bytes.starts_with(conditional::END) {
+                    let claimed_equal = conditional::decode_flag(&bytes, conditional::END)?;
+                    self.finish_conditional_server(
+                        channel,
+                        proof,
+                        &view,
+                        &owner.lease(),
+                        claimed_equal,
+                    )
+                    .await?;
+                    drop(owner);
+                    return Ok(());
+                }
+                serve_wire_bytes_budgeted(channel, &store, &bytes, &self.budget).await
+            } else {
+                serve_one_budgeted(channel, &store, &self.budget).await
+            };
+            match served.map_err(IndexedRelayError::from)? {
                 Served::Closed => break,
                 Served::Handled(_) => {}
             }
         }
         drop(owner);
+        if conditional.is_some() {
+            return Err("conditional federation lacks an explicit completion".into());
+        }
         Ok(())
     }
     async fn serve_directory<IO: AsyncRead + AsyncWrite + Unpin>(
@@ -549,3 +640,6 @@ async fn receive_inventory<IO: AsyncRead + AsyncWrite + Unpin>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod conditional_tests;

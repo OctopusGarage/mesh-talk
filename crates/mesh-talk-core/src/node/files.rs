@@ -1100,7 +1100,9 @@ impl Node {
             None,
             &mut authorize,
         )?;
-        if let Err(error) = self.queue_group_file_delivery(file_conv, id) {
+        if let Err(error) = self.queue_group_file_delivery(file_conv, id)
+            && !matches!(error, LogError::StaleCursor)
+        {
             // The manifest is already committed. The durable row scan retries
             // scheduling; a transient lookup failure must not reject its send.
             log::warn!("Group file scheduling deferred after storage failure: {error}");

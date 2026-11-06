@@ -782,7 +782,9 @@ impl NodeRuntime {
                                     published.get_mut(&uid).expect("prepared publication").last_attempt = Some(std::time::Instant::now());
                                     let node = Arc::clone(&node);
                                     attempts.push(Box::pin(async move {
-                                        let complete = node.deliver_profile_to(&peer, conversation).await;
+                                        let complete =
+                                            Box::pin(node.deliver_profile_to(&peer, conversation))
+                                                .await;
                                         (uid, revision, complete)
                                     }));
                                 }

@@ -299,7 +299,7 @@ impl GroupInventoryReference {
 
 pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool {
     let AccountDocumentKey::GroupInventory {
-        channel,
+        channel: _,
         source_device,
     } = &meta.key
     else {
@@ -314,6 +314,20 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
     let Ok(value) = serde_json::from_slice::<GroupInventoryReference>(payload) else {
         return false;
     };
+    valid_reference(meta, &value)
+}
+
+pub(super) fn valid_reference(meta: &AccountDocumentMeta, value: &GroupInventoryReference) -> bool {
+    let AccountDocumentKey::GroupInventory {
+        channel,
+        source_device,
+    } = &meta.key
+    else {
+        return false;
+    };
+    if meta.tombstone || source_device != &meta.writer_device {
+        return false;
+    }
     let mut members = BTreeSet::new();
     let principals = value
         .members
@@ -370,22 +384,28 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
 
 fn references_from_rows(
     node: &Node,
-    store: &store::AccountDocumentStore,
+    store: &mut store::AccountDocumentStore,
     rows: Vec<AccountDocumentMeta>,
 ) -> BTreeMap<String, GroupInventoryReference> {
     let mut grouped: BTreeMap<String, Vec<(AccountDocumentMeta, GroupInventoryReference)>> =
         BTreeMap::new();
     for meta in rows.into_iter().filter(|meta| !meta.tombstone) {
-        let Ok(Some(document)) = store.get(&meta.key) else {
+        #[cfg(test)]
+        let before = store.inventory_body_validations;
+        let reference = store.inventory_reference(&meta);
+        #[cfg(test)]
+        node.inventory_body_validations.fetch_add(
+            store.inventory_body_validations - before,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let Some(reference) = reference else {
             continue;
         };
-        if !valid_payload(&meta, document.payload()) {
-            continue;
+        #[cfg(test)]
+        if reference.directory.is_some() {
+            node.inventory_live_binding_checks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let Ok(reference) = serde_json::from_slice::<GroupInventoryReference>(document.payload())
-        else {
-            continue;
-        };
         if reference
             .directory
             .as_ref()
@@ -678,8 +698,9 @@ impl Node {
             return None;
         }
         let channel = hex::encode(channel.as_bytes());
-        let store = self.account_documents.lock().expect("documents mutex");
-        references_from_rows(self, &store, store.inventory_channel_rows(&channel)).remove(&channel)
+        let mut store = self.account_documents.lock().expect("documents mutex");
+        let rows = store.inventory_channel_rows(&channel);
+        references_from_rows(self, &mut store, rows).remove(&channel)
     }
     pub fn channel_legacy_membership(&self, channel: ConversationId) -> bool {
         let book = self.channels.lock().expect("channels mutex");
@@ -693,8 +714,9 @@ impl Node {
     pub(in crate::node) fn group_inventory_references(
         &self,
     ) -> BTreeMap<String, GroupInventoryReference> {
-        let store = self.account_documents.lock().expect("documents mutex");
-        references_from_rows(self, &store, store.inventory_rows())
+        let mut store = self.account_documents.lock().expect("documents mutex");
+        let rows = store.inventory_rows();
+        references_from_rows(self, &mut store, rows)
     }
 
     /// Publish only physical local groups, with canonical facts and their witness

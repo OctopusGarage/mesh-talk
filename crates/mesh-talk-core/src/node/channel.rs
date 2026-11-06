@@ -315,6 +315,15 @@ pub(super) struct ChannelMembershipProjection {
 }
 
 impl ChannelMembershipProjection {
+    /// Only the network selection owner may use this under its unchanged
+    /// control/destructive fences and captured canonical rank upper bound.
+    pub(in crate::node) fn allow_network_prefix(&mut self) {
+        if let Some(history) = self.historical.as_mut() {
+            std::sync::Arc::make_mut(history).allow_network_prefix();
+        }
+        self.authority.allow_network_prefix();
+    }
+
     pub(in crate::node) fn empty(channel: ConversationId) -> Self {
         projection::MembershipReducer::new(channel).finish()
     }
@@ -556,6 +565,7 @@ impl ChannelBook {
     /// Channel metadata from the validated event DAG. This intentionally creates
     /// no sender/receiver chains and can project a recovery archive for a device
     /// which is not itself a member.
+    #[cfg(test)]
     pub(super) fn projected_metadata<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
         events: &[E],
@@ -564,7 +574,8 @@ impl ChannelBook {
     }
 
     /// Current members from the validated event DAG, without decrypting or
-    /// surfacing message content. Used for connection admission decisions.
+    /// surfacing message content. Reference for indexed admission regressions.
+    #[cfg(test)]
     pub fn projected_members<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
         events: &[E],

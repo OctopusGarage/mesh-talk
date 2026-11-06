@@ -384,12 +384,20 @@ impl PersistentEventLog {
             Backend::Legacy(log) => log.compact_superseded_profiles(conversation),
             Backend::Indexed(repository) => {
                 repository.request_profile_maintenance(conversation)?;
-                let token = repository.begin_profile_maintenance()?;
-                while repository
-                    .step_profile_maintenance(token, PageBudget::default())?
-                    .state
-                    == MaintenanceState::Pending
-                {}
+                let mut token = repository.begin_profile_maintenance()?;
+                loop {
+                    let progress =
+                        repository.step_profile_maintenance(token, PageBudget::default())?;
+                    match progress.state {
+                        MaintenanceState::Pending => continue,
+                        // Charged migration advanced the source inside our step.
+                        // Zero-work staleness still aborts under external churn.
+                        MaintenanceState::Stale if progress.examined > 0 => {
+                            token = repository.begin_profile_maintenance()?;
+                        }
+                        _ => break,
+                    }
+                }
                 Ok(repository.apply_profile_maintenance(token)?.dropped)
             }
         }
@@ -467,5 +475,66 @@ impl SyncStore for PersistentEventLog {
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         self.append(event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eventlog::{EventKind, repository::EventDomainId};
+    use crate::identity::device::DeviceIdentity;
+    use crate::storage::database::EncryptedDatabase;
+
+    #[test]
+    fn public_profile_compaction_finishes_multiple_legacy_request_migrations() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Arc::new(
+            EncryptedDatabase::open(&directory.path().join("profile.db"), "password", b"profile")
+                .unwrap(),
+        );
+        let domain = EventDomainId([1; 16]);
+        let repository = EventRepository::new(database.clone(), domain).unwrap();
+        let author = DeviceIdentity::generate();
+        let conversations = [1, 2, 3].map(|n| ConversationId::new([n; 32]));
+        let mut latest = Vec::new();
+        for conversation in conversations {
+            for sequence in 1..=12 {
+                let event = Event::new(
+                    &author,
+                    conversation,
+                    sequence,
+                    vec![],
+                    sequence,
+                    sequence,
+                    EventKind::Profile,
+                    vec![42; 128],
+                );
+                repository.append(&event).unwrap();
+                if sequence >= 11 {
+                    latest.push(event.id);
+                }
+            }
+            // Exact old-binary request shape: no eligibility sidecar exists yet.
+            database
+                .transaction(|c| {
+                    c.execute(
+                        "INSERT INTO event_profile_requests VALUES(?1,?2)",
+                        rusqlite::params![domain.0.as_slice(), conversation.as_bytes().as_slice()],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let mut log = PersistentEventLog::from_backend(Backend::Indexed(repository));
+        assert_eq!(
+            log.compact_superseded_profiles(&conversations[0]).unwrap(),
+            30
+        );
+        for conversation in conversations {
+            assert_eq!(log.conversation_len(&conversation).unwrap(), 2);
+        }
+        for id in latest {
+            assert!(log.has(&id).unwrap());
+        }
     }
 }

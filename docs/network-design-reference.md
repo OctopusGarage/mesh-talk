@@ -686,6 +686,11 @@ When local storage cannot persist a received file-consent control, the current m
 
 ### D. Group creation, distribution and member recovery
 
+The runtime creates its signed self-binding proof once from its immutable device
+and account keys, then clones those certified bytes for group queries. Account
+adoption creates a new runtime and proof. This is not a membership or permission
+cache: current binding, source, owner and group authority checks remain fresh.
+
 Account-group capability maintenance probes certified account routes and existing
 group relationships only. An unrelated discovery entry must not create a background
 group connection or consume the connection budget reserved for ordinary delivery.
@@ -967,9 +972,62 @@ sends and restarts. A pass launches at most two recipient jobs and races at most
 two relay exchanges at once under the existing whole-file deadline. Rotation
 advances at launch, failed paths do not pin later recipients, and exact durable
 chunk custody suppresses redundant inventory work for 30 seconds. The index
-contains outgoing group files, not historical private consent controls. Pending
-work keeps the producer's existing short retry interval. Payload pages recheck
+contains outgoing group files, not historical private consent controls. Due jobs
+and unfinished authorization preparation retain the producer's short cadence.
+Network failures and unavailable routes back off from three to sixty seconds;
+launch reserves a deadline before any await, and completed attempts measure their
+delay from completion. The existing producer retains the earliest future retry
+wake. Cooling jobs perform no repeated offer authorization. Completed discovery
+rests for sixty seconds, reopening immediately on changed file rows. Ordinary
+appends preserve unfinished ordinal scans; destructive rewrites restart them.
+Periodic repair still revisits eligibility changes without a new file row,
+including membership, consent and proof recovery. Failed preparation, failed scans
+and full capacity retain unfinished work while independent queued jobs advance.
+Payload pages recheck
 current authority, refusal, relay role and managed runtime I/O admission.
+
+One admitted group retry owns a shared immutable offer descriptor until its
+future completes or is cancelled. It hydrates and validates the manifest once,
+then borrows that descriptor across its live authorization callbacks; it does
+not retain payloads in queued or cooling jobs. A received-row rewrite invalidates
+the descriptor. Every callback still checks retained source metadata, current
+expiry, erasure, recall, suppression, visibility, peer/account binding, signed
+group membership, consent, file progress and outgoing entitlement. Source
+removal or changed authority therefore stops the same attempt without waiting
+for the next retry.
+
+Exact outgoing entitlement retains at most four heavy recipient/channel views.
+Pending finite preparation advances through admission and periodic retry turns;
+only ready views may be evicted. Refill skips already queued keys without
+preventing the rotating retry owner from checking their current authority.
+Orphan preparation finishes or retires through this same owner before idle
+cadence resumes. Each of the bounded jobs can retain one selected-manifest
+qualification shared by its retry clones. Only a fresh, nonmissing, identical
+history/authority stamp permits reuse. Missing or changed versions prepare and
+check exact membership again; only a positive selection with matching before
+and after versions publishes a qualification. Current offer, membership, bytes,
+consent and exact remote custody remain independently checked on every use.
+
+Recipient consent discovery rotates through eight retained offers per mailbox
+exchange. Its cursor is a replay hint, not proof of consent or delivery. The
+existing file-consent owner retains at most 512 peer cursors in memory. Each
+resident peer's first changed page is checkpointed immediately, so repeated
+short restarts advance; subsequent changed checkpoints are coalesced to at most
+once per 30 seconds. Eviction or restart can replay pages from the last durable
+hint. Every turn still validates the current source, account incarnation and
+durable cursor. A required checkpoint failure retains the previous progress;
+an independent writer's newer durable cursor supersedes the runtime hint.
+Decisions and completion remain freshly selected before sending signed controls.
+Repeated selected consent reads reuse intrinsic signature verification through a
+store-owned positive memo capped at 1,024 entries. Its key hashes the complete
+bounded serialized control, including its signature; a claimed event ID alone
+never qualifies reuse. Each read still checks the current source barrier and
+account owner, selects the actual SQL row, decodes it and compares the requested
+manifest and recipient. The memo retains only verified Decision values, not event
+bodies or authorization snapshots. Eviction requires verification again; failed
+verification is not cached, and successful owner recapture clears the memo.
+Outgoing reuse compares that verified value with the complete freshly computed
+Decision and current durable policy generation under their existing guards.
 
 This worker deposits the original sender's retained chunks. Existing authorized
 sharing-member recovery still works over reachable application routes; it does
@@ -981,6 +1039,34 @@ clients need the updated behavior; existing opaque post offices are reused.
 Each accepted member controls **Share a copy**. A receiver can obtain its own authorized events while declining to serve retained history. Recovery automatically selects accepted sharing members from signed group state; users need not inspect individual members or grant separate DM permissions. Lower-frequency reconciliation still checks known non-sharing members so a later sharing change can be learned. The serving peer always enforces current authority and sharing preference.
 
 Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules. Source-revision preparation resumes through the existing bounded work and coalesced wake; it does not count as a persistence failure. Actual I/O, database and encrypted-storage failures retain their catch-up provenance and capped exponential plaintext retry schedule.
+
+Channel plaintext recovery requires retained signed membership controls or a prior
+known-local group checkpoint before preparing canonical order. This is scheduling
+evidence, never membership authority. Ordinary DM rows and stale dirty/runtime
+entries do not classify a group. Negative demand cleanup holds the source guard,
+so later membership admission cannot lose its continuation. Existing incomplete
+group work and membership arriving after ordinary rows remain retryable.
+
+The account-document store may retain intrinsically validated decoded group
+inventory and group-control heads for a shared total of at most 128 records and
+2 MiB of conservative logical charge. Head accounting includes nested decoded
+allocations; the inventory estimate is not a separate allowance for heads.
+Every lookup still reads and integrity-checks the durable blob before comparing
+complete signed metadata. Missing or corrupt data cannot reuse a cached result.
+Replacement and tombstones invalidate the matching entry only after durable
+commit; oversized records remain uncached. Live account binding and permission
+checks run on every query. Receipt-derived local publication frontiers are attached
+to an owned head on each read and never retained in this memo. This cache never
+supplies current membership authority.
+
+The desktop's channel-copy status query admits at most 256 message IDs. The core
+computes member and post-office counts together and may reuse intrinsic device
+certificate verification within that request, retaining at most 256 complete
+fixed-size certificate keys. The request drops this state on completion or error;
+it does not persist permission decisions. Each observation still reads its current
+document and checks current holder binding, tombstones, membership and replica
+policy. Unknown counts remain distinct from confirmed zero, and own-account
+copies and post-office copies remain separate from member-copy targets.
 
 Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
@@ -2355,8 +2441,9 @@ A deleted local record or recalled event does not recall already copied data fro
 | Group initial text/sticker seeding        | Small-group threshold five members; larger groups normally seed two peers.                                                                                                                                                                                                                | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                                                                                                                                                                                                                                           |
 | Group recovery                            | At most two active groups, each selecting three peers; coalesced wakes visit up to eight joined channels. Jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                                                                       | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                                                                                                                                                                                                                                                                 |
 | Group control fanout                      | At most four concurrent contacts.                                                                                                                                                                                                                                                         | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                                                                                                                                                                                                                                          |
+| Participant mailbox preparation           | Four history owners and two receive-only owners; 30-second meaningful-progress protection; 2 MiB repair-ID state per owner (at most 12 MiB).                                                                                                                                              | Receive-only work never prepares history. Busy or contended owners defer admission, while finished, revoked or stalled work remains reclaimable.                                                                                                                                                                                                                                                                                    |
 
-The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `node/opaque_relay/incremental.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
 ### Idle mailbox work and rejected pages
 
@@ -2394,6 +2481,16 @@ store, domain, conversation and destructive-generation binding; later appends
 belong to a later exchange. Destructive or authorization changes invalidate the
 view. No database transaction or mutex spans network I/O.
 
+Direct participant fingerprint probes consult the existing bounded projection
+metadata cache before constructing a historical selection. Paged summaries are
+qualified by the exact current history stamp, including source, identity,
+direction and policy dependencies, and share the owner's 128-entry bound with
+legacy summaries. Preparation may publish a summary only if its captured stamp
+remains current; a finite older cutoff must not be labeled with a later stamp.
+Cold or changing observations are cache misses. A summary contains only the
+fingerprint, count and protocol requirements; differing summaries still use
+fresh bounded reconciliation and ordinary export authorization.
+
 Paged exchanges retain one ID chunk and bounded event frames rather than all
 local IDs. Existing peer Have chunk and aggregate limits remain enforced.
 An unavailable current fingerprint bypasses the optional probe; it cannot become
@@ -2423,31 +2520,249 @@ failures do not select older wire versions. The runtime stops admission on a
 faulted profile and joins owned work before releasing its lease during
 cooperative shutdown.
 
-An opaque mailbox exchange retains IDs of wrappers whose inner events cannot yet
-be admitted, so a rejected page cannot repeatedly occupy every response while
-later valid events wait. These hints belong only to that mailbox operation and
-remain bounded; they do not claim acceptance, custody or recipient delivery.
-A later operation retries the rejected events after permissions, causal parents
-or local storage recover. Existing signature, conversation and attachment policy
-checks remain authoritative.
+Empty selected federation slices still validate session, snapshot completion and
+resource bounds, but do not rewrite unchanged staging charges. Nonempty slices
+retain entry accounting, including duplicate selection and terminal framing;
+this does not change event acceptance or persistence guarantees.
 
-Successfully opened wrappers whose inner events are retained in the local event
-log also produce optional encrypted receive hints in a sidecar next to that log.
-Hints bind the complete local device, account and derived mailbox identity. On
-Node recreation, only mappings whose inner IDs still exist after local replay
-seed the receive set. Missing local history therefore remains recoverable even
-when an older hint file survives. Invalid envelopes, ignored file-consent controls,
-staged events outside the main log and rejected admissions are not persisted as
-receive hints. Existing operation-local retry rules continue to apply.
+### Incremental opaque mailbox synchronization
 
-The sidecar appends only new ID mappings, without storing message content or
-rewriting history. It is limited to 250,000 mappings and 64 MiB; saturation stops
-new hint writes. Duplicate hints perform no disk writes. Corrupt, foreign-owner
-or unavailable files are preserved and disable this optimization for that run;
-receive continues through ordinary validation. Hints need no per-event fsync and
-may be lost on a crash: they never acknowledge custody or delivery. This reduces
-repeat mailbox transfer after restart, while encrypted history replay, local
-index reconstruction and uncached controls still require startup work.
+Modern participant-to-post-office exchanges negotiate the optional `MTOM1`
+mailbox capability on the authenticated Noise connection before requesting
+indexed deltas. The probe uses the existing fingerprint request envelope;
+legacy responses retain the existing protocol on the same connection. Malformed
+responses, transport errors and local storage failures are errors, not evidence
+that the peer supports only an older version. Each negotiated request remains
+bound to that connection's exact mailbox and existing aggregate resource limits.
+
+The remote cursor binds the store UUID, mailbox, destructive epoch, arrival
+incarnation and a finite commit window. Ordinary appends in other mailboxes do
+not invalidate it. Idle comparison reads indexed metadata without loading
+historical event bodies or updating polling timestamps. Pages contain at most
+64 IDs; exact event requests obey the encrypted frame budget before fetching a
+body. The participant currently requests one body at a time. Retirement,
+expiry, replacement and destructive changes reset the cursor through the
+existing post-office policy owner; a cursor cannot extend retention.
+
+Outgoing history first compares an exact authorization-qualified source stamp.
+Unchanged completed views read no historical bodies. When export eligibility has no
+peer-Have-dependent ancestor closure, changing the peer's Have only changes the
+read filter and cursor binding: it neither stages those IDs in SQL nor rebuilds
+completed export flags. Closure-dependent sibling/own exports retain exact-Have
+preparation. Source, policy and selection validation remain current, and unchanged
+row flags are not rewritten while the bounded worker still advances its cursor. Changed views prepare a
+finite canonical metadata prefix through the existing participant selection
+owner, retaining causal, privacy, sibling and file-consent checks. Ordinary
+appends extend a valid completed prefix; invalid authority or ordering rebuilds
+the selection. Incomplete cached views must also be revalidated before reuse.
+The channel checkpoint owner can prepare this captured prefix without publishing
+it as the current whole channel. Background and network preparation share
+immutable event/canonical-job graph answers; each caller still checks its own
+source guard. Ordinary appends therefore cannot make the two consumers restart
+each other's graph work. Legacy future-cut changes retire those answers through
+the existing bounded cleanup owner. Cold preparation yields between bounded
+turns so other runtime work can progress.
+The node retains at most four scoped history-view owners and two independent
+receive-only owners, with at most 16 selected outgoing history IDs and 64 recent
+result hints per exchange. Receive-only owners never acquire a history view;
+large outgoing history cannot consume their admission capacity. Each lane
+enforces its own bound and preserves busy ownership through cancellation.
+Outgoing message, group-control and group-file custody use an explicit
+history-publication intent on indexed relays.
+It probes fresh remote incarnation/destructive metadata and publishes authorized
+history plus identity supplements, without processing incoming IDs, resuming inbox
+repairs or republishing unrelated receive-consent sweeps for every file. Its fresh
+remote probe still returns one bounded metadata page. The
+participant runtime's independent mailbox drains import approvals, refusals and
+completion; custody callbacks still check their latest durable state before
+sending. A purpose-specific local hint key uses the same bounded owner and
+receipt encoding, leaving old duplex cursors and pending repair records untouched.
+Remote reset still invalidates outgoing completion and requires actual renewed
+custody. Legacy negotiation retains its existing duplex behavior; global receive
+permissions and default duplex callers are unchanged.
+Admission prefers inactive completed
+or empty entries. An unfinished view retains its slot for 30 seconds after actual
+preparation or acknowledged upload progress; new scopes defer while all slots
+hold protected work. Acquiring or repeatedly validating a view does not renew
+this deadline. Privacy-generation changes and expired progress permit bounded
+reclamation; current authority is still revalidated before reuse and publication.
+Evicted owners retire after releasing the cache guard, so SQL cleanup does not
+run while global cache admission is locked. Contended entry locks defer that
+entry without blocking unrelated admission. Bodies are fetched and wrapped
+only for selected IDs without confirmed wrapper custody.
+Terminal export preparation rechecks selection and network authority without
+rewriting an unchanged export cursor. Direct framed export and incremental
+mailbox upload share this repository rule; consuming another ID page does not
+restart or republish completed preparation.
+Supplemental identity and consent controls retain their independent bounded selectors. Incremental
+control queues retain only selected IDs and consent offer references. Before
+sending, resolve the selected identity bundle or single consent offer through
+its current authorization owner and require the event ID to remain unchanged.
+A changed or revoked control is omitted from that queue; the next operation
+rediscovers its replacement. Revalidating one selected control must not rebuild
+every other control in the batch. This selection does not certify an unchanged
+control sweep or replace current send authorization.
+
+Completed upload qualifications are kept in the existing bounded signed
+checkpoint store independently of those four heavyweight views. Rotating through
+more relay/mailbox scopes therefore does not restart unchanged history traversal
+merely because a view was evicted. A qualification compares the captured local
+history/authority stamp with the current stamp and a fresh authenticated remote
+store UUID, mailbox, destructive epoch and arrival incarnation. Ordinary appends
+do not invalidate an unrelated scope; remote replacement or retention changes do.
+Authenticated cursor rejection and regression below the recorded revision/commit
+floors invalidate a qualification even when the incarnation fields still match.
+Partial pages use their authenticated window bounds for these comparisons.
+Completion is published only for a finished captured upload after final probing,
+never by attaching a newer source stamp to an older finite prefix. Send-only
+operation checks the remote binding without advancing unprocessed incoming IDs.
+Each qualification retains at most 64 exact selected inner/wrapper pairs. An
+explicit target can reuse that membership only after comparing the current local
+stamp and freshly authenticated remote binding and floors. A missing target
+lazily prepares the existing bounded selection before extending the same valid
+qualification. A view created solely for an already finished confirmation is
+retired after its validated lookup; it must not occupy a protected unfinished
+upload slot. Existing incomplete upload views and interrupted preparation keep
+their original progress protection. This retirement never claims bulk completion.
+New local generations replace its pairs; they never inherit
+membership from an older selection. Every custody check still requires fresh
+exact remote evidence. Reading an unchanged pair does not rewrite its checkpoint.
+Older signed checkpoints preserve incoming cursor and pending retry evidence;
+unsupported completion qualifications are discarded and rebuilt normally.
+
+Optional checkpoints and inner-to-wrapper mappings live on the existing
+encrypted profile connection. Checkpoints are locally signed and bind the full
+relay, recipient and mailbox identities, the local incoming repair revision and
+source floor. Semantic Profile compaction is classified transactionally and does
+not advance this repair revision; the full destructive revision still guards
+outgoing authority and retained-event views. Actual deletion and retirement keep
+their incoming invalidation behavior. At most 512 checkpoints use 8 MiB; each
+blob is limited to 16 KiB.
+Wrapper mappings contain IDs only and have independent 250,000-entry/64-MiB
+limits. Point lookups and unchanged writes do not update cache timestamps or
+rewrite old entries. Reads and proven no-ops still check the exact publication
+barrier but do not synchronize its parent directory. Changed writes retain the
+existing durability and retry rules. Missing, corrupt, foreign or evicted hints cause ordinary
+validated synchronization; they never grant admission or recipient delivery.
+
+A separate versioned namespace in that same bounded wrapper-map bucket records
+outer-to-inner semantic Profile classifications after successful authentication.
+The signed key binds the current account, mailbox and outer ID; its value binds
+the inner ID, local-device classification and incoming repair revision. Before
+skipping an ordinary GET, the receiver rechecks current receive policy, account
+ownership and repair revision. Foreign sources also require their exact durable
+Profile-processing fact; local-device classifications still check the current
+account owner. These mappings never enter retained pairs, HAVE or custody.
+Dependency repair bypasses them. Real destructive changes invalidate them, while
+authorized semantic compaction preserves their qualification. Missing, corrupt,
+evicted or failed optional mappings fall back to the original authenticated GET;
+a failed authoritative fact read cannot acknowledge an event. Unchanged hits
+perform no writes, and warm open does not load historical mappings.
+
+Exact consent classifications use a separate namespace in the same bounded signed
+wrapper bucket. A successfully opened signed control qualifies only while its
+exact current received-control event remains stored, or when its full recipient
+identity equals this device and its sender consequently differs. The latter is
+an own-echo exclusion, not a received decision. Every hit rechecks the current
+account owner and incoming repair revision; ambiguous, missing or replaced
+received records miss. Authoritative read failures cannot acknowledge progress.
+Dependency repair bypasses these hints, and neither classification grants
+retained HAVE or custody. Optional mapping failures retain authenticated GET.
+
+A page cursor is saved only after every ID is either admitted, supported by
+retained local evidence, exact account-scoped terminal Profile-processing or
+authorized superseded-source retirement evidence, the fully verified local-device
+Profile presentation exclusion, an exact current consent classification, or recorded in the same checkpoint's bounded retry set
+of at most 256 IDs. The log is flushed before checkpoint publication. Missing
+causal parents and rejected admission remain retryable; exhaustion fails before
+advancing the page. Uninvited channel ancestry retains the existing 8-MiB
+operation-local staging budget across frames. Staging remains retry evidence,
+never a session-only success hint; cancellation can therefore replay it safely.
+Receive revocation interrupts processing without consuming the current ID. Session-only transport and control evidence is fenced by a fresh runtime ID
+and cannot justify skipping data after restart. This volatile evidence uses
+explicitly named TEMP tables on the existing serialized profile connection,
+whose `temp_store=MEMORY` configuration is checked before use. Fixed-width rows
+retain the 250,000-entry limit and 128-row cleanup/page budget. TEMP state may
+outlive a cache handle, but UUID filtering prevents another runtime from using it.
+The deployed persistent session tables remain compatible and are no longer
+renewed. TEMP initialization or write failure leaves an ordinary cache miss;
+transaction rollback also restores cleanup and usage accounting. Durable retained
+hints, signed wrapper mappings, receipt publication and custody keep their own
+persistent authority and synchronization rules. Terminal Profile-processing
+facts classify authenticated wrappers without republishing old presentation
+state or granting retained custody. They remain effective when optional hints
+are missing, corrupt or evicted; an unknown older-sequence Profile still crosses
+normal admission. Other destructive local changes invalidate the receipt, while
+existing deletion and history-admission policy
+continues to prevent resurrection. These hints reduce redundant transfer and
+decryption; they do not eliminate cold metadata projection or establish
+installed desktop startup and memory bounds.
+
+A late authenticated child can require a Profile parent whose raw event was
+compacted after terminal handling. Only its exact missing dependencies bypass
+the semantic shortcut, through the existing guarded admission path. Recovery
+first checks signed wrapper mappings and current remote custody, then requests
+the selected wrapper. A count-only maintenance lease keeps recovered parents
+available until child admission; no mutex or database guard spans network waits.
+When mappings are unavailable, a fallback captures one finite remote window.
+Its optional signed marker binds an active scan to one pending wrapper, with a
+fixed-size completion bitmap for the bounded pending set. One child's failed
+scan cannot qualify another child's dependencies. A changed missing-parent
+subset alone cannot trigger another completed scan. Interrupted attempts resume the captured window and its bounded
+partially consumed page. Recovery retries child admission as soon as a required
+parent is installed. A single pending repair binds the child's conversation
+destructive epoch, preserving unrelated conversation compaction progress. A
+shared pending qualification uses the full local destructive revision
+conservatively, so it cannot certify lost dependencies in another conversation.
+These repair fences do not discard ordinary incoming coverage after semantic
+Profile compaction. Optional checkpoint failures do not authorize admission;
+the existing bounded runtime owner retains continuation progress while alive.
+Its active repair lease can span exchange watchdog retries, but completion,
+revocation, eviction and thirty seconds without meaningful progress release it. Runtime
+maintenance also releases leases whose privacy generation has changed.
+Each of the four runtime entries charges repair-ID hints against a 2 MiB budget;
+it retains no historical bodies. Exhaustion defers work without certifying a
+completed scan or inventing a delivery result.
+This exceptional repair can read the captured mailbox prefix;
+it is not part of unchanged ordinary polling.
+
+For operator investigation, `MESH_TALK_TRACE_WORK=1` at Node construction enables
+one indexed page of at most 64 order-job metadata rows every thirty seconds in
+the existing admitted maintenance owner. Opaque job/scope tokens, phase and
+scalar source/progress counters distinguish advancing work from replacement.
+The observation is read-only, retains one store/domain-bound cursor and fetches
+no event bodies. It logs no message identifiers. It adds no network or messaging grant.
+Default operation performs no observation query or logging. Pages are live
+observations rather than a transactionally consistent snapshot across intervals;
+normal resource acceptance runs with this optional logging disabled. The same
+interval observes one Profile-maintenance job: current and selected source
+revisions, completion, candidate charges, pending requests and an opaque cursor
+tag. Stale selections remain visible without repairing or authorizing them.
+Tags can show sampled movement or replacement; snapshots do not prove every
+intervening transition or that all unchanged jobs are stuck.
+
+The same opt-in owner keeps cumulative, saturating mailbox reason counters and
+at most 4,096 exact recent mailbox/outer-ID pairs in memory. IDs are never logged;
+a first observation does not prove a newly created wrapper. Hooks use `try_lock`
+and may drop observations under contention, so zero is not proof of absence.
+Receive classification, hint/GET, receipt reuse/rejection and upload-view/stamp
+reasons do not replace or repeat protocol authorization. Counter snapshots and
+cursor reservations release the observer guard before storage access or logging.
+A cursor result is installed only for its matching observation reservation.
+
+New commit-kind counts anchor at the latest ordinal on their first observation,
+then inspect at most 64 indexed headers per interval without reading bodies or
+replaying the initial history. A captured upper ordinal excludes concurrent later
+appends; backlog and reset are reported separately. These counts and the live
+order/Profile pages are observations, not a consistent cross-owner snapshot.
+Scalar cache gauges read existing usage rows only. Their outer optional value
+indicates cache-lock acquisition; readiness contains source presence, checkpoint
+initialization and session-cleanup completion independently of the optional usage
+result. Usage lists retained records/bytes, session records, checkpoint
+records/bytes and wrapper-map records/bytes. Presence or initialization alone is
+not proof of current transfer authority. Hot-entry length is sampled separately.
+Diagnostics add no persistence, payload collection, grant or network exchange;
+normal resource acceptance keeps the observer disabled.
 
 ### Session reuse contract
 

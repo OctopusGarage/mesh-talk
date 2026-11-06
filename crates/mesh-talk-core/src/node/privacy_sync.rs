@@ -13,7 +13,11 @@ use std::collections::{HashMap, HashSet};
 // The staging area is scoped to one authenticated sync connection. An unrelated
 // group can consume at most this much memory and is forgotten when it disconnects.
 mod network;
+pub(in crate::node) use network::{HistorySyncStamp, HistoryUpload};
 mod principal;
+
+#[cfg(test)]
+mod admission_tests;
 
 const MAX_PENDING_CHANNEL_BYTES: usize = 8 * 1024 * 1024;
 
@@ -24,6 +28,23 @@ struct PendingChannel {
     bytes: usize,
 }
 
+/// Bounded uninvited ancestry owned by one authenticated operation. It has
+/// no durable or node-wide authority and cannot move to another relay identity.
+pub(in crate::node) struct UninvitedChannelStaging {
+    peer: PublicIdentity,
+    channels: HashMap<ConversationId, PendingChannel>,
+    bytes: usize,
+}
+impl UninvitedChannelStaging {
+    pub(in crate::node) fn new(peer: &PublicIdentity) -> Self {
+        Self {
+            peer: peer.clone(),
+            channels: HashMap::new(),
+            bytes: 0,
+        }
+    }
+}
+
 pub(in crate::node) struct GuardedSyncStore<'a> {
     node: &'a Node,
     peer: PublicIdentity,
@@ -32,6 +53,9 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     inbound: bool,
     pending_channels: HashMap<ConversationId, PendingChannel>,
     pending_bytes: usize,
+    // One custody-only selection, owned by this authenticated connection. It is
+    // checked out during a query and never shared with mutable export state.
+    custody_view: Option<(bool, network::ParticipantView)>,
 }
 impl Node {
     pub(in crate::node) fn sync_store(
@@ -46,6 +70,7 @@ impl Node {
             inbound: false,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
+            custody_view: None,
         })
     }
     pub(in crate::node) fn pull_sync_store(
@@ -60,6 +85,7 @@ impl Node {
             inbound: false,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
+            custody_view: None,
         })
     }
 
@@ -75,6 +101,7 @@ impl Node {
             inbound: true,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
+            custody_view: None,
         })
     }
 
@@ -341,6 +368,32 @@ impl Node {
     }
 }
 impl GuardedSyncStore<'_> {
+    /// Transfer only the existing bounded uninvited-channel staging area.
+    /// The caller restores it before dropping a short-lived admission store.
+    pub(in crate::node) fn swap_uninvited_channel_staging(
+        &mut self,
+        staging: &mut UninvitedChannelStaging,
+    ) -> Result<(), LogError> {
+        if staging.peer != self.peer {
+            return Err(LogError::AdmissionRejected(
+                "uninvited channel staging peer changed".into(),
+            ));
+        }
+        std::mem::swap(&mut self.pending_channels, &mut staging.channels);
+        std::mem::swap(&mut self.pending_bytes, &mut staging.bytes);
+        Ok(())
+    }
+
+    pub(in crate::node) fn uninvited_channel_staged(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> bool {
+        self.pending_channels
+            .get(&conversation)
+            .is_some_and(|pending| pending.log.has(&id))
+    }
+
     /// Hold an unknown channel's ancestry off disk until a signed, causally
     /// valid membership snapshot explicitly invites this device. The ordinary
     /// append gate is used only after the complete proof has been projected.
@@ -1523,21 +1576,21 @@ impl SyncStore for GuardedSyncStore<'_> {
                     || super::delivery_receipt::delivery_conversation_id(&own, &proof.public())
                         == event.conversation_id
             });
-            let channel = self
-                .node
-                .channels
-                .lock()
-                .expect("channels lock not poisoned")
-                .state(&event.conversation_id)
-                .is_some()
-                || self
+            let channel = !direct
+                && (self
                     .node
-                    .log
+                    .channels
                     .lock()
-                    .expect("log lock not poisoned")
-                    .events(&event.conversation_id)?
-                    .iter()
-                    .any(|entry| entry.kind == EventKind::MembershipChange);
+                    .expect("channels lock not poisoned")
+                    .state(&event.conversation_id)
+                    .is_some()
+                    || self
+                        .node
+                        .log
+                        .lock()
+                        .expect("log lock not poisoned")
+                        .repository()?
+                        .has_kind(&event.conversation_id, EventKind::MembershipChange)?);
             let relay = self
                 .node
                 .privacy

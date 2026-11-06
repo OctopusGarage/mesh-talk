@@ -295,6 +295,62 @@ transaction, expiry and shutdown semantics. Functional fast-KDF tests and Unix
 joined-stop tests do not establish production unlock performance, native Windows
 hard-stop recovery or physical-network discovery acceptance.
 
+### Opt-in ingestion observation
+
+`MESH_TALK_TRACE_WORK=1` enables five fixed per-office cumulative counters:
+committed appends, duplicates, peer-classified rejections, expected local
+unavailability and authoritative failures. Both ordinary and federation ingestion
+classify the final transaction result after rollback and authority validation.
+Peer classification follows the protocol error taxonomy and can include local
+admission revocation; it does not assign blame. Appended totals do not measure
+current retained growth. Relaxed atomic snapshots are approximate under
+concurrency, have no storage reads or writes, and grant no protocol authority.
+
+The dedicated CLI samples enabled counters every 30 seconds in its existing
+owned loop, skips missed ticks, and emits scalar-only lines through its existing
+stdout sink outside storage guards. Enabled tracing inherits that synchronous
+sink's lifetime; it does not add a background logging task. Default-off operation
+creates no observation timer. Diagnostic traffic and log output must be separated
+from normal production resource acceptance.
+
+### Unchanged federation refreshes
+
+Inventory negotiation V5 adds a constant-size conditional exchange while keeping
+V1–V4 layouts and their full reconciliation path unchanged. Every connection
+still authenticates its exact peer and configured federation trust or approved
+membership. A supported-version response precedes storage access; only the
+initial legacy rejection permits older-version negotiation. Supported failures,
+malformed frames, unavailable preparation and denied membership do not downgrade.
+A bounded 256-peer capability/proof cache avoids repeated unsupported probes.
+
+A proof binds both exact public keys and both immutable offered inventory stamps.
+The local stamp covers the store identity, retained commit/source revisions,
+visibility and expiry policy, completed digest preparation and an endpoint-lifetime
+nonce. Due expiry or pending preparation cannot certify an unchanged stamp.
+Only a completed full comparison with zero mismatches, independently checked by
+both participants and explicitly acknowledged, creates a proof. A partial/full
+mailbox batch, origin correction, cancellation or uncertain completion cannot.
+Cache eviction or restart requires another complete comparison; these hints are
+never custody or authorization evidence.
+
+When both current stamps still match that proof, V5 refreshes origin-preserving
+presence without enumerating mailbox inventories, allocating persisted federation
+sessions or staging/deleting inventory rows. Both sides revalidate their stamp
+before acknowledging success. Changes select the existing bounded full exchange;
+the current presence lease, logout bound, exchange deadline and retry policy
+remain unchanged. Older peers continue to incur full inventory costs.
+
+The runtime schedules one exchange per exact relay identity, retaining at most
+eight address candidates within its existing bounded identity inventory. Successful
+addresses remain preferred; alternate candidates retain their own backoff.
+Route aliases cannot create overlapping exchanges for one identity or erase a
+pending mail wake/full-batch continuation. A silent route retains the existing
+exchange deadline before fallback; this is not a new latency guarantee.
+
+Resource regressions measure actual SQLite row/page mutations and unchanged
+expiry/media selection work, separately from native release CPU, RSS, disk and
+network measurements. Functional delivery alone does not certify idle efficiency.
+
 ## Failure behavior and verification
 
 Clients retain direct delivery and order relay alternatives. A failed relay can

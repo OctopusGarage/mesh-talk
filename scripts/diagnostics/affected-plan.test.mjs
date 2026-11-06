@@ -231,6 +231,11 @@ test("shared Cargo configuration selects every workspace crate via owning contra
   assert(!profile.owners.some(owner => owner.id === "core-node"), "established focused ownership must not widen through the catch-all Node prefix");
   assert.deepEqual(profile.rust.find(item => item.package === "mesh-talk-core").filters, [
     "account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
+    "discovered_profile_batch_revalidates_retained_metadata_and_deduplicates",
+    "discovered_profile_demand_precedes_cursor_ack_and_retries_after_reopen",
+    "existing_conversation_profile_callbacks_preserve_completed_negative_maintenance",
+    "global_profile_recovery_retries_unknown_work_after_verified_proof_arrives",
+    "known_profile_callback_progresses_behind_blocked_other_conversation",
     "node::account_profile::tests::",
     "node::account_profile_data::indexed::tests::",
     "node::account_profile_data::tests::",
@@ -250,7 +255,7 @@ test("shared Cargo configuration selects every workspace crate via owning contra
     "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
     "node::opaque_relay::",
     "node::profile::tests::",
-    "node::profile_receive_work::tests::",
+    "node::profile_io::compaction_lease_tests::",
     "node::profile_store::indexed::tests::",
     "node::profile_store::tests::",
     "node::runtime::retirement_tests::retirement_joins_actual_expiry_writer_before_profile_reopen",
@@ -261,8 +266,16 @@ test("shared Cargo configuration selects every workspace crate via owning contra
     "node::runtime_work::tests::",
     "node::trust_card::indexed::tests::",
     "node::trust_card::tests::",
+    "storage::profile::profile_receive::tests::",
+    "unknown_profile_callback_skips_body_then_verified_proof_resumes",
+    "unrelated_profile_callbacks_leave_unknown_pending_work_quiet",
     "warm_open_reads_no_avatar_payloads",
   ]);
+  const receive = buildAffectedPlan(["crates/mesh-talk-core/src/storage/profile/profile_receive.rs"], { contracts: registered });
+  assert(receive.owners.some(owner => owner.id === "core-account-profile"), "moved receive facts must retain their profile capability owner");
+  const receiveFilters = receive.rust.find(item => item.package === "mesh-talk-core").filters;
+  assert(receiveFilters.includes("storage::profile::profile_receive::tests::"));
+  assert(!receiveFilters.includes("node::profile_receive_work::tests::"), "retired selectors must not produce empty validation");
   const consentFixture = buildAffectedPlan(["crates/mesh-talk-core/src/node/file_consent_tests.rs"], {contracts:registered});
   assert.deepEqual(consentFixture.owners.map(owner => owner.id), ["core-file-consent-tests"]);
   assert.deepEqual(consentFixture.rust, [{package:"mesh-talk-core",filters:["node::file_consent_tests::"]}]);

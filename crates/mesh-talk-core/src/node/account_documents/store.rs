@@ -142,7 +142,25 @@ fn encode_row(
     })
     .map_err(|_| corrupt())
 }
+const MAX_INTRINSIC_CACHE_ENTRIES: usize = 128;
+const MAX_INTRINSIC_CACHE_BYTES: usize = 2 * 1024 * 1024;
+
+enum IntrinsicBody {
+    Inventory(Box<super::inventory::GroupInventoryReference>),
+    ControlHead(Box<crate::node::account_group::wire::GroupControlHead>),
+}
+struct IntrinsicCacheEntry {
+    meta: AccountDocumentMeta,
+    body: IntrinsicBody,
+    charge: usize,
+}
+
 pub(in crate::node) struct AccountDocumentStore {
+    // Account-scoped presentation facts only; never memoize live authorization.
+    intrinsic_cache: BTreeMap<AccountDocumentKey, IntrinsicCacheEntry>,
+    intrinsic_cache_bytes: usize,
+    #[cfg(test)]
+    pub(super) inventory_body_validations: usize,
     file: EncryptedRecordLog<Vec<u8>>,
     media: MediaStore,
     current: BTreeMap<AccountDocumentKey, AccountDocumentMeta>,
@@ -289,6 +307,10 @@ impl AccountDocumentStore {
         let journal_bytes =
             INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
         let mut store = Self {
+            intrinsic_cache: BTreeMap::new(),
+            intrinsic_cache_bytes: 0,
+            #[cfg(test)]
+            inventory_body_validations: 0,
             file,
             media,
             current: BTreeMap::new(),
@@ -776,6 +798,127 @@ impl AccountDocumentStore {
         self.incomplete.remove(&meta.key);
         self.current.insert(meta.key.clone(), meta);
     }
+    fn remove_intrinsic_cache(&mut self, key: &AccountDocumentKey) {
+        if let Some(entry) = self.intrinsic_cache.remove(key) {
+            self.intrinsic_cache_bytes -= entry.charge;
+        }
+    }
+
+    fn cache_inventory_reference(
+        &mut self,
+        meta: AccountDocumentMeta,
+        reference: super::inventory::GroupInventoryReference,
+        payload_len: usize,
+    ) {
+        // Decoded strings/collections plus their encoded representation, with
+        // serialized metadata and a conservative fixed allocation allowance.
+        let charge = payload_len
+            .saturating_mul(2)
+            .saturating_add(serde_json::to_vec(&meta).map_or(usize::MAX, |bytes| bytes.len()))
+            .saturating_add(1024);
+        self.cache_intrinsic(meta, IntrinsicBody::Inventory(Box::new(reference)), charge);
+    }
+
+    fn cache_intrinsic(&mut self, meta: AccountDocumentMeta, body: IntrinsicBody, charge: usize) {
+        self.remove_intrinsic_cache(&meta.key);
+        if charge > MAX_INTRINSIC_CACHE_BYTES {
+            return;
+        }
+        while self.intrinsic_cache.len() >= MAX_INTRINSIC_CACHE_ENTRIES
+            || self.intrinsic_cache_bytes.saturating_add(charge) > MAX_INTRINSIC_CACHE_BYTES
+        {
+            let Some(key) = self.intrinsic_cache.keys().next().cloned() else {
+                break;
+            };
+            self.remove_intrinsic_cache(&key);
+        }
+        self.intrinsic_cache_bytes += charge;
+        self.intrinsic_cache
+            .insert(meta.key.clone(), IntrinsicCacheEntry { meta, body, charge });
+    }
+
+    pub(super) fn inventory_reference(
+        &mut self,
+        meta: &AccountDocumentMeta,
+    ) -> Option<super::inventory::GroupInventoryReference> {
+        // Always read and verify the durable blob before considering a memo.
+        let document = match self.get(&meta.key) {
+            Ok(Some(document)) if document.meta == *meta => document,
+            _ => {
+                self.remove_intrinsic_cache(&meta.key);
+                return None;
+            }
+        };
+        if let Some(entry) = self
+            .intrinsic_cache
+            .get(&meta.key)
+            .filter(|entry| entry.meta == *meta)
+            && let IntrinsicBody::Inventory(reference) = &entry.body
+        {
+            return Some(reference.as_ref().clone());
+        }
+        self.remove_intrinsic_cache(&meta.key);
+        #[cfg(test)]
+        {
+            self.inventory_body_validations += 1;
+        }
+        let reference = serde_json::from_slice(document.payload()).ok()?;
+        if !super::inventory::valid_reference(meta, &reference) {
+            return None;
+        }
+        self.cache_inventory_reference(meta.clone(), reference.clone(), document.payload().len());
+        Some(reference)
+    }
+
+    pub(super) fn control_head(
+        &mut self,
+        meta: &AccountDocumentMeta,
+        expected_account: &[u8; 32],
+    ) -> Option<crate::node::account_group::wire::GroupControlHead> {
+        let document = match self.get(&meta.key) {
+            Ok(Some(document))
+                if document.meta == *meta && meta.account_public == *expected_account =>
+            {
+                document
+            }
+            _ => {
+                self.remove_intrinsic_cache(&meta.key);
+                return None;
+            }
+        };
+        if let Some(entry) = self
+            .intrinsic_cache
+            .get(&meta.key)
+            .filter(|entry| entry.meta == *meta)
+            && let IntrinsicBody::ControlHead(head) = &entry.body
+        {
+            return Some((**head).clone());
+        }
+        self.remove_intrinsic_cache(&meta.key);
+        let head = crate::node::account_group::wire::GroupControlHead::decode(
+            document.payload(),
+            expected_account,
+        )?;
+        if !super::group_control::valid_head(meta, &head) {
+            return None;
+        }
+        // Only signed intrinsic facts enter the memo. The caller attaches a
+        // fresh private publication frontier to its owned clone after retrieval.
+        debug_assert!(head.access.local_frontier.is_empty());
+        let charge = head
+            .allocation_charge()
+            .saturating_add(
+                serde_json::to_vec(meta).map_or(usize::MAX, |bytes| bytes.len().saturating_mul(2)),
+            )
+            .saturating_add(1024);
+        self.cache_intrinsic(
+            meta.clone(),
+            IntrinsicBody::ControlHead(Box::new(head.clone())),
+            charge,
+        );
+        Some(head)
+    }
+
     pub(super) fn get(
         &self,
         key: &AccountDocumentKey,
@@ -1241,6 +1384,7 @@ impl AccountDocumentStore {
             }
             return Err(error);
         }
+        self.remove_intrinsic_cache(&meta.key);
         self.journal_bytes += bytes.len() + INDEX_FRAME;
         self.records += 1;
         if let Some(control) = super::personal::decode(&meta, payload) {
@@ -1373,6 +1517,304 @@ impl AccountDocumentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn control_memo_checks_durable_bytes_and_shares_inventory_budget() {
+        use crate::node::account_group::wire::{GroupControlHead, control_head_body_validations};
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let public = account.public().ed25519_pub;
+        let node = super::super::tests::node(&dir.path().join("node"), &account);
+        let owner = super::super::tests::node(&dir.path().join("owner"), &Account::generate());
+        let group =
+            super::super::tests::group_inventory_legacy_fixture(&owner, &node, "Mixed memo");
+        node.publish_account_group_access_for(group);
+        let inventory = super::super::tests::group_inventory_source_document(&node, group);
+        let reference: super::super::inventory::GroupInventoryReference =
+            serde_json::from_slice(inventory.payload()).unwrap();
+        let mut store = node.account_documents.lock().unwrap();
+        let meta = store
+            .group_control_rows(&hex::encode(group.as_bytes()))
+            .into_iter()
+            .find(|row| row.writer_device == node.user_id())
+            .unwrap();
+        let document = store.get(&meta.key).unwrap().unwrap();
+        let head = store.control_head(&meta, &public).unwrap();
+        let before = control_head_body_validations();
+        assert!(store.control_head(&meta, &public).is_some());
+        assert_eq!(control_head_body_validations(), before);
+        assert!(store.control_head(&meta, &[0; 32]).is_none());
+        assert!(!store.intrinsic_cache.contains_key(&meta.key));
+        assert!(store.control_head(&meta, &public).is_some());
+        store.remove_blob_for_test(meta.content_hash);
+        assert!(store.control_head(&meta, &public).is_none());
+        assert!(!store.intrinsic_cache.contains_key(&meta.key));
+        let blob = ConversationId::new(meta.content_hash);
+        store
+            .media
+            .store_bytes(blob, "document.bin", document.payload())
+            .unwrap();
+        assert!(store.control_head(&meta, &public).is_some());
+        store.media.remove(blob).unwrap();
+        store
+            .media
+            .store_bytes(blob, "document.bin", &vec![0; document.payload().len()])
+            .unwrap();
+        assert!(store.control_head(&meta, &public).is_none());
+        assert!(!store.intrinsic_cache.contains_key(&meta.key));
+        store.media.remove(blob).unwrap();
+        store
+            .media
+            .store_bytes(blob, "document.bin", document.payload())
+            .unwrap();
+        assert!(store.control_head(&meta, &public).is_some());
+        store.intrinsic_cache.clear();
+        store.intrinsic_cache_bytes = 0;
+        for i in 0..MAX_INTRINSIC_CACHE_ENTRIES + 2 {
+            let mut row = meta.clone();
+            if i % 2 == 0 {
+                row.key = AccountDocumentKey::GroupControl {
+                    channel: format!("{i:064x}"),
+                    source_device: node.user_id(),
+                };
+                store.cache_intrinsic(
+                    row,
+                    IntrinsicBody::ControlHead(Box::new(head.clone())),
+                    head.allocation_charge() + 1024,
+                );
+            } else {
+                row.key = AccountDocumentKey::GroupInventory {
+                    channel: format!("{i:064x}"),
+                    source_device: node.user_id(),
+                };
+                store.cache_inventory_reference(row, reference.clone(), inventory.payload().len());
+            }
+        }
+        assert_eq!(store.intrinsic_cache.len(), MAX_INTRINSIC_CACHE_ENTRIES);
+        assert!(
+            store
+                .intrinsic_cache
+                .values()
+                .any(|entry| matches!(&entry.body, IntrinsicBody::ControlHead(_)))
+        );
+        assert!(
+            store
+                .intrinsic_cache
+                .values()
+                .any(|entry| matches!(&entry.body, IntrinsicBody::Inventory(_)))
+        );
+        assert!(store.intrinsic_cache_bytes <= MAX_INTRINSIC_CACHE_BYTES);
+        // Force aggregate byte eviction with both types below the per-entry
+        // limit. Count bound alone would permit all these entries.
+        store.intrinsic_cache.clear();
+        store.intrinsic_cache_bytes = 0;
+        for i in 0..4 {
+            let mut row = meta.clone();
+            row.key = AccountDocumentKey::GroupControl {
+                channel: format!("{i:064x}"),
+                source_device: node.user_id(),
+            };
+            store.cache_intrinsic(
+                row,
+                IntrinsicBody::ControlHead(Box::new(head.clone())),
+                MAX_INTRINSIC_CACHE_BYTES / 3,
+            );
+        }
+        store.cache_inventory_reference(
+            inventory.meta.clone(),
+            reference,
+            inventory.payload().len(),
+        );
+        assert!(store.intrinsic_cache.len() < 5);
+        assert!(store.intrinsic_cache_bytes <= MAX_INTRINSIC_CACHE_BYTES);
+        assert_eq!(
+            store.intrinsic_cache_bytes,
+            store
+                .intrinsic_cache
+                .values()
+                .map(|entry| entry.charge)
+                .sum::<usize>()
+        );
+        let mut expanded = head.clone();
+        let original = expanded.allocation_charge();
+        expanded.proof.name.reserve(8192);
+        expanded.access.controls[0].ciphertext.reserve(8192);
+        expanded
+            .access
+            .observation
+            .sources
+            .push(crate::node::account_group::wire::BoundSource {
+                source: expanded.access.source.clone(),
+                proof: expanded.proof.clone(),
+            });
+        assert!(expanded.allocation_charge() >= original + 16384);
+        // Synthetic capacity tests admission only, without accepting this value
+        // as a valid signed head or bypassing the real read/decoder path.
+        expanded.access.controls[0]
+            .ciphertext
+            .reserve(MAX_INTRINSIC_CACHE_BYTES);
+        let charge = expanded.allocation_charge() + 1024;
+        assert!(charge > MAX_INTRINSIC_CACHE_BYTES);
+        store.cache_intrinsic(
+            meta.clone(),
+            IntrinsicBody::ControlHead(Box::new(expanded)),
+            charge,
+        );
+        assert!(!store.intrinsic_cache.contains_key(&meta.key));
+        assert!(store.intrinsic_cache_bytes <= MAX_INTRINSIC_CACHE_BYTES);
+        assert!(head.allocation_charge() >= std::mem::size_of::<GroupControlHead>());
+        let mut access = head.access.clone();
+        access.complete_frontier = false;
+        let replacement =
+            GroupControlHead::new(&node.identity, group, meta.revision + 1, head.proof, access);
+        let payload = replacement.encode();
+        let next = AccountDocumentMeta::new(
+            &account,
+            node.user_id(),
+            meta.key.clone(),
+            replacement.revision,
+            &payload,
+            false,
+        );
+        let frontier = vec![EventId::new([7; 32])];
+        store
+            .merge_local_group_control(next.clone(), &payload, frontier.clone())
+            .unwrap();
+        assert!(!store.intrinsic_cache.contains_key(&meta.key));
+        assert!(store.control_head(&meta, &public).is_none());
+        assert!(
+            store
+                .control_head(&next, &public)
+                .unwrap()
+                .access
+                .local_frontier
+                .is_empty()
+        );
+        drop(store);
+        assert_eq!(
+            node.group_control_heads(group)
+                .into_iter()
+                .find(|head| head.proof.public() == node.identity.public())
+                .unwrap()
+                .access
+                .local_frontier,
+            frontier
+        );
+        let mut store = node.account_documents.lock().unwrap();
+        store.local_receipts.remove(&meta.key);
+        drop(store);
+        assert!(
+            node.group_control_heads(group)
+                .into_iter()
+                .find(|head| head.proof.public() == node.identity.public())
+                .unwrap()
+                .access
+                .local_frontier
+                .is_empty()
+        );
+        let mut store = node.account_documents.lock().unwrap();
+        let tombstone = AccountDocumentMeta::new(
+            &account,
+            node.user_id(),
+            meta.key.clone(),
+            replacement.revision + 1,
+            &[],
+            true,
+        );
+        // Group-control removal is a signed unavailable head, never an empty
+        // tombstone. Rejected writes must retain the accepted head and memo.
+        assert!(store.merge(tombstone, &[]).is_err());
+        assert_eq!(store.meta(&meta.key).as_ref(), Some(&next));
+        assert!(store.control_head(&next, &public).is_some());
+        assert!(store.intrinsic_cache.contains_key(&meta.key));
+    }
+
+    #[test]
+    fn inventory_cache_bounds_replacement_and_oversized_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let node = super::super::tests::node(&dir.path().join("node"), &account);
+        let owner = super::super::tests::node(&dir.path().join("owner"), &Account::generate());
+        let group =
+            super::super::tests::group_inventory_legacy_fixture(&owner, &node, "Cache bounds");
+        let document = super::super::tests::group_inventory_source_document(&node, group);
+        let key = document.meta.key.clone();
+        let reference: super::super::inventory::GroupInventoryReference =
+            serde_json::from_slice(document.payload()).unwrap();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        store
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+        assert!(store.inventory_reference(&document.meta).is_some());
+        assert!(store.inventory_reference(&document.meta).is_some());
+        assert_eq!(store.inventory_body_validations, 1);
+        let newer = AccountDocumentMeta::new(
+            &account,
+            node.user_id(),
+            key.clone(),
+            document.meta.revision + 1,
+            document.payload(),
+            false,
+        );
+        store.merge(newer.clone(), document.payload()).unwrap();
+        assert!(store.intrinsic_cache.is_empty());
+        assert!(store.inventory_reference(&newer).is_some());
+        assert_eq!(store.inventory_body_validations, 2);
+        assert!(
+            store.inventory_reference(&document.meta).is_none(),
+            "stale row metadata cannot use a current cached body"
+        );
+        store.intrinsic_cache.clear();
+        store.intrinsic_cache_bytes = 0;
+        for i in 0..MAX_INTRINSIC_CACHE_ENTRIES + 1 {
+            let mut meta = document.meta.clone();
+            meta.key = AccountDocumentKey::GroupInventory {
+                channel: format!("{i:064x}"),
+                source_device: node.user_id(),
+            };
+            store.cache_inventory_reference(meta, reference.clone(), document.payload().len());
+        }
+        assert_eq!(store.intrinsic_cache.len(), MAX_INTRINSIC_CACHE_ENTRIES);
+        assert!(store.intrinsic_cache_bytes <= MAX_INTRINSIC_CACHE_BYTES);
+        store.intrinsic_cache.clear();
+        store.intrinsic_cache_bytes = 0;
+        // Three individually cacheable entries cannot exceed the aggregate budget.
+        for i in 0..3 {
+            let mut meta = document.meta.clone();
+            meta.key = AccountDocumentKey::GroupInventory {
+                channel: format!("{i:064x}"),
+                source_device: node.user_id(),
+            };
+            store.cache_inventory_reference(meta, reference.clone(), MAX_INTRINSIC_CACHE_BYTES / 5);
+        }
+        assert_eq!(store.intrinsic_cache.len(), 2);
+        assert!(store.intrinsic_cache_bytes <= MAX_INTRINSIC_CACHE_BYTES);
+        let mut replacement = document.meta.clone();
+        store.cache_inventory_reference(replacement.clone(), reference.clone(), 10);
+        replacement.revision += 1;
+        replacement.content_hash = [9; 32];
+        store.cache_inventory_reference(replacement.clone(), reference.clone(), 20);
+        assert_eq!(store.intrinsic_cache.get(&key).unwrap().meta, replacement);
+        assert_eq!(
+            store.intrinsic_cache_bytes,
+            store
+                .intrinsic_cache
+                .values()
+                .map(|entry| entry.charge)
+                .sum::<usize>()
+        );
+        store.cache_inventory_reference(replacement, reference, MAX_INTRINSIC_CACHE_BYTES);
+        assert!(!store.intrinsic_cache.contains_key(&key));
+        assert_eq!(
+            store.intrinsic_cache_bytes,
+            store
+                .intrinsic_cache
+                .values()
+                .map(|entry| entry.charge)
+                .sum::<usize>()
+        );
+    }
+
     #[test]
     fn legacy_child_rows_are_negotiated_before_digest_paging_and_share_operation_quota() {
         let dir = tempfile::tempdir().unwrap();

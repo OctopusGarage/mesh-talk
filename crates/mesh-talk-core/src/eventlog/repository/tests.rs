@@ -1636,6 +1636,88 @@ fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads(
 }
 
 #[test]
+fn runtime_metadata_receive_selection_vm_work_is_independent_of_retained_history() {
+    for controls in [false, true] {
+        let mut measured = Vec::new();
+        for count in [256, 1024] {
+            let directory = tempfile::tempdir().unwrap();
+            let (profile, repository, local, account) = receive_profile(&directory);
+            // Authored retained history is not receive work. Keep one remote
+            // candidate in the same conversation and leave statistics cold.
+            for sequence in 1..=count {
+                repository
+                    .append(&event(
+                        &local,
+                        sequence,
+                        vec![],
+                        sequence,
+                        EventKind::Message,
+                    ))
+                    .unwrap();
+            }
+            let pending = event(
+                &DeviceIdentity::generate(),
+                count + 1,
+                vec![],
+                count + 1,
+                if controls {
+                    EventKind::Delete
+                } else {
+                    EventKind::Message
+                },
+            );
+            repository.append(&pending).unwrap();
+            repository
+                .initialize_receiving(
+                    Author::from_ed25519(local.public().ed25519_pub),
+                    &account.public(),
+                )
+                .unwrap();
+            let pending_rows: i64 = profile
+                .database()
+                .read(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM participant_receive_pending WHERE domain=?1",
+                        [repository.domain.0.as_slice()],
+                        |row| row.get(0),
+                    )
+                    .map_err(LogError::from)
+                })
+                .unwrap();
+            assert_eq!(pending_rows, 1);
+            let before = repository.body_read_counts();
+            let ids = if controls {
+                repository.pending_control_ids(pending.conversation_id, 128, 8 * 1024 * 1024)
+            } else {
+                repository.pending_receive_ids(pending.conversation_id, 128, 8 * 1024 * 1024)
+            }
+            .unwrap();
+            assert_eq!(ids, vec![pending.id]);
+            assert_eq!(repository.body_read_counts(), before);
+            measured.push(super::receiving::receive_selection_work());
+        }
+        // Count real bundled SQLite VM instructions, including rejected join
+        // work; a LIMIT on returned rows cannot establish this bound.
+        println!(
+            "receive selection VM steps: controls={controls}, history256={}, history1024={}",
+            measured[0].0, measured[1].0
+        );
+        assert!(
+            measured.iter().all(|(steps, _)| *steps <= 512),
+            "one pending receive must not scan the retained event domain"
+        );
+        assert!(
+            measured.iter().all(|(_, sorts)| *sorts == 0),
+            "pending receive order must come from its bounded queue index"
+        );
+        assert!(
+            measured[1].0 <= measured[0].0 + 128,
+            "retained history growth must not scale fixed pending selection work"
+        );
+    }
+}
+
+#[test]
 fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() {
     let dir = tempfile::tempdir().unwrap();
     let (profile, repo, local, account) = receive_profile(&dir);
@@ -1758,6 +1840,83 @@ fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
         3
     );
     assert_eq!(repo.body_read_counts(), (0, 0));
+}
+
+#[test]
+fn unresolved_complete_receive_pages_preserve_tickets_but_partial_pages_rotate() {
+    for controls in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (profile, repo, local, account) = receive_profile(&dir);
+        let peer = DeviceIdentity::generate();
+        let kind = if controls {
+            EventKind::React
+        } else {
+            EventKind::Message
+        };
+        let mut items = Vec::new();
+        for n in 0..3 {
+            let item = Event::new(
+                &peer,
+                ConversationId::new([1; 32]),
+                n + 1,
+                vec![],
+                n + 1,
+                1,
+                kind,
+                vec![1; if n == 0 { 262_145 } else { 64 }],
+            );
+            repo.append(&item).unwrap();
+            items.push(item);
+        }
+        let conv = items[0].conversation_id;
+        repo.initialize_receiving(
+            Author::from_ed25519(local.public().ed25519_pub),
+            &account.public(),
+        )
+        .unwrap();
+        let select = |limit, bytes| {
+            if controls {
+                repo.pending_control_ids(conv, limit, bytes)
+            } else {
+                repo.pending_receive_ids(conv, limit, bytes)
+            }
+        };
+        let database = profile.database();
+        let before = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let reads = repo.body_read_counts();
+        for limit in [3, 128].into_iter().cycle().take(8) {
+            assert_eq!(
+                select(limit, 4096).unwrap(),
+                vec![items[1].id, items[2].id],
+                "oversized first row cannot exclude later affordable rows in a complete page"
+            );
+            assert_eq!(
+                select(limit, 8 * 1024 * 1024).unwrap(),
+                items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                "deferred oversized rows remain eligible with a sufficient budget"
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before,
+            "rotating every unresolved row preserves relative order and must not mutate durable tickets"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(repo.body_read_counts(), reads);
+        assert!(matches!(
+            select(1, 1),
+            Err(LogError::PageBudgetTooSmall { .. })
+        ));
+        assert_eq!(
+            select(1, 4096).unwrap(),
+            vec![items[1].id],
+            "an oversized partial turn must still rotate before the next attempt"
+        );
+        assert_eq!(select(1, 4096).unwrap(), vec![items[2].id]);
+        assert_eq!(select(1, 8 * 1024 * 1024).unwrap(), vec![items[0].id]);
+        assert_eq!(repo.body_read_counts(), reads);
+    }
 }
 
 fn downgrade_event_schema_fixture(db: &EncryptedDatabase) {

@@ -1,6 +1,31 @@
 //! Current metadata access never materializes historical applied/authorized IDs.
+pub(crate) const PUBLISHED_PROJECTION_SQL: &str = "SELECT source_job,source_revision,next_rank FROM channel_current WHERE channel=?1 AND owner_account=?2";
 use super::*;
 impl ChannelCheckpointStore {
+    /// Scheduling evidence only. A stale or previous-account checkpoint may
+    /// need replay, but can never supply current membership through this read.
+    pub(in crate::node) fn has_local_channel_checkpoint(
+        &self,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            self.has_local_channel_checkpoint_on(c, channel)
+        })
+    }
+
+    pub(super) fn has_local_channel_checkpoint_on(
+        &self,
+        c: &Connection,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1 AND known_local=1)",
+            [channel.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Frozen history copies do not consume a sender chain. Their validated
     /// release identity still commits with transcript/effect installation.
     pub(in crate::node) fn install_history_receive_on(
@@ -92,9 +117,15 @@ impl ChannelCheckpointStore {
         &self,
         channel: ConversationId,
     ) -> Result<Option<super::super::ChannelMembershipProjection>, LogError> {
-        let binding:Option<(Vec<u8>,i64,i64)>=self.profile.database().read(|c| {
+        let binding: Option<(Vec<u8>, i64, i64)> = self.profile.database().read(|c| {
             self.check_account_on(c)?;
-            c.query_row("SELECT source_job,source_revision,next_rank FROM channel_current WHERE channel=?1 AND owner_account=?2",params![channel.as_bytes().as_slice(),self.account.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into)
+            c.prepare_cached(PUBLISHED_PROJECTION_SQL)?
+                .query_row(
+                    params![channel.as_bytes().as_slice(), self.account.as_slice()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(Into::into)
         })?;
         let Some((job, revision, count)) = binding else {
             return Ok(None);
@@ -119,6 +150,45 @@ impl ChannelCheckpointStore {
             replay::require_source_on(c, channel, job, revision)
         })?;
         Ok(Some(reducer.finish()))
+    }
+
+    /// A network-only prepared prefix is not a published current channel.
+    /// Its owner validates unchanged raw controls/destructive state each turn.
+    pub(in crate::node) fn network_prefix_projection(
+        &self,
+        channel: ConversationId,
+        target: crate::eventlog::repository::order::OrderGeneration,
+    ) -> Result<Option<super::super::ChannelMembershipProjection>, LogError> {
+        let count =
+            i64::try_from(target.count).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        let covered:bool=self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            super::super::graph::require_source_prefix_on(c,channel,target.job,target.source_revision)?;
+            c.query_row("SELECT COALESCE((SELECT next_rank FROM channel_projection_work WHERE job=?1 AND channel=?2),0)>=?3",params![target.job.as_slice(),channel.as_bytes().as_slice(),count],|r|r.get(0)).map_err(Into::into)
+        })?;
+        if !covered {
+            return Ok(None);
+        }
+        let (reducer, next) = super::super::projection_facts::ProjectionFacts::load(
+            self.profile.clone(),
+            target.job,
+            channel,
+        )?;
+        if next < count {
+            return Err(LogError::StaleCursor);
+        }
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            super::super::graph::require_source_prefix_on(
+                c,
+                channel,
+                target.job,
+                target.source_revision,
+            )
+        })?;
+        let mut projection = reducer.finish();
+        projection.allow_network_prefix();
+        Ok(Some(projection))
     }
     /// Per-source work remains on disk; only one current conversation is held
     /// while the scheduler advances its canonical reducer.

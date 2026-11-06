@@ -232,14 +232,18 @@ impl EventRepository {
         let domain = self.domain.0.as_slice();
         let conv = event.conversation_id.as_bytes().as_slice();
         let mut missing = Vec::new();
+        let mut has_profile_parent = false;
         let mut stmt =
-            c.prepare("SELECT conversation FROM retained_events WHERE domain=?1 AND id=?2")?;
+            c.prepare("SELECT conversation,kind FROM retained_events WHERE domain=?1 AND id=?2")?;
         for parent in &event.parents {
-            let parent_conv: Option<Vec<u8>> = stmt
-                .query_row(params![domain, parent.as_bytes().as_slice()], |r| r.get(0))
+            let parent_conv: Option<(Vec<u8>, i64)> = stmt
+                .query_row(params![domain, parent.as_bytes().as_slice()], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .optional()?;
             match parent_conv {
-                Some(bytes) => {
+                Some((bytes, kind)) => {
+                    has_profile_parent |= kind == EventKind::Profile as i64;
                     let bytes: [u8; 32] = bytes
                         .try_into()
                         .map_err(|_| corrupt("invalid parent conversation"))?;
@@ -273,7 +277,9 @@ impl EventRepository {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         let domain_count = advance(domain_count)?;
+        let previous_source_revision = source_revision;
         let source_revision = advance(source_revision)?;
+        let previous_domain_estimate = domain_estimate;
         let domain_estimate = checked_total(domain_estimate, estimate)?;
         // Preflight permanent arithmetic before asking a role to evict anything.
         // serialized_size computes scalar length without allocating an event body.
@@ -331,6 +337,14 @@ impl EventRepository {
         }
         c.execute("INSERT INTO event_author_max VALUES(?1,?2,?3,?4) ON CONFLICT(domain,conversation,author) DO UPDATE SET max_seq=max(max_seq,excluded.max_seq)",params![domain,conv,event.author.ed25519_pub().as_slice(),event.seq.to_be_bytes().as_slice()])?;
         c.execute("UPDATE event_conversations SET revision=?3,event_count=?4,stored_bytes=?5,max_lamport=?6,v2_count=?7,v3_count=?8,v4_count=?9,estimated_bytes=?10 WHERE domain=?1 AND conversation=?2",params![domain,conv,revision,count,stored,max.max(event.lamport).to_be_bytes().as_slice(),v2,v3,v4,estimated])?;
+        if event.kind != EventKind::Profile && !has_profile_parent {
+            self.carry_negative_profile_snapshot_on(
+                c,
+                previous_source_revision,
+                source_revision,
+                previous_domain_estimate,
+            )?;
+        }
         c.execute(
             "UPDATE event_domains SET next_commit=?2,source_revision=?3,estimated_bytes=?4,event_count=?5 WHERE domain=?1",
             params![domain, next_commit,source_revision,domain_estimate,domain_count],

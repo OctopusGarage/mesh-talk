@@ -183,16 +183,29 @@ impl Node {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::node) fn channel_custody_holder_binding(
         &self,
         key: &AccountDocumentKey,
+    ) -> Option<(PublicIdentity, Option<String>)> {
+        self.channel_custody_holder_binding_with_verifier(
+            key,
+            &mut super::super::channels::CustodyCertificateVerifier::default(),
+        )
+    }
+
+    pub(in crate::node) fn channel_custody_holder_binding_with_verifier(
+        &self,
+        key: &AccountDocumentKey,
+        verifier: &mut super::super::channels::CustodyCertificateVerifier,
     ) -> Option<(PublicIdentity, Option<String>)> {
         let document = self.account_document(key).ok()??;
         let value: Observation = serde_json::from_slice(document.payload()).ok()?;
         let account = value
             .holder_certificate
             .filter(|certificate| {
-                certificate.verify() && certificate.device_ed25519_pub == value.holder.ed25519_pub
+                verifier.verify(self, &value.holder, certificate)
+                    && certificate.device_ed25519_pub == value.holder.ed25519_pub
             })
             .map(|certificate| certificate.account_id());
         Some((value.holder, account))

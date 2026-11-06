@@ -29,6 +29,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// An append-only, password-encrypted record log generic over a serializable
 /// record type `R`. Owns the live file handle, the derived key, the header salt,
@@ -48,6 +49,9 @@ pub struct EncryptedRecordLog<R> {
     magic: [u8; 6],
     path: PathBuf,
     poisoned: bool,
+    // Only this owned prefix is confirmed. Mutations require &mut self; the
+    // atomic preserves shared sync(&self) and the existing Send + Sync bounds.
+    needs_sync: AtomicBool,
     // Confirmed prefix before an append whose rollback could not finish.
     rollback_boundary: u64,
     #[cfg(test)]
@@ -112,7 +116,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 let key = EncryptionKey::from_password(password, &salt)?;
                 file.write_all(magic)?;
                 file.write_all(&salt)?;
-                file.sync_all()?;
+                sync_file(&file)?;
                 sync_parent(path)?;
                 Ok(Self {
                     file,
@@ -127,6 +131,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                     magic: *magic,
                     path: path.to_path_buf(),
                     poisoned: false,
+                    needs_sync: AtomicBool::new(false),
                     rollback_boundary: 0,
                     #[cfg(test)]
                     before_rewrite_rename: None,
@@ -168,7 +173,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             #[cfg(not(windows))]
             let repair_file = &file;
             repair_file.set_len((6 + SALT_SIZE) as u64 + valid)?;
-            repair_file.sync_all()?;
+            sync_file(repair_file)?;
         }
         Ok(Self {
             file,
@@ -183,6 +188,9 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             magic: *magic,
             path: path.to_path_buf(),
             poisoned: false,
+            // Reading an authenticated prefix, including repaired torn tails,
+            // does not establish its durability for this reopened owner.
+            needs_sync: AtomicBool::new(true),
             rollback_boundary: 0,
             #[cfg(test)]
             before_rewrite_rename: None,
@@ -268,8 +276,9 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         let repair_file = &self.repair;
         #[cfg(not(windows))]
         let repair_file = &self.file;
+        self.needs_sync.store(true, Ordering::Release);
         repair_file.set_len(self.rollback_boundary)?;
-        repair_file.sync_all()?;
+        sync_file(repair_file)?;
         self.poisoned = false;
         Ok(())
     }
@@ -279,8 +288,12 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         if self.poisoned {
             return Err(LogError::CorruptFile("record log requires reopen".into()));
         }
-        self.file.sync_all()?;
+        if !self.needs_sync.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        sync_file(&self.file)?;
         sync_parent(&self.path)?;
+        self.needs_sync.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -299,6 +312,9 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         }
         let buf = self.encode_record(record)?;
         let boundary = self.file.metadata()?.len();
+        // Failed writes and successful rollback still require a later complete
+        // file-and-parent confirmation before this prefix can be called durable.
+        self.needs_sync.store(true, Ordering::Release);
         #[cfg(test)]
         let append_rollback_fault = self.append_rollback_fault.take();
         #[cfg(test)]
@@ -316,7 +332,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         let write_result = write(&mut self.file, &buf);
         let result = write_result.and_then(|()| {
             if durable {
-                self.file.sync_all().and_then(|()| sync_parent(&self.path))
+                sync_file(&self.file).and_then(|()| sync_parent(&self.path))
             } else {
                 self.file.flush()
             }
@@ -336,13 +352,16 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             let repair_file = readonly_repair.as_ref().unwrap_or(repair_file);
             if repair_file
                 .set_len(boundary)
-                .and_then(|()| repair_file.sync_all())
+                .and_then(|()| sync_file(repair_file))
                 .is_err()
             {
                 self.rollback_boundary = boundary;
                 self.poisoned = true;
             }
             return Err(error.into());
+        }
+        if durable {
+            self.needs_sync.store(false, Ordering::Release);
         }
         Ok(())
     }
@@ -370,7 +389,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             let f = writer
                 .into_inner()
                 .map_err(|error| LogError::Io(error.into_error()))?;
-            f.sync_all()?;
+            sync_file(&f)?;
         }
         // Reopen before replacing the live path. If this fails, the original log is
         // untouched and the caller can safely retry the compaction.
@@ -382,6 +401,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             hook();
         }
         std::fs::rename(&tmp, &self.path)?;
+        self.needs_sync.store(true, Ordering::Release);
         // Keep the already-open handle: it refers to the rewritten inode even after the
         // rename, so there is no post-rename reopen failure that could leave `self.file`
         // pointing at the unlinked old inode.
@@ -394,6 +414,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         // indexes describing the old file. Directory sync is best effort after rename.
         if sync_parent(&self.path).is_err() {
             log::warn!("record log replacement directory sync failed");
+        } else {
+            self.needs_sync.store(false, Ordering::Release);
         }
         Ok(())
     }
@@ -424,7 +446,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             let target = writer
                 .into_inner()
                 .map_err(|error| LogError::Io(error.into_error()))?;
-            target.sync_all()?;
+            sync_file(&target)?;
         }
         let file = OpenOptions::new().read(true).append(true).open(&tmp)?;
         #[cfg(windows)]
@@ -434,6 +456,7 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             hook();
         }
         std::fs::rename(&tmp, &self.path)?;
+        self.needs_sync.store(true, Ordering::Release);
         self.file = file;
         #[cfg(windows)]
         {
@@ -441,12 +464,22 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         }
         if sync_parent(&self.path).is_err() {
             log::warn!("record log replacement directory sync failed");
+        } else {
+            self.needs_sync.store(false, Ordering::Release);
         }
         Ok(())
     }
 }
 
+fn sync_file(file: &File) -> std::io::Result<()> {
+    #[cfg(test)]
+    sync_observations::before_file()?;
+    file.sync_all()
+}
+
 fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    sync_observations::before_parent()?;
     #[cfg(unix)]
     {
         let parent = path
@@ -458,6 +491,50 @@ fn sync_parent(path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod sync_observations {
+    use std::cell::Cell;
+    thread_local! {
+        static COUNTS: Cell<(usize,usize)> = const { Cell::new((0,0)) };
+        static FAIL_FILE: Cell<bool> = const { Cell::new(false) };
+        static FAIL_PARENT: Cell<bool> = const { Cell::new(false) };
+    }
+    pub(crate) fn reset() {
+        COUNTS.with(|value| value.set((0, 0)));
+        FAIL_FILE.with(|value| value.set(false));
+        FAIL_PARENT.with(|value| value.set(false));
+    }
+    pub(crate) fn counts() -> (usize, usize) {
+        COUNTS.with(Cell::get)
+    }
+    pub(crate) fn fail_file() {
+        FAIL_FILE.with(|value| value.set(true));
+    }
+    pub(crate) fn fail_parent() {
+        FAIL_PARENT.with(|value| value.set(true));
+    }
+    pub(super) fn before_file() -> std::io::Result<()> {
+        COUNTS.with(|value| {
+            let (file, parent) = value.get();
+            value.set((file + 1, parent));
+        });
+        if FAIL_FILE.with(|value| value.replace(false)) {
+            return Err(std::io::Error::other("injected record file sync failure"));
+        }
+        Ok(())
+    }
+    pub(super) fn before_parent() -> std::io::Result<()> {
+        COUNTS.with(|value| {
+            let (file, parent) = value.get();
+            value.set((file, parent + 1));
+        });
+        if FAIL_PARENT.with(|value| value.replace(false)) {
+            return Err(std::io::Error::other("injected record parent sync failure"));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

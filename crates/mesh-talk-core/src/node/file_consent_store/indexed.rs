@@ -20,7 +20,24 @@ use crate::{
 };
 use bincode::Options;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{path::Path, sync::Arc};
+use sha2::{Digest, Sha256};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+const OFFER_SCAN_RUNTIME_LIMIT: usize = 512;
+const OFFER_SCAN_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+
+struct OfferScanProgress {
+    position: i64,
+    durable: i64,
+    checkpoint_at: Instant,
+    touched: Instant,
+}
 
 // Decision::open admits <=1024 ciphertext bytes, an empty parent list and a
 // canonical 64-byte signature. This includes every valid encoded Event header.
@@ -124,25 +141,6 @@ fn body(event: &Event) -> Result<Vec<u8>, LogError> {
     }
     bincode::serialize(event).map_err(|e| LogError::Serialization(e.to_string()))
 }
-fn decode(body: &[u8], manifest: EventId, recipient: Option<&[u8; 32]>) -> Result<Event, LogError> {
-    if body.len() > CONTROL_BYTES {
-        return Err(invalid("oversized indexed file consent"));
-    }
-    let event: Event = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(CONTROL_BYTES as u64)
-        .reject_trailing_bytes()
-        .deserialize(body)
-        .map_err(|_| invalid("invalid indexed file consent"))?;
-    let decision =
-        Decision::open(&event).ok_or_else(|| invalid("invalid signed indexed file consent"))?;
-    if decision.manifest != manifest
-        || recipient.is_some_and(|key| key != &decision.recipient.ed25519_pub)
-    {
-        return Err(invalid("indexed file consent identity changed"));
-    }
-    Ok(event)
-}
 fn apply_on(c: &Connection, account: &str, record: Record, limit: usize) -> Result<(), LogError> {
     initialize_on(c, account)?;
     let (event, published, direct) = match record {
@@ -194,16 +192,73 @@ fn apply_on(c: &Connection, account: &str, record: Record, limit: usize) -> Resu
     Ok(())
 }
 
+// Versioned provenance for durable indexed attachment-policy generations.
+// The deployed session column previously held UUIDv4 values or migration NULLs;
+// this marker's version nibble is not 4, so neither can qualify accidentally.
+// Older binaries miss this marker and safely publish a new runtime-bound control.
+const DURABLE_POLICY_MARKER: &[u8; 16] = b"MTConsentPolicy1";
+
+// Intrinsic signature facts only; current SQL ownership, selection and policy
+// remain authoritative. No Event bodies or authorization snapshots are retained.
+const VERIFIED_CONTROL_LIMIT: usize = 1024;
+#[derive(Default)]
+struct VerifiedControls {
+    decisions: HashMap<[u8; 32], Decision>,
+    order: VecDeque<[u8; 32]>,
+}
 pub(crate) struct IndexedFileConsentStore {
     source: PublishedHistorySource,
     owner: Option<ParticipantEventOwner>,
-    session: [u8; 16],
     limit: usize,
+    offer_scans: HashMap<[u8; 32], OfferScanProgress>,
+    verified_controls: RefCell<VerifiedControls>,
     #[cfg(test)]
     fail_writes: bool,
 }
 impl IndexedFileConsentStore {
-    pub(crate) fn offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
+    fn decode_control(
+        &self,
+        body: &[u8],
+        manifest: EventId,
+        recipient: Option<&[u8; 32]>,
+    ) -> Result<(Event, Decision), LogError> {
+        if body.len() > CONTROL_BYTES {
+            return Err(invalid("oversized indexed file consent"));
+        }
+        let event: Event = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(CONTROL_BYTES as u64)
+            .reject_trailing_bytes()
+            .deserialize(body)
+            .map_err(|_| invalid("invalid indexed file consent"))?;
+        // Bind every byte, including signature and claimed ID. A claimed ID by
+        // itself cannot qualify another unverified representation of an event.
+        let key: [u8; 32] = Sha256::digest(body).into();
+        let cached = self.verified_controls.borrow().decisions.get(&key).cloned();
+        let decision = match cached.as_ref() {
+            Some(decision) => decision.clone(),
+            None => Decision::open(&event)
+                .ok_or_else(|| invalid("invalid signed indexed file consent"))?,
+        };
+        if decision.manifest != manifest
+            || recipient.is_some_and(|key| key != &decision.recipient.ed25519_pub)
+        {
+            return Err(invalid("indexed file consent identity changed"));
+        }
+        if cached.is_none() {
+            let mut verified = self.verified_controls.borrow_mut();
+            if verified.decisions.len() == VERIFIED_CONTROL_LIMIT
+                && let Some(oldest) = verified.order.pop_front()
+            {
+                verified.decisions.remove(&oldest);
+            }
+            verified.decisions.insert(key, decision.clone());
+            verified.order.push_back(key);
+        }
+        Ok((event, decision))
+    }
+    fn durable_offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
             let owner = self.check_on(c)?;
             Ok(c.query_row(
@@ -216,21 +271,79 @@ impl IndexedFileConsentStore {
         })
     }
 
+    pub(crate) fn offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
+        let durable = self.durable_offer_scan_position(peer)?;
+        // Another live handle may have checkpointed this peer. Its durable
+        // position supersedes our hint; a fresh retry must still make progress.
+        Ok(self
+            .offer_scans
+            .get(peer)
+            .filter(|scan| scan.durable == durable)
+            .map_or(durable, |scan| scan.position))
+    }
+
     pub(crate) fn advance_offer_scan(
-        &self,
+        &mut self,
         peer: &[u8; 32],
         before: i64,
         after: i64,
     ) -> Result<(), LogError> {
-        self.check_write()?;
-        self.source.profile().database().transaction(|c| {
-            let owner=self.check_on(c)?;
-            c.execute("INSERT OR IGNORE INTO file_consent_offer_scan VALUES(?1,?2,0)",params![owner.namespace(),peer.as_slice()])?;
-            if c.execute("UPDATE file_consent_offer_scan SET after_ordinal=?3 WHERE account=?1 AND peer=?2 AND after_ordinal=?4",params![owner.namespace(),peer.as_slice(),after,before])?!=1 {
-                return Err(LogError::StaleCursor);
-            }
-            Ok(())
-        })
+        let durable = self.durable_offer_scan_position(peer)?;
+        let previous = self
+            .offer_scans
+            .get(peer)
+            .filter(|scan| scan.durable == durable);
+        if previous.map_or(durable, |scan| scan.position) != before || after < 0 {
+            return Err(LogError::StaleCursor);
+        }
+        if before == after {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let checkpoint = after != durable
+            && previous.is_none_or(|scan| {
+                now.duration_since(scan.checkpoint_at) >= OFFER_SCAN_CHECKPOINT_INTERVAL
+            });
+        let checkpoint_at = previous.map_or(now, |scan| scan.checkpoint_at);
+        if checkpoint {
+            // Discovery is a replayable hint, never durable consent acceptance.
+            // Checkpoint the first changed page so repeated short restarts still
+            // progress; warm rotation only needs a bounded periodic checkpoint.
+            #[cfg(test)]
+            self.check_write_failure()?;
+            self.source.profile().database().transaction(|c| {
+                let owner = self.check_on(c)?;
+                c.execute("INSERT OR IGNORE INTO file_consent_offer_scan VALUES(?1,?2,0)", params![owner.namespace(), peer.as_slice()])?;
+                if c.execute("UPDATE file_consent_offer_scan SET after_ordinal=?3 WHERE account=?1 AND peer=?2 AND after_ordinal=?4", params![owner.namespace(), peer.as_slice(), after, durable])? != 1 {
+                    return Err(LogError::StaleCursor);
+                }
+                Ok(())
+            })?;
+        }
+        // Failed required writes never publish the runtime cursor or reset the
+        // checkpoint clock. Eviction may replay old discovery after re-admission,
+        // while preserving its already durable restart position.
+        if !self.offer_scans.contains_key(peer)
+            && self.offer_scans.len() >= OFFER_SCAN_RUNTIME_LIMIT
+        {
+            let oldest = *self
+                .offer_scans
+                .iter()
+                .min_by_key(|(_, scan)| scan.touched)
+                .expect("full offer scan cache")
+                .0;
+            self.offer_scans.remove(&oldest);
+        }
+        self.offer_scans.insert(
+            *peer,
+            OfferScanProgress {
+                position: after,
+                durable: if checkpoint { after } else { durable },
+                checkpoint_at: if checkpoint { now } else { checkpoint_at },
+                touched: now,
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn authenticate_legacy(
@@ -313,8 +426,9 @@ impl IndexedFileConsentStore {
         let mut store = Self {
             source,
             owner: None,
-            session: *uuid::Uuid::new_v4().as_bytes(),
             limit,
+            offer_scans: HashMap::new(),
+            verified_controls: RefCell::default(),
             #[cfg(test)]
             fail_writes: false,
         };
@@ -334,36 +448,58 @@ impl IndexedFileConsentStore {
         Ok(())
     }
     pub(crate) fn recapture(&mut self) -> Result<(), LogError> {
-        self.capture(false)
+        self.capture(false)?;
+        self.offer_scans.clear();
+        *self.verified_controls.get_mut() = VerifiedControls::default();
+        Ok(())
     }
     fn check_on<'a>(&'a self, c: &Connection) -> Result<&'a ParticipantEventOwner, LogError> {
         let owner = self.owner.as_ref().ok_or(LogError::StaleCursor)?;
         event_ownership::check_event_owner_on(c, owner)?;
         Ok(owner)
     }
-    fn check_write(&self) -> Result<(), LogError> {
-        #[cfg(test)]
+    #[cfg(test)]
+    fn check_write_failure(&self) -> Result<(), LogError> {
         if self.fail_writes {
             return Err(LogError::Io(std::io::Error::other(
                 "injected consent write failure",
             )));
         }
+        Ok(())
+    }
+    fn check_write(&self) -> Result<(), LogError> {
+        #[cfg(test)]
+        self.check_write_failure()?;
         self.source.check_write()
     }
+    #[cfg(test)]
     pub(crate) fn published_control(&self, id: EventId) -> Result<Option<Event>, LogError> {
+        Ok(self
+            .published_control_with_decision(id)?
+            .map(|(event, _)| event))
+    }
+    pub(crate) fn published_control_with_decision(
+        &self,
+        id: EventId,
+    ) -> Result<Option<(Event, Decision)>, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c|{
             let owner=self.check_on(c)?;
             let bytes:Option<Vec<u8>>=c.query_row("SELECT CASE WHEN length(body)<=2048 THEN body ELSE NULL END FROM file_consent_published WHERE account=?1 AND manifest=?2",params![owner.namespace(),id.as_bytes().as_slice()],|r|r.get(0)).optional()?;
-            bytes.map(|bytes|decode(&bytes,id,None)).transpose()
+            bytes.map(|bytes|self.decode_control(&bytes,id,None)).transpose()
         })
     }
     pub(crate) fn published_generation(&self, id: EventId) -> Result<Option<u64>, LogError> {
         self.source.profile().database().read(|c|{
             let owner=self.check_on(c)?;
-            let bytes:Option<Vec<u8>>=c.query_row("SELECT generation FROM file_consent_published WHERE account=?1 AND manifest=?2 AND session=?3",params![owner.namespace(),id.as_bytes().as_slice(),self.session.as_slice()],|r|r.get(0)).optional()?;
+            let bytes:Option<Vec<u8>>=c.query_row("SELECT generation FROM file_consent_published WHERE account=?1 AND manifest=?2 AND session=?3",params![owner.namespace(),id.as_bytes().as_slice(),DURABLE_POLICY_MARKER.as_slice()],|r|r.get(0)).optional()?;
             bytes.map(|bytes|bytes.try_into().map(u64::from_be_bytes).map_err(|_|invalid("invalid consent generation"))).transpose()
         })
     }
+    /// `generation` must come from the current owner-checked durable
+    /// IndexedAttachmentConsent policy while its guard remains held. The Node
+    /// caller also requires exact Decision equality before reusing publication;
+    /// this marker must never qualify a legacy launch-local generation.
     pub(crate) fn publish_control(
         &mut self,
         event: Event,
@@ -375,7 +511,7 @@ impl IndexedFileConsentStore {
         self.source.profile().database().transaction(|c|{
             let owner=self.check_on(c)?;let account=owner.namespace();
             apply_on(c,&account,Record::Published(event),self.limit)?;
-            c.execute("UPDATE file_consent_published SET session=?3,generation=?4 WHERE account=?1 AND manifest=?2",params![account,payload.manifest.as_bytes().as_slice(),self.session.as_slice(),generation.to_be_bytes().as_slice()])?;Ok(())
+            c.execute("UPDATE file_consent_published SET session=?3,generation=?4 WHERE account=?1 AND manifest=?2",params![account,payload.manifest.as_bytes().as_slice(),DURABLE_POLICY_MARKER.as_slice(),generation.to_be_bytes().as_slice()])?;Ok(())
         })
     }
     fn unique_recipient_on(
@@ -409,6 +545,7 @@ impl IndexedFileConsentStore {
         })
     }
     fn received_on(
+        &self,
         c: &Connection,
         account: &str,
         id: EventId,
@@ -416,14 +553,18 @@ impl IndexedFileConsentStore {
     ) -> Result<Option<Event>, LogError> {
         let bytes:Option<Vec<u8>>=c.query_row("SELECT CASE WHEN length(body)<=2048 THEN body ELSE NULL END FROM file_consent_received WHERE account=?1 AND manifest=?2 AND recipient=?3",params![account,id.as_bytes().as_slice(),recipient.as_slice()],|r|r.get(0)).optional()?;
         bytes
-            .map(|bytes| decode(&bytes, id, Some(recipient)))
+            .map(|bytes| {
+                self.decode_control(&bytes, id, Some(recipient))
+                    .map(|(event, _)| event)
+            })
             .transpose()
     }
     pub(crate) fn received_control(&self, id: EventId) -> Result<Option<Event>, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
             let account = self.check_on(c)?.namespace();
             match Self::unique_recipient_on(c, &account, id)? {
-                Some(recipient) => Self::received_on(c, &account, id, &recipient),
+                Some(recipient) => self.received_on(c, &account, id, &recipient),
                 None => Ok(None),
             }
         })
@@ -433,8 +574,9 @@ impl IndexedFileConsentStore {
         id: EventId,
         recipient: &PublicIdentity,
     ) -> Result<Option<Event>, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
-            Self::received_on(
+            self.received_on(
                 c,
                 &self.check_on(c)?.namespace(),
                 id,
@@ -579,7 +721,7 @@ impl IndexedFileConsentStore {
                 let id:Vec<u8>=row.get(0)?;
                 let key:Vec<u8>=row.get(1)?;
                 let body:Vec<u8>=row.get(2)?;
-                events.push(decode(&body,EventId::new(id.try_into().map_err(|_|invalid("invalid consent manifest"))?),Some(&key.try_into().map_err(|_|invalid("invalid consent recipient"))?))?);
+                events.push(self.decode_control(&body,EventId::new(id.try_into().map_err(|_|invalid("invalid consent manifest"))?),Some(&key.try_into().map_err(|_|invalid("invalid consent recipient"))?))?.0);
             }
             Ok(events)
         }).unwrap().into_iter()
@@ -605,6 +747,665 @@ mod tests {
             completion: None,
         }
     }
+    fn consent_offer_fixture(
+        count: u8,
+    ) -> (tempfile::TempDir, Arc<crate::node::Node>, DeviceIdentity) {
+        use crate::{discovery::Announce, eventlog::EventKind, file::FileManifest};
+        let directory = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&sender, &Account::generate(), "Sender", 4000);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.set_attachment_global_auto(true).unwrap();
+        let host = crate::node::conversation::dm_conversation_id(
+            &sender.public(),
+            &node.identity.public(),
+        );
+        for index in 1..=count {
+            let manifest = FileManifest {
+                name: "empty.txt".into(),
+                size: 0,
+                mime: "text/plain".into(),
+                checksum: crate::file::file_checksum(&[]),
+                file_key: [3; 32],
+                file_conv: ConversationId::new([index; 32]),
+                chunk_count: 1,
+            };
+            let original = Event::new(
+                &sender,
+                host,
+                u64::from(index),
+                vec![],
+                u64::from(index),
+                1,
+                EventKind::FileManifest,
+                crate::dm::seal(
+                    &sender,
+                    &node.identity.public().x25519_pub,
+                    &manifest.encode(),
+                )
+                .unwrap(),
+            );
+            node.accept_manifest_event(
+                &original,
+                &proof,
+                crate::node::received_log::ReceivedEntry {
+                    event_id: original.id,
+                    conversation: host,
+                    from: sender.user_id(),
+                    wall_clock: 1,
+                    plaintext: manifest.encode(),
+                },
+            )
+            .unwrap();
+        }
+        (directory, node, sender)
+    }
+
+    #[test]
+    fn node_consent_controls_reuse_durable_policy_after_reopen() {
+        let (directory, node, sender) = consent_offer_fixture(8);
+        let proof = node
+            .historical_author(&sender.public().ed25519_pub)
+            .unwrap();
+        let keys = node.identity.secret_bytes();
+        let account_key = node.account.secret_bytes();
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        assert_eq!(offers.len(), 8);
+        let expected = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(expected.len(), 8);
+        let generation = node
+            .attachment_consent
+            .lock()
+            .unwrap()
+            .generation()
+            .unwrap();
+        drop(node);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            Account::from_secret_bytes(account_key),
+            &proof,
+        );
+        assert_eq!(
+            node.attachment_consent
+                .lock()
+                .unwrap()
+                .generation()
+                .unwrap(),
+            generation
+        );
+        let database = node.storage.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..2 {
+            let actual = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|event| (event.id, event.seq))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|event| (event.id, event.seq))
+                    .collect::<Vec<_>>(),
+                "unchanged durable policy must preserve eight signed IDs/sequences across Node reopen"
+            );
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| Decision::open(a) == Decision::open(b)),
+                "reused controls must preserve the exact Decision payload"
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "reusing published controls must not republish SQL facts"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+
+        // Returning to the same payload is not permission to reuse a sequence
+        // across an intervening durable policy change.
+        node.set_attachment_global_auto(false).unwrap();
+        node.set_attachment_global_auto(true).unwrap();
+        let changed = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(changed.len(), expected.len());
+        for (before, after) in expected.iter().zip(&changed) {
+            assert!(Decision::open(before) == Decision::open(after));
+            assert_eq!(after.seq, before.seq + 1);
+            assert_ne!(
+                after.id, before.id,
+                "policy ABA requires fresh signed evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn node_consent_legacy_generation_refreshes_once_then_reuses() {
+        for legacy in [None, Some(*uuid::Uuid::new_v4().as_bytes())] {
+            let (_directory, node, sender) = consent_offer_fixture(8);
+            let offers = node.file_consent_offers(&sender.public()).unwrap();
+            let before = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            let database = node.storage.database();
+            database
+                .transaction(|c| {
+                    // Model deployed runtime UUIDs and migrated rows. Neither
+                    // attests that its generation was a durable policy version.
+                    c.execute(
+                        "UPDATE file_consent_published SET session=?1",
+                        [legacy.as_ref().map(|v| v.as_slice())],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let refreshed = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            assert_eq!(refreshed.len(), 8);
+            for (old, new) in before.iter().zip(&refreshed) {
+                assert!(Decision::open(old) == Decision::open(new));
+                assert_eq!(new.seq, old.seq + 1);
+                assert_ne!(new.id, old.id);
+            }
+            let markers = database
+                .read(|c| {
+                    let mut q = c.prepare("SELECT session FROM file_consent_published")?;
+                    Ok(q.query_map([], |r| r.get::<_, Vec<u8>>(0))?
+                        .collect::<Result<Vec<_>, _>>()?)
+                })
+                .unwrap();
+            assert_eq!(markers.len(), 8);
+            assert!(
+                markers.iter().all(|v| v.as_slice() == b"MTConsentPolicy1"),
+                "only newly published controls qualify for durable-policy reuse"
+            );
+            assert_ne!(
+                b"MTConsentPolicy1"[6] >> 4,
+                4,
+                "the versioned marker must be structurally distinct from legacy UUIDv4"
+            );
+            let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+            let commits = database.successful_write_commits();
+            for _ in 0..2 {
+                assert_eq!(
+                    node.file_consent_controls(&sender.public(), &offers, false)
+                        .unwrap(),
+                    refreshed
+                );
+            }
+            assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+            assert_eq!(database.successful_write_commits(), commits);
+        }
+    }
+
+    #[test]
+    fn node_consent_failed_policy_publication_preserves_prior_evidence() {
+        let (_directory, node, sender) = consent_offer_fixture(1);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        let before = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        let manifest = Decision::open(&before[0]).unwrap().manifest;
+        let database = node.storage.database();
+        let prior_generation = node
+            .file_consent
+            .lock()
+            .unwrap()
+            .published_generation(manifest)
+            .unwrap();
+        node.set_attachment_global_auto(false).unwrap();
+        database.transaction(|c| {
+            // Fail the generation/marker update after apply_on changed the
+            // published event, so rollback must restore the entire evidence.
+            c.execute_batch("CREATE TEMP TRIGGER fail_policy_marker BEFORE UPDATE OF session,generation ON main.file_consent_published BEGIN SELECT RAISE(ABORT,'injected policy marker failure'); END")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            node.file_consent_controls(&sender.public(), &offers, false)
+                .is_err()
+        );
+        assert_eq!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_control(manifest)
+                .unwrap(),
+            Some(before[0].clone())
+        );
+        assert_eq!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_generation(manifest)
+                .unwrap(),
+            prior_generation
+        );
+        database
+            .read(|c| {
+                c.execute_batch("DROP TRIGGER temp.fail_policy_marker")?;
+                Ok(())
+            })
+            .unwrap();
+        let after = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(
+            after[0].seq,
+            before[0].seq + 1,
+            "recovery must not consume a failed publication's sequence"
+        );
+        assert_ne!(after[0].id, before[0].id);
+    }
+
+    #[test]
+    fn quiet_file_consent_event_iteration_preserves_controls_without_writes() {
+        for count in [1, 8] {
+            let (directory, node, sender) = consent_offer_fixture(count);
+            let before = node.storage.database().successful_write_commits();
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+            let expected = node.file_consent_events(&sender.public()).unwrap();
+            assert_eq!(expected.len(), usize::from(count));
+            assert!(
+                node.storage.database().successful_write_commits() > before,
+                "new consent controls and discovery progress must remain durable writes"
+            );
+            assert!(
+                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get())
+                    > 0
+            );
+            assert!(
+                node.file_consent_events(&sender.public()).unwrap() == expected,
+                "warming the same offer cycle must preserve its signed controls"
+            );
+            let database = node.storage.database();
+            let changes = database
+                .read(|connection| Ok(connection.total_changes()))
+                .unwrap();
+            let commits = database.successful_write_commits();
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+            crate::node::file_consent::signature_observations::reset();
+            for _ in 0..3 {
+                assert!(
+                    node.file_consent_events(&sender.public()).unwrap() == expected,
+                    "quiet polling must refresh the same signed consent controls"
+                );
+            }
+            assert_eq!(
+                crate::node::file_consent::signature_observations::count(),
+                0,
+                "unchanged quiet consent polling must reuse intrinsic verification while refreshing current authority"
+            );
+            assert_eq!(
+                database
+                    .read(|connection| Ok(connection.total_changes()))
+                    .unwrap(),
+                changes,
+                "a completed single-page offer cycle must not update its unchanged cursor"
+            );
+            assert_eq!(database.successful_write_commits(), commits);
+            assert_eq!(
+                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+                0,
+                "quiet consent discovery must not synchronize the parent directory"
+            );
+            let valid = &expected[0];
+            let manifest = Decision::open(valid).unwrap().manifest;
+            let mut bad_signature = valid.clone();
+            bad_signature.sig[0] ^= 1;
+            let mut bad_body = valid.clone();
+            *bad_body.ciphertext.last_mut().unwrap() ^= 1;
+            let mut bad_header = valid.clone();
+            bad_header.seq += 1;
+            for malformed in [bad_signature, bad_body, bad_header] {
+                assert_eq!(malformed.id, valid.id, "tampering preserves the claimed ID");
+                database
+                    .transaction(|connection| {
+                        connection.execute(
+                            "UPDATE file_consent_published SET body=?1 WHERE manifest=?2",
+                            params![body(&malformed)?, manifest.as_bytes().as_slice()],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(
+                    node.file_consent
+                        .lock()
+                        .unwrap()
+                        .published_control(manifest)
+                        .is_err(),
+                    "a warmed claimed ID must not authenticate changed signature, payload or headers"
+                );
+                database
+                    .transaction(|connection| {
+                        connection.execute(
+                            "UPDATE file_consent_published SET body=?1 WHERE manifest=?2",
+                            params![body(valid)?, manifest.as_bytes().as_slice()],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(
+                    node.file_consent
+                        .lock()
+                        .unwrap()
+                        .published_control(manifest)
+                        .unwrap(),
+                    Some(valid.clone())
+                );
+            }
+            let path = directory.path().join("file-consent-controls.log");
+            let barrier = std::fs::read(&path).unwrap();
+            std::fs::write(&path, vec![0; barrier.len()]).unwrap();
+            assert!(
+                node.file_consent_events(&sender.public()).is_err(),
+                "a no-op cursor must still reject a replaced source barrier"
+            );
+            std::fs::write(path, barrier).unwrap();
+        }
+    }
+
+    #[test]
+    fn direct_consent_controls_validate_each_manifest_once_without_group_replay() {
+        let (_directory, node, sender) = consent_offer_fixture(8);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        assert_eq!(offers.len(), 8);
+        let scope = crate::node::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &sender.public(),
+        );
+        assert!(
+            !node
+                .channel_checkpoints
+                .has_local_channel_checkpoint(scope)
+                .unwrap()
+        );
+        {
+            let log = node.log.lock().unwrap();
+            for (_, manifest) in &offers {
+                assert_eq!(log.event_conversation(manifest).unwrap(), Some(scope));
+            }
+            assert!(
+                !log.repository()
+                    .unwrap()
+                    .has_kind(&scope, crate::eventlog::EventKind::MembershipChange)
+                    .unwrap()
+            );
+        }
+        let expected = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(expected.len(), 8);
+        let database = node.storage.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..3 {
+            let reads = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts();
+            let actual = node
+                .file_consent_controls(&sender.public(), &offers, false)
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "direct routing preserves exact signed controls and sequences"
+            );
+            let after = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts();
+            assert_eq!(
+                (after.0 - reads.0, after.1 - reads.1),
+                (8, 8),
+                "each direct manifest still crosses incoming-offer validation once; group-only checks must not hydrate it a second time"
+            );
+        }
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(database.successful_write_commits(), commits);
+    }
+
+    #[test]
+    fn direct_consent_scope_with_raw_membership_preserves_group_readiness_fence() {
+        let (_directory, node, sender) = consent_offer_fixture(1);
+        let offers = node.file_consent_offers(&sender.public()).unwrap();
+        assert_eq!(offers.len(), 1);
+        let expected = node
+            .file_consent_controls(&sender.public(), &offers, false)
+            .unwrap();
+        assert_eq!(expected.len(), 1);
+        let scope = crate::node::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &sender.public(),
+        );
+        // A real signed retained membership-kind event is enough to make the
+        // namespace ambiguous, even when its payload cannot establish a group.
+        let membership = Event::new(
+            &sender,
+            scope,
+            99,
+            vec![],
+            99,
+            1,
+            crate::eventlog::EventKind::MembershipChange,
+            vec![0],
+        );
+        node.log.lock().unwrap().append_durable(membership).unwrap();
+        assert!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .has_kind(&scope, crate::eventlog::EventKind::MembershipChange,)
+                .unwrap()
+        );
+        let reads = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        // Group content visibility requires checkpoint history readiness when
+        // retained membership exists; this scope must not take the DM shortcut.
+        assert!(matches!(
+            node.file_consent_controls(&sender.public(), &offers, false),
+            Err(LogError::StaleCursor)
+        ));
+        let after = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert_eq!(
+            (after.0 - reads.0, after.1 - reads.1),
+            (1, 1),
+            "group readiness must fail after group-offer validation, before the direct incoming-offer read"
+        );
+        assert_eq!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_control(offers[0].1)
+                .unwrap(),
+            Some(expected[0].clone()),
+            "failed group readiness must preserve prior signed evidence"
+        );
+    }
+
+    #[test]
+    fn quiet_file_consent_rotating_iteration_has_bounded_checkpoint_writes() {
+        let (_directory, node, sender) = consent_offer_fixture(33);
+        let cycle = || {
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..6 {
+                let controls = node.file_consent_events(&sender.public()).unwrap();
+                // Preserve the actual API's existing 33-offer fairness oracle.
+                assert!(controls.len() <= 8);
+                assert!(
+                    controls
+                        .iter()
+                        .map(|event| bincode::serialized_size(event).unwrap())
+                        .sum::<u64>()
+                        <= 16 * 1024
+                );
+                seen.extend(controls.into_iter().map(|event| event.id));
+            }
+            assert_eq!(
+                seen.len(),
+                33,
+                "one bounded cycle must revisit every retained offer"
+            );
+            seen
+        };
+        let expected = cycle();
+        let database = node.storage.database();
+        let changes = database
+            .read(|connection| Ok(connection.total_changes()))
+            .unwrap();
+        let commits = database.successful_write_commits();
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+        assert!(
+            cycle() == expected,
+            "warm rotation must retain the same signed controls"
+        );
+        assert_eq!(
+            database
+                .read(|connection| Ok(connection.total_changes()))
+                .unwrap(),
+            changes,
+            "warm multi-page rotation must advance in memory between durable checkpoints"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+            0,
+            "cursor-only rotation must not republish an unchanged legacy-writer barrier"
+        );
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_restarts_advance_and_failed_writes_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let peer = [42; 32];
+        for expected in 0..3 {
+            let mut store = IndexedFileConsentStore::open(&path, "pw").unwrap();
+            assert_eq!(store.offer_scan_position(&peer).unwrap(), expected);
+            store.fail_writes = true;
+            assert!(
+                store
+                    .advance_offer_scan(&peer, expected, expected + 1)
+                    .is_err()
+            );
+            assert_eq!(store.offer_scan_position(&peer).unwrap(), expected);
+            store.fail_writes = false;
+            store
+                .advance_offer_scan(&peer, expected, expected + 1)
+                .unwrap();
+            let commits = store.source.profile().database().successful_write_commits();
+            store.advance_offer_scan(&peer, expected + 1, 90).unwrap();
+            assert_eq!(store.offer_scan_position(&peer).unwrap(), 90);
+            assert_eq!(
+                store.source.profile().database().successful_write_commits(),
+                commits,
+                "subsequent runtime rotation must not checkpoint again immediately"
+            );
+        }
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_due_failure_preserves_runtime_and_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let peer = [42; 32];
+        let mut store = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        store.advance_offer_scan(&peer, 0, 1).unwrap();
+        store.fail_writes = true;
+        store.advance_offer_scan(&peer, 1, 2).unwrap();
+        assert_eq!(store.offer_scan_position(&peer).unwrap(), 2);
+        store.offer_scans.get_mut(&peer).unwrap().checkpoint_at -= OFFER_SCAN_CHECKPOINT_INTERVAL;
+        assert!(store.advance_offer_scan(&peer, 2, 3).is_err());
+        assert_eq!(store.offer_scan_position(&peer).unwrap(), 2);
+        store.fail_writes = false;
+        store.advance_offer_scan(&peer, 2, 3).unwrap();
+        drop(store);
+        let reopened = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        assert_eq!(reopened.offer_scan_position(&peer).unwrap(), 3);
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_recovers_from_another_writer_and_fences_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let peer = [42; 32];
+        let mut first = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        first.advance_offer_scan(&peer, 0, 1).unwrap();
+        first.advance_offer_scan(&peer, 1, 90).unwrap();
+        let mut second =
+            IndexedFileConsentStore::from_profile(first.source.profile().clone(), &path, "pw")
+                .unwrap();
+        second.advance_offer_scan(&peer, 1, 2).unwrap();
+        assert!(matches!(
+            first.advance_offer_scan(&peer, 90, 91),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(first.offer_scan_position(&peer).unwrap(), 2);
+        first.advance_offer_scan(&peer, 2, 3).unwrap();
+        assert_eq!(first.offer_scan_position(&peer).unwrap(), 3);
+        let barrier = std::fs::read(&path).unwrap();
+        std::fs::write(&path, vec![0; barrier.len()]).unwrap();
+        assert!(first.offer_scan_position(&peer).is_err());
+        assert!(first.advance_offer_scan(&peer, 3, 4).is_err());
+        std::fs::write(&path, barrier).unwrap();
+        assert_eq!(first.offer_scan_position(&peer).unwrap(), 3);
+    }
+
+    #[test]
+    fn rotating_offer_checkpoint_cache_bounds_peers_without_losing_restart_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("controls");
+        let mut store = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        for number in 0..=OFFER_SCAN_RUNTIME_LIMIT {
+            let mut peer = [0; 32];
+            peer[..8].copy_from_slice(&(number as u64).to_be_bytes());
+            store.advance_offer_scan(&peer, 0, 1).unwrap();
+            store.advance_offer_scan(&peer, 1, 90).unwrap();
+            assert!(store.offer_scans.len() <= OFFER_SCAN_RUNTIME_LIMIT);
+        }
+        // The evicted first peer resumes from its durable hint, and its next
+        // admitted page immediately checkpoints, preserving restart fairness.
+        let peer = [0; 32];
+        assert_eq!(store.offer_scan_position(&peer).unwrap(), 1);
+        store.advance_offer_scan(&peer, 1, 2).unwrap();
+        assert_eq!(store.offer_scans.len(), OFFER_SCAN_RUNTIME_LIMIT);
+        drop(store);
+        let reopened = IndexedFileConsentStore::open(&path, "pw").unwrap();
+        assert_eq!(reopened.offer_scan_position(&peer).unwrap(), 2);
+    }
+
     #[test]
     fn indexed_file_consent_migrates_exact_controls_and_reopens_without_frames() {
         let root = tempfile::tempdir().unwrap();
@@ -677,6 +1478,7 @@ mod tests {
             a.advance_offer_scan(&peer, 0, 92),
             Err(LogError::StaleCursor)
         ));
+        a.offer_scans.get_mut(&peer).unwrap().checkpoint_at -= OFFER_SCAN_CHECKPOINT_INTERVAL;
         a.fail_writes = true;
         assert!(a.advance_offer_scan(&peer, 91, 92).is_err());
         a.fail_writes = false;
@@ -720,8 +1522,8 @@ mod tests {
         );
         assert_eq!(
             resumed.published_generation(payload.manifest).unwrap(),
-            None,
-            "launch-local generation must not survive reopening"
+            Some(8),
+            "qualified durable policy generation must survive reopening"
         );
         assert!(
             matches!(
@@ -810,5 +1612,94 @@ mod tests {
             reopened.remote_decision(first.manifest).unwrap(),
             Some(ReceiveDecision::Declined)
         );
+    }
+    #[test]
+    fn indexed_verified_control_memo_is_bounded_and_rechecks_requested_identity() {
+        use crate::node::file_consent::signature_observations;
+        let root = tempfile::tempdir().unwrap();
+        let store = IndexedFileConsentStore::open(&root.path().join("controls"), "pw").unwrap();
+        let recipient = DeviceIdentity::generate();
+        let decision = payload(&recipient, 1);
+        let first = decision.event(&recipient, 1).unwrap();
+        let first_body = body(&first).unwrap();
+        let recipient_key = recipient.public().ed25519_pub;
+        let (decoded, verified) = store
+            .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+            .unwrap();
+        assert_eq!(decoded, first);
+        assert!(verified == decision);
+        signature_observations::reset();
+        for _ in 0..3 {
+            let (decoded, verified) = store
+                .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+                .unwrap();
+            assert_eq!(decoded, first);
+            assert!(verified == decision);
+        }
+        assert_eq!(signature_observations::count(), 0);
+        let wrong_recipient = DeviceIdentity::generate().public().ed25519_pub;
+        assert!(
+            store
+                .decode_control(&first_body, EventId::new([254; 32]), Some(&recipient_key))
+                .is_err()
+        );
+        assert!(
+            store
+                .decode_control(&first_body, decision.manifest, Some(&wrong_recipient))
+                .is_err()
+        );
+        assert_eq!(
+            signature_observations::count(),
+            0,
+            "warm intrinsic verification must still reject a different requested manifest or recipient"
+        );
+        // Distinct correctly signed revisions have the same Decision payload but
+        // different complete Event bytes; they occupy distinct bounded entries.
+        for revision in 2..=VERIFIED_CONTROL_LIMIT as u64 + 1 {
+            let event = decision.event(&recipient, revision).unwrap();
+            let (decoded, verified) = store
+                .decode_control(
+                    &body(&event).unwrap(),
+                    decision.manifest,
+                    Some(&recipient_key),
+                )
+                .unwrap();
+            assert_eq!(decoded, event);
+            assert!(verified == decision);
+            assert!(store.verified_controls.borrow().decisions.len() <= VERIFIED_CONTROL_LIMIT);
+            assert!(store.verified_controls.borrow().order.len() <= VERIFIED_CONTROL_LIMIT);
+        }
+        assert_eq!(
+            store.verified_controls.borrow().decisions.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        assert_eq!(
+            store.verified_controls.borrow().order.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        signature_observations::reset();
+        let (decoded, verified) = store
+            .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+            .unwrap();
+        assert_eq!(decoded, first);
+        assert!(verified == decision);
+        assert_eq!(
+            signature_observations::count(),
+            1,
+            "FIFO eviction must require genuine signature verification before restoring a positive entry"
+        );
+        assert_eq!(
+            store.verified_controls.borrow().decisions.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        assert_eq!(
+            store.verified_controls.borrow().order.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        signature_observations::reset();
+        store
+            .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+            .unwrap();
+        assert_eq!(signature_observations::count(), 0);
     }
 }

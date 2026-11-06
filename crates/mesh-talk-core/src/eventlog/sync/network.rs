@@ -4,8 +4,9 @@ use super::{ApplyReport, FileConsentStatus};
 use crate::eventlog::{AppendOutcome, ConversationId, Event, EventId, LogError};
 use std::collections::HashSet;
 
-/// Metadata captured atomically with a finite, owned view. A missing current
-/// cached fingerprint skips the optional probe; it never denotes an empty set.
+/// Scalar metadata from a finite owned view or an exactly qualified probe cache.
+/// This grants no Have/export authority. A missing fingerprint skips the optional
+/// probe; it never denotes an empty set.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SyncMetadata {
     pub count: u64,
@@ -128,7 +129,31 @@ pub trait NetworkSyncStore {
     type View;
     type HaveCursor;
     type ExportCursor;
+    /// Optional current scalar probe. Returning metadata grants no export or Have
+    /// permission; a differing fingerprint still requires a fresh owned view.
+    fn probe_metadata(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<SyncMetadata>, LogError> {
+        Ok(None)
+    }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    /// Optionally transfer one already prepared, currently qualified connection-owned
+    /// view to the caller. It must not share mutable export/Have state with any
+    /// other request. A miss uses ordinary bounded authorization preparation.
+    fn take_custody_view(
+        &mut self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        Ok(None)
+    }
+    /// Return ownership after an exact custody query and final validation, or
+    /// after an ordinary Response and its terminal Have have both been sent.
+    /// Custody callers keep an uncached view alive through response sending.
+    /// This never caches the custody answer or a partially sent ordinary response.
+    fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        Ok(Some(view))
+    }
     /// Opening captures a finite source. Implementations with derived authority
     /// prepare it here; there is no collecting fallback in the session adapter.
     fn prepare_view_step(
@@ -142,6 +167,22 @@ pub trait NetworkSyncStore {
             ready: true,
             ..Default::default()
         })
+    }
+    /// Reuse completed export preparation only for this exclusively owned view
+    /// under fresh source and authority qualification. Have-dependent plans
+    /// require exact Have; independent plans must rebind their page cursor to
+    /// the current Have. This never skips fresh filtering or bounded reads.
+    fn reusable_export(
+        &self,
+        _view: &Self::View,
+        _have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    /// Whether preparation needs staged peer IDs for ancestor closure. False
+    /// never removes the current Have filter from the final export pages.
+    fn export_preparation_needs_have(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(true)
     }
     /// Have-dependent closure has the same bounded, cancellable work boundary.
     fn reset_export_step(

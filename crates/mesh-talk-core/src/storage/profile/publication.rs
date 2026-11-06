@@ -505,6 +505,7 @@ pub(crate) mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     thread_local! { pub static ARCHIVE_ATTEMPTS:RefCell<Vec<tokio::time::Instant>>=const {RefCell::new(Vec::new())}; pub static CUT: RefCell<Option<&'static str>>=const {RefCell::new(None)}; pub static HASHES:Cell<usize>=const {Cell::new(0)}; pub static DECODES:Cell<usize>=const {Cell::new(0)}; pub static LIVE:Cell<usize>=const {Cell::new(0)}; pub static MAX_LIVE:Cell<usize>=const {Cell::new(0)}; pub static MAX_BATCH:Cell<usize>=const {Cell::new(0)}; pub static MAX_EDGES:Cell<usize>=const {Cell::new(0)}; }
+    thread_local! { pub static PARENT_SYNCS: Cell<usize> = const { Cell::new(0) }; }
     pub fn enter() {
         LIVE.with(|v| {
             v.set(v.get() + 1);
@@ -517,6 +518,7 @@ pub(crate) mod tests {
     pub fn observe(kind: &str) {
         match kind {
             "hash" => HASHES.with(|v| v.set(v.get() + 1)),
+            "parent_sync" => PARENT_SYNCS.with(|v| v.set(v.get() + 1)),
             "decode" => DECODES.with(|v| v.set(v.get() + 1)),
             "batch" => MAX_BATCH.with(|v| v.set(v.get().max(1))),
             _ => {}

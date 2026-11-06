@@ -53,6 +53,7 @@ impl EventRepository {
         self.database.transaction(|c| {
             self.require_selection_on(c,selection)?;self.validate_network_on(c,view)?;
             let (mut after,mut edge_after,mut sibling_closed,mut own_closed):(i64,Option<Vec<u8>>,bool,bool)=c.query_row("SELECT rank,parent_after,sibling_closed,own_closed FROM participant_sync_export_work WHERE view=?1",[selection.id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+            let original = (after, edge_after.clone(), sibling_closed, own_closed);
             let mut step=PreparationStep::default();
             while step.rows<budget.rows&&step.edges<budget.edges&&step.bytes+64<=budget.bytes {
                 let row:Option<(Vec<u8>,i64,bool,bool,bool)>=c.query_row("SELECT id,rank,candidate,selected,own FROM participant_sync_rows WHERE view=?1 AND rank>?2 ORDER BY rank LIMIT 1",params![selection.id.as_slice(),after],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
@@ -71,10 +72,14 @@ impl EventRepository {
                 }
                 let sibling=candidate&&(!sibling_closure||selected&&sibling_closed);
                 let outgoing=sibling&&(!own_closure||own&&own_closed);
-                c.execute("UPDATE participant_sync_rows SET sibling=?3,outgoing=?4 WHERE view=?1 AND id=?2",params![selection.id.as_slice(),id,sibling,outgoing])?;
+                c.execute("UPDATE participant_sync_rows SET sibling=?3,outgoing=?4 WHERE view=?1 AND id=?2 AND (sibling<>?3 OR outgoing<>?4)",params![selection.id.as_slice(),id,sibling,outgoing])?;
                 after=rank;edge_after=None;sibling_closed=true;own_closed=true;step.rows+=1;step.bytes+=64;
             }
-            c.execute("UPDATE participant_sync_export_work SET rank=?2,parent_after=?3,sibling_closed=?4,own_closed=?5 WHERE view=?1",params![selection.id.as_slice(),after,edge_after,sibling_closed,own_closed])?;
+            // Terminal polling retains fresh selection/source checks above but
+            // has no new cursor to publish, for either network consumer.
+            if original != (after, edge_after.clone(), sibling_closed, own_closed) {
+                c.execute("UPDATE participant_sync_export_work SET rank=?2,parent_after=?3,sibling_closed=?4,own_closed=?5 WHERE view=?1",params![selection.id.as_slice(),after,edge_after,sibling_closed,own_closed])?;
+            }
             Ok(step)
         })
     }

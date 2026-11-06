@@ -16,13 +16,24 @@ use std::time::{Duration, Instant};
 const MAX_SEED_PROBES: usize = 8;
 const MAX_RELAY_SYNCS: usize = 8;
 const MAX_KNOWN_EDGES: usize = 2048;
+// Match discovery's bounded routes per identity; aliases do not own workers.
+const MAX_EDGE_ROUTES: usize = 8;
 const MAX_CONTINUATION_DELAY: Duration = Duration::from_secs(5);
-type EdgeKey = (SocketAddr, [u8; 32], [u8; 32]);
+type EdgeKey = ([u8; 32], [u8; 32]);
+
+struct EdgeRoute {
+    failures: u32,
+    retry_at: Instant,
+    observed: Instant,
+}
 
 struct Edge {
     peer: PublicIdentity,
     pending: bool,
     active: bool,
+    active_addr: Option<SocketAddr>,
+    preferred_addr: SocketAddr,
+    routes: HashMap<SocketAddr, EdgeRoute>,
     failures: u32,
     continuation_batches: u32,
     retry_at: Instant,
@@ -30,6 +41,81 @@ struct Edge {
 }
 
 impl Edge {
+    fn observe_route(&mut self, addr: SocketAddr, now: Instant) {
+        self.observed = now;
+        if let Some(route) = self.routes.get_mut(&addr) {
+            route.observed = now;
+            return;
+        }
+        if self.routes.len() >= MAX_EDGE_ROUTES {
+            let oldest = self
+                .routes
+                .iter()
+                .filter(|(candidate, _)| {
+                    Some(**candidate) != self.active_addr && **candidate != self.preferred_addr
+                })
+                .min_by_key(|(_, route)| route.observed)
+                .map(|(candidate, _)| *candidate)
+                .expect("bounded aliases retain an evictable inactive alternative");
+            self.routes.remove(&oldest);
+        }
+        self.routes.insert(
+            addr,
+            EdgeRoute {
+                failures: 0,
+                retry_at: now,
+                observed: now,
+            },
+        );
+    }
+
+    fn ready_at(&self) -> Instant {
+        self.routes
+            .values()
+            .map(|route| route.retry_at)
+            .min()
+            .unwrap()
+            .max(self.retry_at)
+    }
+
+    fn next_route(&self, now: Instant) -> SocketAddr {
+        if self
+            .routes
+            .get(&self.preferred_addr)
+            .is_some_and(|route| route.retry_at <= now)
+        {
+            return self.preferred_addr;
+        }
+        self.routes
+            .iter()
+            .filter(|(_, route)| route.retry_at <= now)
+            .min_by_key(|(addr, route)| (route.retry_at, **addr))
+            .map(|(addr, _)| *addr)
+            .expect("due identity has an eligible route")
+    }
+
+    fn route_failed(&mut self, addr: SocketAddr, now: Instant) {
+        let route = self
+            .routes
+            .get_mut(&addr)
+            .expect("active route remains installed");
+        route.failures = route.failures.saturating_add(1);
+        route.retry_at = now + retry_delay(route.failures);
+        // An alternate route can progress immediately. Failed routes retain
+        // their own existing backoff even when discovery observes them again.
+        self.retry_at = now;
+    }
+
+    fn route_succeeded(&mut self, addr: SocketAddr, now: Instant) {
+        self.preferred_addr = addr;
+        let route = self
+            .routes
+            .get_mut(&addr)
+            .expect("active route remains installed");
+        route.failures = 0;
+        route.retry_at = now;
+    }
+
     fn succeeded(&mut self, count: usize, now: Instant) {
         self.failures = 0;
         if count == MAX_MAILBOXES_PER_EXCHANGE {
@@ -70,9 +156,9 @@ fn retry_delay(failures: u32) -> Duration {
 }
 
 fn observe_edge(edges: &mut HashMap<EdgeKey, Edge>, addr: SocketAddr, peer: PublicIdentity) {
-    let key = (addr, peer.ed25519_pub, peer.x25519_pub);
+    let key = (peer.ed25519_pub, peer.x25519_pub);
     if let Some(edge) = edges.get_mut(&key) {
-        edge.observed = Instant::now();
+        edge.observe_route(addr, Instant::now());
         return;
     }
     if edges.len() >= MAX_KNOWN_EDGES {
@@ -93,6 +179,16 @@ fn observe_edge(edges: &mut HashMap<EdgeKey, Edge>, addr: SocketAddr, peer: Publ
             peer,
             pending: true,
             active: false,
+            active_addr: None,
+            preferred_addr: addr,
+            routes: HashMap::from([(
+                addr,
+                EdgeRoute {
+                    failures: 0,
+                    retry_at: Instant::now(),
+                    observed: Instant::now(),
+                },
+            )]),
             failures: 0,
             continuation_batches: 0,
             retry_at: Instant::now(),
@@ -219,7 +315,7 @@ async fn run_federation_loop_inner(
         let now = Instant::now();
         let mut due = edges
             .iter()
-            .filter(|(_, edge)| edge.pending && !edge.active && edge.retry_at <= now)
+            .filter(|(_, edge)| edge.pending && !edge.active && edge.ready_at() <= now)
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
         due.sort_unstable();
@@ -232,14 +328,17 @@ async fn run_federation_loop_inner(
             let edge = edges.get_mut(&key).unwrap();
             edge.pending = false;
             edge.active = true;
+            let addr = edge.next_route(now);
+            edge.active_addr = Some(addr);
             let peer = edge.peer.clone();
             let identity = identity.clone();
             let endpoint = endpoint.clone();
             exchanges.push(async move {
                 (
                     key,
+                    addr,
                     endpoint
-                        .sync_with_relay_checked(key.0, &identity, &peer)
+                        .sync_with_relay_checked(addr, &identity, &peer)
                         .await,
                 )
             });
@@ -300,8 +399,8 @@ async fn run_federation_loop_inner(
         }
         let next_retry = edges
             .values()
-            .filter(|edge| edge.pending && !edge.active && edge.retry_at > now)
-            .map(|edge| edge.retry_at)
+            .filter(|edge| edge.pending && !edge.active && edge.ready_at() > now)
+            .map(Edge::ready_at)
             .chain(
                 probes
                     .values()
@@ -314,11 +413,13 @@ async fn run_federation_loop_inner(
         });
         tokio::select! {
             result = exchanges.next(), if !exchanges.is_empty() => {
-                let Some((key, result)) = result else { return Ok(()); };
+                let Some((key, addr, result)) = result else { return Ok(()); };
                 let edge = edges.get_mut(&key).expect("active edge remains installed");
                 edge.active = false;
+                edge.active_addr = None;
                 match result {
                     Ok(count) => {
+                        edge.route_succeeded(addr, Instant::now());
                         edge.succeeded(count, Instant::now());
                         #[cfg(test)]
                         if let Some(control) = &control {
@@ -330,11 +431,15 @@ async fn run_federation_loop_inner(
                     }
                     Err(error) => {
                         if store.requires_reopen() { return Err(error); }
-                        log::debug!("federation sync at {}: {error}", key.0);
+                        log::debug!("federation sync at {addr}: {error}");
                         edge.continuation_batches = 0;
                         edge.failures = edge.failures.saturating_add(1);
                         let local = error.is_local_retry();
-                        edge.retry_at = Instant::now() + if local { Duration::from_millis(100u64 << edge.failures.saturating_sub(1).min(6)).min(Duration::from_secs(5)) } else { retry_delay(edge.failures) };
+                        if local {
+                            edge.retry_at = Instant::now() + Duration::from_millis(100u64 << edge.failures.saturating_sub(1).min(6)).min(Duration::from_secs(5));
+                        } else {
+                            edge.route_failed(addr, Instant::now());
+                        }
                         edge.pending = true;
                     }
                 }
@@ -445,6 +550,145 @@ mod tests {
     }
 
     #[test]
+    fn relay_route_aliases_share_one_exact_identity_schedule() {
+        let peer = DeviceIdentity::generate().public();
+        let mut edges = HashMap::new();
+        observe_edge(&mut edges, "127.0.0.1:47479".parse().unwrap(), peer.clone());
+        observe_edge(&mut edges, "127.0.0.2:47479".parse().unwrap(), peer.clone());
+        assert_eq!(
+            edges.len(),
+            1,
+            "LAN and routed aliases must share one pending/active reconciliation owner"
+        );
+
+        let mut changed_key = peer;
+        changed_key.x25519_pub = DeviceIdentity::generate().public().x25519_pub;
+        observe_edge(&mut edges, "127.0.0.1:47479".parse().unwrap(), changed_key);
+        assert_eq!(edges.len(), 2, "coalescing must bind both full public keys");
+    }
+
+    #[test]
+    fn failed_alias_retains_backoff_and_successful_alternate_stays_preferred() {
+        let peer = DeviceIdentity::generate().public();
+        let first = "127.0.0.1:47479".parse().unwrap();
+        let alternate = "127.0.0.2:47479".parse().unwrap();
+        let mut edges = HashMap::new();
+        observe_edge(&mut edges, first, peer.clone());
+        observe_edge(&mut edges, alternate, peer.clone());
+        let edge = edges.get_mut(&(peer.ed25519_pub, peer.x25519_pub)).unwrap();
+        let now = Instant::now();
+        assert_eq!(edge.next_route(now), first);
+        edge.route_failed(first, now);
+        let failed_retry = edge.routes[&first].retry_at;
+        assert!(failed_retry > now);
+        assert!(
+            edge.ready_at() <= now,
+            "a healthy alternate must not wait for the failed route"
+        );
+        assert_eq!(edge.next_route(now), alternate);
+        edge.observe_route(first, now);
+        assert_eq!(
+            edge.routes[&first].retry_at, failed_retry,
+            "discovery cannot erase route failure backoff"
+        );
+        edge.route_succeeded(alternate, now);
+        edge.succeeded(0, now);
+        assert_eq!(
+            edge.next_route(failed_retry),
+            alternate,
+            "a recovered alias must not displace the proven route"
+        );
+
+        edge.pending = true; // A mail wake received while the worker is active.
+        edge.succeeded(0, now);
+        assert!(edge.pending, "completion must retain a newer mail wake");
+    }
+
+    #[test]
+    fn bounded_alias_churn_preserves_active_route_and_continuation_deadline() {
+        let peer = DeviceIdentity::generate().public();
+        let first = "127.0.0.1:47479".parse().unwrap();
+        let mut edges = HashMap::new();
+        observe_edge(&mut edges, first, peer.clone());
+        let edge = edges.get_mut(&(peer.ed25519_pub, peer.x25519_pub)).unwrap();
+        let now = Instant::now();
+        let active = "127.0.0.2:47479".parse().unwrap();
+        edge.observe_route(active, now);
+        edge.active = true;
+        edge.active_addr = Some(active);
+        edge.succeeded(MAX_MAILBOXES_PER_EXCHANGE, now);
+        let continuation = edge.retry_at;
+        for port in 48000..48032 {
+            edge.observe_route(SocketAddr::from(([127, 0, 0, 1], port)), now);
+            assert!(edge.routes.len() <= MAX_EDGE_ROUTES);
+            assert!(edge.routes.contains_key(&first));
+            assert!(edge.routes.contains_key(&active));
+            assert_eq!(
+                edge.retry_at, continuation,
+                "aliases must not bypass full-batch pacing"
+            );
+        }
+        assert_eq!(edge.ready_at(), continuation);
+    }
+
+    #[tokio::test]
+    async fn new_route_alias_cannot_overlap_an_active_identity_exchange() {
+        let temp = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let self_id = identity.user_id();
+        let peer = DeviceIdentity::generate();
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let alternate = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_addr = first.local_addr().unwrap();
+        let alternate_addr = alternate.local_addr().unwrap();
+        let query_sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        roster.lock().unwrap().update(
+            &Announce::new_post_office(&peer, "relay", first_addr.port()),
+            first_addr.ip(),
+            &self_id,
+        );
+        let runner = tokio::spawn(run_federation_loop(
+            roster.clone(),
+            vec![FederationSeed {
+                id: peer.user_id(),
+                discovery: query_sink.local_addr().unwrap(),
+            }],
+            identity,
+            local_store(&temp),
+            FederationDirectory::new(),
+            None,
+        ));
+        // Keep the real first TCP/Noise attempt active while discovery publishes
+        // a second endpoint for the same exact relay identity.
+        let held = tokio::time::timeout(Duration::from_secs(2), first.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        roster.lock().unwrap().update(
+            &Announce::new_post_office(&peer, "relay", alternate_addr.port()),
+            alternate_addr.ip(),
+            &self_id,
+        );
+        let overlapping =
+            tokio::time::timeout(Duration::from_millis(200), alternate.accept()).await;
+        // Closing the stalled route must make its known alternate eligible
+        // without waiting for the failed address's retry or idle fallback.
+        drop(held);
+        let failover = tokio::time::timeout(Duration::from_secs(2), alternate.accept()).await;
+        runner.abort();
+        let _ = runner.await;
+        assert!(
+            overlapping.is_err(),
+            "a discovery alias must not start a second exchange for an active relay identity"
+        );
+        assert!(
+            failover.is_ok(),
+            "a failed active route must release the identity for a healthy alternate"
+        );
+    }
+
+    #[test]
     fn full_batch_continuation_backs_off_without_delaying_a_drained_edge() {
         let now = Instant::now();
         let mut edges = HashMap::new();
@@ -455,7 +699,7 @@ mod tests {
         observe_edge(&mut edges, saturated_addr, saturated.clone());
         observe_edge(&mut edges, healthy_addr, healthy.clone());
         let saturated = edges
-            .get_mut(&(saturated_addr, saturated.ed25519_pub, saturated.x25519_pub))
+            .get_mut(&(saturated.ed25519_pub, saturated.x25519_pub))
             .unwrap();
         let mut completed_at = now;
         for delay_ms in [100, 200, 400, 800, 1600, 3200, 5000, 5000] {
@@ -474,7 +718,7 @@ mod tests {
         }
         let saturated_retry = saturated.retry_at;
         let healthy = edges
-            .get_mut(&(healthy_addr, healthy.ed25519_pub, healthy.x25519_pub))
+            .get_mut(&(healthy.ed25519_pub, healthy.x25519_pub))
             .unwrap();
         healthy.pending = false;
         healthy.succeeded(0, now);
@@ -489,9 +733,7 @@ mod tests {
         let addr = "127.0.0.1:47479".parse().unwrap();
         let mut edges = HashMap::new();
         observe_edge(&mut edges, addr, peer.clone());
-        let edge = edges
-            .get_mut(&(addr, peer.ed25519_pub, peer.x25519_pub))
-            .unwrap();
+        let edge = edges.get_mut(&(peer.ed25519_pub, peer.x25519_pub)).unwrap();
         let mut now = Instant::now();
         for _ in 0..8 {
             edge.pending = false;

@@ -293,7 +293,7 @@ impl Node {
                     continue;
                 }
                 let Ok(events) = self
-                    .opaque_relay_round(&mut channel, recipient, Some(conv))
+                    .opaque_history_publication_round_for(&mut channel, recipient, conv, confirm)
                     .await
                 else {
                     continue;
@@ -1262,9 +1262,9 @@ impl Node {
     /// until its independently budgeted selectors finish.
     fn prepare_channel_metadata_turn(&self, conv: ConversationId) -> Result<bool, LogError> {
         use crate::eventlog::sync::network::PreparationBudget;
-        self.channel_checkpoints.queue_runtime(conv)?;
         let step = {
             let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.queue_metadata_runtime(conv)?;
             self.channel_checkpoints.project_step_with_budget(
                 log.repository()?,
                 &self.identity,
@@ -1302,6 +1302,7 @@ impl Node {
         }
         let step = {
             let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.queue_metadata_runtime(conv)?;
             self.channel_checkpoints.prepare_presentation_step(
                 log.repository()?,
                 &self.identity,
@@ -1345,6 +1346,7 @@ impl Node {
         // book -> log order; a concurrently appended control cannot install
         // an old display as fresh membership for subsequent authoring.
         let log = self.log.lock().expect("log lock");
+        self.channel_checkpoints.queue_metadata_runtime(conv)?;
         let state = self.channel_checkpoints.current_state(conv)?;
         let Some(state) = state else {
             return Ok(false);
@@ -1377,11 +1379,17 @@ impl Node {
         channel: ConversationId,
         budget: &mut crate::eventlog::sync::network::PreparationBudget,
     ) -> Result<(), LogError> {
-        self.channel_checkpoints.queue_runtime(channel)?;
+        // A caller without a preparation allowance must still retain durable
+        // retry demand. Otherwise qualify completed work under the same log
+        // guard as preparation, before any preparation mutation can run.
+        if budget.rows < 2 || budget.edges == 0 || budget.bytes < 512 {
+            self.channel_checkpoints.queue_runtime(channel)?;
+        }
         let mut advanced = false;
         while budget.rows >= 2 && budget.edges > 0 && budget.bytes >= 512 {
             let step = {
                 let log = self.log.lock().expect("log lock");
+                self.channel_checkpoints.queue_metadata_runtime(channel)?;
                 match self.channel_checkpoints.project_step_with_budget(
                     log.repository()?,
                     &self.identity,
@@ -1519,6 +1527,27 @@ impl Node {
             .pending_channel_plaintext
             .lock()
             .expect("channel retry lock");
+        {
+            // Ordinary DMs share this receive callback. Only signed group
+            // controls or a prior local group checkpoint justify channel work.
+            // Keep the source guard through negative demand cleanup so a newly
+            // appended membership cannot lose its queued continuation.
+            let log = self.log.lock().expect("log lock");
+            if !log
+                .repository()?
+                .has_kind(&conv, crate::eventlog::EventKind::MembershipChange)?
+                && !self
+                    .channel_checkpoints
+                    .has_local_channel_checkpoint(conv)?
+            {
+                let more = self.channel_checkpoints.finish_runtime(conv, None)?;
+                pending.lanes.remove(&conv);
+                if more {
+                    self.channel_recovery_notify.notify_one();
+                }
+                return Ok(());
+            }
+        }
         if pending
             .retry_at
             .is_some_and(|deadline| std::time::Instant::now() < deadline)

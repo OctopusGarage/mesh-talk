@@ -19,6 +19,15 @@ pub(super) trait SessionBackend {
         conversation: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError>;
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    fn take_custody_view(
+        &self,
+        _conversation: &ConversationId,
+    ) -> Result<Option<Self::View>, LogError> {
+        Ok(None)
+    }
+    fn retain_custody_view(&self, view: Self::View) -> Result<Option<Self::View>, LogError> {
+        Ok(Some(view))
+    }
     fn prepare_view_step(
         &self,
         view: &Self::View,
@@ -30,6 +39,13 @@ pub(super) trait SessionBackend {
             ready: true,
             ..Default::default()
         })
+    }
+    fn reusable_export(
+        &self,
+        _view: &Self::View,
+        _have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        Ok(false)
     }
     fn reset_export_step(
         &self,
@@ -45,6 +61,9 @@ pub(super) trait SessionBackend {
     }
     fn stage_export_have(&self, view: &Self::View, _ids: &[EventId]) -> Result<(), LogError> {
         self.validate_view(view)
+    }
+    fn export_preparation_needs_have(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(true)
     }
     fn prepare_export_step(
         &self,
@@ -322,11 +341,20 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
     type View = S::View;
     type HaveCursor = S::HaveCursor;
     type ExportCursor = S::ExportCursor;
+    fn export_preparation_needs_have(&self, view: &Self::View) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .export_preparation_needs_have(view)
+    }
     fn probe_metadata(
         &self,
         c: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError> {
         let store = self.0.lock().expect("store mutex not poisoned");
+        if let Some(metadata) = store.probe_metadata(c)? {
+            return Ok((Some(metadata), None));
+        }
         let view = store.open_view(c)?;
         Ok((None, Some(view)))
     }
@@ -335,6 +363,18 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .open_view(c)
+    }
+    fn take_custody_view(&self, c: &ConversationId) -> Result<Option<S::View>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .take_custody_view(c)
+    }
+    fn retain_custody_view(&self, view: S::View) -> Result<Option<S::View>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .retain_custody_view(view)
     }
     fn prepare_view_step(
         &self,
@@ -345,6 +385,16 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .prepare_view_step(v, budget)
+    }
+    fn reusable_export(
+        &self,
+        view: &Self::View,
+        have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .reusable_export(view, have)
     }
     fn reset_export_step(
         &self,
@@ -669,35 +719,39 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
     have: &HashSet<EventId>,
     max_frames: usize,
 ) -> Result<Vec<SyncFollowup>, SessionError> {
-    loop {
-        if backend
-            .reset_export_step(view, PreparationBudget::default())?
-            .ready
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
-    for id in have {
-        have_batch.push(*id);
-        if have_batch.len() == PreparationBudget::default().rows {
-            backend.stage_export_have(view, &have_batch)?;
-            have_batch.clear();
+    if !backend.reusable_export(view, have)? {
+        loop {
+            if backend
+                .reset_export_step(view, PreparationBudget::default())?
+                .ready
+            {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    }
-    if !have_batch.is_empty() {
-        backend.stage_export_have(view, &have_batch)?;
-    }
-    loop {
-        if backend
-            .prepare_export_step(view, have, PreparationBudget::default())?
-            .ready
-        {
-            break;
+        if backend.export_preparation_needs_have(view)? {
+            let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
+            for id in have {
+                have_batch.push(*id);
+                if have_batch.len() == PreparationBudget::default().rows {
+                    backend.stage_export_have(view, &have_batch)?;
+                    have_batch.clear();
+                    tokio::task::yield_now().await;
+                }
+            }
+            if !have_batch.is_empty() {
+                backend.stage_export_have(view, &have_batch)?;
+            }
         }
-        tokio::task::yield_now().await;
+        loop {
+            if backend
+                .prepare_export_step(view, have, PreparationBudget::default())?
+                .ready
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
     }
     let frame_budget = event_frame_budget(conversation)?;
     let mut frames = Vec::new();

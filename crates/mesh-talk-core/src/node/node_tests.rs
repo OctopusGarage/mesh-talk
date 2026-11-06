@@ -47,6 +47,147 @@ fn settle_injected_channel(node: &Node, channel: ConversationId) {
 }
 
 #[tokio::test]
+async fn completed_channel_metadata_retains_demand_when_source_changes_before_install() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Arc::new(
+        Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel_tx,
+            file,
+            &root.path().join("events"),
+            &root.path().join("sent"),
+            "pw",
+        )
+        .unwrap(),
+    );
+    let channel = node.create_channel("before", vec![]).await.unwrap();
+    settle_injected_channel(&node, channel);
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_none()
+    );
+    let before = node.channels.lock().unwrap().info_projection(channel);
+    let weak = Arc::downgrade(&node);
+    *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+        let node = weak.upgrade().unwrap();
+        node.append_event(channel, EventKind::ChannelRename, b"after".to_vec())
+            .unwrap();
+    }));
+    assert!(matches!(
+        node.process_channel_reception_inner(channel, "catch_up"),
+        Err(NodeError::Log(LogError::StaleCursor))
+    ));
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_some(),
+        "a source change after quiet qualification must retain durable recovery demand"
+    );
+    assert!(
+        node.channels.lock().unwrap().info_projection(channel) == before,
+        "a changed source must not install stale membership"
+    );
+    settle_injected_channel(&node, channel);
+    assert_eq!(
+        node.channel_checkpoints
+            .current_state(channel)
+            .unwrap()
+            .unwrap()
+            .name(),
+        "after"
+    );
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn completed_channel_receive_callbacks_are_quiet_and_new_messages_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        file,
+        &root.path().join("events"),
+        &root.path().join("sent"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("quiet", vec![]).await.unwrap();
+    node.enqueue_channel_message_reply_expiring_if(channel, b"first", None, None, |commit| {
+        commit()
+    })
+    .unwrap();
+    settle_injected_channel(&node, channel);
+    let messages = node.channel_history(channel, 10).unwrap();
+    let members = node
+        .channel_checkpoints
+        .current_state(channel)
+        .unwrap()
+        .unwrap()
+        .members()
+        .to_vec();
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    for _ in 0..8 {
+        node.process_channel_reception_inner(channel, "catch_up")
+            .unwrap();
+    }
+    assert_eq!(
+        database.read(|c| Ok(c.total_changes())).unwrap(),
+        changes,
+        "settled real receive callbacks must not recreate durable channel demand"
+    );
+    assert_eq!(database.successful_write_commits(), commits);
+    assert_eq!(
+        node.channel_history(channel, 10).unwrap().len(),
+        messages.len()
+    );
+    assert_eq!(
+        node.channel_checkpoints
+            .current_state(channel)
+            .unwrap()
+            .unwrap()
+            .members(),
+        members.as_slice()
+    );
+    node.channel_checkpoints.queue_runtime(channel).unwrap();
+    settle_injected_channel(&node, channel);
+    assert!(
+        node.channel_checkpoints
+            .next_runtime(None)
+            .unwrap()
+            .is_none()
+    );
+    node.enqueue_channel_message_reply_expiring_if(channel, b"second", None, None, |commit| {
+        commit()
+    })
+    .unwrap();
+    settle_injected_channel(&node, channel);
+    assert_eq!(
+        node.channel_history(channel, 10).unwrap().len(),
+        messages.len() + 1
+    );
+}
+
+#[tokio::test]
 async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -1694,6 +1835,107 @@ fn restart_erases_unexpired_recipient_copy_without_erasing_sender_copy() {
 }
 
 #[test]
+fn unchanged_expiry_maintenance_does_not_rescan_future_received_deadlines() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let mut node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let conversation = ConversationId::new([52; 32]);
+    let now = super::now_millis();
+    let deadline = now + 3_600_000;
+    for index in 0..129u64 {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&index.to_be_bytes());
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conversation,
+                "peer".into(),
+                now,
+                &crate::expiry::wrap(b"future", Some(deadline)),
+                EventId::new(id),
+            )
+            .unwrap();
+    }
+    node.prune_expired_received().unwrap();
+    crate::node::received_store::deadline_observations::ROWS.with(|count| count.set(0));
+    node.prune_expired_received().unwrap();
+    assert_eq!(
+        crate::node::received_store::deadline_observations::ROWS.with(|count| count.get()),
+        0,
+        "unchanged future deadlines must not be loaded again on each expiry tick"
+    );
+    assert_eq!(
+        node.received.lock().unwrap().entries(&conversation).len(),
+        129
+    );
+    // A changed transcript must invalidate quiet-state scheduling even when the
+    // older selected rows all remain in the future.
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            "peer".into(),
+            now,
+            &crate::expiry::wrap(b"already due", Some(now.saturating_sub(1))),
+            EventId::new([253; 32]),
+        )
+        .unwrap();
+    node.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
+    assert!(
+        node.prune_expired_received().is_err(),
+        "failed due-row erasure must remain retryable"
+    );
+    node.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
+    assert!(node.prune_expired_received().unwrap() > 0);
+    assert_eq!(
+        node.received.lock().unwrap().entries(&conversation).len(),
+        129
+    );
+    let soon = now + 60_000;
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            "peer".into(),
+            now,
+            &crate::expiry::wrap(b"due soon", Some(soon)),
+            EventId::new([254; 32]),
+        )
+        .unwrap();
+    node.prune_expired_received().unwrap();
+    // Advancing the anchored clock must wake the cached wall-clock deadline.
+    Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), soon + 1);
+    assert!(node.prune_expired_received().unwrap() > 0);
+    assert_eq!(
+        node.received.lock().unwrap().entries(&conversation).len(),
+        129
+    );
+}
+
+#[test]
 fn monotonic_observation_bounds_expiry_even_with_a_future_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let (dm, _) = mpsc::unbounded_channel();
@@ -3038,6 +3280,245 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         po_store.lock().unwrap().held_ids(&mailbox.id()),
         held_before
     );
+}
+
+#[tokio::test]
+async fn channel_custody_batch_verifies_shared_certificate_once_per_request() {
+    use crate::{
+        identity::account::Account,
+        node::channel_account_authority::{AccountAuthorityControl, AccountGrant},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let owner = Arc::new(personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+    ));
+    owner.set_post_office_enabled(false);
+    let bob = DeviceIdentity::generate();
+    let bob_sibling = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unavailable = listener.local_addr().unwrap();
+    drop(listener);
+    let bob_proof = Announce::new_with_account(&bob, &bob_account, "Bob", unavailable.port());
+    for proof in [
+        bob_proof.clone(),
+        Announce::new_with_account(
+            &bob_sibling,
+            &bob_account,
+            "Bob sibling",
+            unavailable.port(),
+        ),
+    ] {
+        owner
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, unavailable.ip(), &owner.user_id());
+    }
+    let channel = owner
+        .create_channel("account custody fixture", vec![bob.public()])
+        .await
+        .unwrap();
+    let event = owner
+        .enqueue_channel_message_reply_expiring_if(
+            channel,
+            b"synthetic projected observation",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    owner
+        .publish_channel_custody(channel, event, &bob_sibling.public(), true, false, false)
+        .unwrap();
+    assert_eq!(
+        owner.channel_custody_count(channel, event).unwrap(),
+        Some(0),
+        "a certificate cannot enroll a nonmember into a legacy channel"
+    );
+
+    let own_proof = owner.own_group_proof();
+    let projection = owner.account_group_projection(channel).unwrap();
+    let bindings = vec![own_proof.clone(), bob_proof];
+    let grants = bindings
+        .iter()
+        .enumerate()
+        .map(|(index, proof)| {
+            let accepted = projection
+                .accepted
+                .iter()
+                .find(|member| member.public == proof.public())
+                .unwrap();
+            AccountGrant {
+                incarnation: [index as u8 + 1; 16],
+                pending: false,
+                original: proof.clone(),
+                membership_event: accepted.membership_event,
+                acceptance_event: accepted.acceptance_event,
+            }
+        })
+        .collect();
+    let authority = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: own_proof,
+        owner_account: owner.account.public().ed25519_pub,
+        grants,
+        revoked: Vec::new(),
+        legacy_bindings: bindings,
+        account_signature: Vec::new(),
+    };
+    owner
+        .append_event(
+            channel,
+            EventKind::ChannelAccountAuthority,
+            authority.signed_encode(channel, &owner.account),
+        )
+        .unwrap();
+    owner.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&owner, channel);
+    {
+        let book = owner.channels.lock().unwrap();
+        let state = book.state(&channel).unwrap();
+        assert_eq!(state.owner_account_id(), Some(owner.account_id().as_str()));
+        assert!(!state.members().contains(&bob_sibling.public()));
+    }
+    // Keep fixture preparation outside the measured observation window.
+    let mut ids = vec![event];
+    for body in [
+        b"second custody row".as_slice(),
+        b"third custody row".as_slice(),
+    ] {
+        let id = owner
+            .enqueue_channel_message_reply_expiring_if(channel, body, None, None, |commit| commit())
+            .unwrap();
+        owner
+            .publish_channel_custody(channel, id, &bob_sibling.public(), true, false, false)
+            .unwrap();
+        ids.push(id);
+    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let verifies = Arc::new(AtomicUsize::new(0));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let verifies = verifies.clone();
+        move |_, phase| {
+            if phase == "custody_holder_certificate_verify" {
+                verifies.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }));
+    assert_eq!(
+        owner.channel_custody_counts(channel, &ids).unwrap(),
+        vec![(Some(1), Some(0)); 3]
+    );
+    let first = verifies.swap(0, Ordering::SeqCst);
+    assert_eq!(
+        owner.channel_custody_counts(channel, &ids).unwrap(),
+        vec![(Some(1), Some(0)); 3]
+    );
+    let second = verifies.load(Ordering::SeqCst);
+    *owner.account_client_test_hook.lock().unwrap() = None;
+    assert_eq!(
+        first, 1,
+        "one intrinsic verification for a repeated full certificate per request"
+    );
+    assert_eq!(
+        second, 1,
+        "the next request must independently verify the certificate"
+    );
+
+    assert!(
+        owner
+            .channel_custody_counts(channel, &[])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        owner
+            .channel_custody_counts(channel, &vec![event; 257])
+            .is_err()
+    );
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &vec![event; 256])
+            .unwrap()
+            .len(),
+        256
+    );
+    let unknown = EventId::new([0x5a; 32]);
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &[ids[2], unknown, ids[0], ids[2]])
+            .unwrap(),
+        vec![
+            (Some(1), Some(0)),
+            (None, None),
+            (Some(1), Some(0)),
+            (Some(1), Some(0))
+        ]
+    );
+    // The hook runs before the next row without any custody/document guard held.
+    // Repeated ids must observe new tombstones even when the certificate was cached.
+    let rows = Arc::new(AtomicUsize::new(0));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let owner = Arc::downgrade(&owner);
+        let holder = bob_sibling.public();
+        let rows = rows.clone();
+        move |_, phase| {
+            if phase == "custody_batch_before_row" && rows.fetch_add(1, Ordering::SeqCst) == 1 {
+                owner
+                    .upgrade()
+                    .unwrap()
+                    .publish_channel_custody(channel, event, &holder, false, false, false)
+                    .unwrap();
+            }
+        }
+    }));
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &[event, event])
+            .unwrap(),
+        vec![(Some(1), Some(0)), (Some(0), Some(0))]
+    );
+    *owner.account_client_test_hook.lock().unwrap() = None;
+
+    owner
+        .publish_channel_custody(channel, event, &bob.public(), true, false, false)
+        .unwrap();
+    let rows = Arc::new(AtomicUsize::new(0));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let owner = Arc::downgrade(&owner);
+        move |_, phase| {
+            if phase == "custody_batch_before_row" && rows.fetch_add(1, Ordering::SeqCst) == 1 {
+                let owner = owner.upgrade().unwrap();
+                let (parents, lamport) = owner.log.lock().unwrap().prepare(&channel).unwrap();
+                let preference = Event::new(
+                    &bob,
+                    channel,
+                    1,
+                    parents,
+                    lamport,
+                    1,
+                    EventKind::ChannelReplica,
+                    vec![0],
+                );
+                owner.log.lock().unwrap().append(preference).unwrap();
+                owner.process_channel(channel);
+                crate::node::test_support::settle_group_metadata(&owner, channel);
+                assert!(!owner.channel_replica_enabled(channel, &bob.public().user_id()));
+            }
+        }
+    }));
+    assert_eq!(
+        owner
+            .channel_custody_counts(channel, &[event, event])
+            .unwrap(),
+        vec![(Some(1), Some(0)), (Some(0), Some(0))]
+    );
+    *owner.account_client_test_hook.lock().unwrap() = None;
 }
 
 #[tokio::test]
@@ -11840,8 +12321,33 @@ async fn disabled_profile_sync_defers_sibling_avatar_until_enabled() {
         EventKind::Profile,
         ciphertext,
     );
+    let id = event.id;
     node.log.lock().unwrap().append(event).unwrap();
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
     node.process_profile_events(conversation);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads
+    );
+    assert!(
+        !node
+            .profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
     assert_eq!(node.peer_avatar(&account.account_id()).unwrap(), None);
     node.set_device_sync_category(crate::node::SyncCategory::Profile, true)
         .unwrap();
@@ -14195,6 +14701,549 @@ async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance(
         assert!(
             incoming.try_recv().is_err(),
             "retry duplicated a receipt or terminal"
+        );
+    }
+}
+
+fn append_pending_profile(
+    node: &Node,
+    source: &DeviceIdentity,
+    account: &crate::identity::account::Account,
+    revision: u64,
+) -> (ConversationId, crate::eventlog::event::EventId) {
+    let conversation = dm_conversation_id(&source.public(), &node.identity.public());
+    let profile = crate::node::AccountProfile::new(
+        account,
+        revision,
+        "Pending peer".into(),
+        "bio".into(),
+        None,
+    );
+    let event = Event::new(
+        source,
+        conversation,
+        revision,
+        vec![],
+        revision,
+        revision,
+        EventKind::Profile,
+        crate::dm::seal(
+            source,
+            &node.identity.public().x25519_pub,
+            &profile.encode(),
+        )
+        .unwrap(),
+    );
+    let id = event.id;
+    node.log.lock().unwrap().append(event).unwrap();
+    (conversation, id)
+}
+
+#[test]
+fn completed_ordinary_receive_callbacks_are_quiet_without_body_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let conversation = ConversationId::new([231; 32]);
+    // Retain a real ordinary conversation. Locally authored rows have no
+    // incoming presentation or control work after metadata discovery drains.
+    node.log
+        .lock()
+        .unwrap()
+        .append(Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Message,
+            vec![0; 64],
+        ))
+        .unwrap();
+    node.emit_new_messages(conversation);
+    node.project_private_dm_controls(conversation).unwrap();
+    let database = node.storage.database();
+    let pending: i64 = database
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM participant_receive_pending",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(pending, 0, "fixture must drain both receive purposes");
+    let body_reads = || {
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+    };
+    for controls_only in [false, true] {
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let reads = body_reads();
+        for _ in 0..8 {
+            if controls_only {
+                node.project_private_dm_controls(conversation).unwrap();
+            } else {
+                node.emit_new_messages(conversation);
+            }
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "empty ordinary receive callbacks must not mutate SQL state; controls_only={controls_only}"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(body_reads(), reads);
+    }
+}
+
+#[test]
+fn discovered_profile_demand_precedes_cursor_ack_and_retries_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let (foreign, _) = append_pending_profile(&node, &source, &account, 1);
+    let own = ConversationId::new([228; 32]);
+    node.log
+        .lock()
+        .unwrap()
+        .append(Event::new(
+            &node.identity,
+            own,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Profile,
+            vec![0; 64],
+        ))
+        .unwrap();
+    let database = node.storage.database();
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    database.transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_discovered_demand BEFORE INSERT ON event_profile_requests BEGIN SELECT RAISE(ABORT,'demand failure'); END;")?;
+        Ok(())
+    }).unwrap();
+    node.process_profile_events(foreign);
+    assert_eq!(
+        node.profile_receive_work.lock().unwrap().after().unwrap(),
+        None
+    );
+    database.transaction(|c| {
+        c.execute_batch("DROP TRIGGER fail_discovered_demand; CREATE TEMP TRIGGER fail_discovered_ack BEFORE UPDATE OF after_commit ON profile_receive_scan BEGIN SELECT RAISE(ABORT,'ack failure'); END;")?;
+        Ok(())
+    }).unwrap();
+    node.process_profile_events(foreign);
+    assert_eq!(
+        node.profile_receive_work.lock().unwrap().after().unwrap(),
+        None
+    );
+    let requests: i64 = database
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM event_profile_requests", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        requests, 2,
+        "own and foreign Profile headers both schedule maintenance"
+    );
+    let before = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .observe_profile_work()
+        .unwrap();
+    database
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_discovered_ack")?;
+            Ok(())
+        })
+        .unwrap();
+    *node.profile_receive_work.lock().unwrap() =
+        crate::storage::profile::profile_receive::ProfileReceiveWork::open(node.storage.clone())
+            .unwrap();
+    node.process_profile_events(own);
+    assert!(
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .after()
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .observe_profile_work()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads
+    );
+}
+
+#[test]
+fn discovered_profile_batch_revalidates_retained_metadata_and_deduplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let (conversation, _) = append_pending_profile(&node, &source, &account, 1);
+    let log = node.log.lock().unwrap();
+    let repo = log.repository().unwrap();
+    let page = repo.committed_headers_page(None, 128).unwrap();
+    let before = repo.observe_profile_work().unwrap();
+    let mut stale = page.clone();
+    stale[0].ordinal += 1;
+    repo.request_discovered_profile_maintenance(&stale).unwrap();
+    assert_eq!(repo.observe_profile_work().unwrap(), before);
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "UPDATE event_conversations SET lifecycle=1 WHERE conversation=?1",
+                [conversation.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    repo.request_discovered_profile_maintenance(&page).unwrap();
+    assert_eq!(repo.observe_profile_work().unwrap(), before);
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "UPDATE event_conversations SET lifecycle=0 WHERE conversation=?1",
+                [conversation.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let commits = node.storage.database().successful_write_commits();
+    repo.request_discovered_profile_maintenance(&[page[0], page[0]])
+        .unwrap();
+    assert_eq!(
+        node.storage.database().successful_write_commits(),
+        commits + 1
+    );
+    let after = repo.observe_profile_work().unwrap();
+    assert_eq!(after.source_revision, before.source_revision + 1);
+    repo.request_discovered_profile_maintenance(&page).unwrap();
+    assert_eq!(repo.observe_profile_work().unwrap(), after);
+}
+
+#[test]
+fn existing_conversation_profile_callbacks_preserve_completed_negative_maintenance() {
+    use crate::eventlog::repository::maintenance::MaintenanceState;
+    use crate::eventlog::repository::pages::PageBudget;
+
+    for profile_count in [0, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let node = personal_message_node(
+            dir.path(),
+            DeviceIdentity::generate(),
+            crate::identity::account::Account::generate(),
+        );
+        let ordinary = ConversationId::new([229; 32]);
+        let negative = ConversationId::new([230; 32]);
+        for sequence in 1..=12 {
+            node.log
+                .lock()
+                .unwrap()
+                .append(Event::new(
+                    &node.identity,
+                    negative,
+                    sequence,
+                    vec![],
+                    sequence,
+                    sequence,
+                    EventKind::Profile,
+                    vec![0; 64],
+                ))
+                .unwrap();
+        }
+        node.log
+            .lock()
+            .unwrap()
+            .append(Event::new(
+                &node.identity,
+                ordinary,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::Message,
+                vec![0; 64 * 1024],
+            ))
+            .unwrap();
+        for sequence in 2..2 + profile_count {
+            node.log
+                .lock()
+                .unwrap()
+                .append(Event::new(
+                    &node.identity,
+                    ordinary,
+                    sequence,
+                    vec![],
+                    sequence,
+                    sequence,
+                    EventKind::Profile,
+                    vec![0; 64],
+                ))
+                .unwrap();
+        }
+        // Discover every header before measuring callbacks with no new input.
+        node.process_profile_events(ordinary);
+        node.process_profile_events(negative);
+        let settle = || {
+            let log = node.log.lock().unwrap();
+            let repo = log.repository().unwrap();
+            let token = repo.begin_profile_maintenance().unwrap();
+            for _ in 0..100 {
+                let progress = repo
+                    .step_profile_maintenance(
+                        token,
+                        PageBudget {
+                            rows: 128,
+                            bytes: 128 * 512,
+                        },
+                    )
+                    .unwrap();
+                if progress.state == MaintenanceState::Ready {
+                    assert_eq!(progress.candidates, 10);
+                    assert_eq!(repo.apply_profile_maintenance(token).unwrap().dropped, 0);
+                    return;
+                }
+                assert_eq!(progress.state, MaintenanceState::Pending);
+            }
+            panic!("negative maintenance did not complete");
+        };
+        settle();
+        let observe = || {
+            let log = node.log.lock().unwrap();
+            let repo = log.repository().unwrap();
+            (
+                repo.observe_profile_work().unwrap(),
+                repo.body_read_counts(),
+            )
+        };
+        let before = observe();
+        assert!(before.0.job.as_ref().unwrap().complete);
+        for _ in 0..8 {
+            node.process_profile_events(ordinary);
+            assert_eq!(
+                observe(),
+                before,
+                "existing conversation callbacks must preserve negative jobs and raw demand"
+            );
+            // The real maintenance scanner retires no-candidate requests here.
+            settle();
+            assert_eq!(observe(), before);
+        }
+    }
+}
+
+#[test]
+fn unrelated_profile_callbacks_leave_unknown_pending_work_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let (conversation, id) = append_pending_profile(&node, &source, &account, 1);
+    node.process_profile_events(conversation);
+    let other = ConversationId::new([231; 32]);
+    node.process_profile_events(other); // warm metadata and compaction demand
+    let database = node.storage.database();
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let commits = database.successful_write_commits();
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    for _ in 0..8 {
+        node.process_profile_events(other);
+    }
+    assert_eq!(
+        database.read(|c| Ok(c.total_changes())).unwrap(),
+        changes,
+        "unrelated callbacks must not rotate pending profile work"
+    );
+    assert_eq!(database.successful_write_commits(), commits);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads
+    );
+    assert!(
+        !node
+            .profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
+}
+
+#[test]
+fn unknown_profile_callback_skips_body_then_verified_proof_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let (conversation, id) = append_pending_profile(&node, &source, &account, 1);
+    let reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    node.process_profile_events(conversation);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        reads,
+        "unknown routing identity must be checked before reading ciphertext"
+    );
+    assert!(
+        !node
+            .profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
+    add_account_peer(
+        &node.roster,
+        &source,
+        &account,
+        "Verified",
+        4000,
+        &node.identity.public().user_id(),
+    );
+    node.process_profile_events(conversation);
+    assert_eq!(
+        node.account_profile(&account.account_id())
+            .unwrap()
+            .unwrap()
+            .display_name,
+        "Pending peer"
+    );
+    assert!(
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap()
+    );
+}
+
+#[test]
+fn known_profile_callback_progresses_behind_blocked_other_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        crate::identity::account::Account::generate(),
+    );
+    let unknown = DeviceIdentity::generate();
+    let unknown_account = crate::identity::account::Account::generate();
+    let mut blocked = Vec::new();
+    for revision in 1..=16 {
+        blocked.push(append_pending_profile(&node, &unknown, &unknown_account, revision).1);
+    }
+    let known = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    add_account_peer(
+        &node.roster,
+        &known,
+        &account,
+        "Verified",
+        4000,
+        &node.identity.public().user_id(),
+    );
+    let (conversation, id) = append_pending_profile(&node, &known, &account, 1);
+    node.process_profile_events(conversation);
+    assert!(
+        node.profile_receive_work
+            .lock()
+            .unwrap()
+            .processed(id)
+            .unwrap(),
+        "own callback must reach known work behind unrelated blocked tickets"
+    );
+    assert!(
+        node.account_profile(&account.account_id())
+            .unwrap()
+            .is_some()
+    );
+    for id in blocked {
+        assert!(
+            !node
+                .profile_receive_work
+                .lock()
+                .unwrap()
+                .processed(id)
+                .unwrap()
         );
     }
 }

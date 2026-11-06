@@ -29,6 +29,11 @@ use std::sync::Mutex;
 
 mod indexed;
 
+#[cfg(test)]
+pub(in crate::node) mod prune_observations {
+    std::thread_local! { pub static ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+}
+
 pub(in crate::node) type ManagedFiles =
     Box<dyn Iterator<Item = std::io::Result<(ConversationId, PathBuf)>>>;
 
@@ -339,6 +344,14 @@ impl MediaStore {
         Ok(())
     }
 
+    /// Scalar namespace changes invalidate a successful reference prune.
+    pub(in crate::node) fn inventory_revision(&self) -> std::io::Result<Option<i64>> {
+        self.index
+            .as_ref()
+            .map(|index| index.revision())
+            .transpose()
+    }
+
     /// Recover from a crash between local card erasure and managed-file removal.
     pub fn prune_unreferenced(&self, live: &HashSet<ConversationId>) -> std::io::Result<()> {
         self.prune_unreferenced_where(|file| Ok(live.contains(&file)))
@@ -353,6 +366,8 @@ impl MediaStore {
             let mut after = None;
             loop {
                 let page = index.prune_page(after.as_deref())?;
+                #[cfg(test)]
+                prune_observations::ROWS.with(|count| count.set(count.get() + page.len()));
                 if page.is_empty() {
                     return Ok(());
                 }
@@ -1403,6 +1418,91 @@ mod tests {
         store.schedule_gc().unwrap();
         assert!(store.gc_step(|_| Ok(false)).is_err());
         assert_eq!(std::fs::read(external).unwrap(), b"outside media directory");
+    }
+
+    #[test]
+    fn indexed_media_completed_empty_gc_steps_do_not_write_and_new_schedule_collects() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = indexed_profile(directory.path());
+        let store =
+            MediaStore::open_profile(profile.clone(), directory.path(), "password", "owner", None)
+                .unwrap();
+        store.schedule_gc().unwrap();
+        store
+            .gc_step(|_| panic!("empty GC cannot consult a file reference"))
+            .unwrap();
+        assert!(!store.gc_pending().unwrap());
+        for cycle in 0..2 {
+            let database = profile.database();
+            let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+            let commits = database.successful_write_commits();
+            for _ in 0..16 {
+                store
+                    .gc_step(|_| panic!("completed empty GC must stay empty"))
+                    .unwrap();
+            }
+            assert_eq!(
+                database.read(|c| Ok(c.total_changes())).unwrap(),
+                changes,
+                "completed media GC must not rewrite unchanged namespace state (cycle={cycle})"
+            );
+            assert_eq!(
+                database.successful_write_commits(),
+                commits,
+                "completed media GC must not commit redundant writes (cycle={cycle})"
+            );
+            if cycle == 0 {
+                let file = indexed_id(401);
+                store
+                    .store_bytes(file, "image.png", b"new unreferenced publication")
+                    .unwrap();
+                assert!(store.contains(file));
+                store.schedule_gc().unwrap();
+                assert!(store.gc_pending().unwrap());
+                for _ in 0..4 {
+                    if !store.gc_pending().unwrap() {
+                        break;
+                    }
+                    store.gc_step(|_| Ok(false)).unwrap();
+                }
+                assert!(!store.gc_pending().unwrap(), "new scheduled GC must finish");
+                assert!(
+                    !store.contains(file),
+                    "quiet completion must not suppress later orphan collection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_media_empty_gc_completion_failure_keeps_pending_until_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = indexed_profile(directory.path());
+        let store =
+            MediaStore::open_profile(profile.clone(), directory.path(), "password", "owner", None)
+                .unwrap();
+        store.schedule_gc().unwrap();
+        profile.database().read(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER reject_media_gc_completion BEFORE UPDATE OF gc_active ON main.media_namespaces WHEN OLD.gc_active=1 AND NEW.gc_active=0 BEGIN SELECT RAISE(ABORT,'injected media GC completion failure'); END")?;
+            Ok(())
+        }).unwrap();
+        assert!(store.gc_step(|_| Ok(false)).is_err());
+        assert!(
+            store.gc_pending().unwrap(),
+            "failed completion cannot consume the GC schedule"
+        );
+        profile
+            .database()
+            .read(|c| {
+                c.execute_batch("DROP TRIGGER temp.reject_media_gc_completion")?;
+                Ok(())
+            })
+            .unwrap();
+        store.gc_step(|_| Ok(false)).unwrap();
+        assert!(
+            !store.gc_pending().unwrap(),
+            "completion must remain retryable after storage recovery"
+        );
     }
 
     #[test]

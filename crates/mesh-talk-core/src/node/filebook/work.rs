@@ -41,6 +41,17 @@ impl IndexedFileBook {
         })
     }
     pub(crate) fn discover_downloads(&self, generation: u64) -> Result<(), LogError> {
+        let completed = self.profile.database().read(|c| {
+            self.check(c)?;
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM file_download_scan WHERE account=?1 AND policy=?2 AND done=1)",
+                params![self.account.as_slice(), generation.to_be_bytes().as_slice()],
+                |r| r.get::<_, bool>(0),
+            ).map_err(Into::into)
+        })?;
+        if completed {
+            return Ok(());
+        }
         self.request_download_scan(generation)?;
         self.profile.database().transaction(|c| {
             self.check(c)?;

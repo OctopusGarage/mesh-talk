@@ -7,7 +7,9 @@ use crate::{
         event::EventKind,
         repository::{
             EventRepository,
-            order::{CausalOrder, OrderReadState, OrderReadiness, OrderWorkBudget},
+            order::{
+                CausalOrder, OrderGeneration, OrderReadState, OrderReadiness, OrderWorkBudget,
+            },
             pages::PageBudget,
         },
     },
@@ -57,14 +59,26 @@ impl ChannelCheckpointStore {
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
             for row in &page {
-                if !row.active { continue; }
-                let known:bool=row.header.kind==EventKind::MembershipChange || c.query_row("SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1) OR EXISTS(SELECT 1 FROM channel_dirty WHERE channel=?1)",[row.header.conversation.as_bytes().as_slice()],|r|r.get(0))?;
+                if !row.active {
+                    continue;
+                }
+                let known = row.header.kind == EventKind::MembershipChange
+                    || self.has_local_channel_checkpoint_on(c, row.header.conversation)?;
                 if known {
-                    c.execute("INSERT OR IGNORE INTO channel_dirty VALUES(?1)",[row.header.conversation.as_bytes().as_slice()])?;
-                    work::queue_discovered_on(c,row.header.conversation,row.ordinal)?;
+                    c.execute(
+                        "INSERT OR IGNORE INTO channel_dirty VALUES(?1)",
+                        [row.header.conversation.as_bytes().as_slice()],
+                    )?;
+                    work::queue_discovered_on(c, row.header.conversation, row.ordinal)?;
                 }
             }
-            if c.execute("UPDATE channel_source_scan SET ordinal=?2 WHERE singleton=1 AND ordinal=?1",params![after,last])?!=1 { return Err(LogError::StaleCursor); }
+            if c.execute(
+                "UPDATE channel_source_scan SET ordinal=?2 WHERE singleton=1 AND ordinal=?1",
+                params![after, last],
+            )? != 1
+            {
+                return Err(LogError::StaleCursor);
+            }
             Ok(())
         })?;
         Ok(true)
@@ -91,6 +105,30 @@ impl ChannelCheckpointStore {
         channel: ConversationId,
         budget: PreparationBudget,
     ) -> Result<PreparationStep, LogError> {
+        self.project_step_for_target(repository, me, channel, budget, None)
+    }
+
+    /// Reuse the ordinary reducer, stopping at an immutable network prefix.
+    /// The caller retains exact raw-control and destructive-policy fences.
+    pub(in crate::node) fn project_network_prefix_step(
+        &self,
+        repository: &EventRepository,
+        me: &DeviceIdentity,
+        channel: ConversationId,
+        target: OrderGeneration,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.project_step_for_target(repository, me, channel, budget, Some(target))
+    }
+
+    fn project_step_for_target(
+        &self,
+        repository: &EventRepository,
+        me: &DeviceIdentity,
+        channel: ConversationId,
+        budget: PreparationBudget,
+        target: Option<OrderGeneration>,
+    ) -> Result<PreparationStep, LogError> {
         budget.validate()?;
         let order = repository.order_step(
             &channel,
@@ -111,13 +149,36 @@ impl ChannelCheckpointStore {
             return Ok(work);
         }
         let Some(generation) = repository.order_generation(&channel, CausalOrder::Logical)? else {
+            if target.is_some() {
+                return Err(LogError::StaleCursor);
+            }
             return Ok(PreparationStep {
                 ready: true,
                 ..work
             });
         };
-        let count =
-            i64::try_from(generation.count).map_err(|_| LogError::RepositoryCounterExhausted)?;
+        if target.is_some_and(|target| {
+            target.job != generation.job
+                || target.count > generation.count
+                || target.source_revision > generation.source_revision
+        }) {
+            return Err(LogError::StaleCursor);
+        }
+        let count = i64::try_from(target.map_or(generation.count, |target| target.count))
+            .map_err(|_| LogError::RepositoryCounterExhausted)?;
+        if target.is_some() {
+            let covered:bool=self.profile.database().read(|c| {
+                self.check_account_on(c)?;
+                require_source_on(c,channel,generation.job,generation.source_revision)?;
+                c.query_row("SELECT COALESCE((SELECT next_rank FROM channel_projection_work WHERE job=?1 AND channel=?2),0)>=?3",params![generation.job.as_slice(),channel.as_bytes().as_slice(),count],|r|r.get(0)).map_err(Into::into)
+            })?;
+            if covered {
+                return Ok(PreparationStep {
+                    ready: true,
+                    ..work
+                });
+            }
+        }
         let already:bool=self.profile.database().read(|c| {
             self.check_account_on(c)?;
             c.query_row("SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1 AND source_job=?2 AND source_revision=?3 AND next_rank=?4 AND owner_account=?5)",
@@ -205,11 +266,17 @@ impl ChannelCheckpointStore {
                 let binding = crate::node::channel::graph::preparing::DecisionBinding {
                     job: generation.job,
                     source_job: generation.job,
-                    revision: generation.source_revision,
+                    revision: target
+                        .map_or(generation.source_revision, |target| target.source_revision),
                     channel,
                     event: header.id,
                 };
-                let graph = PreparingGraph::open(
+                let open_graph = if target.is_some() {
+                    PreparingGraph::open_network_prefix
+                } else {
+                    PreparingGraph::open
+                };
+                let graph = open_graph(
                     self.profile.clone(),
                     repository,
                     binding,
@@ -234,7 +301,7 @@ impl ChannelCheckpointStore {
                     return Err(LogError::StaleCursor);
                 }
                 work.bytes += snapshot;
-                let graph = PreparingGraph::open(
+                let graph = open_graph(
                     self.profile.clone(),
                     repository,
                     binding,
@@ -380,6 +447,14 @@ impl ChannelCheckpointStore {
         if actual != next {
             return Err(LogError::StaleCursor);
         }
+        if target.is_some() {
+            // Prefix readiness never certifies the current whole source and
+            // therefore cannot replace channel_current or clear dirty work.
+            return Ok(PreparationStep {
+                ready: true,
+                ..work
+            });
+        }
         work.bytes = snapshot;
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
@@ -498,7 +573,12 @@ impl ChannelCheckpointStore {
             let removed=self.profile.database().transaction(|c| {
                 self.check_account_on(c)?;
                 require_source_on(c,channel,job,revision)?;
+                // A newly discovered legacy future cut changes reducer facts
+                // even when the canonical job survives. Retire its scratch
+                // together with those facts before replaying the same event.
+                crate::node::channel::graph::preparing::retire_selection_on(c,job.as_slice(),channel.as_bytes().as_slice())?;
                 for (table,key) in [
+                    ("channel_decision_answers","key"),("channel_decision_work","channel"),
                     ("channel_event_authority","event"),("channel_departure_facts","member,event"),
                     ("channel_membership_snapshots","rank"),("channel_causal_states","event"),
                     ("channel_activities","event"),("channel_replica_preferences","member"),
@@ -522,7 +602,18 @@ impl ChannelCheckpointStore {
                 ..Default::default()
             });
         }
-        if next == count {
+        if next >= count {
+            if next > count {
+                // Another projector may have covered a later ordinary prefix.
+                // A cursor beyond the actual source still fails closed.
+                let actual = repository
+                    .order_generation(&channel, CausalOrder::Logical)?
+                    .ok_or(LogError::StaleCursor)?;
+                if actual.job != job || !u64::try_from(next).is_ok_and(|next| next <= actual.count)
+                {
+                    return Err(LogError::StaleCursor);
+                }
+            }
             return Ok(PreparationStep {
                 ready: true,
                 ..Default::default()
@@ -533,7 +624,10 @@ impl ChannelCheckpointStore {
                 required: HEADER_CHARGE + 256,
             });
         }
-        let OrderReadState::Ready(page) = repository.causal_headers_after_rank(
+        // Inspect the first header before admitting an ordinary batch. A
+        // pending cut must retain the full remaining allowance: its reducer may
+        // need several facts before it can durably checkpoint one decision.
+        let OrderReadState::Ready(mut page) = repository.causal_headers_after_rank(
             &channel,
             CausalOrder::Logical,
             job,
@@ -546,35 +640,73 @@ impl ChannelCheckpointStore {
         else {
             return Ok(PreparationStep::default());
         };
+        let first_is_cut = page.items.first().is_some_and(|header| {
+            header.kind == EventKind::ChannelLeave && header.ciphertext_bytes == 0
+        });
+        if !first_is_cut
+            && !page.items.is_empty()
+            && budget.rows > 1
+            && count - next > 1
+            && budget.bytes - page.charged_bytes >= HEADER_CHARGE
+        {
+            let OrderReadState::Ready(tail) = repository.causal_headers_after_rank(
+                &channel,
+                CausalOrder::Logical,
+                job,
+                next,
+                PageBudget {
+                    rows: (budget.rows - 1).min(
+                        usize::try_from(count - next - 1)
+                            .map_err(|_| LogError::RepositoryCounterExhausted)?,
+                    ),
+                    bytes: budget.bytes - page.charged_bytes,
+                },
+            )?
+            else {
+                return Err(LogError::StaleCursor);
+            };
+            page.charged_bytes += tail.charged_bytes;
+            page.items.reserve_exact(tail.items.len());
+            page.items.extend(tail.items);
+        }
         let mut through = next;
         let mut candidate = None;
-        let mut work = PreparationStep::default();
+        let mut work = PreparationStep {
+            rows: page.items.len(),
+            bytes: page.charged_bytes,
+            ..Default::default()
+        };
         for header in page.items {
-            work.rows = 1;
-            work.bytes = HEADER_CHARGE;
             through += 1;
             if header.kind != EventKind::ChannelLeave || header.ciphertext_bytes != 0 {
                 continue;
             }
-            if budget.rows < 3 {
-                // A valid caller remainder can pay for this selected header
-                // without enough rows for its causal cut. Charge that read,
-                // retain the cursor, and resume under the next allowance.
-                return Ok(work);
+            if !first_is_cut {
+                // The ordinary page may look ahead to a leave. Charge that I/O
+                // but give its causal cut a fresh full allowance next turn.
+                through -= 1;
+                break;
+            }
+            let remaining = PreparationBudget {
+                rows: budget.rows - work.rows,
+                edges: budget.edges,
+                bytes: budget.bytes - work.bytes,
+            };
+            if remaining.rows >= 2 && remaining.bytes < HEADER_CHARGE + 256 {
+                return Err(LogError::PageBudgetTooSmall {
+                    required: HEADER_CHARGE * 2 + 256,
+                });
+            }
+            if remaining.rows < 2 {
+                // Keep the selected leave at the cursor until a later turn can
+                // pay for its cut, but retain any preceding ordinary prefix.
+                through -= 1;
+                break;
             }
             // Retained headers were admitted only after integrity/signature
             // validation. This empty legacy control needs no body or parent Vec.
-            let (cut, charged) = self.legacy_cut_step(
-                repository,
-                &header,
-                job,
-                revision,
-                PreparationBudget {
-                    rows: budget.rows - 1,
-                    edges: budget.edges,
-                    bytes: budget.bytes - HEADER_CHARGE,
-                },
-            )?;
+            let (cut, charged) =
+                self.legacy_cut_step(repository, &header, job, revision, remaining)?;
             work = add_work(work, charged);
             match cut {
                 super::causal::LegacyCut::Pending => {
@@ -584,6 +716,12 @@ impl ChannelCheckpointStore {
                     candidate = value.map(|value| (value.event, value.member));
                 }
             }
+            // Future-cut preparation retains its existing single-cut owner;
+            // this turn has admitted no ordinary lookahead beside that cut.
+            break;
+        }
+        if through == next && candidate.is_none() {
+            return Ok(work);
         }
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;

@@ -50,25 +50,6 @@ impl EventRepository {
         })?;
         Ok(Some(selection))
     }
-    pub(crate) fn insert_selection_row(
-        &self,
-        selection: &Selection,
-        view: &NetworkView,
-        row: SelectionRow,
-    ) -> Result<bool, LogError> {
-        self.database.transaction(|c| {
-            self.require_selection_on(c, selection)?;
-            self.validate_network_on(c, view)?;
-            let inserted=c.execute("INSERT OR IGNORE INTO participant_sync_rows(view,id,rank,candidate,selected,own) SELECT ?1,id,?2,?3,?4,?5 FROM retained_events WHERE domain=?6 AND conversation=?7 AND id=?8 AND commit_ordinal<?9",params![selection.id.as_slice(),row.rank,row.candidate,row.selected,row.own,self.domain.0.as_slice(),row.header.conversation.as_bytes().as_slice(),row.header.id.as_bytes().as_slice(),view.binding.cutoff])?;
-            if inserted != 0 && row.receipt {
-                c.execute("INSERT INTO participant_sync_receipts VALUES(?1,?2)",params![selection.id.as_slice(),row.header.id.as_bytes().as_slice()])?;
-            }
-            // Retrying the same durable cursor may revisit a committed row.
-            // Membership remains true while its caller replays the scalar count.
-            let retained:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2)",params![selection.id.as_slice(),row.header.id.as_bytes().as_slice()],|r|r.get(0))?;
-            Ok(retained)
-        })
-    }
     pub(crate) fn selected_contains(
         &self,
         selection: &Selection,
@@ -92,7 +73,7 @@ impl EventRepository {
         view: &NetworkView,
         event: EventId,
         after: Option<EventId>,
-        receipts_only: bool,
+        (receipts_only, pending): (bool, &[SelectionRow]),
         edges: usize,
     ) -> Result<ParentStep, LogError> {
         let limit = crate::eventlog::sync::network::scan_limit(edges)?;
@@ -107,7 +88,7 @@ impl EventRepository {
                 if result.examined == edges { return Ok(result); }
                 result.after=Some(EventId::new(blob(row,0)?));
                 result.examined+=1;
-                if !row.get::<_,bool>(1)? {result.closed=false; result.complete=true;return Ok(result);}
+                if !row.get::<_,bool>(1)? && !pending.iter().any(|accepted| accepted.header.id == result.after.expect("examined parent") && (!receipts_only || accepted.receipt)) {result.closed=false; result.complete=true;return Ok(result);}
             }
             result.complete=true;
             Ok(result)
@@ -144,14 +125,22 @@ impl EventRepository {
         view: &NetworkView,
         job: [u8; 16],
         rank: i64,
+        require_finite_prefix: bool,
     ) -> Result<Option<EventHeader>, LogError> {
         self.database.read(|c| {
             self.validate_network_on(c,view)?;
             self.require_selection_order_on(c,view,job)?;
             let columns=HEADER_COLUMNS.split(',').map(|name|format!("e.{name}")).collect::<Vec<_>>().join(",");
-            let mut stmt=c.prepare(&format!("SELECT {columns} FROM event_order_rows r JOIN retained_events e ON e.domain=?1 AND e.id=r.id WHERE r.job=?2 AND r.rank=?3"))?;
+            let mut stmt=c.prepare(&format!("SELECT {columns},e.commit_ordinal FROM event_order_rows r JOIN retained_events e ON e.domain=?1 AND e.id=r.id WHERE r.job=?2 AND r.rank=?3"))?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),job.as_slice(),rank])?;
-            rows.next()?.map(read_header).transpose()
+            rows.next()?.map(|row| {
+                // A newly built order can include a lower-priority append made
+                // after capture. Such a row cannot displace the finite prefix.
+                if require_finite_prefix && nonnegative(row.get(12)?)? >= view.binding.cutoff {
+                    return Err(LogError::StaleCursor);
+                }
+                read_header(row)
+            }).transpose()
         })
     }
     fn require_selection_order_on(
@@ -315,9 +304,39 @@ impl EventRepository {
         view: &NetworkView,
         context: &[u8],
     ) -> Result<(), LogError> {
-        self.database.transaction(|c|{
-            self.require_selection_on(c,selection)?;self.validate_network_on(c,view)?;
-            c.execute("INSERT INTO participant_sync_progress VALUES(?1,?2) ON CONFLICT(view) DO UPDATE SET context=excluded.context",params![selection.id.as_slice(),context])?;
+        self.save_selection_batch(selection, view, &[], context)
+    }
+    /// Publish one bounded admission turn and its resume cursor together. The
+    /// caller's policy checks remain authoritative; this owner fences retention,
+    /// scope and incarnation again before making any buffered decisions durable.
+    pub(crate) fn save_selection_batch(
+        &self,
+        selection: &Selection,
+        view: &NetworkView,
+        rows: &[SelectionRow],
+        context: &[u8],
+    ) -> Result<(), LogError> {
+        self.database.transaction(|c| {
+            self.require_selection_on(c, selection)?;
+            self.validate_network_on(c, view)?;
+            for row in rows {
+                if row.header.conversation != view.binding.conversation {
+                    return Err(LogError::StaleCursor);
+                }
+                let retained: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM retained_events WHERE domain=?1 AND conversation=?2 AND id=?3 AND commit_ordinal<?4)",
+                    params![self.domain.0.as_slice(), view.binding.conversation.as_bytes().as_slice(), row.header.id.as_bytes().as_slice(), view.binding.cutoff],
+                    |r| r.get(0),
+                )?;
+                if !retained {
+                    return Err(LogError::StaleCursor);
+                }
+                c.execute("INSERT OR IGNORE INTO participant_sync_rows(view,id,rank,candidate,selected,own) VALUES(?1,?2,?3,?4,?5,?6)", params![selection.id.as_slice(), row.header.id.as_bytes().as_slice(), row.rank, row.candidate, row.selected, row.own])?;
+                if row.receipt {
+                    c.execute("INSERT OR IGNORE INTO participant_sync_receipts VALUES(?1,?2)", params![selection.id.as_slice(), row.header.id.as_bytes().as_slice()])?;
+                }
+            }
+            c.execute("INSERT INTO participant_sync_progress VALUES(?1,?2) ON CONFLICT(view) DO UPDATE SET context=excluded.context", params![selection.id.as_slice(), context])?;
             Ok(())
         })
     }

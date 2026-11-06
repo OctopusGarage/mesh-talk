@@ -9,6 +9,77 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[test]
+fn preferred_route_hints_bound_churn_and_retain_recent_successes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, _) = node(dir.path());
+    let address = "127.0.0.1:47479".parse().unwrap();
+    let mut routes = node.preferred_routes.lock().unwrap();
+    for index in 0..256 {
+        routes.insert(format!("{index:032x}"), address);
+    }
+    routes.insert(format!("{:032x}", 0), address);
+    routes.insert(format!("{:032x}", 256), address);
+    assert_eq!(
+        routes.len(),
+        256,
+        "successful peer churn must not grow advisory route memory"
+    );
+    assert_eq!(routes.get(&format!("{:032x}", 0)), Some(&address));
+    assert_eq!(routes.get(&format!("{:032x}", 256)), Some(&address));
+    assert!(
+        routes.get(&format!("{:032x}", 1)).is_none(),
+        "the oldest success should yield to the newly authenticated route"
+    );
+}
+
+#[tokio::test]
+async fn evicted_preferred_route_falls_back_to_current_authenticated_peer_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    alice
+        .preferred_routes
+        .lock()
+        .unwrap()
+        .insert(bob.user_id(), address);
+    for index in 0..256 {
+        alice
+            .preferred_routes
+            .lock()
+            .unwrap()
+            .insert(format!("{index:032x}"), address);
+    }
+    assert!(
+        alice
+            .preferred_routes
+            .lock()
+            .unwrap()
+            .get(&bob.user_id())
+            .is_none()
+    );
+    let expected = bob.identity.public();
+    let (connected, accepted) = tokio::join!(alice.privacy_dial(address, &expected), async {
+        let (stream, _) = listener.accept().await.unwrap();
+        bob.privacy_accept(stream).await.unwrap()
+    });
+    let connected = connected.unwrap();
+    assert_eq!(connected.peer_identity(), &bob.identity.public());
+    assert_eq!(accepted.peer_identity(), &alice.identity.public());
+    assert_eq!(
+        alice.preferred_routes.lock().unwrap().get(&bob.user_id()),
+        Some(&address)
+    );
+}
+
 #[tokio::test]
 async fn private_probe_refreshes_public_presence_before_its_lease_expires() {
     let dir = tempfile::tempdir().unwrap();
@@ -2345,9 +2416,21 @@ async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
     );
     let leave_id = leave.id;
     alice.log.lock().unwrap().append(leave).unwrap();
+    let mut denied = false;
+    for _ in 0..1024 {
+        match alice.group_member(&bob.identity.public()) {
+            Ok(false) => {
+                denied = true;
+                break;
+            }
+            Err(LogError::StaleCursor) => {}
+            Ok(true) => panic!("a stale owner snapshot restored departed peer admission"),
+            Err(error) => panic!("membership preparation failed: {error}"),
+        }
+    }
     assert!(
-        !alice.group_member(&bob.identity.public()).unwrap(),
-        "admission must honor the signed leave despite the stale owner snapshot"
+        denied,
+        "bounded admission must finish honoring the signed leave despite the stale owner snapshot"
     );
     alice
         .append_event(group, EventKind::ChannelRename, b"After leave".to_vec())

@@ -54,6 +54,7 @@ pub fn init_logging(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::er
         .targets(targets)
         .level(configured_log_level(cfg!(debug_assertions)))
         .level_for(GRAPHICS_LOG_TARGET, LogLevelFilter::Info)
+        .level_for("mesh_talk_core::node::node", LogLevelFilter::Info)
         .timezone_strategy(TimezoneStrategy::UseLocal)
         .build();
 

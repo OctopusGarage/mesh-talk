@@ -227,6 +227,49 @@ pub struct ChannelRecovery {
     pub checked_at: Option<u64>,
 }
 
+/// Only intrinsic signature results survive between rows in one bounded request.
+/// Membership, document bindings and policy are always read by their owners.
+#[derive(Hash, PartialEq, Eq)]
+struct CustodyCertificateKey {
+    account: [u8; 32],
+    device: [u8; 32],
+    signature: [u8; 64],
+}
+
+type ChannelCustodyCounts = Vec<(Option<usize>, Option<usize>)>;
+
+#[derive(Default)]
+pub(in crate::node) struct CustodyCertificateVerifier {
+    verified: HashMap<CustodyCertificateKey, bool>,
+}
+
+impl CustodyCertificateVerifier {
+    pub(in crate::node) fn verify(
+        &mut self,
+        node: &Node,
+        holder: &PublicIdentity,
+        certificate: &crate::identity::account::DeviceCertificate,
+    ) -> bool {
+        let key = CustodyCertificateKey {
+            account: certificate.account_ed25519_pub,
+            device: certificate.device_ed25519_pub,
+            signature: certificate.signature,
+        };
+        if let Some(result) = self.verified.get(&key) {
+            return *result;
+        }
+        #[cfg(test)]
+        node.trace_account_client(holder, || "custody_holder_certificate_verify".into());
+        #[cfg(not(test))]
+        let _ = (node, holder);
+        let result = certificate.verify();
+        if self.verified.len() < 256 {
+            self.verified.insert(key, result);
+        }
+        result
+    }
+}
+
 impl Node {
     /// Historical membership belonging to an account other than the active one.
     pub fn channel_previous_account(
@@ -2449,6 +2492,19 @@ impl Node {
         channel: ConversationId,
         id: EventId,
     ) -> Result<Option<usize>, NodeError> {
+        self.channel_custody_count_with_verifier(
+            channel,
+            id,
+            &mut CustodyCertificateVerifier::default(),
+        )
+    }
+
+    fn channel_custody_count_with_verifier(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+        verifier: &mut CustodyCertificateVerifier,
+    ) -> Result<Option<usize>, NodeError> {
         let physical_member = {
             let book = self.channels.lock().expect("channels mutex");
             book.state(&channel)
@@ -2510,7 +2566,8 @@ impl Node {
         if !own_local && observations.is_empty() {
             return Ok(None);
         }
-        let (principals, unreadable) = self.confirmed_channel_custody_principals(channel, id)?;
+        let (principals, unreadable) =
+            self.confirmed_channel_custody_principals_with_verifier(channel, id, verifier)?;
         if unreadable && principals.is_empty() {
             Ok(None)
         } else {
@@ -2621,6 +2678,19 @@ impl Node {
         channel: ConversationId,
         id: EventId,
     ) -> Result<(HashSet<String>, bool), NodeError> {
+        self.confirmed_channel_custody_principals_with_verifier(
+            channel,
+            id,
+            &mut CustodyCertificateVerifier::default(),
+        )
+    }
+
+    fn confirmed_channel_custody_principals_with_verifier(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+        verifier: &mut CustodyCertificateVerifier,
+    ) -> Result<(HashSet<String>, bool), NodeError> {
         let (confirmed, observations) = self.effective_channel_custody_observations(channel, id)?;
         let members = self
             .channels
@@ -2630,18 +2700,50 @@ impl Node {
             .map(|state| state.members().to_vec())
             .unwrap_or_default();
         let unreadable = observations.iter().any(|meta| {
-            !meta.tombstone && self.channel_custody_holder_binding(&meta.key).is_none()
+            !meta.tombstone
+                && self
+                    .channel_custody_holder_binding_with_verifier(&meta.key, verifier)
+                    .is_none()
         });
         let principals = confirmed.into_iter().filter_map(|device| {
             if device.starts_with("relay:") { return None; }
             if let Some(meta) = observations.iter().find(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder == &device)) {
-                let (holder, account) = self.channel_custody_holder_binding(&meta.key)?;
+                let (holder, account) = self.channel_custody_holder_binding_with_verifier(&meta.key, verifier)?;
                 return self.channel_custody_member_principal(channel, &holder, account);
             }
             let member = members.iter().find(|member| member.user_id() == device)?;
             self.channel_custody_member_principal(channel, member, None)
         }).collect();
         Ok((principals, unreadable))
+    }
+
+    /// Observe at most 256 message rows in input order, preserving unknown counts.
+    pub fn channel_custody_counts(
+        &self,
+        channel: ConversationId,
+        ids: &[EventId],
+    ) -> Result<ChannelCustodyCounts, NodeError> {
+        if ids.len() > 256 {
+            return Err(NodeError::InvalidInput(
+                "at most 256 message ids are allowed".into(),
+            ));
+        }
+        let mut counts = Vec::with_capacity(ids.len());
+        let mut verifier = CustodyCertificateVerifier::default();
+        for id in ids {
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "custody_batch_before_row".into()
+            });
+            let members = self.channel_custody_count_with_verifier(channel, *id, &mut verifier)?;
+            let post_offices = if members.is_some() {
+                self.channel_post_office_custody_count_with_verifier(channel, *id, &mut verifier)?
+            } else {
+                None
+            };
+            counts.push((members, post_offices));
+        }
+        Ok(counts)
     }
 
     /// Historical exact-wrapper custody confirmed by post offices, separate
@@ -2654,8 +2756,21 @@ impl Node {
         if self.channel_custody_count(channel, id)?.is_none() {
             return Ok(None);
         }
+        self.channel_post_office_custody_count_with_verifier(
+            channel,
+            id,
+            &mut CustodyCertificateVerifier::default(),
+        )
+    }
+
+    fn channel_post_office_custody_count_with_verifier(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+        verifier: &mut CustodyCertificateVerifier,
+    ) -> Result<Option<usize>, NodeError> {
         let (confirmed, observations) = self.effective_channel_custody_observations(channel, id)?;
-        let unreadable = observations.iter().any(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder.starts_with("relay:")) && self.channel_custody_holder_binding(&meta.key).is_none());
+        let unreadable = observations.iter().any(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder.starts_with("relay:")) && self.channel_custody_holder_binding_with_verifier(&meta.key, verifier).is_none());
         if unreadable {
             return Ok(None);
         }
@@ -3312,6 +3427,43 @@ mod fanout_tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    #[test]
+    fn channel_custody_batch_verifier_keys_full_certificate_and_bounds_retention() {
+        use crate::{
+            discovery::Announce, identity::account::Account, node::test_support::node_with_files,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let identity = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&identity, &account, "verifier", 9);
+        let (node, _, _) = node_with_files(dir.path(), identity, account, &proof);
+        let holder = DeviceIdentity::generate();
+        let certificate = node.account.certify(&holder.public().ed25519_pub);
+        let mut verifier = CustodyCertificateVerifier::default();
+        assert!(verifier.verify(&node, &holder.public(), &certificate));
+        let mut changed = certificate.clone();
+        changed.signature[0] ^= 1;
+        assert!(!verifier.verify(&node, &holder.public(), &changed));
+        changed = certificate.clone();
+        changed.account_ed25519_pub[0] ^= 1;
+        assert!(!verifier.verify(&node, &holder.public(), &changed));
+        changed = certificate.clone();
+        changed.device_ed25519_pub[0] ^= 1;
+        assert!(!verifier.verify(&node, &holder.public(), &changed));
+        for value in 0u16..300 {
+            let mut changed = certificate.clone();
+            changed.signature[..2].copy_from_slice(&value.to_le_bytes());
+            verifier.verify(&node, &holder.public(), &changed);
+        }
+        assert_eq!(verifier.verified.len(), 256);
+        // Cache authority covers signatures only, never the asserted holder.
+        assert!(verifier.verify(&node, &node.identity.public(), &certificate));
+        assert_ne!(
+            certificate.device_ed25519_pub,
+            node.identity.public().ed25519_pub
+        );
+    }
 
     #[tokio::test]
     async fn channel_custody_retry_skips_own_siblings_and_already_confirmed_account() {

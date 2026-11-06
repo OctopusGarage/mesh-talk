@@ -1583,6 +1583,297 @@ mod tests {
     }
 
     #[test]
+    fn completed_download_scan_rejects_stale_owner_and_storage_failure() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        f.book.discover_downloads(7).unwrap();
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book.discover_downloads(7),
+            Err(LogError::StaleCursor)
+        ));
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(
+            matches!(f.book.discover_downloads(7), Err(LogError::StaleCursor)),
+            "returning to an account must not revive its retired scan owner"
+        );
+        let fresh = Fixture::new();
+        fresh.book.discover_downloads(7).unwrap();
+        fresh
+            .book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_download_scan")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            fresh.book.discover_downloads(7).is_err(),
+            "quiet scans must propagate storage read failures"
+        );
+    }
+
+    #[test]
+    fn completed_download_scan_is_quiet_and_changed_policy_resumes() {
+        let f = Fixture::new();
+        f.book.discover_downloads(7).unwrap();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            f.book.discover_downloads(7).unwrap();
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "completed unchanged policy scans must perform no writes"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        let (row, event, _) = f.fixture(1);
+        database
+            .transaction(|c| Fixture::install(c, &row, &event))
+            .unwrap();
+        assert_eq!(
+            f.book.claim_downloads().unwrap().len(),
+            1,
+            "a new offer must enqueue after the scan has completed"
+        );
+        for work in f.book.claim_downloads().unwrap() {
+            f.book.finish_download(work).unwrap();
+        }
+        f.book.discover_downloads(8).unwrap();
+        assert_eq!(
+            f.book.claim_downloads().unwrap().len(),
+            1,
+            "a changed policy must rediscover retained offers"
+        );
+    }
+
+    #[test]
+    fn file_receive_empty_candidate_turns_do_not_commit_or_rewrite_scan() {
+        let f = Fixture::new();
+        let conversation = ConversationId::new([12; 32]);
+        let database = f.book.profile.database();
+        let before_changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let before_commits = database.successful_write_commits();
+        for _ in 0..8 {
+            assert!(
+                f.book
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before_changes,
+            "empty receive turns must not rewrite the unchanged scan cursor"
+        );
+        assert_eq!(
+            database.successful_write_commits(),
+            before_commits,
+            "empty receive turns must not create durable write transactions"
+        );
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn file_receive_idle_tail_preserves_order_without_durable_rewrites() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        let other = ConversationId::new([13; 32]);
+        for sequence in 1..=3 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        let expected: Vec<_> = rows.iter().map(|row| row.header.id).collect();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            assert_eq!(
+                f.book.receive_candidates(conversation, 8, 4096).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "retrying an unchanged global tail must not rewrite its tickets"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(f.records.body_reads(), 0);
+
+        // Newly enqueued work must take its fair turn ahead of the old retry.
+        log.append_durable(Event::new(
+            &sender,
+            other,
+            1,
+            vec![],
+            4,
+            0,
+            EventKind::FileManifest,
+            vec![2; 100],
+        ))
+        .unwrap();
+        let after = f.book.receive_after().unwrap();
+        let added = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(after, 128)
+            .unwrap();
+        f.book.discover_receives(after, &added, own).unwrap();
+        assert_eq!(
+            f.book.receive_candidates(conversation, 8, 4096).unwrap(),
+            expected
+        );
+        assert_eq!(
+            f.book.receive_conversations().unwrap().first(),
+            Some(&other)
+        );
+        for id in &expected {
+            f.book.mark_processed(*id).unwrap();
+        }
+        assert!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_receive_interleaved_tail_retains_cross_conversation_fairness() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        let other = ConversationId::new([13; 32]);
+        for sequence in 1..=3 {
+            log.append_durable(Event::new(
+                &sender,
+                if sequence == 2 { other } else { conversation },
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        assert_eq!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            f.book.receive_conversations().unwrap().first(),
+            Some(&other),
+            "matching the last ticket cannot hide an interleaved conversation"
+        );
+    }
+
+    #[test]
+    fn file_receive_empty_candidate_turns_reject_stale_owner_and_read_failure() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let conversation = ConversationId::new([12; 32]);
+        assert!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .is_empty()
+        );
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        assert!(matches!(
+            f.book.receive_candidates(conversation, 8, 4096),
+            Err(LogError::StaleCursor)
+        ));
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(
+            matches!(
+                f.book.receive_candidates(conversation, 8, 4096),
+                Err(LogError::StaleCursor)
+            ),
+            "returning to the same account must not revive its old receive owner"
+        );
+        let fresh = Fixture::new();
+        fresh
+            .book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE file_receive_pending")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                fresh.book.receive_candidates(conversation, 8, 4096),
+                Err(LogError::Database(_))
+            ),
+            "a failed receive query must not become a successful empty page"
+        );
+    }
+
+    #[test]
     fn file_receive_discovery_is_atomic_fair_and_does_not_discard_large_legal_rows() {
         use crate::eventlog::{Author, persist::PersistentEventLog};
         let f = Fixture::new();

@@ -721,7 +721,7 @@ async fn publishing_profile_projects_newer_sibling_profile_pulled_in_same_round(
     });
     let delivered = tokio::time::timeout(
         Duration::from_secs(5),
-        alice.deliver_profile_to(&bob_peer, conversation),
+        Box::pin(alice.deliver_profile_to(&bob_peer, conversation)),
     )
     .await;
     // Recycled channels can leave the responder waiting for another round.

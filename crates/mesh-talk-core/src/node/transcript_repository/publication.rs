@@ -180,10 +180,16 @@ impl PublishedHistorySource {
     pub(crate) fn profile(&self) -> &Arc<ProfileStorage> {
         &self.profile
     }
-    pub(crate) fn check_write(&self) -> Result<(), LogError> {
+    /// Validate the exact current barrier without changing filesystem durability.
+    /// Read-only and unchanged operations do not publish a directory entry.
+    pub(crate) fn check_barrier(&self) -> Result<(), LogError> {
         if !matches_stub(&self.path, &self.stub)? {
             return Err(invalid("history source barrier changed"));
         }
+        Ok(())
+    }
+    pub(crate) fn check_write(&self) -> Result<(), LogError> {
+        self.check_barrier()?;
         sync_parent(&self.path)
     }
 }

@@ -1708,11 +1708,11 @@ fn channel_indexed_legacy_parent_cut_rebuild_preserves_account_lifetime_and_leas
             .unwrap(),
         "moved authority retains its causal fact lease"
     );
+    let profile = fixture.store.profile.clone();
     drop(held);
+    drop(fixture.store);
     assert!(
-        !fixture
-            .store
-            .profile
+        !profile
             .database()
             .read(|c| c
                 .query_row(
@@ -1722,10 +1722,10 @@ fn channel_indexed_legacy_parent_cut_rebuild_preserves_account_lifetime_and_leas
                 )
                 .map_err(Into::into))
             .unwrap(),
-        "the last authority owner retires the causal query"
+        "the last authority and completed-cut owner retires the causal query"
     );
     let before = repository.body_read_counts();
-    let warm = ChannelCheckpointStore::open(fixture.store.profile.clone()).unwrap();
+    let warm = ChannelCheckpointStore::open(profile).unwrap();
     assert!(
         warm.project_step(repository, &fixture.me, fixture.channel)
             .unwrap()
@@ -2293,6 +2293,124 @@ fn channel_logical_retirement_reclaims_orphan_facts_in_bounded_turns() {
 }
 
 #[test]
+fn channel_legacy_scan_amortizes_ordinary_prefix_commits_and_stays_quiet_when_ready() {
+    use crate::eventlog::{
+        repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
+        sync::network::PreparationBudget,
+    };
+    for count in [128, 256] {
+        let fixture = Fixture::new(count);
+        let repository = fixture.log.repository().unwrap();
+        for _ in 0..20 * (count + 2) {
+            if repository
+                .order_step(
+                    &fixture.channel,
+                    CausalOrder::Logical,
+                    OrderWorkBudget::default(),
+                )
+                .unwrap()
+                .readiness
+                == OrderReadiness::Ready
+            {
+                break;
+            }
+        }
+        let generation = repository
+            .order_generation(&fixture.channel, CausalOrder::Logical)
+            .unwrap()
+            .expect("canonical fixture order must be ready");
+        let database = fixture.store.profile.database();
+        let scan_rank = || {
+            database.read(|c| {
+            c.query_row("SELECT COALESCE((SELECT next_rank FROM channel_legacy_scan WHERE job=?1 AND channel=?2),0)",
+                params![generation.job.as_slice(), fixture.channel.as_bytes().as_slice()], |r| r.get::<_, i64>(0))
+                .map_err(LogError::from)
+        }).unwrap()
+        };
+        let budget = PreparationBudget::default();
+        // Complete the two control-header classifications before measuring the
+        // ordinary prefix. No canonical reducer decision has run yet.
+        for _ in 0..count + 2 {
+            if scan_rank() >= 2 {
+                break;
+            }
+            fixture
+                .store
+                .project_step_with_budget(repository, &fixture.me, fixture.channel, budget)
+                .unwrap();
+        }
+        let initial_rank = scan_rank();
+        assert!(initial_rank >= 2 && initial_rank < generation.count as i64);
+        let before_reads = repository.body_read_counts();
+        let before_commits = database.successful_write_commits();
+        let mut largest_prefix = 0;
+        let mut finished = false;
+        for _ in 0..count + 2 {
+            let before = scan_rank();
+            if before == generation.count as i64 {
+                finished = true;
+                break;
+            }
+            let step = fixture
+                .store
+                .project_step_with_budget(repository, &fixture.me, fixture.channel, budget)
+                .unwrap();
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes
+            );
+            let after = scan_rank();
+            assert!(
+                after > before,
+                "ordinary prefix scan must make durable progress"
+            );
+            largest_prefix = largest_prefix.max(after - before);
+        }
+        assert!(
+            finished,
+            "legacy header scan must finish before reducer replay"
+        );
+        assert_eq!(
+            repository.body_read_counts(),
+            before_reads,
+            "legacy classification must not open message bodies"
+        );
+        let remaining = usize::try_from(generation.count as i64 - initial_rank).unwrap();
+        let page_commits = remaining.div_ceil(budget.rows) + 1;
+        let commits = database.successful_write_commits() - before_commits;
+        assert!(
+            commits <= page_commits,
+            "{count} ordinary messages: legacy prefix scan used {commits} durable commits, expected at most {page_commits} bounded-page commits"
+        );
+        assert!(
+            largest_prefix > 1,
+            "a default turn must scan multiple ordinary headers"
+        );
+        fixture.project();
+        let ready_reads = repository.body_read_counts();
+        let ready_commits = database.successful_write_commits();
+        let ready_changes = || database.read(|c| Ok(c.total_changes())).unwrap();
+        let changes = ready_changes();
+        for _ in 0..4 {
+            let step = fixture
+                .store
+                .project_step_with_budget(repository, &fixture.me, fixture.channel, budget)
+                .unwrap();
+            assert!(step.ready);
+            assert_eq!((step.rows, step.edges, step.bytes), (0, 0, 0));
+        }
+        assert_eq!(
+            ready_changes(),
+            changes,
+            "unchanged completed scopes must not rewrite derived state"
+        );
+        assert_eq!(database.successful_write_commits(), ready_commits);
+        assert_eq!(repository.body_read_counts(), ready_reads);
+    }
+}
+
+#[test]
 fn channel_legacy_departure_yields_a_charged_two_row_remainder() {
     use crate::eventlog::sync::network::PreparationBudget;
     let f = Fixture::new(0);
@@ -2478,4 +2596,451 @@ fn runtime_completion_hands_off_only_removed_work_with_a_remaining_lane() {
     assert!(!fixture.store.finish_runtime(second, None).unwrap());
     assert!(fixture.store.next_runtime(None).unwrap().is_none());
     assert!(!fixture.store.finish_runtime(second, None).unwrap());
+}
+
+#[test]
+fn channel_legacy_scan_rejects_cursor_beyond_actual_source_before_body_reads() {
+    use crate::eventlog::{
+        repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
+        sync::network::PreparationBudget,
+    };
+    let fixture = Fixture::new(2);
+    let repository = fixture.log.repository().unwrap();
+    for _ in 0..128 {
+        if repository
+            .order_step(
+                &fixture.channel,
+                CausalOrder::Logical,
+                OrderWorkBudget::default(),
+            )
+            .unwrap()
+            .readiness
+            == OrderReadiness::Ready
+        {
+            break;
+        }
+    }
+    let generation = repository
+        .order_generation(&fixture.channel, CausalOrder::Logical)
+        .unwrap()
+        .expect("fixture order must be ready before cursor corruption");
+    let next = i64::try_from(generation.count).unwrap() + 1;
+    fixture
+        .store
+        .profile
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "INSERT INTO channel_legacy_scan VALUES(?1,?2,?3,0)",
+                params![
+                    generation.job.as_slice(),
+                    fixture.channel.as_bytes().as_slice(),
+                    next
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let before = repository.body_read_counts();
+    assert!(matches!(
+        fixture.store.project_step_with_budget(
+            repository,
+            &fixture.me,
+            fixture.channel,
+            PreparationBudget::default(),
+        ),
+        Err(LogError::StaleCursor)
+    ));
+    assert_eq!(repository.body_read_counts(), before);
+}
+
+#[test]
+fn channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state() {
+    use crate::node::channel::{graph, projection_facts};
+    use crate::storage::profile::participant::event_ownership;
+    use rusqlite::StatementStatus;
+
+    let fixture = Fixture::new(1);
+    fixture.project();
+    let source = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    let database = fixture.store.profile.database();
+    let owner = database
+        .read(|c| event_ownership::capture_event_owner_on(c, &fixture.account.public()))
+        .unwrap();
+    // Remove fixture preparation from the measured window. Observe SQLite's
+    // real VM run counts without executing the observing statements ourselves.
+    database
+        .read(|c| {
+            c.flush_prepared_statement_cache();
+            Ok(())
+        })
+        .unwrap();
+    let missing = ConversationId::new([239; 32]);
+    for _ in 0..4 {
+        assert!(
+            fixture
+                .store
+                .published_projection(fixture.channel)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            fixture
+                .store
+                .published_projection(missing)
+                .unwrap()
+                .is_none()
+        );
+        database
+            .read(|c| {
+                graph::require_source_on(c, source.channel, source.job, source.revision)?;
+                graph::require_source_prefix_on(c, source.channel, source.job, source.revision)?;
+                assert!(matches!(
+                    graph::require_source_on(c, missing, source.job, source.revision),
+                    Err(LogError::StaleCursor)
+                ));
+                event_ownership::check_event_owner_on(c, &owner)
+            })
+            .unwrap();
+    }
+    let runs = database
+        .read(|c| {
+            [
+                graph::REQUIRE_SOURCE_SQL,
+                graph::REQUIRE_SOURCE_PREFIX_SQL,
+                event_ownership::CHECK_EVENT_OWNER_SQL,
+                current::PUBLISHED_PROJECTION_SQL,
+                projection_facts::LOAD_PROJECTION_SQL,
+                projection_facts::SOURCE_REVISION_SQL,
+            ]
+            .into_iter()
+            .map(|sql| Ok(c.prepare_cached(sql)?.get_status(StatementStatus::Run)))
+            .collect::<Result<Vec<_>, LogError>>()
+        })
+        .unwrap();
+
+    // An ordinary append invalidates exact current authority immediately even
+    // when the same compiled query has just returned a positive result.
+    let rename = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        100,
+        vec![fixture.genesis],
+        100,
+        100,
+        EventKind::ChannelRename,
+        b"fresh title".to_vec(),
+    );
+    fixture.log.repository().unwrap().append(&rename).unwrap();
+    assert!(matches!(
+        fixture.store.published_projection(fixture.channel),
+        Err(LogError::StaleCursor)
+    ));
+    fixture.project();
+    assert_eq!(
+        fixture
+            .store
+            .current_state(fixture.channel)
+            .unwrap()
+            .unwrap()
+            .name(),
+        "fresh title"
+    );
+
+    // Reusing bytecode must not revive an event owner after A -> B -> A.
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let next = Account::generate();
+    prepare_adoption(database, &fixture.account.public(), &next.public()).unwrap();
+    finish_adoption(database, &next.public()).unwrap();
+    prepare_adoption(database, &next.public(), &fixture.account.public()).unwrap();
+    finish_adoption(database, &fixture.account.public()).unwrap();
+    assert!(matches!(
+        database.read(|c| event_ownership::check_event_owner_on(c, &owner)),
+        Err(LogError::StaleCursor)
+    ));
+    let current_owner = database
+        .read(|c| event_ownership::capture_event_owner_on(c, &fixture.account.public()))
+        .unwrap();
+    database
+        .read(|c| event_ownership::check_event_owner_on(c, &current_owner))
+        .unwrap();
+
+    // Report all owners together: uncached Connection::query_row leaves each
+    // observer with a newly compiled, never-run VM (zero), rather than >=4.
+    assert!(
+        runs.iter().all(|runs| *runs >= 4),
+        "hot owner VM run counts: {runs:?}"
+    );
+}
+
+#[test]
+fn channel_completed_causal_cut_reuses_facts_without_sql_writes() {
+    let fixture = Fixture::new(130);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let first = fixture
+        .store
+        .causal_projection(repository, fixture.channel, target)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first.state.as_ref().unwrap().owner(),
+        fixture.sender.user_id()
+    );
+    assert!(!first.contains_event(target).unwrap());
+    let changes = || {
+        fixture
+            .store
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap()
+    };
+    let before = changes();
+    for _ in 0..3 {
+        let repeated = fixture
+            .store
+            .causal_projection(repository, fixture.channel, target)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repeated.state.as_ref().unwrap().owner(),
+            fixture.sender.user_id()
+        );
+        assert!(!repeated.contains_event(target).unwrap());
+    }
+    assert_eq!(
+        changes(),
+        before,
+        "unchanged historical membership must reuse its completed leased facts without rebuilding or retiring SQL selections"
+    );
+}
+
+#[test]
+fn channel_completed_causal_cut_distinguishes_roots_and_account_lifetime() {
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let fixture = Fixture::new(3);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let excluded = fixture
+        .store
+        .causal_projection(repository, fixture.channel, target)
+        .unwrap()
+        .unwrap();
+    let included = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(!excluded.contains_event(target).unwrap());
+    assert!(included.contains_event(target).unwrap());
+    assert!(matches!(
+        fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[]),
+        Err(LogError::InvalidPageBudget)
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[target; 257]),
+        Err(LogError::InvalidPageBudget)
+    ));
+    let database = fixture.store.profile.database();
+    let next = Account::generate();
+    prepare_adoption(database, &fixture.account.public(), &next.public()).unwrap();
+    finish_adoption(database, &next.public()).unwrap();
+    prepare_adoption(database, &next.public(), &fixture.account.public()).unwrap();
+    finish_adoption(database, &fixture.account.public()).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .store
+                .causal_projection(repository, fixture.channel, target),
+            Err(LogError::StaleCursor)
+        ),
+        "returning to the account must not revive an earlier completed causal owner"
+    );
+}
+
+#[test]
+fn channel_completed_causal_cut_eviction_preserves_borrowed_lease() {
+    let fixture = Fixture::new(12);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let first_target = fixture.messages[0].id;
+    let held = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[first_target])
+        .unwrap()
+        .unwrap();
+    for message in &fixture.messages[1..9] {
+        let cut = fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[message.id])
+            .unwrap()
+            .unwrap();
+        assert!(cut.contains_event(message.id).unwrap());
+    }
+    let active = || {
+        fixture
+            .store
+            .profile
+            .database()
+            .read(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM channel_projection_queries WHERE retired=0",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        active(),
+        9,
+        "eight cache owners plus the borrowed evicted cut"
+    );
+    assert!(
+        held.contains_event(first_target).unwrap(),
+        "eviction cannot destroy borrowed historical facts"
+    );
+    drop(held);
+    assert_eq!(active(), 8, "last borrowed owner retires the evicted cut");
+}
+
+#[test]
+fn channel_completed_causal_cut_rechecks_source_and_retirement() {
+    let fixture = Fixture::new(3);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let held = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    let tail = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        100,
+        vec![target],
+        100,
+        100,
+        EventKind::Message,
+        vec![1],
+    );
+    repository.append(&tail).unwrap();
+    fixture.project();
+    assert!(matches!(
+        held.contains_event(target),
+        Err(LogError::StaleCursor)
+    ));
+    let current = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(current.contains_event(target).unwrap());
+    let changes = fixture
+        .store
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    let same = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target, target])
+        .unwrap()
+        .unwrap();
+    assert!(same.contains_event(target).unwrap());
+    assert_eq!(
+        fixture
+            .store
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        changes,
+        "equivalent normalized roots reuse the current generation"
+    );
+    let transfer = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        101,
+        vec![fixture.genesis],
+        2,
+        2,
+        EventKind::ChannelOwnerTransfer,
+        fixture.me.user_id().into_bytes(),
+    );
+    repository.append(&transfer).unwrap();
+    fixture.project();
+    assert!(matches!(
+        current.contains_event(target),
+        Err(LogError::StaleCursor)
+    ));
+    let reordered = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reordered.state.as_ref().unwrap().owner(),
+        fixture.sender.user_id(),
+        "the historical parent cut cannot borrow an unobserved canonical ownership transfer"
+    );
+    repository.begin_retirement(&fixture.channel).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .store
+                .causal_projection_basis(repository, fixture.channel, &[target]),
+            Err(LogError::ConversationRetiring)
+        ),
+        "retirement cannot return a cached membership projection"
+    );
+}
+
+#[test]
+fn channel_completed_causal_cut_failed_construction_remains_retryable() {
+    let fixture = Fixture::new(3);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let database = fixture.store.profile.database();
+    database.transaction(|c| { c.execute_batch("CREATE TEMP TRIGGER fail_causal_cut BEFORE INSERT ON channel_projection_queries BEGIN SELECT RAISE(ABORT,'causal cut failure'); END;")?; Ok(()) }).unwrap();
+    assert!(
+        fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[target])
+            .is_err()
+    );
+    database
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_causal_cut")?;
+            Ok(())
+        })
+        .unwrap();
+    let recovered = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(recovered.contains_event(target).unwrap());
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let same = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(same.contains_event(target).unwrap());
+    assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
 }
