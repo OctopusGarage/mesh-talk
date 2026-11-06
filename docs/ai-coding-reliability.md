@@ -432,6 +432,11 @@ lose a natural read between setup notification and admission; removing that
 variant does not qualify a separate fresh empty-corpus timing boundary. Keep the
 retired-child observer and interrupted-preparation controls rather than adding
 sleep, suppressing publication or accepting a stale child to rescue setup.
+Its test-only dispatch gate must classify the actual owed parked pair credit,
+not the shared resumed trace label. Capture that one-shot child before waiting
+for its later projection; retain exact private-receipt evidence before release.
+The paid-pair classifier regression rejects foreground resumes and unprotected
+turns while the real Noise scenarios retain admission and recovery assertions.
 
 A progressing serial test partition can exhaust its job watchdog without a hung
 case. The Windows archive owner uses eight native serial execution partitions,

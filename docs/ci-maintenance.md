@@ -50,6 +50,10 @@ transport. Scripts own inventory validation, artifact roles, packaging, report
 collection and execution policy. Reuse the same CLI locally and in Actions;
 extract substantial conditionals and loops into the existing feature owner rather
 than copying YAML fragments or introducing another generic orchestration layer.
+When moving execution into a script, update every caller and smoke check. Keep
+launcher behavior in its owning regression instead of requiring obsolete command
+text in YAML. Cross-platform fixtures must convert file URLs with `fileURLToPath`
+rather than `.pathname`; exercise native path handling on its required platform.
 Keep live source/release checks immediately before each publication boundary;
 those protect against changed state and are not redundant setup checks.
 
@@ -398,6 +402,10 @@ request identity, immutable control state and the lifetime of the actual task.
 Historical logs or a previously authenticated request do not prove that a live
 request has entered the required phase. Keep cancellation, task joining and
 cleanup correct on success, failure and panic.
+Classify fixture gates from the current decision owner's state, not a trace flag
+that also describes another phase. Do not sample a later observer projection to
+decide whether to capture a one-shot event; observe that evidence before releasing
+the captured task and retain its exact operation and child identity.
 
 Separate expensive fixture preparation from the operation's measured window when
 preparation is outside the requirement. Continue using the real signing,

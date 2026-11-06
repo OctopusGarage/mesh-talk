@@ -5,8 +5,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const packageApp = new URL("../release/package-app.sh", import.meta.url).pathname;
+const packageApp = fileURLToPath(new URL("../release/package-app.sh", import.meta.url));
 const packageSource = readFileSync(packageApp, "utf8");
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 

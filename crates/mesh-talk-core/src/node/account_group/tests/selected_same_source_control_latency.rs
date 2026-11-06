@@ -2673,15 +2673,11 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let exact = owner.identity.public();
             let signal = paid_dispatch_arrived.clone();
             let release = paid_dispatch_release.clone();
-            let requester = Arc::downgrade(&reference);
-            let source = Arc::downgrade(&owner);
             let authorized = authorized_paid_dispatch.clone();
             let operation = active_operation.clone();
             move |peer, paid_resume| {
                 let signal = signal.clone();
                 let release = release.clone();
-                let requester = requester.clone();
-                let source = source.clone();
                 let authorized = authorized.clone();
                 let operation = operation.clone();
                 let exact = exact.clone();
@@ -2692,30 +2688,9 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     let Some(id) = *operation.lock().unwrap() else {
                         return;
                     };
-                    let Some((requester, source)) = requester.upgrade().zip(source.upgrade())
-                    else {
-                        return;
-                    };
-                    let statuses = requester
-                        .account_group_operation_status(&requester.account_id(), id)
-                        .unwrap()
-                        .zip(
-                            source
-                                .account_group_operation_status(&source.account_id(), id)
-                                .unwrap(),
-                        );
-                    if !statuses.is_some_and(|(requester_status, source_status)| {
-                        exact_private_receipt(
-                            &requester,
-                            &source,
-                            group,
-                            id,
-                            &requester_status,
-                            &source_status,
-                        )
-                    }) {
-                        return;
-                    }
+                    // This is the pair's owed parked turn, after the real
+                    // foreground prefix. The main task observes the unchanged
+                    // full private receipt before it may release this gate.
                     let captured = signal.lock().unwrap().take();
                     if let Some(signal) = captured {
                         *authorized.lock().unwrap() = Some(tokio::task::id());

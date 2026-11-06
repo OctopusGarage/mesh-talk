@@ -329,6 +329,11 @@ enum ControlPairCredit {
     Repaid,
 }
 
+#[cfg(test)]
+fn paid_control_resume_for_test(pair: Option<&ControlComparisonPair>, protected: bool) -> bool {
+    protected && pair.is_some_and(ControlComparisonPair::resume_turn_owed)
+}
+
 struct ControlComparisonPair {
     credit: ControlPairCredit,
     parked: DocumentCheckpoint,
@@ -3151,9 +3156,7 @@ impl Node {
                 });
                 #[cfg(test)]
                 let paid_resume = key.lane == DocumentLane::Control
-                    && control_pairs.contains_key(&key)
-                    && control_origin.0
-                    && protected;
+                    && paid_control_resume_for_test(control_pairs.get(&key), protected);
                 let task = documents.spawn(permit.track(async move {
                     #[cfg(test)]
                     let _lifetime = control_task_trace.map(|event| {
@@ -4129,6 +4132,10 @@ mod tests {
             }))
             .into();
         let mut pair = ControlComparisonPair::new(background.clone(), ControlDemand::new(), None);
+        // A foreground continuation can have resumed=true in the dispatch
+        // trace. It must not authorize the parked background fixture gate.
+        assert!(!paid_control_resume_for_test(Some(&pair), true));
+        assert!(!paid_control_resume_for_test(None, true));
         let mut unpaid: DocumentCheckpoint = Cursor::control().into();
         assert!(!pair.finish_page(&mut unpaid));
         assert!(
@@ -4142,6 +4149,8 @@ mod tests {
             "the exact interrupted checkpoint owns the next protected turn"
         );
         assert!(pair.resume_turn_owed());
+        assert!(paid_control_resume_for_test(Some(&pair), true));
+        assert!(!paid_control_resume_for_test(Some(&pair), false));
         assert!(!pair.finish_page(&mut unpaid));
         assert!(
             pair.resume_turn_owed(),
