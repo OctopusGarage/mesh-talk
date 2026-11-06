@@ -16,10 +16,12 @@ below are explicit gates or environment-specific tools.
 | Comprehensive health         | [`check-health.sh`](check-health.sh)                                 | Before requesting review or in CI; `--fast` is an optional partial check                                                          |
 | Delivery and agent contracts | [`ai-eval-smoke.sh`](ai-eval-smoke.sh), [`ai-eval.mjs`](ai-eval.mjs) | When changing their contracts or in CI; the model-backed runner needs a provider                                                  |
 | Complete real smoke          | [`run-real-smoke.sh`](run-real-smoke.sh)                             | Explicit release validation; includes backend and browser E2E                                                                     |
-| Git hooks                    | [`setup-hooks.sh`](setup-hooks.sh), [`../hooks/`](../hooks/)         | On initial checkout; the commit hook checks source formatting only                                                                |
+| Git hooks                    | [`setup-hooks.sh`](setup-hooks.sh), [`../hooks/`](../hooks/)         | On initial checkout; commit hooks run cheap source/structure/syntax checks, with no suites                                                                |
 | Build retention              | [`build-retention.py`](build-retention.py)                           | After managed builds/tests; five successful build sets and a 40 GiB cache budget; see [configuration](../docs/build-retention.md) |
 | Release                      | [`release/`](release/)                                               | CI release workflow and signed artifact validation                                                                                |
 | Owned full Chromium          | [`ci/ui-runner.mjs`](ci/ui-runner.mjs) | CI full shards; preserves progress and joined cleanup inside the workflow budget |
+| Changed syntax              | [`validation/syntax.mjs`](validation/syntax.mjs) | Pre-commit, affected validation and clean PR publication; no runtime suites |
+| Native coverage             | [`ci/workspace-coverage.sh`](ci/workspace-coverage.sh) | CI native partitions or their pinned-tool fixtures, from the declared workspace directory |
 | CI diagnostics               | [`diagnostics/`](diagnostics/) and [`evals/`](evals/)                | Their `.test.mjs` files are selected by CI globs, even when no script names them individually                                     |
 
 ## Opt-in network acceptance

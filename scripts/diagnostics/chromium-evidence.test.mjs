@@ -108,3 +108,42 @@ test("platform shard layouts preserve exact partitions and reject invalid discov
   const duplicate = structuredClone(manifests); duplicate[7].shard = 1;
   assert.throws(() => validateShardInventory(duplicate, identity));
 });
+
+test("downloaded collectors preserve attempt, OS partitions and diagnostic producer behavior", async () => {
+  const { mkdtemp, mkdir, writeFile, rm, readdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { collectDownloadedShards, renderDownloadedReports, chromiumShardCount } = await import("../evals/chromium-evidence.mjs");
+  const root = await mkdtemp(join(tmpdir(), "mesh-collected-ui-"));
+  const systems = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
+  try {
+    for (const os of systems) for (let shard = 1; shard <= chromiumShardCount(os); shard++) {
+      await mkdir(join(root, "portable", `chromium-portable-${os}-${shard}-2`), { recursive: true });
+      const blob = join(root, "reports", `playwright-ui-${os}-${shard}-2`, "blob-report");
+      await mkdir(blob, { recursive: true });
+      await writeFile(join(blob, `report-${shard}.zip`), "fixture");
+    }
+    const identity = { sourceSha: "a".repeat(40), runId: "17", runAttempt: "2" };
+    const collected = [];
+    await collectDownloadedShards(join(root, "portable"), join(root, "collected"), identity, {
+      collect: async (directory, actual) => collected.push({ files: await readdir(directory), actual }),
+    });
+    assert.deepEqual(collected.map(row => row.files.length), [4, 8, 4]);
+    assert.deepEqual(collected.map(row => row.actual), ["linux", "darwin", "win32"].map(platform => ({ ...identity, platform })));
+    const rendered = [];
+    const options = { merge: async (_directory, os) => rendered.push(os), log() {} };
+    await renderDownloadedReports(join(root, "reports"), join(root, "merged"), { runAttempt: "2", linuxResult: "failure", desktopResult: "cancelled" }, options);
+    assert.deepEqual(rendered, systems, "failed admitted producers still yield diagnostic reports");
+    rendered.length = 0;
+    await renderDownloadedReports(join(root, "reports"), join(root, "skipped"), { runAttempt: "2", linuxResult: "success", desktopResult: "skipped" }, options);
+    assert.deepEqual(rendered, [systems[0]]);
+    for (const change of [{ runAttempt: "1" }, { linuxResult: "unknown" }, { linuxResult: "skipped", desktopResult: "skipped" }]) {
+      await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "negative"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", ...change }, options), /incomplete/);
+    }
+    await rm(join(root, "reports", "playwright-ui-macos-26-intel-8-2"), { recursive: true });
+    rendered.length = 0;
+    await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "missing"), { runAttempt: "2", linuxResult: "success", desktopResult: "success" }, options));
+    assert.deepEqual(rendered, [systems[0], systems[2]], "missing Mac evidence does not suppress available OS diagnostics");
+    await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "broken"), { runAttempt: "2", linuxResult: "success", desktopResult: "skipped" }, { merge: async () => { throw Error("corrupt blob"); }, log() {} }));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

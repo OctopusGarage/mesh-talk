@@ -148,6 +148,13 @@ See the attachment preparation and document-scheduler regressions in
 
 ## R03: Actual work owns its lifetime
 
+Consume the canonical process owner's result contract rather than deriving a new
+verdict from a diagnostic flag. Windows atomically terminates its owned job even
+when empty, so verified `forcedRetirement` alone does not mean work leaked or a
+successful test failed. Preserve the actual exit status and error, cancellation,
+timeout and cleanup-verification results. The empty-job owner control and UI
+runner outcome controls exercise that distinction.
+
 **Failure pattern:** cancelling an awaiter releases serialization or capacity while
 its blocking worker, process or native provider continues; retries overlap, old
 work writes into a new session, or shutdown waits for a worker while holding a

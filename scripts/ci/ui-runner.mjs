@@ -35,7 +35,7 @@ export async function runUi(args, {
   }
   const result = { ...outcome, state: "finished", started, deadline, elapsedMs: Date.now() - started, timedOut,
     sourceSha: process.env.EVAL_SOURCE_SHA ?? null, shard: args.find(arg => arg.startsWith("--shard="))?.slice(8) ?? null,
-    success: outcome.code === 0 && !controller.signal.aborted && !outcome.error && !outcome.cleanupUnverified && !outcome.forcedRetirement };
+    success: outcome.code === 0 && !controller.signal.aborted && !outcome.error && !outcome.cleanupUnverified };
   await writeFile(join(directory, "owner.json"), JSON.stringify(result, null, 2));
   return result;
 }

@@ -43,6 +43,43 @@ while developing, then complete the applicable boundary and candidate gates.
 New tests still need independent assertions; matching the implementation or
 increasing a test count does not establish useful coverage.
 
+## Keep workflow policy thin and reject cheap failures locally
+
+Workflows own triggers, permissions, runners, matrices, dependencies and artifact
+transport. Scripts own inventory validation, artifact roles, packaging, report
+collection and execution policy. Reuse the same CLI locally and in Actions;
+extract substantial conditionals and loops into the existing feature owner rather
+than copying YAML fragments or introducing another generic orchestration layer.
+Keep live source/release checks immediately before each publication boundary;
+those protect against changed state and are not redundant setup checks.
+
+The [syntax owner](../scripts/validation/syntax.mjs) parses changed Node, Bash and
+Python sources without executing them or writing Python caches, and invokes
+`actionlint` for changed workflows. Pre-commit selects staged paths but checks
+worktree bytes, matching the existing structural checks. Affected validation also
+checks new nonignored sources; PR creation checks the clean committed comparison.
+Use Node 22, Bash and Python; install actionlint before changing workflows. No
+checker installs tools or contacts the network. Hook installation configures hooks
+without launching comprehensive health; request that gate explicitly.
+
+Local feedback does not replace committed-candidate acceptance. Git documents
+that [hooks can be bypassed](https://git-scm.com/docs/githooks); web edits and other
+clients may not run them. Keep a compact authoritative remote check and necessary
+runtime/native evidence. Delete duplicate execution only after comparing source,
+configuration, platform, assertion and consumers, with an inventory/equivalence
+control in the retained owner. The two optional-pack browser cases execute once
+in full Linux Chromium; their separate job retains only its unique built-asset
+and syntax checks. The non-instrumented ASan archive protocol executes once before
+the required sanitizer producer, while actual instrumentation controls remain on
+every consumer. Pure syntax does not establish either runtime contract.
+
+Historical renderer, tray, window and network incident comparisons are manual
+workflows. Their former development-branch bootstrap triggers do not provide
+ordinary candidate acceptance. Keep their diagnostic tools available; normal
+cross-platform native acceptance remains in the required backend caller. Review
+all workflows, including scheduled, manual, reusable and publication roles, before
+calling a job redundant merely because it is not a PR check.
+
 ## Measure the bottleneck before choosing the optimization
 
 For a CI optimization task, use `gh` to collect the last 50 workflow runs and
@@ -96,6 +133,10 @@ remaining-partition rejection, successful coverage accumulation, timing pipeline
 and report errors. Preserve partial backend evidence after a failure, while
 requiring evidence on passing jobs; a producer skipped by an upstream failure
 must not create a second missing-artifact error.
+
+The [workspace coverage owner](../scripts/ci/workspace-coverage.sh) owns native
+partition commands, timing pipelines and report generation; workflow steps pass
+only the platform. Actual-tool failure controls verify both platform branches.
 
 Keep complete tests distinct from duplicate instrumentation. macOS instruments
 Host for its native desktop/updater branches, then runs every remaining default
@@ -353,7 +394,9 @@ owner; retain exact live-task and measured-operation assertions at admission.
 Browser commands use the existing process owner with a deadline inside the total
 job budget, reserving time for joined cleanup and evidence upload. Keep streamed
 logs and append-only active/completed-case progress when final reports cannot be
-written. Timeout, forced retirement or uncertain cleanup remains a failure.
+written. Timeout or uncertain cleanup remains a failure. Preserve verified closure of owned work as a diagnostic separately from the
+actual child outcome: Windows
+intentionally terminates even an empty job to close descendant admission.
 Actual CLI regression fixtures need private output directories as well as private
 source directories; parallel Playwright commands otherwise delete one another's
 traces and manufacture failures. Missing hosted logs do not identify a slow case.

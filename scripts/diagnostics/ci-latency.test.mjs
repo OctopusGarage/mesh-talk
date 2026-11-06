@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { versions } from "../ci/windows-coverage.mjs";
 
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
@@ -9,7 +10,7 @@ const step = (source, name) => source.split(/^      - /m).find(value => value.st
 
 test("real compiler contracts do not compete for the native job's Cargo cache", () => {
   for (const [workflow, name, expected] of [
-    ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "native-host-coverage", "rust-profile", "asan-cli"]],
+    ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "native-host-coverage", "rust-profile"]],
     ["windows-workspace.yml", "Validate archive and coverage contracts", ["windows-native-deps", "backend-coverage", "rust-profile", "windows-coverage-cli"]],
   ]) {
     const caller = step(read(workflow), name);
@@ -186,7 +187,7 @@ test("UI coverage consumers share Health's same-run Linux unit coverage", () => 
   assert.match(ui, /health:\n    uses: \.\/\.github\/workflows\/check-health\.yml/);
   assert.match(health, /unit-coverage-artifact.mjs seal/);
   assert.match(health, /name: ui-unit-coverage-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
-  for (const job of ["coverage", "packs"]) {
+  for (const job of ["coverage"]) {
     const consumer = ui.split(`  ${job}:\n`)[1].split(/^  [a-z][\w-]*:\n/m)[0];
     assert.match(consumer, /needs:.*health/);
     assert.match(consumer, /unit-coverage-artifact.mjs restore/);
@@ -206,7 +207,7 @@ test("full Chromium execution owns portable evidence while unique engines remain
   assert.match(step(read("ui-shards.yml"), "Run UI E2E"), /--reporter=list,blob,json/);
   const reports = ui.split("  reports:\n")[1].split("  packs:\n")[0];
   assert.doesNotMatch(reports, /matrix:/);
-  assert.match(reports, /for os in ubuntu-24.04 macos-26-intel windows-latest/);
+  assert.match(reports, /chromium-evidence.mjs render-artifacts/);
   assert.match(ui, /chromium-extended:/);
   assert.match(ui, /firefox-extended:/);
 });
@@ -230,4 +231,55 @@ test("Windows builds once then requires eight complete serial archive partitions
   assert.ok(windows.includes(`cargo-nextest@${versions.nextest},cargo-llvm-cov@${versions.llvmCov}`));
   assert.match(windows, /if-no-files-found: error/);
   assert.doesNotMatch(windows.split("  tests:\n")[1], /Swatinem\/rust-cache|cargo build|npm ci/);
+});
+
+test("optional pack job retains unique dist checks without repeating baseline browsers", () => {
+  const ui = read("e2e-ui.yml");
+  const packs = ui.split("  packs:\n")[1].split("  portable:\n")[0];
+  assert.match(packs, /name: Optional pack UI and asset check/);
+  assert.match(packs, /npm run build && node .*check-variant-assets.mjs/);
+  assert.match(packs, /npm run check:build-syntax/);
+  assert.doesNotMatch(packs, /playwright install|playwright test|coverage|codecov|download-artifact/);
+});
+
+
+test("ASan protocol fixture has one authoritative producer before compilation", () => {
+  const sanitizer = read("sanitizers.yml");
+  assert.equal((sanitizer.match(/node --test scripts\/ci\/asan-cli.test.mjs/g) ?? []).length, 1);
+  assert.doesNotMatch(read("ci.yml"), /node --test[^\n]*asan-cli.test.mjs/);
+  assert.ok(sanitizer.indexOf("asan-cli.test.mjs") < sanitizer.indexOf("asan.mjs build"));
+});
+
+
+test("removed pack browser selection remains entirely in the authoritative full Chromium inventory", () => {
+  const cli = fileURLToPath(new URL("../../frontend/node_modules/@playwright/test/cli.js", import.meta.url));
+  function list(args) {
+    const result = spawnSync(process.execPath, [cli, "test", ...args, "--list", "--reporter=json"], { cwd: new URL("../../frontend/", import.meta.url), encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const paths = [];
+    function visit(suite) {
+      for (const spec of suite.specs ?? []) for (const item of spec.tests) {
+        if (args.length) assert.equal(item.expectedStatus, "passed");
+        paths.push(JSON.stringify([spec.file, spec.title, item.projectName]));
+      }
+      for (const child of suite.suites ?? []) visit(child);
+    }
+    visit(JSON.parse(result.stdout));
+    return paths;
+  }
+  const baseline = list([]);
+  const removed = list(["e2e/stickers.spec.ts", "e2e/packs-empty.spec.ts", "--grep", "starts without"]);
+  assert.equal(removed.length, 2);
+  for (const path of removed) assert.equal(baseline.filter(candidate => candidate === path).length, 1);
+});
+
+test("historical incident rigs are manual while required native acceptance remains automatic", () => {
+  for (const file of ["linux-renderer-diagnostics.yml", "linux-tray-diagnostics.yml", "native-window-diagnostics.yml", "windows-network-diagnostics.yml"]) {
+    const source = read(file);
+    assert.match(source, /workflow_dispatch:/);
+    assert.doesNotMatch(source, /^  (?:push|pull_request|schedule):/m);
+  }
+  const backend = read("e2e-backend.yml");
+  assert.match(backend, /pull_request:/);
+  assert.match(backend, /uses: \.\/\.github\/workflows\/hidden-contacts-native\.yml/);
 });

@@ -63,6 +63,7 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 git diff --check "$base_ref"...HEAD
+node scripts/validation/syntax.mjs --base "$base_ref"
 if [ "$full_preflight" -eq 1 ]; then
     "$repo_root/scripts/prepare-pr.sh" ${preflight_args[@]+"${preflight_args[@]}"}
 else

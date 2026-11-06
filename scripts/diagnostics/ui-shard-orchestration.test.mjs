@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
@@ -25,7 +26,7 @@ test("Linux coverage requires Linux and Health without waiting for desktop shard
 test("portable acceptance and final UI gate reject every unsuccessful Linux or desktop result", () => {
   const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
   for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop\]/);
-  assert.match(job("portable-evidence"), /node scripts\/evals\/chromium-evidence\.mjs shards/);
+  assert.match(job("portable-evidence"), /node scripts\/evals\/chromium-evidence\.mjs collect-artifacts/);
   assert.match(job("ui-gate"), /needs: \[linux, desktop,/);
   for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
     for (const desktop of ["success", "failure", "cancelled", "skipped", ""]) {
@@ -87,8 +88,8 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
   assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
   assert.match(job("portable"), /os: macos-26-intel, browser: webkit/);
   assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
-  assert.match(job("portable-evidence"), /macos-26-intel:darwin/);
-  assert.match(job("reports"), /for os in ubuntu-24.04 macos-26-intel windows-latest/);
+  assert.match(job("portable-evidence"), /chromium-evidence.mjs collect-artifacts/);
+  assert.match(job("reports"), /chromium-evidence.mjs render-artifacts/);
   assert.match(health, /os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
   assert.match(rust, /os: \[ubuntu-latest, macos-latest\]/);
   assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
@@ -210,9 +211,14 @@ function renderReports({ linux = "success", desktop = "skipped", platforms = ["u
       mkdirSync(blob, { recursive: true });
       writeFileSync(path.join(blob, `report-${shard}.zip`), "actual shard blob placeholder");
     }
-    const block = root().split(/^      - /m).find(value => value.startsWith("name: Render each OS report from its raw blobs\n"));
-    const script = block.split("        run: |\n")[1].replace(/^          /gm, "").replaceAll("${{ github.run_attempt }}", "3");
-    const result = spawnSync("bash", ["-e", "-c", 'npx() { printf "%s\\n" "$PLAYWRIGHT_HTML_OUTPUT_DIR" >> "$RENDERED"; return "$RENDER_EXIT"; };\n' + script], {
+    const module = pathToFileURL(path.join(directory, "scripts/evals/chromium-evidence.mjs")).href;
+    const script = `import {renderDownloadedReports} from ${JSON.stringify(module)};
+      import {appendFileSync} from 'node:fs';
+      try { await renderDownloadedReports('../target/ui-reports', '../target/ui-report-blobs',
+        {runAttempt:'3', linuxResult:process.env.LINUX_RESULT, desktopResult:process.env.DESKTOP_RESULT},
+        {merge:async(_directory,os)=>{appendFileSync(process.env.RENDERED,'playwright-report/'+os+'\\n');if(process.env.RENDER_EXIT!=='0')throw Error('renderer failed')}});
+      } catch(error) { console.error(error.message); process.exitCode=1; }`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       cwd: path.join(directory, "frontend"), encoding: "utf8",
       env: { ...process.env, LINUX_RESULT: linux, DESKTOP_RESULT: desktop, RENDERED: path.join(directory, "rendered"), RENDER_EXIT: renderExit },
     });

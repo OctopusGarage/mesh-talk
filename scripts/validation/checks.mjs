@@ -1,10 +1,11 @@
+import { syntaxKind } from "./syntax.mjs";
 /** Static obligations for a development plan; browser/native proof stays explicit. */
 export function buildStaticChecks(plan) {
   const checks = [];
   const add = (name, command, cwd = ".", inputs) => checks.push({ name, command, cwd, ...(inputs ? { inputs } : {}) });
   const packages = [...new Set(plan.rust.map(item => item.package))].sort();
-  if (plan.files.some(file => file.startsWith(".github/workflows/")))
-    add("workflow-lint", ["actionlint"]);
+  const syntax = plan.files.filter(file => !plan.deleted?.includes(file) && syntaxKind(file));
+  if (syntax.length) add("changed-syntax", ["node", "scripts/validation/syntax.mjs", "--files", ...syntax]);
   const shells = plan.files.filter(file => !plan.deleted?.includes(file) && /^(?:scripts\/.*\.sh|hooks\/[^/]+)$/u.test(file));
   if (shells.length) add("shell-lint", ["shellcheck", "--severity=warning", "--", ...shells]);
   if (plan.files.some(file => ["scripts/build-retention.py", "scripts/test_build_retention.py"].includes(file)))

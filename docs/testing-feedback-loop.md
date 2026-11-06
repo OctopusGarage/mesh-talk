@@ -1,8 +1,9 @@
 # Local test feedback loop
 
 During feature development, run the smallest tests that cross the changed
-boundary. The pre-commit hook checks staged whitespace and source formatting;
-it does not launch test suites. Record the focused commands and results in the
+boundary. The pre-commit hook checks staged whitespace, source formatting,
+structural ownership, hygiene and changed-script/workflow syntax; it does not
+launch test suites. It selects staged paths but validates worktree bytes. Record the focused commands and results in the
 PR. Commit the candidate and use `./scripts/create-pr.sh -- <gh pr create options>`
 for fast publication after cheap source, whitespace, structural and hygiene checks.
 CI runs the comprehensive suites after publication; all required checks must pass
@@ -15,6 +16,7 @@ when explicitly requested or when the changed behavior needs process/browser evi
 
 | Changed boundary            | Fast local command                                                                                          | Broader trigger                                             |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Script / workflow syntax    | `node scripts/validation/syntax.mjs --base origin/main` | Clean committed candidate and required CI remain authoritative |
 | Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge             |
 | Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge             |
 | One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke`                                   | `make e2e` when requested or for release validation         |
@@ -1537,6 +1539,12 @@ blob/trace evidence upload to succeed. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
 
+Portable/report artifact orchestration belongs to
+`scripts/evals/chromium-evidence.mjs`; workflows invoke its collectors rather than
+reimplementing platform counts and result policy. The optional-pack job retains
+built-asset absence and ES2021 syntax validation. Its two browser scenarios and
+coverage execute once in the full Linux matrix, with actual inventory proof.
+
 Successful shard uploads contain the raw Playwright blob (including its
 attachments) and structured JSON results, without a second copy of
 `test-results/`. Failed or interrupted UI execution additionally retains raw
@@ -1811,7 +1819,10 @@ compaction deadlines remain unchanged.
 AddressSanitizer and LeakSanitizer retain the complete default core-library
 inventory and instrumented standard library in one source-pinned Nextest archive.
 Its Linux consumers execute the serial partitions owned by `scripts/ci/asan.mjs`,
-one test at a time with no retries. The producer seals the full default inventory
+one test at a time with no retries. Its non-instrumented archive protocol fixture
+runs once in the sanitizer producer before expensive compilation, rather than
+again in both ordinary native jobs. It remains available for focused local checks.
+The producer seals the full default inventory
 and source/compiler/config/platform identity. Trusted job outputs bind both the
 archive and manifest digests; consumers verify those bytes before extraction and
 compare the actual inventory before execution, without rebuilding the core.

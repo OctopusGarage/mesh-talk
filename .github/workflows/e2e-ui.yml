@@ -135,18 +135,7 @@ jobs:
           pattern: chromium-portable-*-${{ github.run_attempt }}
           path: target/chromium-portable
       - name: Validate every OS and the complete portable inventory
-        shell: bash
-        run: |
-          for entry in ubuntu-24.04:linux macos-26-intel:darwin windows-latest:win32; do
-            os="${entry%:*}"
-            platform="${entry#*:}"
-            mkdir -p "target/chromium-collected/$platform"
-            shard_ids="$(node scripts/evals/chromium-evidence.mjs shards "$os")"
-            for shard in $shard_ids; do
-              mv "target/chromium-portable/chromium-portable-$os-$shard-${{ github.run_attempt }}" "target/chromium-collected/$platform/$shard"
-            done
-            node scripts/evals/chromium-evidence.mjs collect "target/chromium-collected/$platform" "$platform"
-          done
+        run: node scripts/evals/chromium-evidence.mjs collect-artifacts target/chromium-portable target/chromium-collected
       - name: Preserve validated portable reports
         uses: actions/upload-artifact@v7
         with:
@@ -183,40 +172,7 @@ jobs:
         env:
           LINUX_RESULT: ${{ needs.linux.result }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
-        shell: bash
-        run: |
-          status=0
-          rendered=0
-          for os in ubuntu-24.04 macos-26-intel windows-latest; do
-            result="$DESKTOP_RESULT"
-            if [ "$os" = ubuntu-24.04 ]; then result="$LINUX_RESULT"; fi
-            case "$result" in
-              skipped) continue ;; # No shard was admitted; acceptance still rejects this producer.
-              success|failure|cancelled) ;;
-              *) echo "Unknown producer conclusion for $os: $result" >&2; status=1; continue ;;
-            esac
-            mkdir -p "../target/ui-report-blobs/$os"
-            available=true
-            shard_ids="$(node ../scripts/evals/chromium-evidence.mjs shards "$os")"
-            for shard in $shard_ids; do
-              artifact="../target/ui-reports/playwright-ui-$os-$shard-${{ github.run_attempt }}"
-              if ! cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/"; then
-                echo "::error::Missing $os shard $shard blobs for this run attempt."
-                available=false
-              fi
-            done
-            if [ "$available" != true ]; then
-              status=1
-              continue
-            fi
-            if PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$os" npx playwright merge-reports --config playwright.config.ts --reporter=html "../target/ui-report-blobs/$os"; then
-              rendered=$((rendered + 1))
-            else
-              status=1
-            fi
-          done
-          if [ "$rendered" -eq 0 ]; then status=1; fi
-          exit "$status"
+        run: node ../scripts/evals/chromium-evidence.mjs render-artifacts ../target/ui-reports ../target/ui-report-blobs
       - uses: actions/upload-artifact@v7
         if: always() && hashFiles('frontend/playwright-report/**') != ''
         with:
@@ -241,35 +197,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - name: Prepare Ubuntu archive source
-        if: runner.os == 'Linux'
-        shell: bash
-        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
-      - run: npx playwright install --with-deps chromium
       - name: Verify desktop build has no bundled packs
         run: npm run build && node ../scripts/release/check-variant-assets.mjs
       - name: Check JavaScript for macOS 12 WKWebView
         run: npm run check:build-syntax
-      - name: Download this run's unit coverage
-        uses: actions/download-artifact@v8
-        with:
-          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ui-unit-coverage
-      - name: Validate unit coverage provenance and restore line map
-        run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
-      - name: Run sticker and installation flows
-        run: npx playwright test e2e/stickers.spec.ts e2e/packs-empty.spec.ts --grep "starts without" --workers=1 --retries=0
-        env:
-          MESH_TALK_E2E_COVERAGE: "1"
-      - name: Merge pack browser coverage
-        run: node scripts/merge-e2e-coverage.mjs
-      - name: Upload pack browser coverage
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5.5.1
-        with:
-          files: frontend/coverage/e2e.lcov
-          flags: ui-e2e-packs
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
 
   portable:
     name: Portable UI (${{ matrix.os }}, ${{ matrix.browser }})

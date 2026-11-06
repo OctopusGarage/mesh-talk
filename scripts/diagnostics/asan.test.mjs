@@ -184,6 +184,9 @@ test("ASan compiles once and binds every consumer to the current producer archiv
   const consumers = workflow.split("  shards:\n")[1].split("  asan:\n")[0];
   assert.match(producer, /node scripts\/ci\/asan.mjs build tmp\/asan-build/u);
   assert.ok(producer.indexOf("node --test scripts/ci/asan-cli.test.mjs") < producer.indexOf("node scripts/ci/asan.mjs build"), "actual archive protocol must reject regressions before the large compilation");
+  const native = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(native, /scripts\/ci\/asan-cli\.test\.mjs/u, "the non-instrumented ASan protocol belongs to its required producer, not both native jobs");
+  assert.equal(workflow.match(/node --test scripts\/ci\/asan-cli\.test\.mjs/gu)?.length, 1);
   assert.match(producer, /archive_sha256: \$\{\{ steps.build.outputs.archive_sha256 \}\}/u);
   assert.match(producer, /manifest_sha256: \$\{\{ steps.build.outputs.manifest_sha256 \}\}/u);
   assert.match(producer, /compression-level: 0/u);

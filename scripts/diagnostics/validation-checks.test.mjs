@@ -16,7 +16,8 @@ test("documentation-only checks do not start compilers or browsers", () => {
 test("workflow and shell edits add their existing static checks but removed scripts are not executed", () => {
   assert.deepEqual(buildStaticChecks(plan({ files: ["scripts/removed.sh"], deleted: ["scripts/removed.sh"] })), []);
   const checks = buildStaticChecks(plan({ files: [".github/workflows/ci.yml", "scripts/changed.sh"] }));
-  assert.deepEqual(checks.map(check => check.name), ["workflow-lint", "shell-lint"]);
+  assert.deepEqual(checks.map(check => check.name), ["changed-syntax", "shell-lint"]);
+  assert.deepEqual(checks[0].command, ["node", "scripts/validation/syntax.mjs", "--files", ".github/workflows/ci.yml", "scripts/changed.sh"]);
   assert.deepEqual(checks[1].command, ["shellcheck", "--severity=warning", "--", "scripts/changed.sh"]);
 });
 test("Rust static checks lint actual affected packages with CI target coverage", () => {
@@ -72,6 +73,6 @@ test("cheap static feedback runs separately from heavy builds and test execution
 
 test("retention guard edits run its real subprocess and filesystem regressions before heavy work", () => {
   const checks = buildStaticChecks(plan({ files: ["scripts/build-retention.py"] }));
-  assert.deepEqual(checks.map(check => check.command), [["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_build_retention.py", "-v"]]);
+  assert.deepEqual(checks.map(check => check.command), [["node", "scripts/validation/syntax.mjs", "--files", "scripts/build-retention.py"], ["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_build_retention.py", "-v"]]);
   assert.deepEqual(phasePlan(plan({ checks }), "static").checks, checks);
 });

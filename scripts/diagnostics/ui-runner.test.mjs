@@ -33,12 +33,19 @@ test("owned absolute deadline rejects unfinished work without a startup SLA", as
   }
 });
 
-test("cleanup uncertainty and forced retirement cannot pass", async () => {
+test("verified retirement preserves the canonical exit verdict while cleanup uncertainty fails", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mesh-ui-result-"));
   try {
-    for (const outcome of [{ code: 0, cleanupUnverified: true }, { code: 0, forcedRetirement: true }, { code: 1 }, { code: 0 }]) {
+    for (const [outcome, expected] of [
+      [{ code: 0, cleanupUnverified: true }, false],
+      [{ code: 0, forcedRetirement: true, cleanupUnverified: false }, true],
+      [{ code: 1 }, false],
+      [{ code: 0, error: "owner failure" }, false],
+      [{ code: 0 }, true],
+    ]) {
       const result = await runUi([], { deadline: Date.now() + 10000, directory, execute: async () => outcome });
-      assert.equal(result.success, outcome.code === 0 && !outcome.cleanupUnverified && !outcome.forcedRetirement);
+      assert.equal(result.success, expected);
+      assert.equal(result.forcedRetirement, outcome.forcedRetirement);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

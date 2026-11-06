@@ -180,6 +180,11 @@ The same signing key authenticates canonical full packages and optional incremen
 
 ### Manual package size budgets
 
+[`package-app.sh`](../scripts/release/package-app.sh) owns installer collection,
+checksum roles and fresh signed application ZIPs. The release workflow passes the
+validated tag and target to that script; the existing signing and verification
+owners still control acceptance.
+
 Manual downloads carry no updater payload bytes. Their signed checksum manifests are limited
 to 64 KiB each, and their installer formats remain an exact platform-specific set. macOS DMGs and
 their outer ZIPs each have a 24 MiB limit, enforced independently before native inspection by

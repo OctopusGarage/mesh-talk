@@ -19,6 +19,7 @@ test("PR creation is fast by default, supports full preparation and preserves ar
   assert.equal(spawnSync("git", ["-c", "user.name=Preflight Test", "-c", "user.email=preflight@example.test", "commit", "--allow-empty", "-qm", "fixture"], { cwd: root }).status, 0);
   for (const branch of ["main", "release"]) assert.equal(spawnSync("git", ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"], { cwd: root }).status, 0);
   copyFileSync(entry, join(root, "scripts/create-pr.sh"));
+  copyFileSync(resolve("scripts/validation/syntax.mjs"), join(root, "scripts/validation/syntax.mjs"));
   copyFileSync(resolve("scripts/pr-platform/plan.mjs"), join(root, "scripts/pr-platform/plan.mjs"));
   copyFileSync(resolve("scripts/pr-platform/rust-packages.mjs"), join(root, "scripts/pr-platform/rust-packages.mjs"));
   const trace = join(root, "trace.jsonl");
@@ -84,4 +85,14 @@ test("PR creation is fast by default, supports full preparation and preserves ar
   assert.notEqual(run(0, args, {}, false).status, 0);
   assert.equal(readFileSync(trace, "utf8"), "", "cheap-check changes cannot publish either");
   assert.notEqual(run(0, ["--draft"], {}, false).status, 0, "separator remains mandatory");
+  writeFileSync(join(root, "scripts/broken.mjs"), "export const = ;\n");
+  assert.equal(spawnSync("git", ["add", "-f", "scripts/broken.mjs"], { cwd: root }).status, 0);
+  assert.equal(spawnSync("git", ["-c", "user.name=Test", "-c", "user.email=preflight@example.test", "commit", "-qm", "invalid syntax fixture"], { cwd: root }).status, 0);
+  for (const full of [false, true]) {
+    const invalid = run(0, args, {}, full);
+    assert.notEqual(invalid.status, 0);
+    assert.match(invalid.stderr, /rejected syntax/);
+    assert.equal(readFileSync(trace, "utf8"), "", "invalid committed scripts cannot reach preparation or publication");
+  }
+
 });
