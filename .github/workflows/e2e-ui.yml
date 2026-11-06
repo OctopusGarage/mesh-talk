@@ -36,11 +36,23 @@ jobs:
       operating_systems: '["ubuntu-24.04"]'
 
   desktop:
-    # Finish Health and WebKit before admitting the bounded desktop burst.
+    # Preserve native Mac admission, with independent per-OS browser budgets.
     needs: [health, portable]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26-intel
+            shards: '[1,2,3,4,5,6,7,8]'
+            total: 8
+          - os: windows-latest
+            shards: '[1,2,3,4]'
+            total: 4
     uses: ./.github/workflows/ui-shards.yml
     with:
-      operating_systems: '["macos-26-intel","windows-latest"]'
+      operating_systems: ${{ format('["{0}"]', matrix.os) }}
+      shards: ${{ matrix.shards }}
+      shard_total: ${{ matrix.total }}
       max_parallel: 3
 
   coverage:
@@ -129,7 +141,8 @@ jobs:
             os="${entry%:*}"
             platform="${entry#*:}"
             mkdir -p "target/chromium-collected/$platform"
-            for shard in 1 2 3 4; do
+            shard_ids="$(node scripts/evals/chromium-evidence.mjs shards "$os")"
+            for shard in $shard_ids; do
               mv "target/chromium-portable/chromium-portable-$os-$shard-${{ github.run_attempt }}" "target/chromium-collected/$platform/$shard"
             done
             node scripts/evals/chromium-evidence.mjs collect "target/chromium-collected/$platform" "$platform"
@@ -184,7 +197,8 @@ jobs:
             esac
             mkdir -p "../target/ui-report-blobs/$os"
             available=true
-            for shard in 1 2 3 4; do
+            shard_ids="$(node ../scripts/evals/chromium-evidence.mjs shards "$os")"
+            for shard in $shard_ids; do
               artifact="../target/ui-reports/playwright-ui-$os-$shard-${{ github.run_attempt }}"
               if ! cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/"; then
                 echo "::error::Missing $os shard $shard blobs for this run attempt."

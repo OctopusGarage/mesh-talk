@@ -43,7 +43,7 @@ test("portable shard collection requires exact source, run attempt, OS and compl
   assert.throws(() => validateShardInventory(duplicate, identity));
 });
 
-test("real shard files survive relocation and revalidation rejects changed evidence bytes", async t => {
+for (const platform of ["win32", "darwin"]) test(`real ${platform} shard files survive relocation and reject changed evidence`, async t => {
   const { mkdtemp, mkdir, writeFile, readFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join, resolve } = await import("node:path");
@@ -52,11 +52,13 @@ test("real shard files survive relocation and revalidation rejects changed evide
   const { extractShard, collectShards } = await import("../evals/chromium-evidence.mjs");
   const root = await mkdtemp(join(tmpdir(), "mesh-chromium-evidence-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const identity = { sourceSha: "a".repeat(40), runId: "17", runAttempt: "2", platform: "win32" };
+  const identity = { sourceSha: "a".repeat(40), runId: "17", runAttempt: "2", platform };
+  const { chromiumShardCount } = await import("../evals/chromium-evidence.mjs");
+  const total = chromiumShardCount(platform);
   const paths = requiredBrowserPaths("core");
   const all = join(root, "collected");
-  for (let shard = 1; shard <= 4; shard++) {
-    const selected = paths.filter((_, i) => i % 4 === shard - 1), report = full(selected);
+  for (let shard = 1; shard <= total; shard++) {
+    const selected = paths.filter((_, i) => i % total === shard - 1), report = full(selected);
     const raw = join(root, `raw-${shard}`);
     await mkdir(raw);
     for (let i = 0; i < selected.length; i++) {
@@ -74,7 +76,7 @@ test("real shard files survive relocation and revalidation rejects changed evide
     await extractShard(reportPath, join(all, String(shard)), shard, identity);
   }
   // Raw Playwright paths no longer exist: collection must use copied relative paths.
-  for (let shard = 1; shard <= 4; shard++) await rm(join(root, `raw-${shard}`), { recursive: true });
+  for (let shard = 1; shard <= total; shard++) await rm(join(root, `raw-${shard}`), { recursive: true });
   await collectShards(all, identity);
   const filename = join(all, "1/case-0-portable-browser-evidence");
   const evidence = JSON.parse(await readFile(filename, "utf8"));
@@ -83,4 +85,26 @@ test("real shard files survive relocation and revalidation rejects changed evide
   await writeFile(filename, JSON.stringify(evidence));
   await writeFile(join(all, "1/case-0-trace"), "not a ZIP");
   await assert.rejects(collectShards(all, identity), /Trace ZIP/);
+});
+
+test("platform shard layouts preserve exact partitions and reject invalid discovery", async () => {
+  const { chromiumShardCount, validateShardLayout, validateShardInventory } = await import("../evals/chromium-evidence.mjs");
+  for (const [os, platform, total] of [["ubuntu-24.04", "linux", 4], ["windows-latest", "win32", 4], ["macos-26-intel", "darwin", 8]]) {
+    const shards = Array.from({ length: total }, (_, index) => index + 1);
+    assert.equal(chromiumShardCount(os), total);
+    assert.equal(chromiumShardCount(platform), total);
+    assert.doesNotThrow(() => validateShardLayout(os, shards, total, total, platform));
+    for (const bad of [shards.slice(1), [...shards, 1], shards.map(() => 1)]) assert.throws(() => validateShardLayout(os, bad, total, 1, platform));
+    assert.throws(() => validateShardLayout(os, shards, total + 1, 1, platform));
+    assert.throws(() => validateShardLayout(os, shards, total, total + 1, platform));
+    assert.throws(() => validateShardLayout(os, shards, total, 1, "unknown"));
+  }
+  assert.throws(() => chromiumShardCount("unknown"));
+  const identity = { sourceSha: "a".repeat(40), runId: "17", runAttempt: "2", platform: "darwin" };
+  const paths = requiredBrowserPaths("core");
+  const manifests = Array.from({ length: 8 }, (_, index) => ({ schema: 1, ...identity, shard: index + 1, total: 8, paths: paths.filter((_, item) => item % 8 === index) }));
+  assert.doesNotThrow(() => validateShardInventory(manifests, identity));
+  assert.throws(() => validateShardInventory(manifests.slice(0, 4), identity));
+  const duplicate = structuredClone(manifests); duplicate[7].shard = 1;
+  assert.throws(() => validateShardInventory(duplicate, identity));
 });

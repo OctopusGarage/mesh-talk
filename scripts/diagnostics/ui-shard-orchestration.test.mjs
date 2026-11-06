@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -25,6 +25,7 @@ test("Linux coverage requires Linux and Health without waiting for desktop shard
 test("portable acceptance and final UI gate reject every unsuccessful Linux or desktop result", () => {
   const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
   for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop\]/);
+  assert.match(job("portable-evidence"), /node scripts\/evals\/chromium-evidence\.mjs shards/);
   assert.match(job("ui-gate"), /needs: \[linux, desktop,/);
   for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
     for (const desktop of ["success", "failure", "cancelled", "skipped", ""]) {
@@ -35,16 +36,17 @@ test("portable acceptance and final UI gate reject every unsuccessful Linux or d
   }
 });
 
-test("one reusable shard implementation retains twelve runners and all evidence identities", () => {
+test("one reusable shard implementation retains platform-sized runners and all evidence identities", () => {
   const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
   assert.match(reusable, /operating_systems:\n        type: string\n        required: true/);
   assert.match(reusable, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
-  assert.match(reusable, /shard: \[1, 2, 3, 4\]/);
+  assert.match(reusable, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
   assert.match(job("linux"), /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(job("desktop"), /- os: macos-26-intel\n            shards: '\[1,2,3,4,5,6,7,8\]'\n            total: 8/);
+  assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
   assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 2);
   assert.ok(!root().includes("name: Run UI E2E"));
-  assert.match(reusable, /npx playwright test --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4 --reporter=list,blob,json/);
+  assert.match(reusable, /npx playwright test --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\} --reporter=list,blob,json/);
   assert.match(reusable, /MESH_TALK_E2E_COVERAGE: \$\{\{ runner.os == 'Linux' && '1' \|\| '0' \}\}/);
   for (const prefix of ["playwright-ui", "chromium-portable"]) assert.ok(reusable.includes(`name: ${prefix}-`));
   assert.match(reusable, /SOURCE_SHA: \$\{\{ github.sha \}\}/);
@@ -56,7 +58,8 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(job("desktop"), /- os: macos-26-intel\n            shards: '\[1,2,3,4,5,6,7,8\]'\n            total: 8/);
+  assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
   assert.match(job("portable"), /os: macos-26-intel, browser: webkit/);
   assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
   assert.match(job("portable-evidence"), /macos-26-intel:darwin/);
@@ -77,7 +80,7 @@ test("desktop browser burst waits for Health and WebKit with bounded admission w
   assert.doesNotMatch(job("linux"), /needs:/);
 });
 
-test("HTML reports require all four current-attempt shards for every admitted OS", () => {
+test("HTML reports require all platform-specific current-attempt shards", () => {
   const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   const complete = { desktop: "success", platforms };
   assert.equal(renderReports(complete).status, 0);
@@ -85,6 +88,10 @@ test("HTML reports require all four current-attempt shards for every admitted OS
     const partial = renderReports({ ...complete, missing: [`${os}-2`, `${os}-3`, `${os}-4`] });
     assert.notEqual(partial.status, 0, `${os} accepted only one shard`);
   }
+  assert.notEqual(renderReports({ ...complete, missing: ["macos-26-intel-8"] }).status, 0, "macOS eighth shard is mandatory");
+  const discovery = renderReports({ ...complete, discoveryFailure: true });
+  assert.notEqual(discovery.status, 0);
+  assert.deepEqual(discovery.rendered, [], "failed layout discovery cannot silently render an incomplete report");
   assert.notEqual(renderReports({ ...complete, attempt: "2" }).status, 0, "another attempt cannot satisfy current artifacts");
 });
 
@@ -165,11 +172,14 @@ test("Firefox core runs on ordinary candidates and the final gate requires its r
   }
 });
 
-function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0" } = {}) {
+function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0", discoveryFailure = false } = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-inventory-"));
   try {
     mkdirSync(path.join(directory, "frontend"));
-    for (const os of platforms) for (const shard of [1, 2, 3, 4]) {
+    mkdirSync(path.join(directory, "scripts/evals"), { recursive: true });
+    for (const file of ["chromium-evidence.mjs", "browser-report.mjs", "png-evidence.mjs", "trace-evidence.mjs"]) copyFileSync(new URL(`../evals/${file}`, import.meta.url), path.join(directory, "scripts/evals", file));
+    if (discoveryFailure) writeFileSync(path.join(directory, "scripts/evals/chromium-evidence.mjs"), "process.exit(37);\n");
+    for (const os of platforms) for (const shard of os === "macos-26-intel" ? [1, 2, 3, 4, 5, 6, 7, 8] : [1, 2, 3, 4]) {
       if (`${os}-${shard}` === omit || missing.includes(`${os}-${shard}`)) continue;
       const blob = path.join(directory, "target", "ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
       mkdirSync(blob, { recursive: true });

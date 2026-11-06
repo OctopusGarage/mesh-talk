@@ -6,6 +6,19 @@ import { dirname, resolve, relative, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { requiredBrowserPaths, validateBrowserReport, validateBrowserEvidence } from "./browser-report.mjs";
 
+const platforms = { linux: "linux", darwin: "darwin", win32: "win32", "ubuntu-24.04": "linux", "macos-26-intel": "darwin", "windows-latest": "win32" };
+export function chromiumShardCount(platform) {
+  assert.ok(Object.hasOwn(platforms, platform), "Unknown Chromium shard platform");
+  return platforms[platform] === "darwin" ? 8 : 4;
+}
+export function validateShardLayout(os, shards, total, shard, platform = process.platform) {
+  const count = chromiumShardCount(os);
+  assert.equal(platforms[os], platform, "Chromium runner differs from declared OS");
+  assert.equal(total, count, "Unexpected Chromium partition count");
+  assert.deepEqual(shards, Array.from({ length: count }, (_, index) => index + 1), "Incomplete or duplicate Chromium partition layout");
+  assert.ok(shards.includes(shard), "Unknown Chromium partition");
+}
+
 export function selectPortableReport(report) {
   const required = new Set(requiredBrowserPaths("core").map(path => JSON.stringify(path)));
   const selected = { errors: report.errors, stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 }, suites: [], paths: [] };
@@ -23,13 +36,14 @@ export function selectPortableReport(report) {
 }
 
 export function validateShardInventory(manifests, identity) {
-  assert.equal(manifests.length, 4, "Missing Chromium portable shards");
+  const total = chromiumShardCount(identity.platform);
+  assert.equal(manifests.length, total, "Missing Chromium portable shards");
   const seen = new Set(), paths = [];
   for (const manifest of manifests) {
     assert.equal(manifest.schema, 1, "Unsupported portable shard schema");
     for (const field of ["sourceSha", "runId", "runAttempt", "platform"]) assert.equal(manifest[field], identity[field], `Wrong portable shard ${field}`);
-    assert.equal(manifest.total, 4, "Unexpected portable shard total");
-    assert.ok(Number.isInteger(manifest.shard) && manifest.shard >= 1 && manifest.shard <= 4 && !seen.has(manifest.shard), "Invalid or duplicate portable shard");
+    assert.equal(manifest.total, total, "Unexpected portable shard total");
+    assert.ok(Number.isInteger(manifest.shard) && manifest.shard >= 1 && manifest.shard <= total && !seen.has(manifest.shard), "Invalid or duplicate portable shard");
     seen.add(manifest.shard);
     paths.push(...manifest.paths.map(path => JSON.stringify(path)));
   }
@@ -46,7 +60,8 @@ function identity(platform = process.platform) {
 }
 
 export async function extractShard(reportPath, output, shard, expectedIdentity = identity()) {
-  assert.ok(Number.isInteger(shard) && shard >= 1 && shard <= 4, "Invalid Chromium shard");
+  const total = chromiumShardCount(expectedIdentity.platform);
+  assert.ok(Number.isInteger(shard) && shard >= 1 && shard <= total, "Invalid Chromium shard");
   reportPath = resolve(reportPath); output = resolve(output);
   const selected = selectPortableReport(JSON.parse(await readFile(reportPath, "utf8")));
   const results = validateBrowserReport(selected, { count: selected.paths.length, browser: "chromium", expectedPaths: selected.paths });
@@ -61,9 +76,9 @@ export async function extractShard(reportPath, output, shard, expectedIdentity =
   const filename = resolve(output, "results.json");
   await writeFile(filename, JSON.stringify(selected));
   await validateBrowserEvidence(filename, { ...expectedIdentity, expectedPaths: selected.paths });
-  const manifest = { schema: 1, ...expectedIdentity, shard, total: 4, paths: selected.paths };
+  const manifest = { schema: 1, ...expectedIdentity, shard, total, paths: selected.paths };
   await writeFile(resolve(output, "shard.json"), JSON.stringify(manifest));
-  console.log(`Validated ${selected.paths.length} portable cases in Chromium shard ${shard}/4`);
+  console.log(`Validated ${selected.paths.length} portable cases in Chromium shard ${shard}/${total}`);
 }
 
 export async function collectShards(input, expectedIdentity) {
@@ -79,12 +94,14 @@ export async function collectShards(input, expectedIdentity) {
   for (const [index, root] of roots.entries()) {
     await validateBrowserEvidence(resolve(root, "results.json"), { ...expectedIdentity, expectedPaths: manifests[index].paths });
   }
-  console.log(`Validated all ${requiredBrowserPaths("core").length} ${expectedIdentity.platform} Chromium portable scenarios from four full-suite shards`);
+  console.log(`Validated all ${requiredBrowserPaths("core").length} ${expectedIdentity.platform} Chromium portable scenarios from ${chromiumShardCount(expectedIdentity.platform)} full-suite shards`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [mode, input, output] = process.argv.slice(2);
   if (mode === "extract") await extractShard(input, output, Number(process.env.CHROMIUM_SHARD));
   else if (mode === "collect") await collectShards(input, identity(output));
-  else throw Error("usage: chromium-evidence.mjs extract REPORT OUTPUT | collect INPUT PLATFORM");
+  else if (mode === "shards") console.log(Array.from({ length: chromiumShardCount(input) }, (_, index) => index + 1).join(" "));
+  else if (mode === "layout") validateShardLayout(process.env.CHROMIUM_OS, JSON.parse(process.env.CHROMIUM_SHARDS), Number(process.env.CHROMIUM_TOTAL), Number(process.env.CHROMIUM_SHARD));
+  else throw Error("usage: chromium-evidence.mjs extract REPORT OUTPUT | collect INPUT PLATFORM | shards PLATFORM | layout");
 }

@@ -120,11 +120,12 @@ test("full browser coverage remains on every desktop OS with bounded shards", ()
   const shardWorkflow = read("ui-shards.yml");
   const baseline = shardWorkflow.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(ui, /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(ui, /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(ui, /- os: macos-26-intel/);
+  assert.match(ui, /- os: windows-latest/);
   assert.match(baseline, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
-  assert.match(baseline, /shard: \[1, 2, 3, 4\]/);
+  assert.match(baseline, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
   assert.match(baseline, /fail-fast: false/);
-  assert.match(step(shardWorkflow, "Run UI E2E"), /--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4/);
+  assert.match(step(shardWorkflow, "Run UI E2E"), /--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\}/);
   assert.match(baseline, /name: playwright-ui-\$\{\{ matrix.os \}\}-\$\{\{ matrix.shard \}\}-\$\{\{ github.run_attempt \}\}/);
   assert.match(baseline, /if-no-files-found: error/);
   assert.doesNotMatch(baseline, /test:coverage|codecov/);

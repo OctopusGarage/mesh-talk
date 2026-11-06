@@ -7,6 +7,14 @@ on:
         type: string
         required: true
         description: JSON array of hosted runner labels
+      shards:
+        type: string
+        default: '[1,2,3,4]'
+        description: Complete ordered partition identifiers
+      shard_total:
+        type: number
+        default: 4
+        description: Full-suite partition count for every requested OS
       max_parallel:
         type: number
         default: 4
@@ -17,13 +25,13 @@ permissions:
 
 jobs:
   e2e:
-    name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
+    name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/${{ inputs.shard_total }})
     strategy:
       fail-fast: false
       max-parallel: ${{ inputs.max_parallel }}
       matrix:
         os: ${{ fromJSON(inputs.operating_systems) }}
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(inputs.shards) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     defaults:
@@ -38,6 +46,13 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Validate full-suite partition layout
+        run: node ../scripts/evals/chromium-evidence.mjs layout
+        env:
+          CHROMIUM_OS: ${{ matrix.os }}
+          CHROMIUM_SHARDS: ${{ inputs.shards }}
+          CHROMIUM_TOTAL: ${{ inputs.shard_total }}
+          CHROMIUM_SHARD: ${{ matrix.shard }}
       - name: Install dependencies
         run: npm ci
       - name: Prepare Ubuntu archive source
@@ -61,7 +76,7 @@ jobs:
       # tests across machines rather than competing with Vite on one runner.
       - name: Run UI E2E
         id: ui
-        run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/4 --reporter=list,blob,json
+        run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/${{ inputs.shard_total }} --reporter=list,blob,json
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: full-results.json
           EVAL_SOURCE_SHA: ${{ github.sha }}

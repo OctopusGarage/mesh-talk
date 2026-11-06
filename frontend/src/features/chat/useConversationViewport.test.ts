@@ -806,3 +806,32 @@ it("does not apply a resize correction before pending user scroll input is consu
   await nextAnimationFrame();
   expect(scroller.scrollTop).toBe(100);
 });
+
+it("retains a reading target when row geometry arrives after the frame budget", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  let height = 1000;
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: () => height },
+    clientHeight: { value: 300 },
+  });
+  scroller.scrollTop = 120;
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  await render("account:bob");
+  height = 300;
+  scroller.scrollTop = 0;
+  await render("account:alice");
+  for (let i = 0; i < 35; i++) await nextAnimationFrame();
+  expect(frames.size).toBe(0);
+  height = 1000;
+  await act(async () => {
+    scroller.appendChild(document.createElement("div"));
+  });
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(120);
+});

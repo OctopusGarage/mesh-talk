@@ -248,7 +248,7 @@ when a PR has a separately validated docs-only path.
 The UI HTML collector follows the mandatory full-shard producers, independently
 of the optional extended-browser jobs. If Health prevents desktop shards from
 starting, their missing reports remain incomplete evidence. The collector checks
-all four current-attempt shards per OS; fixing the upstream failure and rerunning
+all platform-specific current-attempt shards (eight macOS, four Linux/Windows); fixing the upstream failure and rerunning
 the selected producers supplies that evidence, rather than omitting those OSes.
 
 ## Bound parallelism and preserve isolation
@@ -260,6 +260,12 @@ formatting, source lint and dependency auditing on Ubuntu. Retain macOS/Windows
 execution when assertions exercise their native behavior. Count macOS jobs across
 all workflows against the account's actual concurrency allowance; moving one
 workflow's bottleneck into another workflow's queue is not an improvement.
+
+Full Chromium uses eight macOS partitions and four each on Linux and Windows.
+Desktop browsers have independent per-OS admission limits of three; preserve
+Health and WebKit admission before that burst and the existing job watchdog.
+Strict collectors require the platform-specific complete layout, including the
+last partition, and reject layout discovery failures.
 
 Choose shards from observed work and available runner capacity. Count setup and
 artifact overhead as well as execution. More shards can increase queueing and

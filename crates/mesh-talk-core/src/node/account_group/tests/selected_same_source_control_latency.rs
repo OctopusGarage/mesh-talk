@@ -2857,6 +2857,10 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     })
                     .unwrap()
                     .4;
+                // The controlled tail was seeded directly into storage while
+                // preparing A's read. Advertise that fixture publication only
+                // after A's receipt and protected paired page are established.
+                owner.note_account_local_change();
                 super::cold_account_setup(async {
                     while !scope.lock().unwrap().ready_for(expected)
                         || other.account_document_meta(&tail.key).as_ref() != Some(&tail)
@@ -2865,7 +2869,17 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     }
                 })
                 .await
-                .expect("B's exact unrelated Control scope must settle before B admission");
+                .unwrap_or_else(|error| {
+                    let scope = scope.lock().unwrap();
+                    panic!(
+                        "B's exact unrelated Control scope must settle before B admission: {error:?}; settled={} paired={} corpus_matches={} tail_matches={} held_active={}",
+                        scope.settled,
+                        scope.paired,
+                        scope.settled_corpus == Some(expected),
+                        other.account_document_meta(&tail.key).as_ref() == Some(&tail),
+                        control_pages.lock().unwrap().is_active(held),
+                    );
+                });
                 assert!(owner.account_document_meta(&tail.key).as_ref() == Some(&tail));
                 assert!(!resumed_release.is_closed());
                 assert!(control_pages.lock().unwrap().is_active(held));

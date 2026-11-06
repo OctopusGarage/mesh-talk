@@ -1469,8 +1469,10 @@ coverage upload failures. Native CI has a 90-minute job budget; Health portable
 jobs have a 25-minute budget. These are execution bounds, not latency promises.
 Compare hosted queue, execution and all-required-check completion after deployment.
 
-Full Chromium tests use four Playwright shards per OS, with one worker and zero
-retries per runner. This keeps the existing per-machine rendering budget while
+Full Chromium tests use eight Playwright shards on macOS and four each on Linux
+and Windows, with one worker and zero retries per runner. Desktop admission allows
+three concurrent shards per OS after Health and WebKit; Linux starts independently.
+The platform-specific inventory owner rejects incomplete or mismatched layouts. This keeps the existing per-machine rendering budget while
 running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.

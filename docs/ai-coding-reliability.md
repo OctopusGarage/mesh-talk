@@ -383,6 +383,19 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Browser fixtures must make hydrated backend settings agree with the intended
+frontend state before navigation; a later settings response must not silently
+remove the capability under test. The call-readiness fixture owns that setup.
+For saved reading positions, exhausting bounded animation-frame polling does not
+prove geometry is ready: retain the conversation-owned target and resume on
+geometry changes, cancelling observers on cleanup and reader intent. The viewport
+unit regression supplies geometry only after the polling window.
+
+Raw storage injection in concurrency fixtures must publish through the normal
+owner notification before requiring a peer's unrelated scope to settle. Preserve
+the protected in-flight page, exact inventory assertions and original latency
+bounds; the same-source control fixture owns this preparation contract.
+
 Keep a test's observation scope equal to its named requirement. The
 growing-history fixture measures exact durable originals during continuation,
 then checks the full public
