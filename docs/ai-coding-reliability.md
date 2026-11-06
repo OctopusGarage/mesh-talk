@@ -155,6 +155,12 @@ successful test failed. Preserve the actual exit status and error, cancellation,
 timeout and cleanup-verification results. The empty-job owner control and UI
 runner outcome controls exercise that distinction.
 
+POSIX process-group retirement proves only that group. A browser framework may
+launch its web server in another group; use the actual tool's teardown protocol
+and retain independent server-retirement controls in the UI command owner. Missing
+cooperative teardown evidence cannot become verified cleanup merely because the
+CLI exited or its group disappeared.
+
 **Failure pattern:** cancelling an awaiter releases serialization or capacity while
 its blocking worker, process or native provider continues; retries overlap, old
 work writes into a new session, or shutdown waits for a worker while holding a
@@ -240,6 +246,12 @@ The [session pool](../crates/mesh-talk-core/src/node/session_pool.rs) owns this
 handoff: idle eligibility requests retirement, while the actual connection keeps
 its permits until destruction. Preserve startup, wake,
 shutdown and missed-notification recovery behavior.
+Delivery fixtures reuse the register-before-check durable-status observer in
+[delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs),
+not periodic polling that competes with protocol and persistence workers. Keep
+the exact message predicate and original deadline; the late exact-receipt
+regression rejects unrelated wakeups, and the oversized-message regression also
+retains pre-acceptance rejection and unchanged ratchet state.
 
 Keep independent reasons for continuing work separate. A worker can finish a
 history page and then fail an optional favorites exchange; reporting that error

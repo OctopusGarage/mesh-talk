@@ -71,6 +71,11 @@ node scripts/validation/stage.mjs workspace-tests --profile shared --resource he
 MESH_VALIDATION_FRESH=1 ./scripts/check-health.sh
 ```
 
+Use `--deadline EPOCH_MS --result PATH` for a command bounded by an existing job
+budget. Health also retains active-case evidence through
+[`diagnostics/node-test-progress.mjs`](diagnostics/node-test-progress.mjs);
+the Node test runner still owns test acceptance.
+
 Reuse requires a clean identical revision, matching tool/environment/command
 inputs, and intact required artifacts; receipts expire after 24 hours. CI always
 executes. Shared stages exclude PR transport settings from identity because those

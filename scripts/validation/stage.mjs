@@ -184,8 +184,9 @@ function supervisorAncestor(owner) {
   }
   return false;
 }
-export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false, onSpawn }) {
+export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false, onSpawn, terminationSignal = "SIGTERM" }) {
   signal?.throwIfAborted();
+  if (!["SIGTERM", "SIGINT"].includes(terminationSignal)) throw Error("Unsupported command termination signal");
   if (process.platform === "win32") {
     const { executeWindows } = await import("./windows-process-owner.mjs");
     return executeWindows(executableCommand(command, env), { cwd, env, logPath, signal, createLogStream, onOutput });
@@ -237,9 +238,9 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
             cleanup = Promise.resolve();
           }
         }
-        child.kill("SIGTERM");
+        child.kill(terminationSignal);
       } else {
-        try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill(); }
+        try { process.kill(-child.pid, terminationSignal); } catch { child.kill(); }
         // The leader may exit while descendants with independent stdio remain.
         // Keep the group escalation and resource lease until cleanup completes.
         cleanup = new Promise(done => setTimeout(async () => {
@@ -493,12 +494,13 @@ export async function runStage({ root, cwd = root, name, command, env = process.
 
 async function main(args) {
   const separator = args.indexOf("--");
-  if (separator < 1) throw Error("Usage: stage.mjs <name> [--artifact path] [--resource name] [--context text] -- command [args]");
-  const name = args[0]; const artifacts = []; let resource; let context = {}; let profile = "all"; let inputs; let resultFile;
+  if (separator < 1) throw Error("Usage: stage.mjs <name> [--artifact path] [--resource name] [--context text] [--deadline epoch-ms] [--result path] -- command [args]");
+  const name = args[0]; const artifacts = []; let resource; let context = {}; let profile = "all"; let inputs; let resultFile; let deadline;
   for (let index = 1; index < separator; index += 2) {
     const value = args[index + 1];
     if (!value) throw Error(`Missing value: ${args[index]}`);
     if (args[index] === "--artifact") artifacts.push(value);
+    else if (args[index] === "--deadline") deadline = Number(value);
     else if (args[index] === "--result") resultFile = path.resolve(value);
     else if (args[index] === "--resource") resource = value;
     else if (args[index] === "--context") context = { value };
@@ -506,8 +508,17 @@ async function main(args) {
     else if (args[index] === "--inputs") inputs = inputGroup(value, name);
     else throw Error(`Unknown option: ${args[index]}`);
   }
+  if (deadline !== undefined && (!Number.isSafeInteger(deadline) || deadline <= Date.now() || deadline - Date.now() > 2147483647)) {
+    const error = "Stage deadline is invalid, exhausted or exceeds the timer range";
+    if (resultFile) {
+      await mkdir(path.dirname(resultFile), { recursive: true });
+      await writeFile(resultFile, JSON.stringify({ code: 1, failureKind: "unavailable", error, launched: false, deadline }));
+    }
+    throw Error(error);
+  }
   const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
   const controller = new AbortController();
+  const timer = deadline === undefined ? undefined : setTimeout(() => controller.abort(), Math.max(1, deadline - Date.now()));
   const stop = () => controller.abort();
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
   try {
@@ -519,6 +530,6 @@ async function main(args) {
       await rename(temporary, resultFile);
     }
     process.exitCode = result.code;
-  } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+  } finally { clearTimeout(timer); process.off("SIGINT", stop); process.off("SIGTERM", stop); }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main(process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });

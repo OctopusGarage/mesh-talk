@@ -205,6 +205,8 @@
         "scripts/diagnostics/test-fixtures/tool-versions.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/node-test-progress.mjs",
+        "scripts/diagnostics/node-test-progress.test.mjs",
         "frontend/validation.json",
         "crates/mesh-talk-core/validation.json",
         "src-tauri/validation.json",
@@ -246,6 +248,7 @@
         "scripts/diagnostics/changed-validation.test.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/node-test-progress.test.mjs",
         "scripts/diagnostics/windows-process-owner.test.mjs",
         "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-preflight-output.test.mjs",
@@ -276,6 +279,10 @@
           {
             "name": "POSIX signal fixtures atomically publish complete PID readiness after installing handlers, accept only positive safe integer PIDs and retain owned cleanup while a deterministic real write is held before publication",
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          },
+          {
+            "name": "Diagnostic deadlines reserve joined cleanup and evidence upload inside the existing job budget; invalid budgets cannot launch work. Persist bounded active-case lifecycle records and preserve actual command status separately from scope retirement diagnostics.",
+            "reference": "docs/ci-maintenance.md"
           }
         ]
       },

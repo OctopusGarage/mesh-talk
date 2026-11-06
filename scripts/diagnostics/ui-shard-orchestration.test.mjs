@@ -86,7 +86,8 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
   assert.match(job("desktop"), /- os: macos-26-intel\n            shards: '\[1,2,3,4,5,6,7,8\]'\n            total: 8/);
   assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
-  assert.match(job("portable"), /os: macos-26-intel, browser: webkit/);
+  assert.match(job("portable-shards"), /runs-on: macos-26-intel/);
+  assert.match(job("portable"), /name: Portable UI \(macos-26-intel, webkit\)/);
   assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
   assert.match(job("portable-evidence"), /chromium-evidence.mjs collect-artifacts/);
   assert.match(job("reports"), /chromium-evidence.mjs render-artifacts/);
@@ -255,4 +256,21 @@ test("HTML reports render admitted producers and distinguish skipped desktop fro
   }
   assert.equal(renderReports({ linux: "skipped", desktop: "success", platforms: ["macos-26-intel", "windows-latest"] }).status, 0);
   assert.notEqual(renderReports({ linux: "skipped", desktop: "skipped", platforms: [] }).status, 0, "empty presentation cannot claim a rendered report");
+});
+
+test("the stable required WebKit check admits only both successful partitions", () => {
+  const producer = job("portable-shards"), collector = job("portable");
+  assert.match(producer, /runs-on: macos-26-intel/);
+  assert.match(producer, /shard: \[1, 2\]/);
+  assert.match(producer, /timeout-minutes: 20/);
+  assert.match(producer, /ui-runner.mjs.*--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/2/);
+  assert.match(collector, /name: Portable UI \(macos-26-intel, webkit\)/);
+  assert.match(collector, /needs: portable-shards/);
+  assert.match(collector, /portable-runner.mjs collect-partitions/);
+  const block = root().split(/^      - /m).find(value => value.startsWith("name: Require both WebKit partitions\n"));
+  const script = block.match(/        run: (.*)/)[1];
+  for (const status of ["success", "failure", "cancelled", "skipped", "", "in_progress"]) {
+    const result = spawnSync("bash", ["-e", "-c", script], { encoding: "utf8", env: { ...process.env, PRODUCER: status } });
+    assert.equal(result.status === 0, status === "success");
+  }
 });

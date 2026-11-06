@@ -201,49 +201,90 @@ jobs:
       - name: Check JavaScript for macOS 12 WKWebView
         run: npm run check:build-syntax
 
-  portable:
-    name: Portable UI (${{ matrix.os }}, ${{ matrix.browser }})
+  portable-shards:
+    name: WebKit portable partition (${{ matrix.shard }}/2)
+    runs-on: macos-26-intel
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-26-intel, browser: webkit }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+        shard: [1, 2]
     defaults:
       run:
         working-directory: frontend
+    env:
+      EVAL_BROWSER: webkit
+      EVAL_SOURCE_SHA: ${{ github.sha }}
+      EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
+      EVAL_EVIDENCE_ROOT: eval-results/webkit/raw
+      PLAYWRIGHT_JSON_OUTPUT_FILE: eval-results/webkit/raw/results.json
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Reserve partition cleanup and evidence time
+        working-directory: .
+        shell: bash
+        run: echo "MESH_UI_DEADLINE_MS=$(( $(date +%s) * 1000 + 18 * 60000 ))" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - name: Prepare Ubuntu archive source
-        if: runner.os == 'Linux'
-        shell: bash
-        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
-      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - run: npx playwright install --with-deps webkit
       - name: Run real React portable workflows (mocked IPC boundary)
-        run: node ../scripts/evals/portable-runner.mjs
-        env:
-          EVAL_BROWSER: ${{ matrix.browser }}
-          EVAL_SOURCE_SHA: ${{ github.sha }}
-          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
-      - name: Validate scenario evidence and reject partial or skipped execution
-        run: node ../scripts/evals/browser-report.mjs eval-results/portable/${{ matrix.browser }}/${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}/results.json
-        env:
-          EVAL_BROWSER: ${{ matrix.browser }}
-          EVAL_SOURCE_SHA: ${{ github.sha }}
-          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
-      - name: Preserve scenario reports screenshots and traces
+        run: node ../scripts/ci/ui-runner.mjs --config=playwright.portable.config.ts --workers=1 --retries=0 --shard=${{ matrix.shard }}/2 --reporter=list,json,../scripts/ci/ui-runner.mjs
+      - name: Seal source-pinned partition evidence
+        run: node ../scripts/evals/portable-runner.mjs seal-partition eval-results/webkit/raw/results.json eval-results/webkit/sealed ${{ matrix.shard }}
+      - name: Preserve partition evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: portable-ui-${{ matrix.os }}-${{ matrix.browser }}-${{ github.run_attempt }}
-          path: frontend/eval-results/portable/
+          name: webkit-partition-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: frontend/eval-results/webkit/sealed/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve interrupted partition diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: webkit-diagnostics-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            frontend/eval-results/webkit/raw/
+            frontend/ui-runner-evidence/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  portable:
+    name: Portable UI (macos-26-intel, webkit)
+    needs: portable-shards
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EVAL_SOURCE_SHA: ${{ github.sha }}
+      EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
+    steps:
+      - name: Require both WebKit partitions
+        env:
+          PRODUCER: ${{ needs.portable-shards.result }}
+        run: test "$PRODUCER" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: webkit-partition-*-${{ github.run_attempt }}
+          path: target/webkit-partitions
+      - name: Validate complete WebKit evidence union
+        run: node scripts/evals/portable-runner.mjs collect-partitions target/webkit-partitions
+      - uses: actions/upload-artifact@v7
+        with:
+          name: portable-ui-macos-26-intel-webkit-${{ github.run_attempt }}
+          path: target/webkit-partitions/
+          compression-level: 0
           if-no-files-found: error
           retention-days: 14
 

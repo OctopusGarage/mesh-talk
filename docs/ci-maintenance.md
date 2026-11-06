@@ -333,6 +333,12 @@ Health and WebKit admission before that burst and the existing job watchdog.
 Strict collectors require the platform-specific complete layout, including the
 last partition, and reject layout discovery failures.
 
+WebKit partitions retain their existing stable required-check name through a
+full-union collector. Bind every producer to its actual platform, source, run and
+attempt; reject missing, duplicate or stale partitions and validate the complete
+scenario inventory after rebasing copied evidence. A continuously progressing
+suite that exhausts its budget needs measured partitioning, not a larger timeout.
+
 Choose shards from observed work and available runner capacity. Count setup and
 artifact overhead as well as execution. More shards can increase queueing and
 runner minutes; more workers per machine can increase memory pressure, port
@@ -404,6 +410,11 @@ request identity, immutable control state and the lifetime of the actual task.
 Historical logs or a previously authenticated request do not prove that a live
 request has entered the required phase. Keep cancellation, task joining and
 cleanup correct on success, failure and panic.
+Use the owning register-before-check notification protocol for durable status;
+polling an in-memory flag can still compete with the work that must publish it.
+Match a fixture's executor to its requirement: preserve single-thread tests when
+responsiveness is the subject, and keep independent protocol/persistence workers
+for other production-runtime scenarios. Join admitted work before deleting data.
 Classify fixture gates from the current decision owner's state, not a trace flag
 that also describes another phase. Do not sample a later observer projection to
 decide whether to capture a one-shot event; observe that evidence before releasing
@@ -426,11 +437,20 @@ logs and append-only active/completed-case progress when final reports cannot be
 written. Timeout or uncertain cleanup remains a failure. Preserve verified closure of owned work as a diagnostic separately from the
 actual child outcome: Windows
 intentionally terminates even an empty job to close descendant admission.
+On POSIX, verify the framework's independently grouped web server as well as the
+CLI group. Use its supported graceful interruption protocol; a missing teardown
+acknowledgment means cleanup remains unverified. Bind lifecycle markers to the
+current invocation so old evidence cannot prove a later process stopped.
 Actual CLI regression fixtures need private output directories as well as private
 source directories; parallel Playwright commands otherwise delete one another's
 traces and manufacture failures. Missing hosted logs do not identify a slow case.
 Local-only evidence fixtures must explicitly isolate and restore inherited CI
 flags, and separately assert that real CI cannot reuse local acceptance evidence.
+Health captures its absolute budget before setup and uses the existing stage
+owner to stop diagnostics before the job watchdog. Preserve its structured result,
+execution log and bounded Node lifecycle records, including the active file/case,
+through the always-upload path. Prove interruption and joined cleanup with a real
+parked command. Missing hosted logs require better evidence, not a guessed fix.
 
 The [fixture timing guidance](testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress)
 owns concrete examples and permitted boundaries.

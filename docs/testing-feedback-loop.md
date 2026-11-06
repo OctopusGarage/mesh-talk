@@ -1472,7 +1472,15 @@ and assertions are identical in both modes. CI uploads Rust coverage from each
 platform. Both workflows remain protected, including strict
 coverage upload failures. Native CI has a 90-minute job budget; Health portable
 jobs have a 25-minute budget. These are execution bounds, not latency promises.
+Health diagnostics run through the canonical stage owner with an absolute budget
+captured before setup, leaving time for joined cleanup and always-uploaded logs,
+structured results and active Node test lifecycle evidence. A timeout still fails.
 Compare hosted queue, execution and all-required-check completion after deployment.
+
+WebKit core and extended inventories use parallel producers and retain the stable
+`Portable UI (macos-26-intel, webkit)` required check through a full-union collector.
+The existing portable evidence owner validates every source/run/attempt-bound
+partition and the complete scenario inventory; missing producers do not pass.
 
 Full Chromium tests use eight Playwright shards on macOS and four each on Linux
 and Windows, with one worker and zero retries per runner. Desktop admission allows

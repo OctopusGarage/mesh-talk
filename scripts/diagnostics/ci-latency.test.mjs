@@ -64,13 +64,13 @@ test("verification Rust caches restore on PRs and publish reusable main caches",
 test("portable diagnostics declare the Rust toolchain needed by their real Cargo fixture", () => {
   const platform = read("check-health.yml").split("  platform:\n")[1].split("  source:\n")[0];
   const toolchain = platform.indexOf("uses: dtolnay/rust-toolchain@stable");
-  assert.ok(toolchain >= 0 && toolchain < platform.indexOf("node --test scripts/diagnostics/*.test.mjs"));
+  assert.ok(toolchain >= 0 && toolchain < platform.indexOf("node --test --test-reporter=spec"));
 });
 
 test("portable validation runs beside native compilation using existing health runners", () => {
   const ci = read("ci.yml");
   const health = read("check-health.yml");
-  for (const command of ["npm run test:coverage", "node --test scripts/diagnostics/*.test.mjs", "python3 -m unittest discover", "node --test tools/help/*.test.mjs"]) {
+  for (const command of ["npm run test:coverage", "node --test --test-reporter=spec", "python3 -m unittest discover", "node --test tools/help/*.test.mjs"]) {
     assert.ok(health.includes(command), `Health must retain ${command}`);
     assert.ok(!ci.includes(command), `native compilation must not wait for ${command}`);
   }
@@ -200,7 +200,8 @@ test("full Chromium execution owns portable evidence while unique engines remain
   const ui = read("e2e-ui.yml");
   const portable = ui.split("  portable:\n")[1].split("  chromium-extended:\n")[0];
   assert.doesNotMatch(portable, /browser: chromium/);
-  assert.match(portable, /os: macos-26-intel, browser: webkit/);
+  assert.match(portable, /name: Portable UI \(macos-26-intel, webkit\)/);
+  assert.match(portable, /needs: portable-shards/);
   assert.match(ui, /name: Chromium portable evidence/);
   assert.match(read("ui-shards.yml"), /chromium-evidence.mjs extract/);
   assert.match(ui, /chromium-evidence.mjs collect/);
@@ -214,7 +215,7 @@ test("full Chromium execution owns portable evidence while unique engines remain
 
 test("CI runs release workflow diagnostics only through the shared glob", () => {
   const ci = read("check-health.yml");
-  assert.match(ci, /node --test scripts\/diagnostics\/\*.test.mjs/);
+  assert.match(ci, /scripts\/diagnostics\/\*.test.mjs/);
   assert.doesNotMatch(ci, /node --test scripts\/diagnostics\/release-workflow.test.mjs/);
 });
 
@@ -235,7 +236,7 @@ test("Windows builds once then requires eight complete serial archive partitions
 
 test("optional pack job retains unique dist checks without repeating baseline browsers", () => {
   const ui = read("e2e-ui.yml");
-  const packs = ui.split("  packs:\n")[1].split("  portable:\n")[0];
+  const packs = ui.split("  packs:\n")[1].split("  portable-shards:\n")[0];
   assert.match(packs, /name: Optional pack UI and asset check/);
   assert.match(packs, /npm run build && node .*check-variant-assets.mjs/);
   assert.match(packs, /npm run check:build-syntax/);

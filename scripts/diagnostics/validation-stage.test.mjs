@@ -785,3 +785,24 @@ test("verification-only leases declare no admitted work and dead readers do not 
     assert.equal(await f.count(), 2);
   } finally { clearTimeout(deadline); }
 });
+
+test("stage CLI rejects invalid budgets and persists cancellation at an absolute deadline", { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const env = { ...process.env, CI: "1" }; delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER;
+  for (const deadline of ["invalid", String(Date.now() - 1), String(Date.now() + 1e12)]) {
+    const launch = path.join(f.root, "target/failed-launch.json");
+    const result = spawnSync(process.execPath, [cli, "deadline-invalid", "--deadline", deadline, "--result", launch, "--", ...f.command], { cwd: f.root, env, encoding: "utf8", timeout: 10000 });
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /deadline/);
+    const failure = JSON.parse(await readFile(launch, "utf8"));
+    assert.equal(failure.launched, false); assert.equal(failure.code, 1);
+  }
+  const receipt = path.join(f.root, "target/deadline-result.json");
+  const result = spawnSync(process.execPath, [cli, "deadline-parked", "--deadline", String(Date.now() + 2000), "--result", receipt, "--", process.execPath, "-e", "setInterval(()=>{},1000)"], { cwd: f.root, env, encoding: "utf8", timeout: 15000 });
+  assert.equal(result.status, 130, result.stderr);
+  const record = JSON.parse(await readFile(receipt, "utf8"));
+  assert.equal(record.code, 130); assert.equal(record.cleanupUnverified, false);
+  // A long unused deadline must not retain an otherwise finished CLI process.
+  const normal = spawnSync(process.execPath, [cli, "deadline-normal", "--deadline", String(Date.now() + 60000), "--", process.execPath, "-e", "process.exit(0)"], { cwd: f.root, env, encoding: "utf8", timeout: 15000 });
+  assert.equal(normal.status, 0, normal.stderr);
+});
