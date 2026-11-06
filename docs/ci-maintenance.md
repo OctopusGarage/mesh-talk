@@ -219,6 +219,13 @@ a runner has no test result; preserve its infrastructure failure separately.
 UI coverage and reports require one complete attempt, so recover that workflow
 as a whole when an unallocated producer prevents its current-attempt evidence.
 
+ASan uses eight serial Nextest partitions to reduce the measured uneven execution
+tail of the former four partitions. Each runner retains the same case budgets,
+instrumented standard library and clean/error controls. The required collector
+checks the exhaustive disjoint inventory and current-attempt execution receipts;
+additional shards do not permit omitted cases or retries. Include the extra
+compilation and queue time when comparing hosted performance.
+
 Retain fresh process/context isolation, owned temporary directories, dynamically
 allocated ports where supported, and deterministic cleanup. Keep compile jobs,
 test workers and network/rendering resource limits explicit. Do not multiply

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Four independently compiled, serial ASan partitions with exact union evidence.
+// Eight independently compiled, serial ASan partitions with exact union evidence.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { command as runLogged, inventory, verifyPartition, verifyExecution, versions } from "./windows-coverage.mjs";
 
-const partitions = [1, 2, 3, 4];
+const partitions = [1, 2, 3, 4, 5, 6, 7, 8];
 const target = "x86_64-unknown-linux-gnu";
 const config = ".config/nextest-asan.toml";
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -30,11 +30,11 @@ export function nightlyFromManifest(text) {
 export function partitionArgs(mode, buildArgs, shard) {
   assert.ok(["list", "run"].includes(mode), "Invalid ASan command mode");
   assert.ok(shard === undefined || partitions.includes(shard), "Invalid ASan partition");
-  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard ? ["--partition", `hash:${shard}/4`] : []), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
+  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard ? ["--partition", `hash:${shard}/${partitions.length}`] : []), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
 }
 
 export function verifyAsanUnion(bundles, expected) {
-  assert.equal(bundles.length, 4, "Expected exactly four ASan partitions");
+  assert.equal(bundles.length, partitions.length, "Expected exactly eight ASan partitions");
   assert.deepEqual(bundles.map(bundle => bundle.receipt.shard).sort(), partitions, "Duplicate or missing ASan partition");
   const full = bundles[0].full;
   for (const bundle of bundles) {
@@ -54,7 +54,7 @@ export function verifyAsanUnion(bundles, expected) {
     assert.equal(receipt.executedTests, count, "ASan execution count mismatch");
     executedTests += count;
   }
-  return { totalTests: full.length, executedTests, ignoredTests: full.filter(row => row.ignored).length, shards: 4 };
+  return { totalTests: full.length, executedTests, ignoredTests: full.filter(row => row.ignored).length, shards: partitions.length };
 }
 
 // Exported for the real stable-toolchain protocol fixture. Hosted CLI callers use
@@ -216,7 +216,7 @@ async function main([mode, first, second, ...extra]) {
     assert.equal(process.env.MESH_ASAN_SHARDS_RESULT, "success", "Every actual ASan shard must succeed");
     const root = path.resolve(first);
     const summary = collectAsan(root, identity);
-    console.log(`ASan full union verified: ${summary.executedTests} passed, ${summary.ignoredTests} default ignored, four exact-source partitions.`);
+    console.log(`ASan full union verified: ${summary.executedTests} passed, ${summary.ignoredTests} default ignored, ${summary.shards} exact-source partitions.`);
     return summary;
   }
   throw Error("Usage: asan.mjs cohort | smoke OUTPUT | shard INDEX OUTPUT | verify ARTIFACT_ROOT");

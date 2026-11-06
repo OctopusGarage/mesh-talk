@@ -57,13 +57,13 @@ jobs:
         run: node scripts/ci/asan.mjs cohort
 
   shards:
-    name: ASan core shard (${{ matrix.shard }}/4)
+    name: ASan core shard (${{ matrix.shard }}/8)
     needs: cohort
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       MESH_ASAN_TOOLCHAIN: ${{ needs.cohort.outputs.toolchain }}
       MESH_ASAN_RUSTC: ${{ needs.cohort.outputs.rustc }}

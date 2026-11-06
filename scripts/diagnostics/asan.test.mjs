@@ -9,13 +9,13 @@ import { versions } from "../ci/windows-coverage.mjs";
 const owner = new URL("../ci/asan.mjs", import.meta.url);
 const hash = value => createHash("sha256").update(value).digest("hex");
 const identity = { sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), runId: "123", runAttempt: "2", toolchain: "nightly-2026-11-02", rustcSha256: "c".repeat(64), cargoSha256: "d".repeat(64), nextest: versions.nextest, inputsSha256: "e".repeat(64), target: "x86_64-unknown-linux-gnu", rustflags: "-Zsanitizer=address", rustdocflags: "-Zsanitizer=address", asanOptions: "detect_leaks=1", testThreads: "1", profileEnvironment: {} };
-const full = Array.from({ length: 5 }, (_, index) => ({ id: `core::case_${index}`, eventName: `core::core$case_${index}`, ignored: index === 4, selected: index !== 4 }));
+const full = Array.from({ length: 9 }, (_, index) => ({ id: `core::case_${index}`, eventName: `core::core$case_${index}`, ignored: index === 8, selected: index !== 8 }));
 const events = rows => {
   const nextest = { crate: "core", test_binary: "core", kind: "lib" };
   return [ { type: "suite", event: "started", nextest }, ...rows.filter(row => row.selected).flatMap(row => [{ type: "test", event: "started", name: row.eventName }, { type: "test", event: "ok", name: row.eventName }]), { type: "suite", event: "ok", failed: 0, nextest } ].map(JSON.stringify).join("\n") + "\n";
 };
 function bundles() {
-  return [1, 2, 3, 4].map(shard => {
+  return [1, 2, 3, 4, 5, 6, 7, 8].map(shard => {
     const selected = full.map((row, index) => ({ ...row, selected: index === shard - 1 }));
     const execution = events(selected);
     return { receipt: { schema: 1, shard, identity: structuredClone(identity), fullSha256: hash(JSON.stringify(full)), selectedSha256: hash(JSON.stringify(selected)), executionSha256: hash(execution), executedTests: 1 }, full: structuredClone(full), selected, execution };
@@ -23,7 +23,7 @@ function bundles() {
 }
 const load = () => import(owner);
 
-test("ASan has a substantive four-partition evidence owner", () => assert(existsSync(owner), "missing ASan full-union owner"));
+test("ASan has a substantive eight-partition evidence owner", () => assert(existsSync(owner), "missing ASan full-union owner"));
 
 test("nightly cohort uses the installed release manifest date, not rustc's previous commit date", async () => {
   const { nightlyFromManifest } = await load();
@@ -33,7 +33,7 @@ test("nightly cohort uses the installed release manifest date, not rustc's previ
 
 test("ASan union proves all selected cases once, with default ignored cases excluded", async () => {
   const { verifyAsanUnion } = await load();
-  assert.deepEqual(verifyAsanUnion(bundles(), identity), { totalTests: 5, executedTests: 4, ignoredTests: 1, shards: 4 });
+  assert.deepEqual(verifyAsanUnion(bundles(), identity), { totalTests: 9, executedTests: 8, ignoredTests: 1, shards: 8 });
 });
 
 test("ASan union rejects missing, duplicate, empty and overlapping partitions", async () => {
@@ -57,7 +57,7 @@ test("ASan union rejects changed ignored/default coverage and cross-run/toolchai
   }
   const hidden = bundles(); hidden[0].full[0].selected = false; hidden[0].receipt.fullSha256 = hash(JSON.stringify(hidden[0].full));
   assert.throws(() => verifyAsanUnion(hidden, identity));
-  const ignored = bundles(); ignored[0].selected[4].selected = true; ignored[0].receipt.selectedSha256 = hash(JSON.stringify(ignored[0].selected));
+  const ignored = bundles(); ignored[0].selected[8].selected = true; ignored[0].receipt.selectedSha256 = hash(JSON.stringify(ignored[0].selected));
   assert.throws(() => verifyAsanUnion(ignored, identity), /ignored tests/u);
 });
 
@@ -76,9 +76,9 @@ test("ASan union rejects failed, retried, skipped, truncated and altered executi
   assert.throws(() => verifyAsanUnion(altered, identity), /digest/u);
 });
 
-test("ASan workflow retains required name as strict full-union check with four independently instrumented runners", () => {
+test("ASan workflow retains required name as strict full-union check with eight independently instrumented runners", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
-  assert.match(workflow, /shard: \[1, 2, 3, 4\]/u);
+  assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
   assert.match(workflow, /fail-fast: false/u);
   assert.equal(workflow.match(/name: ASan \+ LeakSanitizer \(core\)$/gmu)?.length, 1);
   assert.match(workflow, /needs: \[cohort, shards\]/u);
@@ -161,7 +161,7 @@ test("ASan artifact collector binds source, run, attempt and the receipt's actua
     for (const [name, value] of [["receipt", bundle.receipt], ["full", bundle.full], ["selected", bundle.selected]]) writeFileSync(path.join(directory, `${name}.json`), JSON.stringify(value));
     writeFileSync(path.join(directory, "execution.jsonl"), bundle.execution);
   }
-  assert.deepEqual(collectAsan(root, identity), { totalTests: 5, executedTests: 4, ignoredTests: 1, shards: 4 });
+  assert.deepEqual(collectAsan(root, identity), { totalTests: 9, executedTests: 8, ignoredTests: 1, shards: 8 });
   const original = path.join(root, expectedName(1));
   for (const wrong of [expectedName(1).replace("-2-shard-", "-1-shard-"), "asan-renamed-shard-1"]) {
     const renamed = path.join(root, wrong); renameSync(original, renamed);

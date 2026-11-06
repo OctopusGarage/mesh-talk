@@ -22,7 +22,7 @@ const buildArgs = ["--offline", "--locked", "-p", "asan-protocol-fixture", "--li
 const directory = shard => path.join(root, "evidence", String(shard));
 if (mode === "run") {
  const bundles = [];
- for (const shard of [1,2,3,4]) bundles.push(await runPartition(shard, directory(shard), { buildArgs, identity }));
+ for (const shard of [1,2,3,4,5,6,7,8]) bundles.push(await runPartition(shard, directory(shard), { buildArgs, identity }));
  writeFileSync(path.join(root, "summary.json"), JSON.stringify(verifyAsanUnion(bundles, identity)));
 } else if (mode === "fail") {
  await runPartition(1, path.join(root, "failed"), { buildArgs, identity });
@@ -41,7 +41,7 @@ if (mode === "run") {
  writeFileSync(path.join(output, "smoke.json"), JSON.stringify({ schema: 1, identity, files }));
  verifySmoke(output, identity);
 } else if (mode === "verify") {
- const bundles = [1,2,3,4].map(shard => ({ receipt: JSON.parse(readFileSync(path.join(directory(shard), "receipt.json"))), full: JSON.parse(readFileSync(path.join(directory(shard), "full.json"))), selected: JSON.parse(readFileSync(path.join(directory(shard), "selected.json"))), execution: readFileSync(path.join(directory(shard), "execution.jsonl"), "utf8") }));
+ const bundles = [1,2,3,4,5,6,7,8].map(shard => ({ receipt: JSON.parse(readFileSync(path.join(directory(shard), "receipt.json"))), full: JSON.parse(readFileSync(path.join(directory(shard), "full.json"))), selected: JSON.parse(readFileSync(path.join(directory(shard), "selected.json"))), execution: readFileSync(path.join(directory(shard), "execution.jsonl"), "utf8") }));
  verifyAsanUnion(bundles, identity);
 } else throw Error("unknown protocol mode");
 `;
@@ -69,7 +69,7 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   const run = (mode, environment = env) => spawnSync(process.execPath, [path.join(root, "driver.mjs"), path.join(root, "scripts/ci/asan.mjs"), root, mode], { cwd: root, env: environment, encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024 });
   const accepted = run("run");
   assert.equal(accepted.status, 0, `${accepted.error ?? ""}\n${accepted.stdout}\n${accepted.stderr}`);
-  assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 33, executedTests: 32, ignoredTests: 1, shards: 4 });
+  assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 33, executedTests: 32, ignoredTests: 1, shards: 8 });
   const failed = run("fail", { ...env, MESH_ASAN_PROTOCOL_FAIL: path.join(root, "first-failure.sentinel") });
   assert.equal(failed.status, 1, `${failed.error ?? ""}\n${failed.stderr}`);
   assert.match(failed.stderr, /failed: 100/u);

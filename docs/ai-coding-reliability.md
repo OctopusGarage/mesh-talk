@@ -412,7 +412,7 @@ protection migration owner requires every successful current-head app-bound
 replacement before retiring oversized partition names; skipped or partial runs
 cannot qualify. Account for additional archive/setup cost and hosted variation.
 The shared union verifier takes the caller-owned partition count; Windows capacity
-changes must not alter the independent four-part ASan contract. Run both real-tool
+changes must not alter the independent eight-part ASan contract. Run both real-tool
 protocol fixtures and their missing/duplicate/failed-receipt controls.
 
 A total functional browser-case watchdog is not a product performance SLA.
