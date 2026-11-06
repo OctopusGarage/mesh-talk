@@ -473,6 +473,7 @@ pub struct Node {
     /// Exact device fingerprints the host user has safety-number verified for
     /// recipient-initiated DM catch-up. Discovery alone never adds entries.
     pub(in crate::node) verified_dm_pull_peers: Mutex<HashSet<UserId>>,
+    pub(in crate::node) verified_dm_pull_generation: std::sync::atomic::AtomicU64,
     /// Ephemeral identities introduced by an explicitly enabled bridge relay.
     pub(in crate::node) bridge_dm_pull_peers: Mutex<HashMap<UserId, std::time::Instant>>,
     pub(in crate::node) physical_lan_only: std::sync::atomic::AtomicBool,
@@ -1383,6 +1384,7 @@ impl Node {
             network_changes: tokio::sync::watch::channel(0).0,
             delivery_status_notify: tokio::sync::Notify::new(),
             verified_dm_pull_peers: Mutex::new(HashSet::new()),
+            verified_dm_pull_generation: std::sync::atomic::AtomicU64::new(0),
             bridge_dm_pull_peers: Mutex::new(HashMap::new()),
             physical_lan_only: std::sync::atomic::AtomicBool::new(false),
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),

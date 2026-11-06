@@ -429,6 +429,16 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   A failed batch can retain its already committed prefix; retry uses the existing
   content-addressed duplicate check rather than assuming the batch rolled back.
   This changes the Rust storage interface, not event IDs or the wire encoding.
+  Proactive verified-contact recovery distinguishes accepted incoming progress,
+  a clean unchanged exchange, and deferred failure. A clean exchange still
+  recycles its authenticated session and retries local projections; it does not
+  schedule itself as new progress. Quiet peer recovery waits for a 60-second
+  repair backstop, while ordinary pushes and queued delivery/receipt work keep
+  their independent prompt lanes. Failure uses the existing bounded retry
+  schedule. Captured endpoint, policy and semantic verification generations
+  qualify each deadline; unchanged verification refreshes do not renew demand,
+  and new eligible routes or verification changes bypass an old quiet hint.
+  These bounded runtime hints never confirm custody, delivery or read state.
   Channel recovery asks up to three online members per turn and continues past a
   reachable but stale member. A completed generic channel attachment remains available from a
   receiver after local save; complete attachment chunk conversations are retained
@@ -1469,6 +1479,12 @@ file paths. Observation uses nonblocking admission after the database guard is
 released; logging also occurs after the observation guard is released. Disabled
 owners retain no diagnostic collector. These logical work counts do not measure
 physical disk bytes; native filesystem tracing owns that acceptance evidence.
+
+Settled fixed-consumer reception retirement performs no SQL mutation when
+its durable retirement cursor has not advanced. The same bounded transaction
+still checks account/lifetime ownership and drains pending metadata: an ACK
+committed before a cleanup failure must allow cleanup to resume after reopen
+without requiring another ACK.
 
 Encrypted record logs retain a confirmation flag for their exact owned file
 incarnation and successful prefix. Confirmed prefixes make repeated sync calls

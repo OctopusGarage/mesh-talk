@@ -27,7 +27,45 @@ const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(10)
 
 // Whole authenticated control exchanges need several routed round trips. Keep
 // them off the serial file scheduler, with independent capacity for each lane.
+const QUIET_PULL_REPAIR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 const CONTROL_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Transport completion is separate from accepted data and from retryable failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::node) enum Reconciliation {
+    Advanced,
+    Quiet,
+    Deferred,
+}
+impl Reconciliation {
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Advanced, _) | (_, Self::Advanced) => Self::Advanced,
+            (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
+            _ => Self::Quiet,
+        }
+    }
+    fn schedule<K: Eq + std::hash::Hash + Clone, R: Eq + Clone>(
+        self,
+        retries: &mut super::delivery_retry::RetrySchedule<K, R>,
+        key: K,
+        routes: R,
+        now: std::time::Instant,
+    ) {
+        match self {
+            Self::Quiet => retries.settled(key, routes, QUIET_PULL_REPAIR_INTERVAL, now),
+            other => retries.finished(key, routes, other == Self::Advanced, now),
+        }
+    }
+    fn from_progress(progress: bool) -> Self {
+        if progress {
+            Self::Advanced
+        } else {
+            Self::Deferred
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum ControlWork {
@@ -40,6 +78,8 @@ struct ControlRoutes {
     peer: PublicIdentity,
     endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
     publicly_observed: bool,
+    policy_generation: u64,
+    verified_generation: u64,
 }
 
 /// Task IDs distinguish an aborted route owner from its same-key replacement.
@@ -96,8 +136,15 @@ impl ControlRoutes {
     ) -> (
         std::collections::BTreeSet<(String, std::net::SocketAddr)>,
         bool,
+        u64,
+        u64,
     ) {
-        (self.endpoints.clone(), self.publicly_observed)
+        (
+            self.endpoints.clone(),
+            self.publicly_observed,
+            self.policy_generation,
+            self.verified_generation,
+        )
     }
 }
 
@@ -631,13 +678,22 @@ impl Node {
     /// Hosts populate this from an explicit safety-number verification decision;
     /// incoming pushes remain available to other authenticated peers.
     pub fn replace_verified_dm_pull_peers(&self, fingerprints: Vec<String>) {
-        *self
-            .verified_dm_pull_peers
-            .lock()
-            .expect("verified DM pull mutex not poisoned") = fingerprints
+        let next = fingerprints
             .into_iter()
             .map(|fingerprint| fingerprint.to_ascii_lowercase())
             .collect();
+        {
+            let mut current = self
+                .verified_dm_pull_peers
+                .lock()
+                .expect("verified DM pull mutex not poisoned");
+            if *current == next {
+                return;
+            }
+            *current = next;
+            self.verified_dm_pull_generation
+                .fetch_add(1, Ordering::Release);
+        }
         self.delivery_notify.notify_one();
     }
 
@@ -2112,6 +2168,8 @@ impl Node {
             peer: peer.clone(),
             endpoints,
             publicly_observed,
+            policy_generation: self.privacy.generation.load(Ordering::Acquire),
+            verified_generation: self.verified_dm_pull_generation.load(Ordering::Acquire),
         }
     }
 
@@ -2251,7 +2309,15 @@ impl Node {
                         Some(Ok((task, (key, persistence_failed, progress, observation)))) => {
                             if control_owners.finished(task).as_ref() == Some(&key)
                                 && let Some(routes) = active.remove(&key) {
-                                retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
+                                if matches!(key, ControlWork::Pull(_)) {
+                                    let reason = match progress {
+                                        Reconciliation::Advanced => super::work_observation::reason::PULL_ADVANCED,
+                                        Reconciliation::Quiet => super::work_observation::reason::PULL_QUIET,
+                                        Reconciliation::Deferred => super::work_observation::reason::PULL_DEFERRED,
+                                    };
+                                    self.observe_mailbox_work(reason, None);
+                                }
+                                progress.schedule(&mut retries, key.retry_key(&routes.peer), routes.retry_routes(), std::time::Instant::now());
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
                             if persistence_failed {
@@ -2412,7 +2478,12 @@ impl Node {
                             false
                         };
                         let observation = attempt.token.take().map(|token| (token, reason));
-                        (key, failed, progress, observation)
+                        (
+                            key,
+                            failed,
+                            Reconciliation::from_progress(progress),
+                            observation,
+                        )
                     }));
                     control_owners.insert(owner, task);
                 }
@@ -2446,7 +2517,7 @@ impl Node {
                                 .expect("delivery lock not poisoned")
                                 .finish_receipt(receipt.conversation, receipt.original_event_id)
                                 .is_err();
-                        (key, failed, progress, None)
+                        (key, failed, Reconciliation::from_progress(progress), None)
                     }));
                     control_owners.insert(owner, task);
                 }
@@ -2507,9 +2578,12 @@ impl Node {
         }
     }
 
-    async fn reconcile_delivery_peer(&self, peer: &crate::discovery::Announce) -> bool {
+    pub(in crate::node) async fn reconcile_delivery_peer(
+        &self,
+        peer: &crate::discovery::Announce,
+    ) -> Reconciliation {
         if !self.verified_dm_pull_peer(&peer.user_id) {
-            return false;
+            return Reconciliation::Deferred;
         }
         let conv = super::delivery_receipt::delivery_conversation_id(
             &self.identity.public(),
@@ -2521,18 +2595,18 @@ impl Node {
                 async {
                     let messages = Box::pin(self.pull_delivery_scope(peer, dm, false)).await;
                     let receipts = Box::pin(self.pull_delivery_scope(peer, conv, false)).await;
-                    messages || receipts
+                    messages.combine(receipts)
                 },
                 async {
                     let messages = Box::pin(self.pull_delivery_scope(peer, dm, true)).await;
                     let receipts = Box::pin(self.pull_delivery_scope(peer, conv, true)).await;
-                    messages || receipts
+                    messages.combine(receipts)
                 }
             );
-            direct || relay
+            direct.combine(relay)
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(Reconciliation::Deferred)
     }
 
     async fn pull_delivery_scope(
@@ -2540,7 +2614,7 @@ impl Node {
         proof: &crate::discovery::Announce,
         conv: ConversationId,
         relay: bool,
-    ) -> bool {
+    ) -> Reconciliation {
         let current = || {
             self.verified_dm_pull_peer(&proof.user_id)
                 && self.historical_author(&proof.ed25519_pub).is_some_and(|p| {
@@ -2551,7 +2625,7 @@ impl Node {
                     .load(std::sync::atomic::Ordering::Acquire)
         };
         if !current() {
-            return false;
+            return Reconciliation::Deferred;
         }
         let peers = if relay {
             let roster = self.roster.lock().expect("roster lock not poisoned");
@@ -2566,23 +2640,29 @@ impl Node {
         } else {
             peers
         };
-        let mut completed = false;
+        let mut completed = if relay || !peers.is_empty() {
+            Reconciliation::Quiet
+        } else {
+            Reconciliation::Deferred
+        };
         for peer in peers {
             let started = std::time::Instant::now();
             if relay && !self.relay_receive_allowed(&peer.public) {
                 continue;
             }
             if !relay && (peer.public != proof.public() || peer.account_id != proof.account_id()) {
+                completed = completed.combine(Reconciliation::Deferred);
                 continue;
             }
             if relay && !self.relay_retry_due(&peer.public) {
+                completed = completed.combine(Reconciliation::Deferred);
                 continue;
             }
-            let success = self
+            let result = self
                 .adaptive_control_timeout(&peer.public, async {
                     let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await
                     else {
-                        return false;
+                        return Err(SessionError::UnexpectedMessage);
                     };
                     if !current()
                         || (relay && !self.relay_receive_allowed(&peer.public))
@@ -2590,32 +2670,50 @@ impl Node {
                             .peer_announcement()
                             .is_some_and(|p| p.account_id() != peer.account_id)
                     {
-                        return false;
+                        return Err(SessionError::UnexpectedMessage);
                     }
-                    let success = if relay {
+                    let advanced = if relay {
+                        // Upload confirmations are not incoming progress. A bounded
+                        // scalar source observation also sees accepted relay controls.
+                        let before = self
+                            .log
+                            .lock()
+                            .expect("log lock")
+                            .repository()?
+                            .source_revision()?;
                         self.opaque_relay_round(&mut channel, &proof.public(), None)
-                            .await
-                            .is_ok()
+                            .await?;
+                        let after = self
+                            .log
+                            .lock()
+                            .expect("log lock")
+                            .repository()?
+                            .source_revision()?;
+                        before != after
                     } else {
                         let store = self.pull_sync_store(channel.peer_identity());
                         super::session::request_round_paged(&mut channel, &store, conv)
-                            .await
-                            .is_ok()
+                            .await?
+                            .applied
+                            > 0
                     };
-                    if success {
-                        self.observe_control_exchange(&channel, started);
-                        self.recycle_sync_channel(channel);
-                        self.emit_new_messages(conv);
-                        self.process_file_events(conv);
-                    }
-                    success
+                    // A quiet success still retires the framed exchange and retries
+                    // local projections. It never certifies new data or custody.
+                    self.observe_control_exchange(&channel, started);
+                    self.recycle_sync_channel(channel);
+                    self.emit_new_messages(conv);
+                    self.process_file_events(conv);
+                    Ok::<_, SessionError>(advanced)
                 })
-                .await
-                .unwrap_or(false);
+                .await;
             if relay {
-                self.record_relay_attempt(&peer.public, success);
+                self.record_relay_attempt(&peer.public, matches!(result, Some(Ok(_))));
             }
-            completed |= success;
+            completed = completed.combine(match result {
+                Some(Ok(true)) => Reconciliation::Advanced,
+                Some(Ok(false)) => Reconciliation::Quiet,
+                _ => Reconciliation::Deferred,
+            });
         }
         completed
     }
@@ -3844,6 +3942,67 @@ fn delivery_log_error(error: NodeError) -> LogError {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    #[test]
+    fn quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress() {
+        use super::Reconciliation::{Advanced, Deferred, Quiet};
+        use std::time::{Duration, Instant};
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let now = Instant::now();
+        Quiet.schedule(&mut retries, "peer", 1, now);
+        assert!(!retries.ready(&"peer", &1, now + Duration::from_millis(500)));
+        assert!(!retries.ready(&"peer", &1, now + Duration::from_secs(59)));
+        assert!(retries.ready(&"peer", &1, now + super::QUIET_PULL_REPAIR_INTERVAL));
+        assert!(
+            retries.ready(&"peer", &2, now),
+            "new route or verified policy wakes immediately"
+        );
+        // Capture the admitted stamp: a completion must not label old work with
+        // a newer route and suppress its replacement.
+        Quiet.schedule(&mut retries, "peer", 1, now);
+        assert!(retries.ready(&"peer", &2, now));
+        Deferred.schedule(&mut retries, "failed", 1, now);
+        assert!(!retries.ready(&"failed", &1, now + Duration::from_millis(500)));
+        assert!(retries.ready(&"failed", &1, now + Duration::from_secs(2)));
+        Advanced.schedule(&mut retries, "peer", 1, now);
+        assert!(retries.ready(&"peer", &1, now + Duration::from_millis(500)));
+        assert_eq!(Quiet.combine(Deferred), Deferred);
+        assert_eq!(Advanced.combine(Deferred), Advanced);
+    }
+
+    #[test]
+    fn refreshing_same_verified_pull_set_does_not_invalidate_quiet_deadline() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let directory = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&remote, &Account::generate(), "peer", 9);
+        let (node, _, _) = node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let peer = proof.public();
+        node.replace_verified_dm_pull_peers(vec![proof.user_id.clone()]);
+        let admitted = node.control_routes(&peer).retry_routes();
+        let mut retries = super::super::delivery_retry::RetrySchedule::default();
+        let now = std::time::Instant::now();
+        super::Reconciliation::Quiet.schedule(&mut retries, "peer", admitted.clone(), now);
+        for _ in 0..16 {
+            node.replace_verified_dm_pull_peers(vec![proof.user_id.to_ascii_uppercase()]);
+        }
+        let refreshed = node.control_routes(&peer).retry_routes();
+        assert_eq!(admitted, refreshed);
+        assert!(!retries.ready(&"peer", &refreshed, now));
+        node.replace_verified_dm_pull_peers(Vec::new());
+        node.replace_verified_dm_pull_peers(vec![proof.user_id.clone()]);
+        assert!(
+            retries.ready(&"peer", &node.control_routes(&peer).retry_routes(), now),
+            "reverification must wake retained pull work"
+        );
+    }
+
     #[tokio::test]
     async fn cancelled_old_control_owner_cannot_remove_its_same_key_replacement() {
         let key = super::ControlWork::Pull("fixture".into());

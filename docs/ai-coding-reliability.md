@@ -278,6 +278,20 @@ round-trip regression in the [participant network owner](../crates/mesh-talk-cor
 qualifies legacy replay, eventual quiet and a new Profile epoch. Completed
 [media GC](../crates/mesh-talk-core/src/node/media_store.rs) also remains quiet
 until a new schedule, including after completion failure and retry.
+A clean network exchange is not evidence of new data. The
+[delivery runtime](../crates/mesh-talk-core/src/node/delivery_runtime.rs) keeps
+advanced, quiet and deferred reconciliation distinct: empty success must not
+reset a fast progress deadline, and a failed route still cooling must not become
+quiet success. Retain successful framing/session reuse separately. Qualify
+quiet deadlines with the admitted route and policy generation; refreshing an
+unchanged subscription must not invalidate them. The real Noise
+`clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances` regression
+covers empty success, later data, unchanged replay and deferred relay recovery;
+`quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress` covers
+actual scheduling policy. Settled reception retirement suppresses same-value
+writes inside its existing transaction while preserving cleanup after a committed
+ACK and failed retirement, as covered by the
+[reception-effect tests](../crates/mesh-talk-core/src/node/reception_effects/tests.rs).
 Separate due retries, cooled jobs and unfinished discovery or preparation.
 Reserve a retry deadline before cancellable work and retain its wake through the
 existing scheduler. Scope each reservation to the exact attempt and eligible route;

@@ -45,6 +45,28 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
                 .filter(|e| e.routes == routes)
                 .map_or(1, |e| e.failures.saturating_add(1))
         };
+        let delay = if progress {
+            Duration::from_millis(500)
+        } else {
+            Self::failure_delay(&key, failures)
+        };
+        self.record_completion(key, routes, failures, delay, now);
+    }
+
+    /// Successful absence of work is neither progress nor a failed attempt.
+    /// Keep a finite repair deadline without turning a clean poll into a loop.
+    pub(super) fn settled(&mut self, key: K, routes: R, delay: Duration, now: Instant) {
+        self.record_completion(key, routes, 0, delay, now);
+    }
+
+    fn record_completion(
+        &mut self,
+        key: K,
+        routes: R,
+        failures: u32,
+        delay: Duration,
+        now: Instant,
+    ) {
         if !self.entries.contains_key(&key)
             && self.entries.len() >= CAPACITY
             && let Some(oldest) = self
@@ -55,11 +77,6 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
         {
             self.entries.remove(&oldest);
         }
-        let delay = if progress {
-            Duration::from_millis(500)
-        } else {
-            Self::failure_delay(&key, failures)
-        };
         self.entries.insert(
             key,
             Entry {

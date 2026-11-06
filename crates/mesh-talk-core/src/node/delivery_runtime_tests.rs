@@ -9,6 +9,120 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances() {
+    let receiver_dir = tempfile::tempdir().unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+    let receiver_identity = DeviceIdentity::generate();
+    let receiver_account = Account::generate();
+    let source_identity = DeviceIdentity::generate();
+    let source_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let receiver_proof =
+        Announce::new_with_account(&receiver_identity, &receiver_account, "Receiver", 9);
+    let source_proof = Announce::new_with_account(
+        &source_identity,
+        &source_account,
+        "Source",
+        listener.local_addr().unwrap().port(),
+    );
+    let (receiver, mut received) = node(
+        receiver_dir.path(),
+        receiver_identity,
+        receiver_account,
+        &source_proof,
+    );
+    let (source, _) = node(
+        source_dir.path(),
+        source_identity,
+        source_account,
+        &receiver_proof,
+    );
+    receiver.replace_verified_dm_pull_peers(vec![source_proof.user_id.clone()]);
+    // Only serve inbound requests: background push/recovery must not import the
+    // new message before the explicitly measured reconciliation owns it.
+    let responder = source.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let responder = responder.clone();
+                    connections.spawn(async move {
+                        let channel = responder.privacy_accept(stream).await.unwrap();
+                        responder.serve_connection(channel).await;
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+            }
+        }
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let empty = receiver.reconcile_delivery_peer(&source_proof).await;
+        let target = receiver.account_id();
+        let id = source
+            .enqueue_to_account(&target, b"new data after a quiet pull", None)
+            .await
+            .unwrap();
+        assert!(received.try_recv().is_err());
+        let advanced = receiver.reconcile_delivery_peer(&source_proof).await;
+        let message = received.try_recv().unwrap();
+        let quiet = receiver.reconcile_delivery_peer(&source_proof).await;
+        let relay = DeviceIdentity::generate();
+        let relay_proof = Announce::new_post_office_with_account(
+            &relay,
+            &Account::generate(),
+            "Cooling relay",
+            9,
+        );
+        receiver.roster.lock().unwrap().update(
+            &relay_proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &receiver.user_id(),
+        );
+        assert!(receiver.relay_receive_allowed(&relay_proof.public()));
+        // A retained failed-attempt deadline represents unresolved relay work.
+        // A clean direct replay cannot relabel that skipped relay as quiet.
+        receiver.record_relay_attempt(&relay_proof.public(), false);
+        assert!(!receiver.relay_retry_due(&relay_proof.public()));
+        let cooling = receiver.reconcile_delivery_peer(&source_proof).await;
+        (empty, advanced, quiet, cooling, id, message.message_id)
+    })
+    .await;
+    server.abort();
+    let retired = server.await.unwrap_err();
+    assert!(retired.is_cancelled());
+    let (empty, advanced, quiet, cooling, id, received_id) = result.unwrap();
+    assert_eq!(
+        empty,
+        super::delivery_runtime::Reconciliation::Quiet,
+        "a successful empty exchange is not useful progress"
+    );
+    assert_eq!(
+        advanced,
+        super::delivery_runtime::Reconciliation::Advanced,
+        "new remote data must retain prompt continuation"
+    );
+    assert_eq!(
+        quiet,
+        super::delivery_runtime::Reconciliation::Quiet,
+        "an unchanged successful replay must remain quiet"
+    );
+    assert_eq!(
+        cooling,
+        super::delivery_runtime::Reconciliation::Deferred,
+        "a clean direct exchange must preserve an eligible relay's failed retry deadline"
+    );
+    assert_eq!(received_id, Some(id));
+    assert!(
+        received.try_recv().is_err(),
+        "replay must not emit a duplicate"
+    );
+}
+
 #[tokio::test]
 async fn production_node_tcp_sockets_enable_keepalive() {
     let ad = tempfile::tempdir().unwrap();
