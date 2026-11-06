@@ -1802,8 +1802,12 @@ fixture directory if retirement cannot be verified. Existing delivery and
 compaction deadlines remain unchanged.
 
 AddressSanitizer and LeakSanitizer retain the complete default core-library
-inventory and instrumented standard library across four independent Linux
-partitions. Each runner executes one test at a time with no retries. The exact
+inventory and instrumented standard library in one source-pinned Nextest archive.
+Its Linux consumers execute the serial partitions owned by `scripts/ci/asan.mjs`,
+one test at a time with no retries. The producer seals the full default inventory
+and source/compiler/config/platform identity. Trusted job outputs bind both the
+archive and manifest digests; consumers verify those bytes before extraction and
+compare the actual inventory before execution, without rebuilding the core. The exact
 nightly cohort comes from the installed release manifest and matching compiler
 and Cargo fingerprints. An explicit Nextest sanitizer config preserves the
 original case budgets without inheriting unrelated Host/Windows watchdogs.
@@ -1811,7 +1815,7 @@ Every shard first proves a real clean execution and an actual intentional
 use-after-free diagnosis using the same sanitizer settings and target.
 
 The existing `ASan + LeakSanitizer (core)` required check is the substantive
-full-union validator. It requires all four jobs to succeed, exact
+full-union validator. It requires the producer and every partition to succeed, exact
 source/run/attempt/shard artifact names, matching compiler/config identities,
 identical full inventories, and a disjoint exhaustive selected union. It
 revalidates each successful execution and the raw clean/error smoke channels;
@@ -1824,7 +1828,11 @@ Build-cache publication
 remains main-only.
 
 `scripts/ci/asan-cli.test.mjs` uses the pinned Nextest with an already installed
-stable compiler to prove the listing, partition, execution and receipt protocol.
+Rust compiler to prove actual archive production, extraction, listing, partition,
+execution and receipt behavior. It removes producer build outputs and verifies
+all consumers execute without rebuilding, including the explicit target-triple
+layout. Changed source/inventory, missing digests, corrupt archive/manifest bytes
+and a producer identity change reject before acceptance.
 Synthetic diagnostic records in that fixture do not prove sanitizer
 instrumentation. The real Linux clean/error controls and complete source-bound
 core execution remain required hosted evidence.
