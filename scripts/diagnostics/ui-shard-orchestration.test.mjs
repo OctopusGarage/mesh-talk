@@ -120,7 +120,7 @@ test("UI and reusable Health isolate caller/event streams while superseded candi
     assert.equal(concurrency(owner, { ...context, event_name: "workflow_dispatch" }).cancel, false);
     for (const event_name of ["pull_request", "merge_group", "push"]) {
       const candidate = { ...context, event_name, ref: event_name === "push" ? "refs/heads/main" : "refs/merge-queue/main/candidate", event: event_name === "pull_request" ? { pull_request: { number: 42 } } : { pull_request: {} } };
-      assert.equal(concurrency(owner, candidate).cancel, true);
+      assert.equal(concurrency(owner, candidate).cancel, event_name !== "push");
       assert.equal(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, sha: "replacement" }).group);
       assert.notEqual(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, ref: event_name === "push" ? "refs/heads/dev" : "refs/merge-queue/main/other", event: event_name === "pull_request" ? { pull_request: { number: 43 } } : { pull_request: {} } }).group);
     }
@@ -134,7 +134,7 @@ for (const owner of ["ci", "e2e-backend"]) test(`${owner} isolates evidence even
     const event = { ...context, event_name };
     const observed = concurrency(owner, event);
     groups.push(observed.group);
-    assert.equal(observed.cancel, ["push", "pull_request", "merge_group"].includes(event_name));
+    assert.equal(observed.cancel, ["pull_request", "merge_group"].includes(event_name));
     assert.equal(observed.group, concurrency(owner, { ...event, sha: "replacement" }).group);
     assert.notEqual(observed.group, concurrency(owner, { ...event, ref: "refs/heads/other" }).group);
   }
