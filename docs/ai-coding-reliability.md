@@ -394,7 +394,17 @@ unit regression supplies geometry only after the polling window.
 Raw storage injection in concurrency fixtures must publish through the normal
 owner notification before requiring a peer's unrelated scope to settle. Preserve
 the protected in-flight page, exact inventory assertions and original latency
-bounds; the same-source control fixture owns this preparation contract.
+bounds; the same-source control fixture owns this preparation contract. Finish
+unrelated readiness preparation before dispatching a timed network read. A
+protected task can still reach its genuine idle deadline. Test barriers belong
+before I/O, inside the owned child, with cancellation releasing their futures;
+post-send hooks must not hide that deadline. Do not repeat long preparation waits
+inside the measured held-read window.
+
+Concurrent actual-tool fixtures must own output directories, not only source
+and temporary data. A second Playwright invocation can otherwise clean a running
+suite's traces. The browser command owner retains live logs and case progress,
+joins descendants before reporting and fails on timeout or uncertain retirement.
 
 Keep a test's observation scope equal to its named requirement. The
 growing-history fixture measures exact durable originals during continuation,

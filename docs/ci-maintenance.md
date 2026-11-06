@@ -294,6 +294,8 @@ full Rust cache or repeat the large core compilation. Keep the already compresse
 archive transient and transfer it without another compression pass. Compare
 producer compilation, artifact transfer, consumer preparation and queue time
 alongside test execution; more shards alone can duplicate the dominant setup.
+Keep extracted runtimes outside uploaded evidence. Collect receipts, inventories
+and logs; do not upload another compiled binary copy from every consumer.
 Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
 when recovering a failed attempt; do not mix a previous producer with new shards.
 
@@ -342,6 +344,20 @@ preparation is outside the requirement. Continue using the real signing,
 persistence, transport or UI owner when it is part of the assertion. Preserve
 production deadlines and real lifecycle coverage where those are the subject of
 the test; changing the clock or injecting state cannot silently remove them.
+A held real socket still consumes its production timeout while a fixture waits.
+Finish unrelated cold preparation before dispatching that read, using a scoped
+owned barrier before I/O where necessary. Do not pause a post-send hook to conceal
+the network timeout. Consolidate repeated readiness polls into that preparation
+owner; retain exact live-task and measured-operation assertions at admission.
+
+Browser commands use the existing process owner with a deadline inside the total
+job budget, reserving time for joined cleanup and evidence upload. Keep streamed
+logs and append-only active/completed-case progress when final reports cannot be
+written. Timeout, forced retirement or uncertain cleanup remains a failure.
+Actual CLI regression fixtures need private output directories as well as private
+source directories; parallel Playwright commands otherwise delete one another's
+traces and manufacture failures. Missing hosted logs do not identify a slow case.
+
 The [fixture timing guidance](testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress)
 owns concrete examples and permitted boundaries.
 

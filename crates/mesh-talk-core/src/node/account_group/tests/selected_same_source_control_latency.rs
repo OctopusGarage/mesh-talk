@@ -1691,6 +1691,33 @@ async fn retire_same_source_workers(
     drained
 }
 
+fn exact_private_receipt(
+    requester_node: &Node,
+    source_node: &Node,
+    group: ConversationId,
+    id: AccountGroupOperationId,
+    requester: &crate::node::account_group::operations::AccountGroupOperationStatus,
+    source: &crate::node::account_group::operations::AccountGroupOperationStatus,
+) -> bool {
+    requester.phase == AccountGroupOperationPhase::Committed
+        && source.phase == AccountGroupOperationPhase::Committed
+        && requester.committed_events == source.committed_events
+        && requester_node
+            .account_group_operation_inputs()
+            .into_iter()
+            .any(|(_, _, frame)| {
+                frame.group == group
+                    && frame.proof.public() == source_node.identity.public()
+                    && frame.projection.results.iter().any(|result| {
+                        result.reference.id == id
+                            && result.reference.origin.public() == requester_node.identity.public()
+                            && result.reference.executor.device == source_node.identity.public()
+                            && result.status.phase == AccountGroupOperationPhase::Committed
+                            && result.status.committed_events == requester.committed_events
+                    })
+            })
+}
+
 async fn run_same_source_receipt(scenario: SameSourceScenario) {
     use futures_util::FutureExt;
     let other_selected = matches!(
@@ -2372,10 +2399,12 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             })
         }
     }));
+    let authorized_paid_dispatch = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let checkpoints = Arc::new(Mutex::new(Vec::new()));
     let tail_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let rejected = Arc::new(Mutex::new([0usize; 6]));
     *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let authorized_paid_dispatch = authorized_paid_dispatch.clone();
         let release = release.clone();
         let checkpoints = checkpoints.clone();
         let exact_reference = reference.identity.public();
@@ -2408,6 +2437,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let abort_trace = abort_trace.clone();
             let abort_window = abort_window.clone();
             let held_pages = held_pages.clone();
+            let authorized_paid_dispatch = authorized_paid_dispatch.clone();
             let release = release.clone();
             let arrived = arrived.clone();
             let checkpoints = checkpoints.clone();
@@ -2588,6 +2618,8 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     let _ = signal.send(());
                     let _ = release.acquire().await;
                 } else if other_selected
+                    && (!matches!(scenario, SameSourceScenario::OtherSelected)
+                        || *authorized_paid_dispatch.lock().unwrap() == Some(page.task))
                     && !held_executor_preparation
                     && admitted.is_some_and(|id| {
                         requester.upgrade().is_some_and(|requester| {
@@ -2632,6 +2664,68 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             })
         }
     }));
+    let (paid_dispatch_arrived, paid_dispatch_wait) = oneshot::channel();
+    let paid_dispatch_arrived = Arc::new(Mutex::new(Some(paid_dispatch_arrived)));
+    let paid_dispatch_release = Arc::new(Semaphore::new(0));
+    let _paid_dispatch_cleanup = ReleaseReadOnDrop(paid_dispatch_release.clone());
+    if matches!(scenario, SameSourceScenario::OtherSelected) {
+        *reference.account_control_dispatch_test_hook.lock().unwrap() = Some(Arc::new({
+            let exact = owner.identity.public();
+            let signal = paid_dispatch_arrived.clone();
+            let release = paid_dispatch_release.clone();
+            let requester = Arc::downgrade(&reference);
+            let source = Arc::downgrade(&owner);
+            let authorized = authorized_paid_dispatch.clone();
+            let operation = active_operation.clone();
+            move |peer, paid_resume| {
+                let signal = signal.clone();
+                let release = release.clone();
+                let requester = requester.clone();
+                let source = source.clone();
+                let authorized = authorized.clone();
+                let operation = operation.clone();
+                let exact = exact.clone();
+                Box::pin(async move {
+                    if !paid_resume || peer != exact {
+                        return;
+                    }
+                    let Some(id) = *operation.lock().unwrap() else {
+                        return;
+                    };
+                    let Some((requester, source)) = requester.upgrade().zip(source.upgrade())
+                    else {
+                        return;
+                    };
+                    let statuses = requester
+                        .account_group_operation_status(&requester.account_id(), id)
+                        .unwrap()
+                        .zip(
+                            source
+                                .account_group_operation_status(&source.account_id(), id)
+                                .unwrap(),
+                        );
+                    if !statuses.is_some_and(|(requester_status, source_status)| {
+                        exact_private_receipt(
+                            &requester,
+                            &source,
+                            group,
+                            id,
+                            &requester_status,
+                            &source_status,
+                        )
+                    }) {
+                        return;
+                    }
+                    let captured = signal.lock().unwrap().take();
+                    if let Some(signal) = captured {
+                        *authorized.lock().unwrap() = Some(tokio::task::id());
+                        let _ = signal.send(id);
+                        let _ = release.acquire().await;
+                    }
+                })
+            }
+        }));
+    }
     let mut executor_preparation_failure = None;
     reference.account_sync_notify.notify_one();
     super::cold_account_setup(async {
@@ -2769,24 +2863,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 );
             }
             if let (Some(requester), Some(source)) = (requester, source)
-                && requester.phase == AccountGroupOperationPhase::Committed
-                && source.phase == AccountGroupOperationPhase::Committed
-                && requester.committed_events == source.committed_events
-                && reference
-                    .account_group_operation_inputs()
-                    .into_iter()
-                    .any(|(_, _, frame)| {
-                        frame.group == group
-                            && frame.proof.public() == owner.identity.public()
-                            && frame.projection.results.iter().any(|result| {
-                                result.reference.id == id
-                                    && result.reference.origin.public()
-                                        == reference.identity.public()
-                                    && result.reference.executor.device == owner.identity.public()
-                                    && result.status.phase == AccountGroupOperationPhase::Committed
-                                    && result.status.committed_events == requester.committed_events
-                            })
-                    })
+                && exact_private_receipt(&reference, &owner, group, id, &requester, &source)
             {
                 break (requester, source);
             }
@@ -2820,29 +2897,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     let mut executor_boundary = None;
     let other_receipt = if let Some(other) = &other {
         if receipt.is_ok() && executor_preparation_failure.is_none() {
-            if !held_executor_preparation {
-                tokio::time::timeout(Duration::from_secs(8), resumed_wait)
-                    .await
-                    .expect("completed operation must yield a paired background page")
-                    .unwrap();
-            }
-
-            assert!(
-                !reference.pending_account_operation_sources().contains(&(
-                    owner.identity.public().ed25519_pub,
-                    owner.identity.public().x25519_pub
-                )),
-                "A is terminal before B is admitted"
-            );
-            let held_before_b_setup = if matches!(scenario, SameSourceScenario::OtherSelected) {
+            let needs_independent_scope = matches!(scenario, SameSourceScenario::OtherSelected);
+            if needs_independent_scope {
                 // This variant measures the requester's selected-B preemption.
                 // Let B's existing worker finish its unrelated A scope, including
-                // the exact newly introduced tail, while that requester resume
-                // remains held. PaidBoundary separately faults B's incoming lane.
+                // the exact newly introduced tail, before the requester opens
+                // its paid resume socket. PaidBoundary faults B's incoming lane.
                 assert!(second_id.is_none());
-                let held = held_pages.lock().unwrap().last().unwrap().0;
-                let checkpoint = checkpoints.lock().unwrap().last().unwrap().clone();
-                assert!(control_pages.lock().unwrap().is_active(held));
                 let keys = partial_keys.lock().unwrap().clone();
                 assert_eq!(keys.len(), 66);
                 let tail = owner.account_document_meta(keys.last().unwrap()).unwrap();
@@ -2859,11 +2920,14 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     .4;
                 // The controlled tail was seeded directly into storage while
                 // preparing A's read. Advertise that fixture publication only
-                // after A's receipt and protected paired page are established.
+                // after A's receipt, before opening the protected paid page.
                 owner.note_account_local_change();
                 super::cold_account_setup(async {
+                    assert_eq!(paid_dispatch_wait.await.expect("A paid resume reaches preparation"), id);
+                    assert_eq!(held_pages.lock().unwrap().len(), 1, "B preparation precedes the second wire hold");
                     while !scope.lock().unwrap().ready_for(expected)
                         || other.account_document_meta(&tail.key).as_ref() != Some(&tail)
+                        || !executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
                     {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
@@ -2872,21 +2936,42 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 .unwrap_or_else(|error| {
                     let scope = scope.lock().unwrap();
                     panic!(
-                        "B's exact unrelated Control scope must settle before B admission: {error:?}; settled={} paired={} corpus_matches={} tail_matches={} held_active={}",
+                        "B's exact unrelated Control scope must settle before B admission: {error:?}; settled={} paired={} corpus_matches={} tail_matches={} dispatch_released={}",
                         scope.settled,
                         scope.paired,
                         scope.settled_corpus == Some(expected),
                         other.account_document_meta(&tail.key).as_ref() == Some(&tail),
-                        control_pages.lock().unwrap().is_active(held),
+                        paid_dispatch_release.is_closed(),
                     );
                 });
                 assert!(owner.account_document_meta(&tail.key).as_ref() == Some(&tail));
                 assert!(!resumed_release.is_closed());
+                assert_eq!(
+                    held_pages.lock().unwrap().len(),
+                    1,
+                    "B preparation must not issue the paid resume wire read"
+                );
+                paid_dispatch_release.close();
+            }
+            if !held_executor_preparation {
+                tokio::time::timeout(Duration::from_secs(8), resumed_wait)
+                    .await
+                    .expect("completed operation must yield a paired background page")
+                    .unwrap();
+            }
+
+            assert!(
+                !reference.pending_account_operation_sources().contains(&(
+                    owner.identity.public().ed25519_pub,
+                    owner.identity.public().x25519_pub
+                )),
+                "A is terminal before B is admitted"
+            );
+            let held_before_b_setup = needs_independent_scope.then(|| {
+                let held = held_pages.lock().unwrap().last().unwrap().0;
                 assert!(control_pages.lock().unwrap().is_active(held));
-                Some((held, checkpoint))
-            } else {
-                None
-            };
+                (held, checkpoints.lock().unwrap().last().unwrap().clone())
+            });
             if paid_boundary {
                 // This variant faults B's unrelated incoming-hint scheduler,
                 // not the parent's selected-B-vs-held-A boundary. Finish that
@@ -2971,9 +3056,14 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     executor_natural.close();
                     executor_paired.close();
                 }
-                super::cold_account_setup(super::observe_account_fixture_condition(|| {
-                    executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
-                })).await.expect("B must process A's actual current signed inputs and retire its ingestion pair before admission");
+                if matches!(scenario, SameSourceScenario::OtherSelected) {
+                    assert!(executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope),
+                        "B's prepared signed inputs and retired ingestion pair remain current at admission");
+                } else {
+                    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+                        executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
+                    })).await.expect("B must process A's actual current signed inputs and retire its ingestion pair before admission");
+                }
                 assert!(
                     reference.account_document_meta(&b_key).is_none(),
                     "preparation must not admit or preload B intent"
@@ -3297,6 +3387,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
         .collect::<Vec<_>>();
+    paid_dispatch_release.close();
     release.close();
     resumed_release.close();
     executor_natural.close();
@@ -3394,6 +3485,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     *owner.account_session_test_hook.lock().unwrap() = None;
     *owner.account_client_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;
+    *reference.account_control_dispatch_test_hook.lock().unwrap() = None;
     *reference.account_session_test_hook.lock().unwrap() = None;
     if let Some(other) = &other {
         *other.account_client_test_hook.lock().unwrap() = None;

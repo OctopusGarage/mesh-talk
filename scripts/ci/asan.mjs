@@ -138,7 +138,9 @@ export async function verifyArchive(directory, identity) {
 
 export async function reuseArchive(directory, outputDirectory, identity, options = {}) {
   const manifest = await verifyArchive(directory, identity);
-  const buildArgs = await extractArchive(path.join(directory, "core.tar.zst"), outputDirectory, options);
+  // Keep disposable compiled binaries beside the evidence uploaded by callers.
+  const runtimeDirectory = `${path.resolve(outputDirectory)}-archive-runtime`;
+  const buildArgs = await extractArchive(path.join(directory, "core.tar.zst"), runtimeDirectory, options);
   return { buildArgs, expectedInventory: manifest.full };
 }
 
@@ -286,7 +288,7 @@ async function main([mode, first, second, ...extra]) {
     const directory = path.resolve("tmp/asan-build");
     const env = { ...process.env, CARGO_NET_OFFLINE: "true" };
     const cargoPrefix = [`+${identity.toolchain}`];
-    const reuse = await reuseArchive(directory, path.resolve(second, "archive-runtime"), identity, { cargoPrefix, env });
+    const reuse = await reuseArchive(directory, path.resolve(second), identity, { cargoPrefix, env });
     const result = await runPartition(Number(first), second, { ...reuse, identity, cargoPrefix, env, afterExecution: async () => { assert.deepEqual(await expectedIdentity(), identity, "ASan identity changed during execution"); await verifyArchive(directory, identity); } });
     assert.deepEqual(await expectedIdentity(), identity, "ASan identity changed during execution");
     return result;

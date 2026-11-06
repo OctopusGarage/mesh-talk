@@ -46,12 +46,37 @@ test("one reusable shard implementation retains platform-sized runners and all e
   assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
   assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 2);
   assert.ok(!root().includes("name: Run UI E2E"));
-  assert.match(reusable, /npx playwright test --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\} --reporter=list,blob,json/);
+  assert.match(reusable, /node \.\.\/scripts\/ci\/ui-runner\.mjs --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\} --reporter=list,blob,json,\.\.\/scripts\/ci\/ui-runner\.mjs/);
   assert.match(reusable, /MESH_TALK_E2E_COVERAGE: \$\{\{ runner.os == 'Linux' && '1' \|\| '0' \}\}/);
   for (const prefix of ["playwright-ui", "chromium-portable"]) assert.ok(reusable.includes(`name: ${prefix}-`));
   assert.match(reusable, /SOURCE_SHA: \$\{\{ github.sha \}\}/);
   assert.match(reusable, /if: always\(\)/);
   assert.match(reusable, /if-no-files-found: error/);
+});
+
+test("browser job budget reserves cleanup before dependency work and persists interruption evidence", () => {
+  const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
+  assert.match(reusable, /timeout_minutes:\n        type: number\n        default: 25/);
+  assert.match(reusable, /timeout-minutes: \$\{\{ inputs.timeout_minutes \}\}/);
+  assert.ok(reusable.indexOf("name: Reserve browser cleanup") < reusable.indexOf("name: Install dependencies"));
+  assert.match(reusable, /frontend\/ui-runner-evidence\//);
+  const block = reusable.split(/^      - /m).find(value => value.startsWith("name: Reserve browser cleanup and evidence time\n"));
+  assert.match(block, /shell: bash/);
+  const script = block.split("        run: |\n")[1].replace(/^          /gm, "");
+  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-budget-"));
+  try {
+    for (const minutes of ["25", "2", "invalid"]) {
+      const envFile = path.join(directory, "environment");
+      writeFileSync(envFile, "");
+      const result = spawnSync("bash", ["-e", "-c", script], { cwd: directory, encoding: "utf8", env: { ...process.env, UI_JOB_MINUTES: minutes, GITHUB_ENV: envFile } });
+      assert.equal(result.status === 0, minutes === "25", result.stderr);
+      if (minutes === "25") {
+        const budget = JSON.parse(readFileSync(path.join(directory, "ui-runner-evidence/budget.json"), "utf8"));
+        assert.equal(budget.deadline - budget.startedAt, 23 * 60000);
+        assert.equal(readFileSync(envFile, "utf8"), `MESH_UI_DEADLINE_MS=${budget.deadline}\n`);
+      }
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("macOS browsers, Health and backend use Intel while Rust and native retain ARM", () => {

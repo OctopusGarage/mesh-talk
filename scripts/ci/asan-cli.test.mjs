@@ -3,7 +3,7 @@
 // the sanitizer workflow separately requires an actual Linux ASan error control.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -23,7 +23,7 @@ const buildArgs = ["--offline", "--locked", "-p", "asan-protocol-fixture", "--li
 const directory = shard => path.join(root, "evidence", String(shard));
 const archiveDirectory = path.join(root, "archive");
 const archiveIdentity = () => ({ ...identity, archive: JSON.parse(readFileSync(path.join(root, "build-output.json"))) });
-const reuse = output => reuseArchive(archiveDirectory, path.join(root, output, "archive-runtime"), archiveIdentity(), { env: { ...process.env, CARGO_NET_OFFLINE: "true" } });
+const reuse = output => reuseArchive(archiveDirectory, path.join(root, output), archiveIdentity(), { env: { ...process.env, CARGO_NET_OFFLINE: "true" } });
 if (mode === "run") {
  const archive = await produceArchive(archiveDirectory, { buildArgs, identity });
  writeFileSync(path.join(root, "build-output.json"), JSON.stringify(archive));
@@ -93,6 +93,13 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   const accepted = run("run");
   assert.equal(accepted.status, 0, `${accepted.error ?? ""}\n${accepted.stdout}\n${accepted.stderr}`);
   assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 33, executedTests: 32, ignoredTests: 1, shards: 8 });
+  for (const shard of [1, 2, 3, 4, 5, 6, 7, 8]) {
+    const evidence = path.join(root, "evidence", String(shard));
+    const files = readdirSync(evidence, { withFileTypes: true });
+    assert.ok(files.every(entry => entry.isFile()), "execution evidence must not contain extracted runtime directories");
+    for (const name of ["receipt.json", "full.json", "selected.json", "execution.jsonl"]) assert.ok(files.some(entry => entry.name === name), `missing required evidence: ${name}`);
+    assert.ok(!files.some(entry => entry.name === "binaries.json"), "binary metadata belongs outside execution evidence");
+  }
   for (const [mode, message] of [["wrong-source", /identity mismatch/u], ["missing-digests", /Missing trusted/u], ["wrong-inventory", /inventory differs/u]]) {
     const rejected = run(mode);
     assert.equal(rejected.status, 1, rejected.stderr);
@@ -117,6 +124,7 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   assert.equal(failed.status, 1, `${failed.error ?? ""}\n${failed.stderr}`);
   assert.match(failed.stderr, /failed: 100/u);
   assert(!existsSync(path.join(root, "failed/receipt.json")));
+  assert.ok(readdirSync(path.join(root, "failed"), { withFileTypes: true }).every(entry => entry.isFile()), "failed execution evidence must also exclude extracted runtimes");
   const selected = JSON.parse(readFileSync(path.join(root, "failed/selected.json"))).filter(row => row.selected);
   assert.ok(selected.length > 1, "the control needs later selected cases");
   const allEvents = readFileSync(path.join(root, "failed/execution.jsonl"), "utf8").trim().split(/\r?\n/u).map(JSON.parse).filter(event => event.type === "test");

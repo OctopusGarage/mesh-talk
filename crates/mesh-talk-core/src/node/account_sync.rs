@@ -3149,6 +3149,11 @@ impl Node {
                         hints.iter().any(|hint| hint.public == key.public())
                     )
                 });
+                #[cfg(test)]
+                let paid_resume = key.lane == DocumentLane::Control
+                    && control_pairs.contains_key(&key)
+                    && control_origin.0
+                    && protected;
                 let task = documents.spawn(permit.track(async move {
                     #[cfg(test)]
                     let _lifetime = control_task_trace.map(|event| {
@@ -3158,6 +3163,19 @@ impl Node {
                         node.trace_control_task(&peer.public, event, Arc::downgrade(&lifetime));
                         lifetime
                     });
+                    #[cfg(test)]
+                    {
+                        // Owned preparation precedes opening the page's socket.
+                        // Cancellation drops the hook future with this child.
+                        let hook = node
+                            .account_control_dispatch_test_hook
+                            .lock()
+                            .unwrap()
+                            .clone();
+                        if let Some(hook) = hook {
+                            hook(peer.public.clone(), paid_resume).await;
+                        }
+                    }
                     let _ = node.pull_account_documents_page(&peer, &mut state).await;
                     (key, peer, state)
                 }));

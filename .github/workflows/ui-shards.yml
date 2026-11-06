@@ -15,6 +15,10 @@ on:
         type: number
         default: 4
         description: Full-suite partition count for every requested OS
+      timeout_minutes:
+        type: number
+        default: 25
+        description: Total runner budget including preparation and evidence
       max_parallel:
         type: number
         default: 4
@@ -33,7 +37,7 @@ jobs:
         os: ${{ fromJSON(inputs.operating_systems) }}
         shard: ${{ fromJSON(inputs.shards) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     defaults:
       run:
         working-directory: frontend
@@ -46,6 +50,21 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Reserve browser cleanup and evidence time
+        shell: bash
+        env:
+          UI_JOB_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+          const minutes = Number(process.env.UI_JOB_MINUTES);
+          if (!Number.isFinite(minutes) || minutes <= 2) throw Error("Invalid browser job budget");
+          const startedAt = Date.now();
+          const deadline = startedAt + (minutes - 2) * 60000;
+          mkdirSync("ui-runner-evidence", { recursive: true });
+          writeFileSync("ui-runner-evidence/budget.json", JSON.stringify({ startedAt, deadline, jobMinutes: minutes, reserveMinutes: 2 }));
+          appendFileSync(process.env.GITHUB_ENV, `MESH_UI_DEADLINE_MS=${deadline}\n`);
+          JS
       - name: Validate full-suite partition layout
         run: node ../scripts/evals/chromium-evidence.mjs layout
         env:
@@ -76,7 +95,7 @@ jobs:
       # tests across machines rather than competing with Vite on one runner.
       - name: Run UI E2E
         id: ui
-        run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/${{ inputs.shard_total }} --reporter=list,blob,json
+        run: node ../scripts/ci/ui-runner.mjs --workers=1 --retries=0 --shard=${{ matrix.shard }}/${{ inputs.shard_total }} --reporter=list,blob,json,../scripts/ci/ui-runner.mjs
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: full-results.json
           EVAL_SOURCE_SHA: ${{ github.sha }}
@@ -128,6 +147,7 @@ jobs:
           path: |
             frontend/blob-report/
             frontend/full-results.json
+            frontend/ui-runner-evidence/
           if-no-files-found: error
           retention-days: 7
       # Preserve partial attachments when interruption prevents a complete blob.

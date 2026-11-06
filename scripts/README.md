@@ -19,6 +19,7 @@ below are explicit gates or environment-specific tools.
 | Git hooks                    | [`setup-hooks.sh`](setup-hooks.sh), [`../hooks/`](../hooks/)         | On initial checkout; the commit hook checks source formatting only                                                                |
 | Build retention              | [`build-retention.py`](build-retention.py)                           | After managed builds/tests; five successful build sets and a 40 GiB cache budget; see [configuration](../docs/build-retention.md) |
 | Release                      | [`release/`](release/)                                               | CI release workflow and signed artifact validation                                                                                |
+| Owned full Chromium          | [`ci/ui-runner.mjs`](ci/ui-runner.mjs) | CI full shards; preserves progress and joined cleanup inside the workflow budget |
 | CI diagnostics               | [`diagnostics/`](diagnostics/) and [`evals/`](evals/)                | Their `.test.mjs` files are selected by CI globs, even when no script names them individually                                     |
 
 ## Opt-in network acceptance

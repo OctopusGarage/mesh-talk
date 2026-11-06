@@ -1472,7 +1472,12 @@ Compare hosted queue, execution and all-required-check completion after deployme
 Full Chromium tests use eight Playwright shards on macOS and four each on Linux
 and Windows, with one worker and zero retries per runner. Desktop admission allows
 three concurrent shards per OS after Health and WebKit; Linux starts independently.
-The platform-specific inventory owner rejects incomplete or mismatched layouts. This keeps the existing per-machine rendering budget while
+The platform-specific inventory owner rejects incomplete or mismatched layouts.
+The full Chromium command reuses the validation process owner through
+`scripts/ci/ui-runner.mjs`. Its absolute deadline includes setup since budget
+initialization and reserves cleanup/upload time inside the existing job budget.
+Streamed logs, owner status and append-only case progress survive interruption;
+partial evidence cannot satisfy the existing strict acceptance collectors. This keeps the existing per-machine rendering budget while
 running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.
@@ -1809,7 +1814,9 @@ Its Linux consumers execute the serial partitions owned by `scripts/ci/asan.mjs`
 one test at a time with no retries. The producer seals the full default inventory
 and source/compiler/config/platform identity. Trusted job outputs bind both the
 archive and manifest digests; consumers verify those bytes before extraction and
-compare the actual inventory before execution, without rebuilding the core. The exact
+compare the actual inventory before execution, without rebuilding the core.
+Extract disposable runtimes beside, rather than inside, uploaded evidence; the
+collector needs execution proofs, inventories and smoke logs, not repeated binaries. The exact
 nightly cohort comes from the installed release manifest and matching compiler
 and Cargo fingerprints. An explicit Nextest sanitizer config preserves the
 original case budgets without inheriting unrelated Host/Windows watchdogs.
