@@ -229,7 +229,7 @@ test("LCOV rejects invalid executable line and branch counts", () => {
     "DA:0,1",
     "DA:1,-1",
     "DA:1,1.5",
-    "BRDA:1,0,0,-2",
+    "BRDA:1,0,0,1.5",
     "BRDA:0,0,0,1",
   ]) {
     assert.throws(
@@ -237,6 +237,13 @@ test("LCOV rejects invalid executable line and branch counts", () => {
       /Invalid LCOV/,
     );
   }
+});
+
+test("negative V8 branch counts remain uncovered without invalidating the report", () => {
+  const report = parseLcov("SF:src/real.ts\nDA:125,3\nBRDA:125,14,0,3\nBRDA:125,14,1,-2\nend_of_record\n");
+  assert.deepEqual(summarizePatchCoverage(new Map([["src/real.ts", new Set([125])]]), [report]), {
+    covered: 0, total: 1, missing: [{ file: "src/real.ts", line: 125 }],
+  });
 });
 
 test("local target comes exclusively from the explicit Codecov patch policy", () => {

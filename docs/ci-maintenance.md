@@ -75,6 +75,8 @@ implicitly in the cheap mode. Source changes during checking invalidate it.
 
 The frontend precheck reads the target from `codecov.yml`, includes partially
 covered branches in the uncovered denominator and rejects omitted changed files.
+Exercise report readers against actual producer output as well as small fixtures;
+negative V8 branch counts remain uncovered rather than invalidating the report.
 It verifies an existing clean-candidate `frontend-coverage` receipt through the
 canonical stage owner and rechecks LCOV bytes, rather than trusting a timestamp or
 raw report. Generate missing evidence explicitly with the reported command. A

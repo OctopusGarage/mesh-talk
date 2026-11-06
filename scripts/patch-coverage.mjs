@@ -62,12 +62,13 @@ export function parseLcov(report) {
         line < 1 ||
         !block ||
         !branch ||
-        !Number.isInteger(hits) ||
-        hits < 0
+        !Number.isInteger(hits)
       )
         throw new Error(`Invalid LCOV branch: ${row}`);
       const branches = lines.branches.get(line) ?? new Map();
       const key = `${block},${branch}`;
+      // V8's merged reports can contain negative branch counts. Treat them as
+      // uncovered; they must neither reject the whole report nor count as hits.
       branches.set(key, Math.max(branches.get(key) ?? 0, hits));
       lines.branches.set(line, branches);
     } else if (row === "end_of_record") {
