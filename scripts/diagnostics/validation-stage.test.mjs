@@ -188,7 +188,11 @@ test("cancellation immediately before spawn prevents command side effects", asyn
   await assert.rejects(f.run({
     signal: controller.signal,
     log: message => { if (message.startsWith("started after")) controller.abort(); },
-  }), /abort/iu);
+  }), error => {
+    assert.equal(error.name, "AbortError");
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
   await assert.rejects(f.count(), /ENOENT/u);
   assert.equal((await f.run()).code, 0);
 });
@@ -805,4 +809,111 @@ test("stage CLI rejects invalid budgets and persists cancellation at an absolute
   // A long unused deadline must not retain an otherwise finished CLI process.
   const normal = spawnSync(process.execPath, [cli, "deadline-normal", "--deadline", String(Date.now() + 60000), "--", process.execPath, "-e", "process.exit(0)"], { cwd: f.root, env, encoding: "utf8", timeout: 15000 });
   assert.equal(normal.status, 0, normal.stderr);
+});
+
+
+test("pre-admission abort preserves the original rejection without mutating its reason", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(f.run({ signal: controller.signal }), error => {
+    assert.equal(error, controller.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+  await assert.rejects(f.count(), /ENOENT/);
+  const reader = new AbortController(); reader.abort();
+  await assert.rejects(f.run({ reuseOnly: true, signal: reader.signal }), error => {
+    assert.equal(error, reader.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+});
+
+test("resource-wait abort reports no admission and releases only its own key lease", async t => {
+  const f = await fixture(t);
+  const { createHash } = await import("node:crypto");
+  const resource = "pre-admission-resource";
+  const directory = path.join(f.root, ".git/validation-resources", createHash("sha256").update(resource).digest("hex"));
+  await mkdir(directory, { recursive: true });
+  const owner = { pid: process.pid, started: Date.now() };
+  await writeFile(path.join(directory, "owner.json"), JSON.stringify(owner));
+  const controller = new AbortController();
+  await assert.rejects(f.run({ resource, signal: controller.signal, log: message => {
+    if (message.startsWith("waiting for another validation stage")) controller.abort();
+  } }), error => {
+    assert.equal(error.name, "AbortError");
+    assert.equal(error, controller.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+  await assert.rejects(f.count(), /ENOENT/);
+  assert.deepEqual(await readdir(path.join(f.root, "target/validation/locks")), []);
+  assert.deepEqual(JSON.parse(await readFile(path.join(directory, "owner.json"))), owner);
+});
+
+test("post-admission exceptions cannot acquire a verified no-work cancellation result", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  await assert.rejects(f.run({ signal: controller.signal, createLogStream: () => {
+    controller.abort(); throw controller.signal.reason;
+  } }), error => {
+    assert.equal(error, controller.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+  await assert.rejects(f.count(), /ENOENT/);
+});
+
+
+test("stage CLI persists owned pre-admission cancellation when cold identity consumes its unchanged 2s budget", { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const preload = path.join(f.root, "target/cold-identity.mjs");
+  await mkdir(path.dirname(preload), { recursive: true });
+  await writeFile(preload, `
+import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+const original = cp.spawnSync;
+let cold = true;
+cp.spawnSync = function(program, args, ...rest) {
+  if (cold && args?.length === 1 && args[0] === '--version') {
+    cold = false;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2100);
+  }
+  return original.call(this, program, args, ...rest);
+};
+syncBuiltinESMExports();
+`);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const resultFile = path.join(f.root, "target/cold-result.json");
+  const env = { ...process.env, CI: "1", NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${pathToFileURL(preload).href}` };
+  delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER;
+  const result = spawnSync(process.execPath, [cli, "cold-deadline", "--deadline", String(Date.now() + 2000), "--result", resultFile, "--", ...f.command], {
+    cwd: f.root, env, encoding: "utf8", timeout: 15000,
+  });
+  assert.equal(result.status, 130, result.stderr);
+  const record = JSON.parse(await readFile(resultFile, "utf8"));
+  assert.equal(record.code, 130);
+  assert.equal(record.launched, false);
+  assert.equal(record.cleanupUnverified, false);
+  assert.equal(record.executionMs, 0);
+  await assert.rejects(f.count(), /ENOENT/);
+});
+
+test("CLI diagnostic failures cannot impersonate an owner-proven pre-admission cancellation", async t => {
+  const f = await fixture(t);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const preload = path.join(f.root, "spoof-owner.mjs");
+  await writeFile(preload, "Error.prototype.stageResult = {code:130, launched:false, cleanupUnverified:false};");
+  const resultFile = path.join(f.root, "target/diagnostic-result.json");
+  const result = spawnSync(process.execPath, [cli, "invalid-profile", "--profile", "unknown", "--result", resultFile, "--", ...f.command], {
+    cwd: f.root, encoding: "utf8", timeout: 15000,
+    env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${pathToFileURL(preload).href}` },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Unknown validation environment profile/);
+  const record = JSON.parse(await readFile(resultFile, "utf8"));
+  assert.equal(record.code, 1);
+  assert.equal(record.launched, null);
+  assert.equal(record.cleanupUnverified, true);
+  await assert.rejects(f.count(), /ENOENT/);
 });

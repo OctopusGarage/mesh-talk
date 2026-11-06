@@ -11,6 +11,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 
+const preAdmissionResults = new WeakMap();
 const hash = value => createHash("sha256").update(value).digest("hex");
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function observeInputs(root, configuration) {
@@ -304,7 +305,28 @@ export async function verifyStageEvidence(options) {
   return record;
 }
 
-export async function runStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, reuseOnly = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }) {
+export async function runStage(options) {
+  const admission = { started: Date.now(), commandAdmitted: false };
+  try { return await runOwnedStage(options, admission); }
+  catch (error) {
+    const signal = options?.signal;
+    if (error && typeof error === "object") preAdmissionResults.delete(error);
+    if (!options?.reuseOnly && !admission.commandAdmitted && signal?.aborted &&
+        error && typeof error === "object" &&
+        (error === signal.reason || error.name === "AbortError")) {
+      const finished = Date.now();
+      const record = { schema: 1, name: options.name, source: admission.source,
+        key: admission.key, receipt: admission.receipt, platform: process.platform, arch: process.arch,
+        code: 130, error: "Validation cancelled before command admission", launched: false,
+        cleanupUnverified: false, forcedRetirement: false, reused: false, artifacts: [],
+        elapsedMs: finished - admission.started, executionMs: 0, queuedMs: finished - admission.started, finished };
+      preAdmissionResults.set(error, record);
+    }
+    throw error;
+  }
+}
+
+async function runOwnedStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, reuseOnly = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }, admission) {
   if (!/^[\w:.-]+$/u.test(name) || !command?.length) throw Error("A stage needs a safe name and command");
   if (!["all", "shared"].includes(profile)) throw Error("Unknown validation environment profile");
   // Cargo owns the repository's Rust thread budget. Preserve caller overrides
@@ -313,8 +335,10 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   env = { ...env, VITEST_MAX_WORKERS: env.VITEST_MAX_WORKERS || "2" };
   root = path.resolve(root); cwd = path.resolve(cwd);
   const started = Date.now();
+  admission.started = started;
   let initial;
   try { initial = source(root); } catch { initial = { dirty: true }; }
+  admission.source = initial.head;
   if (reuseOnly && (initial.dirty || env.CI || fresh || env.MESH_VALIDATION_FRESH === "1"))
     throw Error("Cannot verify reusable evidence for dirty source, CI, or fresh execution; produce successful local evidence for the clean candidate first");
   const declared = inputs === undefined ? undefined : await inputIdentity(root, inputs);
@@ -342,6 +366,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   const key = hash(JSON.stringify(identity));
   const directory = path.join(root, "target/validation");
   const receipt = path.join(directory, "receipts", `${key}.json`);
+  admission.key = key; admission.receipt = receipt;
   const reusable = !initial.dirty && !env.CI && !fresh && env.MESH_VALIDATION_FRESH !== "1";
   const release = await lock(path.join(directory, "locks", key), { log, signal, nonblocking: reuseOnly, noWork: reuseOnly });
   let releaseResource;
@@ -408,7 +433,13 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       };
     }
     const timer = setInterval(() => log(`running for ${Math.round((Date.now() - started - queuedMs) / 1000)}s; log ${logPath}`), 30_000);
-    try { result = await execute(command, { cwd, env, logPath, signal, createLogStream, onSpawn }); }
+    try {
+      signal?.throwIfAborted();
+      // From this point the execution owner may admit work. No asynchronous
+      // gap separates the final cancellation check from that handoff.
+      admission.commandAdmitted = true;
+      result = await execute(command, { cwd, env, logPath, signal, createLogStream, onSpawn });
+    }
     finally { clearInterval(timer); }
     cleanupUnverified = result.cleanupUnverified;
     if (cleanupUnverified) {
@@ -522,13 +553,25 @@ async function main(args) {
   const stop = () => controller.abort();
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
   try {
-    const result = await runStage({ root, name, command: args.slice(separator + 1), cwd: process.cwd(), artifacts, resource, context, profile, inputs, signal: controller.signal });
-    if (resultFile) {
+    const persist = async record => {
+      if (!resultFile) return;
       await mkdir(path.dirname(resultFile), { recursive: true });
       const temporary = `${resultFile}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(result, null, 2)}\n`);
+      await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`);
       await rename(temporary, resultFile);
+    };
+    let result;
+    try {
+      result = await runStage({ root, name, command: args.slice(separator + 1), cwd: process.cwd(), artifacts, resource, context, profile, inputs, signal: controller.signal });
+    } catch (error) {
+      if (preAdmissionResults.has(error)) result = preAdmissionResults.get(error);
+      else {
+        await persist({ schema: 1, name, code: 1, error: error.message,
+          launched: null, cleanupUnverified: true });
+        throw error;
+      }
     }
+    await persist(result);
     process.exitCode = result.code;
   } finally { clearTimeout(timer); process.off("SIGINT", stop); process.off("SIGTERM", stop); }
 }

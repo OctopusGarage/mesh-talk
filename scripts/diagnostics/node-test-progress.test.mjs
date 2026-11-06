@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { execute } from "../validation/stage.mjs";
 
@@ -23,7 +22,7 @@ test("actual Node progress identifies a begun parked file before owned interrupt
   let result; let diagnostic = "";
   try {
     const env = { ...process.env }; delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER; delete env.NODE_TEST_CONTEXT;
-    result = await execute([process.execPath, "--test", `--test-reporter=${fileURLToPath(new URL("./node-test-progress.mjs", import.meta.url))}`, `--test-reporter-destination=${output}`, fixture], {
+    result = await execute([process.execPath, "--test", `--test-reporter=${new URL("./node-test-progress.mjs", import.meta.url).href}`, `--test-reporter-destination=${output}`, fixture], {
       cwd: directory, env, signal: controller.signal, onOutput(chunk) { diagnostic += chunk; },
     });
     assert.equal(observed, true, `progress must be durable while the case is still parked: ${diagnostic}`);

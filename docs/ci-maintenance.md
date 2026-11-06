@@ -52,8 +52,9 @@ extract substantial conditionals and loops into the existing feature owner rathe
 than copying YAML fragments or introducing another generic orchestration layer.
 When moving execution into a script, update every caller and smoke check. Keep
 launcher behavior in its owning regression instead of requiring obsolete command
-text in YAML. Cross-platform fixtures must convert file URLs with `fileURLToPath`
-rather than `.pathname`; exercise native path handling on its required platform.
+text in YAML. Cross-platform filesystem paths use `fileURLToPath` rather than
+`.pathname`; ESM module arguments retain a file URL or relative module specifier
+instead of a native Windows absolute path. Exercise each boundary on its platform.
 Keep live source/release checks immediately before each publication boundary;
 those protect against changed state and are not redundant setup checks.
 
@@ -451,6 +452,9 @@ owner to stop diagnostics before the job watchdog. Preserve its structured resul
 execution log and bounded Node lifecycle records, including the active file/case,
 through the always-upload path. Prove interruption and joined cleanup with a real
 parked command. Missing hosted logs require better evidence, not a guessed fix.
+Cancellation during preparation still needs a failed structured result. Only the
+command owner can attest that admission never happened; failures after that
+boundary must retain uncertain cleanup rather than manufacture a no-work result.
 
 The [fixture timing guidance](testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress)
 owns concrete examples and permitted boundaries.
