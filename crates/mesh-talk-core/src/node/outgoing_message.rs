@@ -414,7 +414,8 @@ impl Node {
                     transaction: Box::new(transaction),
                 };
             }
-            store.begin(transaction).map_err(NodeError::Log)?;
+            self.begin_delivery_intent(&mut store, transaction)
+                .map_err(NodeError::Log)?;
             drop(book);
             result = Some(id);
             Ok(())
@@ -433,7 +434,6 @@ impl Node {
             log::debug!("accepted channel metadata awaits preparation: {error}");
         }
         self.process_channel(channel);
-        self.delivery_notify.notify_one();
         Ok(id)
     }
 }

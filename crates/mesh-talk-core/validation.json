@@ -476,7 +476,8 @@
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_retry.rs",
-        "crates/mesh-talk-core/src/node/node.rs"
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs"
       ],
       "rust": [
         {
@@ -530,7 +531,8 @@
             "account_history_capacity_backoff_retains_demand_without_periodic_repair",
             "clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances",
             "quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress",
-            "refreshing_same_verified_pull_set_does_not_invalidate_quiet_deadline"
+            "refreshing_same_verified_pull_set_does_not_invalidate_quiet_deadline",
+            "unchanged_direct_custody_does_not_keep_destination_retry_hot"
           ]
         }
       ],
@@ -576,6 +578,10 @@
           },
           {
             "name": "Successful empty proactive recovery is quiet rather than progress: it retains a finite 60-second repair deadline without accelerating retries, while failed/cooling routes remain deferred and actual incoming progress continues promptly. Admitted route/policy/semantic verification generations qualify bounded hints; unchanged verification refreshes do not create demand and eligible route or verification changes bypass old deadlines. Transport success alone never establishes custody or delivery.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Repeated positive custody does not accelerate an awaiting destination; delivery retry progress requires durable queue advancement and failed destination/receipt retirement remains deferred. A newly accepted durable intent bypasses older retry hints, while idempotent acceptance of a pending intent does not manufacture a new demand generation. Generic projection/poll completion notifications never create new intent demand.",
             "reference": "docs/ARCHITECTURE.md"
           }
         ]

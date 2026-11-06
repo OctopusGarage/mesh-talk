@@ -312,6 +312,8 @@ struct DeferredReceiptStore<S> {
     inner: S,
     control: ConversationId,
     control_seen: Arc<std::sync::atomic::AtomicBool>,
+    custody_queries: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    release_receipts: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
@@ -325,7 +327,14 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
         conversation: &ConversationId,
         id: &EventId,
     ) -> Result<bool, crate::eventlog::LogError> {
-        self.inner.durable_have(conversation, id)
+        let held = self.inner.durable_have(conversation, id)?;
+        if held
+            && *conversation != self.control
+            && let Some(queries) = &self.custody_queries
+        {
+            queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(held)
     }
     fn event_ids(
         &self,
@@ -334,7 +343,15 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
         if *conversation == self.control {
             self.control_seen
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(Vec::new())
+            if self
+                .release_receipts
+                .as_ref()
+                .is_some_and(|release| release.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                self.inner.event_ids(conversation)
+            } else {
+                Ok(Vec::new())
+            }
         } else {
             self.inner.event_ids(conversation)
         }
@@ -344,7 +361,12 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
         conversation: &ConversationId,
         have: &std::collections::HashSet<EventId>,
     ) -> Result<Vec<crate::eventlog::Event>, crate::eventlog::LogError> {
-        if *conversation == self.control {
+        if *conversation == self.control
+            && !self
+                .release_receipts
+                .as_ref()
+                .is_some_and(|release| release.load(std::sync::atomic::Ordering::SeqCst))
+        {
             Ok(Vec::new())
         } else {
             self.inner.events_excluding(conversation, have)
@@ -356,6 +378,147 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
     ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
         self.inner.ingest(event)
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchanged_direct_custody_does_not_keep_destination_retry_hot() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let recipient_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let recipient_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sender_proof = Announce::new_with_account(&sender_identity, &sender_account, "sender", 9);
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "recipient",
+        listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &recipient_proof,
+    );
+    let (recipient, mut incoming) = node(
+        recipient_dir.path(),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    let control = super::delivery_receipt::delivery_conversation_id(
+        &sender.identity.public(),
+        &recipient.identity.public(),
+    );
+    let queries = Arc::new(AtomicUsize::new(0));
+    let control_seen = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let mut tasks = tokio::task::JoinSet::new();
+    let receiver = recipient.clone();
+    let counted = queries.clone();
+    let seen = control_seen.clone();
+    let released = release.clone();
+    tasks.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let receiver = receiver.clone();
+                    let counted = counted.clone();
+                    let seen = seen.clone();
+                    let released = released.clone();
+                    connections.spawn(async move {
+                        let Ok(mut channel) = receiver.privacy_accept(stream).await else { return; };
+                        let store = Mutex::new(DeferredReceiptStore {
+                            inner: receiver.sync_store(channel.peer_identity()).into_inner().unwrap(),
+                            control,
+                            control_seen: seen,
+                            custody_queries: Some(counted),
+                            release_receipts: Some(released),
+                        });
+                        while let Ok(super::session::Served::Handled(conversation)) =
+                            super::session::serve_one(&mut channel, &store).await
+                        {
+                            receiver.emit_new_messages(conversation);
+                        }
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+            }
+        }
+    });
+    let id = sender
+        .enqueue_to_account(
+            &recipient.account_id(),
+            b"custody is not fresh progress",
+            None,
+        )
+        .await
+        .unwrap();
+    tasks.spawn(sender.clone().run_delivery_loop());
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        while queries.load(Ordering::SeqCst) == 0 || !control_seen.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let first = queries.load(Ordering::SeqCst);
+        let received = incoming.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let repeated = queries.load(Ordering::SeqCst) - first;
+        let pending = sender.delivery_status(id);
+        let second_id = sender
+            .enqueue_to_account(
+                &recipient.account_id(),
+                b"new demand must bypass old peer backoff",
+                None,
+            )
+            .await
+            .unwrap();
+        let second_received = tokio::time::timeout(Duration::from_secs(3), incoming.recv())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|message| message.message_id);
+        let second_pending = sender.delivery_status(second_id);
+        release.store(true, Ordering::SeqCst);
+        sender.delivery_notify.notify_one();
+        while sender.delivery_status(id) != Some(DeliveryStatus::Delivered)
+            || sender.delivery_status(second_id) != Some(DeliveryStatus::Delivered)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (
+            repeated,
+            pending,
+            received.message_id,
+            second_id,
+            second_received,
+            second_pending,
+        )
+    })
+    .await;
+    tasks.shutdown().await;
+    let (repeated, pending, received_id, second_id, second_received, second_pending) =
+        result.unwrap();
+    assert_eq!(pending, Some(DeliveryStatus::Awaiting));
+    assert_eq!(received_id, Some(id));
+    assert_eq!(
+        second_received,
+        Some(second_id),
+        "new durable demand must bypass the old destination's peer cooldown within three seconds"
+    );
+    assert_eq!(second_pending, Some(DeliveryStatus::Awaiting));
+    assert!(incoming.try_recv().is_err());
+    assert!(
+        repeated <= 3,
+        "unchanged positively confirmed durable custody kept the retry lane hot: {repeated} additional positive queries in 8 seconds"
+    );
 }
 
 #[tokio::test]
@@ -461,6 +624,8 @@ async fn late_exact_receipt_releases_peer_lane_before_a_stalled_relay_finishes()
                         .unwrap(),
                     control,
                     control_seen: seen,
+                    custody_queries: None,
+                    release_receipts: None,
                 });
                 while let Ok(super::session::Served::Handled(conversation)) =
                     super::session::serve_one(&mut channel, &store).await

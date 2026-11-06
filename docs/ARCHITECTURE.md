@@ -437,7 +437,13 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   their independent prompt lanes. Failure uses the existing bounded retry
   schedule. Captured endpoint, policy and semantic verification generations
   qualify each deadline; unchanged verification refreshes do not renew demand,
-  and new eligible routes or verification changes bypass an old quiet hint.
+  and new eligible routes, verification changes or newly accepted durable work
+  bypass an old retry hint. A positive remote-have proof does not count as fresh
+  progress while its destination is still awaiting a recipient receipt. Fast
+  continuation requires actual durable destination/receipt queue advancement;
+  failed retirement remains deferred. The existing WAL acceptance boundary
+  advances the runtime demand generation only for a new intent, preserving
+  idempotent pending retries without manufacturing fresh demand.
   These bounded runtime hints never confirm custody, delivery or read state.
   Channel recovery asks up to three online members per turn and continues past a
   reachable but stale member. A completed generic channel attachment remains available from a

@@ -79,7 +79,7 @@ struct ControlRoutes {
     endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
     publicly_observed: bool,
     policy_generation: u64,
-    verified_generation: u64,
+    demand_generation: u64,
 }
 
 /// Task IDs distinguish an aborted route owner from its same-key replacement.
@@ -143,7 +143,7 @@ impl ControlRoutes {
             self.endpoints.clone(),
             self.publicly_observed,
             self.policy_generation,
-            self.verified_generation,
+            self.demand_generation,
         )
     }
 }
@@ -691,7 +691,7 @@ impl Node {
                 return;
             }
             *current = next;
-            self.verified_dm_pull_generation
+            self.delivery_demand_generation
                 .fetch_add(1, Ordering::Release);
         }
         self.delivery_notify.notify_one();
@@ -713,6 +713,32 @@ impl Node {
 
     /// Authorize one immutable outgoing journal entry, then attempt local replay.
     /// Once the journal accepts it, replay failure must not become a retryable send.
+    /// Call only after durable acceptance of new work, never after an unchanged
+    /// projection, successful poll or ordinary completion notification.
+    pub(in crate::node) fn note_delivery_demand(&self) {
+        self.delivery_demand_generation
+            .fetch_add(1, Ordering::Release);
+        self.delivery_notify.notify_one();
+    }
+
+    /// The delivery guard serializes this identity check with WAL acceptance.
+    /// Retrying an already accepted pending intent must not create fresh demand.
+    pub(in crate::node) fn begin_delivery_intent(
+        &self,
+        store: &mut DeliveryStore,
+        transaction: DeliveryTransaction,
+    ) -> Result<EventId, LogError> {
+        let already_pending = store
+            .pending_transactions()
+            .iter()
+            .any(|pending| pending.id() == transaction.id());
+        let id = store.begin(transaction)?;
+        if !already_pending {
+            self.note_delivery_demand();
+        }
+        Ok(id)
+    }
+
     pub(in crate::node) fn commit_outgoing_transaction(
         &self,
         store: &mut DeliveryStore,
@@ -725,7 +751,8 @@ impl Node {
             .expect("log lock")
             .sync()
             .map_err(NodeError::Log)?;
-        store.begin(transaction).map_err(NodeError::Log)?;
+        self.begin_delivery_intent(store, transaction)
+            .map_err(NodeError::Log)?;
         let recovered = match self.recover_delivery(store) {
             Ok(()) => true,
             Err(error) => {
@@ -733,7 +760,6 @@ impl Node {
                 false
             }
         };
-        self.delivery_notify.notify_one();
         Ok(recovered)
     }
 
@@ -891,15 +917,17 @@ impl Node {
                 owner_account: self.account_id(),
             },
         );
-        store.begin(DeliveryTransaction::IncomingManifest {
-            sender: peer,
-            original: Box::new(event.clone()),
-            received: Box::new(received),
-            receipt,
-            file,
-        })?;
+        self.begin_delivery_intent(
+            &mut store,
+            DeliveryTransaction::IncomingManifest {
+                sender: peer,
+                original: Box::new(event.clone()),
+                received: Box::new(received),
+                receipt,
+                file,
+            },
+        )?;
         self.recover_delivery(&mut store)?;
-        self.delivery_notify.notify_one();
         Ok(())
     }
     pub(in crate::node) fn persist_account_adoption<T>(
@@ -1224,16 +1252,18 @@ impl Node {
             self.reopen_personal_after_live(&peer_account)
                 .map_err(delivery_log_error)?;
         }
-        store.begin(DeliveryTransaction::Incoming {
-            sender: peer.clone(),
-            original: Box::new(event.clone()),
-            ratchet: prepared,
-            received: Box::new(received),
-            receipt,
-        })?;
+        self.begin_delivery_intent(
+            store,
+            DeliveryTransaction::Incoming {
+                sender: peer.clone(),
+                original: Box::new(event.clone()),
+                ratchet: prepared,
+                received: Box::new(received),
+                receipt,
+            },
+        )?;
         drop(policy);
         self.recover_delivery(store)?;
-        self.delivery_notify.notify_one();
         Ok(Some(()))
     }
     pub(in crate::node) fn recover_delivery(
@@ -2169,7 +2199,7 @@ impl Node {
             endpoints,
             publicly_observed,
             policy_generation: self.privacy.generation.load(Ordering::Acquire),
-            verified_generation: self.verified_dm_pull_generation.load(Ordering::Acquire),
+            demand_generation: self.delivery_demand_generation.load(Ordering::Acquire),
         }
     }
 
@@ -2469,19 +2499,25 @@ impl Node {
                         } else {
                             (false, None)
                         };
-                        let failed = if progress {
+                        let (failed, advanced) = if progress {
                             let mut store =
                                 node.delivery.lock().expect("delivery lock not poisoned");
-                            store.completed_work(id).is_some()
-                                && store.retire_destination(id, destination.event.id).is_err()
+                            let failed = store.completed_work(id).is_some()
+                                && store.retire_destination(id, destination.event.id).is_err();
+                            // An unchanged positive remote-have proof is storage
+                            // evidence, not new queue progress. Keep awaiting the
+                            // recipient's receipt with the existing bounded backoff.
+                            let advanced =
+                                !failed && !store.contains_destination(id, destination.event.id);
+                            (failed, advanced)
                         } else {
-                            false
+                            (false, false)
                         };
                         let observation = attempt.token.take().map(|token| (token, reason));
                         (
                             key,
                             failed,
-                            Reconciliation::from_progress(progress),
+                            Reconciliation::from_progress(advanced),
                             observation,
                         )
                     }));
@@ -2517,7 +2553,12 @@ impl Node {
                                 .expect("delivery lock not poisoned")
                                 .finish_receipt(receipt.conversation, receipt.original_event_id)
                                 .is_err();
-                        (key, failed, Reconciliation::from_progress(progress), None)
+                        (
+                            key,
+                            failed,
+                            Reconciliation::from_progress(progress && !failed),
+                            None,
+                        )
                     }));
                     control_owners.insert(owner, task);
                 }
@@ -2842,10 +2883,12 @@ impl Node {
                 "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
                 direct_elapsed.as_millis(), relay_elapsed.as_millis(), held, relay_held, budget.as_millis());
         }
-        let progress = held || relay_held;
+        // This return value is remote storage evidence. The scheduling owner
+        // separately checks whether durable destination work actually advanced.
+        let held = held || relay_held;
         (
-            progress,
-            if progress {
+            held,
+            if held {
                 None
             } else if direct_timeout || relay_timeout {
                 Some(DeliveryRecoveryReason::AttemptTimedOut)

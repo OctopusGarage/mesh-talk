@@ -288,7 +288,14 @@ unchanged subscription must not invalidate them. The real Noise
 `clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances` regression
 covers empty success, later data, unchanged replay and deferred relay recovery;
 `quiet_pull_deadline_and_changed_admission_do_not_requeue_as_progress` covers
-actual scheduling policy. Settled reception retirement suppresses same-value
+actual scheduling policy. A repeated positive custody proof is also not fresh
+progress while the durable delivery destination still awaits its receipt. The
+`unchanged_direct_custody_does_not_keep_destination_retry_hot` regression drives
+the real delivery loop, retains awaiting state, bounds repeated positive
+confirmations and admits another new message before the first receipt arrives.
+New retry demand belongs to durable intent acceptance, not successful polling
+or idempotent reacceptance of an existing pending intent. Settled reception
+retirement suppresses same-value
 writes inside its existing transaction while preserving cleanup after a committed
 ACK and failed retirement, as covered by the
 [reception-effect tests](../crates/mesh-talk-core/src/node/reception_effects/tests.rs).
