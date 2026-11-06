@@ -539,6 +539,7 @@ fn profile_scan_reopens_and_stale_work_is_cleaned_within_budget() {
     finish(&repo, old);
     let e = event(&author, 17, vec![], 17, EventKind::Profile);
     repo.append(&e).unwrap();
+    repo.request_profile_maintenance(&conv).unwrap();
     assert_eq!(
         repo.apply_profile_maintenance(old).unwrap().state,
         MaintenanceState::Stale
@@ -594,6 +595,7 @@ fn profile_amortization_uses_global_estimate_and_preserves_requests() {
 
     let tenth = event(&author, 10, vec![], 10, EventKind::Profile);
     repo.append(&tenth).unwrap();
+    repo.request_profile_maintenance(&conv).unwrap();
     let huge = Event::new(
         &DeviceIdentity::generate(),
         ConversationId::new([9; 32]),

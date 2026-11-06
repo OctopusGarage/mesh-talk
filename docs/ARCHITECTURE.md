@@ -2256,6 +2256,20 @@ proportional to the removed rows, without rewriting unrelated event bodies.
 Participant runtime maintenance now drives these bounded repository steps and
 retries publication cleanup through the same admitted blocking-work owner.
 
+Each pending Profile request captures an eligible commit cutoff. Only genuinely
+new, account-qualified Profile demand advances it; replay of a terminal processed
+ID does not. Advancing a cutoff invalidates older source-bound workers, including
+workers created after raw admission but before discovery. Candidate collection
+charges late rows while excluding them from that epoch; current parent references
+remain unrestricted. Legacy request bounds initialize through bounded migration
+work before they can authorize deletion. Ordinary legacy sync may restore old raw
+ancestry once, while repeated sync and maintenance must settle without destructive
+oscillation. This changes neither retained HAVE/custody nor user deletion rules.
+
+Completed media GC turns do not update an inactive namespace. Scheduling fresh
+work reactivates its existing cutoff owner, and failed completion remains pending
+for retry; no cache can turn missing or failed work into successful erasure.
+
 Semantic Profile compaction advances the full destructive revision used by
 outgoing authority and retained-history views. In the same transaction it records
 the classified increment separately. Incoming mailbox repair uses the difference

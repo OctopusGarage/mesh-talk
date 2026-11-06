@@ -1203,7 +1203,7 @@
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {
-            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; semantic compaction preserves incoming coverage while retaining full outgoing destructive authority, retires both order bindings immediately and defers derived-row reclamation to budgeted maintenance; drop and recreate cannot revive stale cursors",
+            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; semantic compaction captures per-request eligible commit cuts, fences old workers when fresh demand advances and excludes processed late replay from renewed deletion, while preserving charged scans, current parent references and bounded legacy initialization; semantic compaction preserves incoming coverage while retaining full outgoing destructive authority, retires both order bindings immediately and defers derived-row reclamation to budgeted maintenance; drop and recreate cannot revive stale cursors",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1891,7 +1891,7 @@
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           },
           {
-            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics.",
+            "name": "Unchanged expiry and favorite-media maintenance skips repeated metadata/media scans only for successfully completed matching revision/authority inputs before their earliest wall or monotonic deadline; restart, mutations and failures retain erasure and retry semantics. Completed media GC performs no inactive namespace writes; fresh schedules and failed-completion recovery retain their existing cutoff owner.",
             "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
           }
         ]

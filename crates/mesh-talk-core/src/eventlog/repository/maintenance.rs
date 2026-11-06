@@ -338,6 +338,7 @@ fn subtract(value: i64, delta: i64) -> Result<i64, LogError> {
         .ok_or_else(|| corrupt("maintenance counter underflow"))
 }
 mod apply;
+mod bounds;
 mod scan;
 #[cfg(test)]
 mod tests;
@@ -386,7 +387,7 @@ fn optional_blob<const N: usize>(r: &Row<'_>, column: usize) -> Result<Option<[u
         .transpose()
 }
 
-fn clear_profile_leaves(c: &Connection, job: &[u8]) -> Result<(), LogError> {
+fn check_profile_leaves(c: &Connection, job: &[u8]) -> Result<(), LogError> {
     let count: i64 = c.query_row(
         "SELECT count(*) FROM (SELECT 1 FROM event_profile_leaves WHERE job=?1 LIMIT 3)",
         [job],
@@ -395,6 +396,11 @@ fn clear_profile_leaves(c: &Connection, job: &[u8]) -> Result<(), LogError> {
     if count > 2 {
         return Err(corrupt("maintenance leaf scratch exceeds bound"));
     }
+    Ok(())
+}
+
+fn clear_profile_leaves(c: &Connection, job: &[u8]) -> Result<(), LogError> {
+    check_profile_leaves(c, job)?;
     // At most two exact-PK deletions, including corrupted-source resets.
     loop {
         let leaf = {

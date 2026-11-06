@@ -28,10 +28,23 @@ impl EventRepository {
                 dropped: 0,
             });
         }
+        if !self.profile_request_bounds_ready_on(c)? {
+            return Ok(MaintenanceApply {
+                state: MaintenanceState::Pending,
+                dropped: 0,
+            });
+        }
         let (source, total) = self.domain_maintenance_on(c)?;
         if job.count < 8 || job.bytes < total / 8 + i64::from(total % 8 != 0) {
             return Ok(MaintenanceApply {
                 state: MaintenanceState::Ready,
+                dropped: 0,
+            });
+        }
+        let missing: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM event_profile_candidates x LEFT JOIN event_profile_request_bounds b ON b.domain=?1 AND b.conversation=x.conversation WHERE x.job=?2 AND b.domain IS NULL)",params![self.domain.0.as_slice(),token.job.as_slice()],|r|r.get(0))?;
+        if missing {
+            return Ok(MaintenanceApply {
+                state: MaintenanceState::Stale,
                 dropped: 0,
             });
         }
@@ -69,6 +82,9 @@ impl EventRepository {
             let metadata = self
                 .metadata_on(c, &conversation)?
                 .ok_or_else(|| corrupt("maintenance source conversation missing"))?;
+            let through = self
+                .profile_request_bound_on(c, &conv)?
+                .ok_or(LogError::StaleCursor)?;
             let revision = advance(metadata.revision)?;
             let epoch = advance(self.network_epoch_on(c, &conversation)?)?;
             c.execute("UPDATE event_conversations SET destructive_epoch=?3 WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conversation.as_bytes().as_slice(),epoch])?;
@@ -105,6 +121,9 @@ impl EventRepository {
                 let Some((id, author, cost, body_bytes, commit_ordinal)) = candidate else {
                     break;
                 };
+                if commit_ordinal > through {
+                    return Err(LogError::StaleCursor);
+                }
                 let referenced:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM retained_event_parents WHERE domain=?1 AND parent=?2)",params![domain,id.as_slice()],|r|r.get(0))?;
                 if referenced {
                     return Err(corrupt("maintenance candidate is a referenced ancestor"));

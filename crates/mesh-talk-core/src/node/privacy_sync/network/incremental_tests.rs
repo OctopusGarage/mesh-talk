@@ -894,3 +894,299 @@ fn participant_history_sync_stamp_is_metadata_only_and_exact() {
         );
     }
 }
+
+// Ordinary sync must distinguish presentation retirement from retained custody.
+async fn ordinary_profile_compaction_round(
+    sender: &std::sync::Arc<Node>,
+    receiver: &std::sync::Arc<Node>,
+    conversation: ConversationId,
+) {
+    use crate::{
+        node::session::{Served, request_round_paged, serve_one_paged},
+        transport::SecureChannel,
+    };
+    struct Server(Option<tokio::task::JoinHandle<()>>);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            if let Some(task) = &self.0 {
+                task.abort();
+            }
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_node = sender.clone();
+    let remote = receiver.identity.public();
+    let mut server = Server(Some(tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut channel = SecureChannel::accept(socket, &server_node.identity)
+            .await
+            .unwrap();
+        let store = server_node.serve_sync_store(&remote);
+        loop {
+            if matches!(
+                serve_one_paged(&mut channel, &store).await.unwrap(),
+                Served::Closed
+            ) {
+                break;
+            }
+        }
+    })));
+    let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut channel =
+        SecureChannel::connect(socket, &receiver.identity, Some(&sender.identity.public()))
+            .await
+            .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        request_round_paged(
+            &mut channel,
+            &receiver.sync_store(&sender.identity.public()),
+            conversation,
+        ),
+    )
+    .await
+    .expect("ordinary Profile round stalled")
+    .unwrap();
+    drop(channel);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        server.0.as_mut().unwrap(),
+    )
+    .await
+    .expect("ordinary Profile server did not retire")
+    .unwrap();
+    server.0.take();
+}
+
+#[tokio::test]
+async fn ordinary_sync_automatic_profile_maintenance_settles_after_legacy_replay() {
+    assert_ordinary_profile_compaction(false).await;
+}
+
+#[tokio::test]
+async fn ordinary_sync_compacted_profile_parent_remains_available_to_late_child() {
+    assert_ordinary_profile_compaction(true).await;
+}
+
+async fn assert_ordinary_profile_compaction(repair: bool) {
+    let sender_dir = tempfile::tempdir().unwrap();
+    let receiver_dir = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let receiver_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let receiver_account = Account::generate();
+    let sender_proof = Announce::new_with_account(&sender_identity, &sender_account, "Sender", 9);
+    let receiver_proof =
+        Announce::new_with_account(&receiver_identity, &receiver_account, "Receiver", 9);
+    let (sender, _, _) = super::super::super::test_support::node_with_files(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &receiver_proof,
+    );
+    let (receiver, _, _) = super::super::super::test_support::node_with_files(
+        receiver_dir.path(),
+        receiver_identity,
+        receiver_account,
+        &sender_proof,
+    );
+    sender.cached_peer_snapshot_async().await.unwrap();
+    receiver.cached_peer_snapshot_async().await.unwrap();
+    let conversation = crate::node::conversation::dm_conversation_id(
+        &sender.identity.public(),
+        &receiver.identity.public(),
+    );
+    let mut profiles = Vec::new();
+    for revision in 1..=12 {
+        let payload = crate::node::profile::ProfilePayload::new(&sender.account, None, revision);
+        let event = Event::new(
+            &sender.identity,
+            conversation,
+            revision,
+            vec![],
+            revision,
+            0,
+            EventKind::Profile,
+            crate::dm::seal(
+                &sender.identity,
+                &receiver.identity.public().x25519_pub,
+                &payload.encode(),
+            )
+            .unwrap(),
+        );
+        profiles.push(event.id);
+        sender.log.lock().unwrap().append_durable(event).unwrap();
+    }
+    ordinary_profile_compaction_round(&sender, &receiver, conversation).await;
+    assert!(
+        profiles
+            .iter()
+            .all(|id| receiver.log.lock().unwrap().has(id).unwrap()),
+        "initial ordinary sync must actually admit all twelve validated Profiles"
+    );
+    receiver.process_profile_events(conversation);
+    let processed: i64 = receiver
+        .storage
+        .database()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM profile_receive_processed WHERE account=?1",
+                [receiver.account.public().ed25519_pub.as_slice()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        processed, 12,
+        "fixture must establish real durable Profile presentation terminals"
+    );
+    let initial_dropped = if repair {
+        receiver
+            .log
+            .lock()
+            .unwrap()
+            .compact_superseded_profiles(&conversation)
+            .unwrap()
+    } else {
+        drain_ordinary_profile_maintenance(&receiver)
+    };
+    assert_eq!(
+        initial_dropped, 10,
+        "actual maintenance must retire ten superseded leaves"
+    );
+    let absent: Vec<_> = profiles
+        .iter()
+        .copied()
+        .filter(|id| !receiver.log.lock().unwrap().has(id).unwrap())
+        .collect();
+    assert_eq!(absent.len(), 10);
+    assert!(
+        profiles
+            .iter()
+            .all(|id| sender.log.lock().unwrap().has(id).unwrap()),
+        "sender must still retain the compacted receiver history"
+    );
+    let source = || {
+        receiver
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .source_revision()
+            .unwrap()
+    };
+    let before = source();
+    if repair {
+        let child = Event::new(
+            &sender.identity,
+            conversation,
+            13,
+            vec![absent[0]],
+            13,
+            0,
+            EventKind::Message,
+            crate::dm::seal(
+                &sender.identity,
+                &receiver.identity.public().x25519_pub,
+                b"late child",
+            )
+            .unwrap(),
+        );
+        let child_id = child.id;
+        sender.log.lock().unwrap().append_durable(child).unwrap();
+        ordinary_profile_compaction_round(&sender, &receiver, conversation).await;
+        assert!(
+            receiver.log.lock().unwrap().has(&absent[0]).unwrap(),
+            "presentation evidence cannot replace raw custody of a required Profile parent"
+        );
+        assert!(
+            receiver.log.lock().unwrap().has(&child_id).unwrap(),
+            "ordinary late-child admission must retain its exact required parent"
+        );
+    } else {
+        // Deployed ordinary sync may restore raw leaves once. Presentation
+        // terminals are not retained HAVE or custody; automatic maintenance
+        // must instead avoid retiring the same replayed IDs in a feedback loop.
+        ordinary_profile_compaction_round(&sender, &receiver, conversation).await;
+        receiver.process_profile_events(conversation);
+        assert_eq!(
+            drain_ordinary_profile_maintenance(&receiver),
+            0,
+            "processed-ID legacy replay must not schedule another destructive epoch"
+        );
+        let settled = source();
+        assert!(settled >= before);
+        let retained = || {
+            profiles
+                .iter()
+                .map(|id| receiver.log.lock().unwrap().has(id).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let settled_ids = retained();
+        for _ in 0..3 {
+            ordinary_profile_compaction_round(&sender, &receiver, conversation).await;
+            receiver.process_profile_events(conversation);
+            assert_eq!(drain_ordinary_profile_maintenance(&receiver), 0);
+            assert_eq!(
+                source(),
+                settled,
+                "unchanged automatic maintenance/sync must settle"
+            );
+            assert_eq!(retained(), settled_ids);
+        }
+        let payload = crate::node::profile::ProfilePayload::new(&sender.account, None, 13);
+        let fresh = Event::new(
+            &sender.identity,
+            conversation,
+            13,
+            vec![],
+            13,
+            0,
+            EventKind::Profile,
+            crate::dm::seal(
+                &sender.identity,
+                &receiver.identity.public().x25519_pub,
+                &payload.encode(),
+            )
+            .unwrap(),
+        );
+        let fresh_id = fresh.id;
+        sender.log.lock().unwrap().append_durable(fresh).unwrap();
+        ordinary_profile_compaction_round(&sender, &receiver, conversation).await;
+        receiver.process_profile_events(conversation);
+        assert_eq!(
+            drain_ordinary_profile_maintenance(&receiver),
+            11,
+            "a genuinely new Profile must advance demand and compact the older eligible epoch"
+        );
+        assert!(receiver.log.lock().unwrap().has(&fresh_id).unwrap());
+        ordinary_profile_compaction_round(&sender, &receiver, conversation).await;
+        receiver.process_profile_events(conversation);
+        assert_eq!(
+            drain_ordinary_profile_maintenance(&receiver),
+            0,
+            "new-epoch legacy replay must also settle after one bounded backfill"
+        );
+        let refreshed = source();
+        let refreshed_ids = retained();
+        for _ in 0..2 {
+            ordinary_profile_compaction_round(&sender, &receiver, conversation).await;
+            receiver.process_profile_events(conversation);
+            assert_eq!(drain_ordinary_profile_maintenance(&receiver), 0);
+            assert_eq!(source(), refreshed);
+            assert_eq!(retained(), refreshed_ids);
+            assert!(receiver.log.lock().unwrap().has(&fresh_id).unwrap());
+        }
+    }
+}
+
+fn drain_ordinary_profile_maintenance(node: &Node) -> usize {
+    // Use the actual bounded runtime owner, including participant cleanup and
+    // compaction-lease exclusion; do not replace automatic demand with explicit
+    // request_profile_compaction on every retry.
+    (0..64)
+        .map(|_| node.drain_profile_compaction().unwrap().unwrap_or(0))
+        .sum()
+}

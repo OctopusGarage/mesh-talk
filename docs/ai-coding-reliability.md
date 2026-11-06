@@ -240,6 +240,15 @@ root set and inclusion mode; every hit rechecks the account lifetime and source.
 The `channel_completed_causal_cut_` regressions assert quiet SQL mutations,
 source and account invalidation, failed-construction retry and borrowed eviction
 leases. Current caller authorization and discovery proofs remain fresh.
+Compaction and replication must not form a feedback loop: freeze the eligible
+commit cut for each destructive epoch so later rehydration cannot repeatedly
+reopen the same deletion work. Fresh semantic demand must advance and fence the
+cut even when the request already exists. Keep parent-reference checks current;
+processed presentation is not retained raw custody. The automatic-maintenance
+round-trip regression in the [participant network owner](../crates/mesh-talk-core/src/node/privacy_sync/network/incremental_tests.rs)
+qualifies legacy replay, eventual quiet and a new Profile epoch. Completed
+[media GC](../crates/mesh-talk-core/src/node/media_store.rs) also remains quiet
+until a new schedule, including after completion failure and retry.
 Separate due retries, cooled jobs and unfinished discovery or preparation.
 Reserve a retry deadline before cancellable work and retain its wake through the
 existing scheduler. Scope each reservation to the exact attempt and eligible route;

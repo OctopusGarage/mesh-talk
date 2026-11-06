@@ -20,7 +20,7 @@ impl EventRepository {
         let owner = self.receiving_owner()?;
         self.database.transaction(|c| {
             crate::storage::profile::participant::event_ownership::check_event_owner_on(c, &owner)?;
-            let mut conversations = std::collections::HashSet::new();
+            let mut conversations = std::collections::HashMap::new();
             for row in headers {
                 if !row.active || row.header.kind != EventKind::Profile {
                     continue;
@@ -28,10 +28,12 @@ impl EventRepository {
                 let retained: bool = c.prepare_cached(
                     "SELECT EXISTS(SELECT 1 FROM retained_events e JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE e.domain=?1 AND e.id=?2 AND e.commit_ordinal=?3 AND e.conversation=?4 AND e.kind=?5 AND s.lifecycle=0)"
                 )?.query_row(params![self.domain.0.as_slice(), row.header.id.as_bytes().as_slice(), row.ordinal, row.header.conversation.as_bytes().as_slice(), EventKind::Profile as i64], |r| r.get(0))?;
-                if retained && conversations.insert(row.header.conversation) {
-                    self.request_profile_maintenance_on(c, &row.header.conversation)?;
+                if retained {
+                    let processed = c.query_row("SELECT EXISTS(SELECT 1 FROM profile_receive_processed WHERE account=?1 AND id=?2)", params![owner.account().as_slice(),row.header.id.as_bytes().as_slice()], |r|r.get::<_,bool>(0))?;
+                    if !processed { conversations.entry(row.header.conversation).and_modify(|cut: &mut i64| *cut=(*cut).max(row.ordinal)).or_insert(row.ordinal); }
                 }
             }
+            for (conversation,cut) in conversations { self.request_profile_maintenance_through_on(c,&conversation,cut)?; }
             Ok(())
         })
     }
@@ -49,18 +51,8 @@ impl EventRepository {
         c: &Connection,
         conv: &ConversationId,
     ) -> Result<(), LogError> {
-        if self.metadata_on(c, conv)?.is_none_or(|m| m.count == 0) {
-            return Ok(());
-        }
-        let changed=c.execute("INSERT INTO event_profile_requests VALUES(?1,?2) ON CONFLICT(domain,conversation) DO NOTHING",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()])?;
-        if changed != 0 {
-            let revision = advance(self.domain_maintenance_on(c)?.0)?;
-            c.execute(
-                "UPDATE event_domains SET source_revision=?2 WHERE domain=?1",
-                params![self.domain.0.as_slice(), revision],
-            )?;
-        }
-        Ok(())
+        let through = self.latest_profile_request_cut_on(c)?;
+        self.request_profile_maintenance_through_on(c, conv, through)
     }
     /// O(1) snapshot binding. Stale candidates are removed by subsequent bounded
     /// steps before the replacement snapshot starts; begin never bulk-cleans.
@@ -72,6 +64,8 @@ impl EventRepository {
         &self,
         c: &Connection,
     ) -> Result<ProfileMaintenanceToken, LogError> {
+        // At most one legacy request gets a conservative bound before the token.
+        self.migrate_profile_request_bounds_on(c)?;
         let revision = self.domain_maintenance_on(c)?.0;
         let proposed = *uuid::Uuid::new_v4().as_bytes();
         c.execute("INSERT INTO event_profile_jobs(job,domain,source_revision,candidate_count,candidate_bytes,complete) VALUES(?1,?2,?3,0,0,0) ON CONFLICT(domain) DO NOTHING",params![proposed.as_slice(),self.domain.0.as_slice(),revision])?;
@@ -154,6 +148,32 @@ impl EventRepository {
             candidates: 0,
             candidate_bytes: 0,
         };
+        // Foreign or stale work has no authority even to advance migration.
+        if self.profile_job(c, token)?.is_none() {
+            progress.state = MaintenanceState::Stale;
+            return Ok(progress);
+        }
+        // Validate the fixed-size scratch before migration can consume the
+        // caller quantum; corruption must not be hidden by bootstrap progress.
+        check_profile_leaves(c, token.job.as_slice())?;
+        // Qualify legacy requests before any candidate generation. The durable
+        // cursor advances independently of candidate resets, one indexed row at
+        // a time, so initialization never repeatedly rebuilds partial snapshots.
+        while !self.profile_request_bounds_ready_on(c)?
+            && progress.examined < budget.rows
+            && budget.bytes - progress.charged_bytes >= WORK_BYTES
+        {
+            self.migrate_profile_request_bounds_on(c)?;
+            progress.examined += 1;
+            progress.charged_bytes += WORK_BYTES;
+            if self.domain_maintenance_on(c)?.0 != token.revision {
+                progress.state = MaintenanceState::Stale;
+                return Ok(progress);
+            }
+        }
+        if !self.profile_request_bounds_ready_on(c)? {
+            return Ok(progress);
+        }
         while progress.examined < budget.rows && budget.bytes - progress.charged_bytes >= WORK_BYTES
         {
             let Some(job) = self.profile_job(c, token)? else {
@@ -176,12 +196,17 @@ impl EventRepository {
                 return Ok(progress);
             } else if let Some(conv) = job.conversation {
                 self.require_active_on(c, &ConversationId::new(conv))?;
+                let Some(through) = self.profile_request_bound_on(c, &conv)? else {
+                    self.restart_profile_request_bounds_on(c)?;
+                    progress.state = MaintenanceState::Stale;
+                    return Ok(progress);
+                };
                 let after = if job.author.is_some() {
                     "AND (author,lamport,id)>(?3,?4,?5)"
                 } else {
                     "AND ?3 IS NULL AND ?4 IS NULL AND ?5 IS NULL"
                 };
-                let mut stmt=c.prepare(&format!("SELECT id,author,lamport,ciphertext_bytes,parent_count FROM retained_events WHERE domain=?1 AND conversation=?2 AND kind=8 {after} ORDER BY author,lamport,id LIMIT 1"))?;
+                let mut stmt=c.prepare(&format!("SELECT id,author,lamport,ciphertext_bytes,parent_count,commit_ordinal FROM retained_events WHERE domain=?1 AND conversation=?2 AND kind=8 {after} ORDER BY author,lamport,id LIMIT 1"))?;
                 let mut rows = stmt.query(params![
                     self.domain.0.as_slice(),
                     conv.as_slice(),
@@ -198,7 +223,9 @@ impl EventRepository {
                         clear_profile_leaves(c, job_id)?;
                     }
                     let referenced:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM retained_event_parents WHERE domain=?1 AND parent=?2)",params![self.domain.0.as_slice(),id.as_slice()],|r|r.get(0))?;
-                    if !referenced {
+                    // Late raw replay is charged and advances the scan cursor,
+                    // but cannot expand this request's destructive eligibility.
+                    if nonnegative(row.get(5)?)? <= through && !referenced {
                         c.execute(
                             "INSERT INTO event_profile_leaves VALUES(?1,?2,?3,?4)",
                             params![job_id, clock.as_slice(), id.as_slice(), estimate],
@@ -286,6 +313,20 @@ impl EventRepository {
             })
             .transpose()?;
         let next: Option<[u8; 32]> = next;
+        if let Some(conversation) = next
+            && self.profile_request_bound_on(c, &conversation)?.is_none()
+        {
+            let through = self.latest_profile_request_cut_on(c)?;
+            self.request_profile_maintenance_through_on(
+                c,
+                &ConversationId::new(conversation),
+                through,
+            )?;
+            self.restart_profile_request_bounds_on(c)?;
+            // The revision advance makes this old token stale. Do not mark the
+            // remaining unqualified requests complete or consume their demand.
+            return Ok(());
+        }
         clear_profile_leaves(c, token.job.as_slice())?;
         c.execute("UPDATE event_profile_jobs SET conversation=?2,after_author=NULL,after_clock=NULL,after_id=NULL,complete=?3 WHERE job=?1",params![token.job.as_slice(),next.as_ref().map(|v|v.as_slice()),next.is_none()])?;
         Ok(())
