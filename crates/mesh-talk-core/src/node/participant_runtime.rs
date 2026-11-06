@@ -196,8 +196,10 @@ impl PreparedParticipant {
                 loop {
                     let Some(permit) = node.runtime_work.admit() else { break; };
                     let receiving = Arc::clone(&node);
-                    if let Err(error) = tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
+                    // The blocking owner destroys captured Node references
+                    // before releasing retirement admission, including when
+                    // the awaiting producer is cancelled.
+                    if let Err(error) = permit.spawn_blocking(move || {
                         receiving.retry_file_receives();
                         if let Err(error)=receiving.maintain_media(){log::warn!("media maintenance deferred: {error}");}
                     }).await {

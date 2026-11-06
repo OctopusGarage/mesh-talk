@@ -155,6 +155,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocking_captures_are_destroyed_before_admission_is_released() {
+        let work = Arc::new(RuntimeWork::default());
+        let permit = work.admit().unwrap();
+        let (observed, result) = tokio::sync::oneshot::channel();
+        let probe = CaptureDropProbe {
+            work: work.clone(),
+            observed: Some(observed),
+        };
+        let task = permit.spawn_blocking(move || {
+            std::hint::black_box(&probe);
+        });
+        task.await.unwrap();
+        assert!(
+            result.await.unwrap(),
+            "blocking capture outlived admission permit"
+        );
+        work.drain().await;
+    }
+
+    #[tokio::test]
     async fn cancellation_before_first_poll_releases_admission() {
         let work = Arc::new(RuntimeWork::default());
         let permit = work.admit().unwrap();

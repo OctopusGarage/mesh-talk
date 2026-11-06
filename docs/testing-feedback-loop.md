@@ -227,9 +227,12 @@ Desktop browser shards start after Health and WebKit complete, with at most thre
 desktop shards active at once. Linux retains four concurrent shards. These job
 dependencies and admission limits reduce macOS runner demand while retaining all
 four shards per OS and their complete same-attempt evidence. Portable Health and
-independent backend jobs use the standard `macos-26-intel` pool. The complete Rust workspace, all browser suites and real native desktop
-acceptance retain `macos-latest` Apple Silicon execution. The workspace retains
-all default targets, doc-tests, native lint/build checks and coverage. Keep these
+independent backend jobs use the standard `macos-26-intel` pool, alongside
+WebKit and Chromium browser suites. The complete Rust workspace and real native
+desktop acceptance retain `macos-latest` Apple Silicon execution. The workspace
+retains all default targets, doc-tests, native lint/build checks and desktop Host
+coverage. Linux/Windows own complete instrumented Core coverage; macOS runs its
+full remaining workspace without another instrumented Core test build. Keep
 compute-heavy protocol tests on ARM; desktop browser admission limits their
 simultaneous demand for macOS runners. Measure both
 queue and execution before moving a workload: Intel qualification substantially
@@ -1665,12 +1668,17 @@ and its existing command/test watchdog; remove competing compiler work rather
 than extending deadlines when a contract waits for a sibling fixture's lock.
 Portable diagnostics and independent CI jobs retain their existing scheduling.
 
-Linux/macOS coverage runs both the desktop Host and remaining complete workspace
+Linux/macOS runs both the desktop Host and remaining complete workspace
 partitions with pinned Nextest, four concurrent case processes and no retries.
-The partitions collect independently: a Host failure still permits the remaining
-workspace tests to finish, and either failure preserves a nonzero result. The
-timing-log path applies the same rule. This collection cannot authorize a
-coverage report from an incomplete or failed workspace.
+Finish all selected cases within a partition, then return a failed Host's original
+status before admitting another expensive compilation. A passing Host still
+requires the complete remaining workspace; either failure prevents reporting.
+The timing-log path preserves the same nonzero result through its pipeline.
+Linux instruments both partitions and Windows instruments its full archive
+union. macOS instruments Host for desktop-specific branches, then executes all
+remaining default targets normally. Its report retains Host coverage without a
+second instrumented Core cohort; this does not claim full macOS Core line
+coverage. All platform test assertions remain required.
 Both use the same repository default process-hang profile. Ordinary cases have
 a fifteen-minute termination limit, sized above measured multi-minute Windows
 stress cases; the registered metadata IPC and reconnect cases retain their
@@ -1679,11 +1687,14 @@ a hung process. The real-tool parked-case control derives its policy from the
 repository default, accelerates only the period in its isolated fixture, and
 requires termination plus continued collection of a later test. Unit, binary, integration and
 test-enabled example targets retain their default selection and ignored policy;
-doctests remain separate. Successful partitions accumulate into one report; any
-partition failure prevents that report and cannot qualify partial coverage.
-The real-tool `scripts/ci/native-host-coverage.test.mjs` requires actual target
-coverage, single and simultaneous partition failures, report-destination failure,
-empty-selection rejection and genuine
+doctests remain separate. Linux's successful partitions accumulate into one
+report; macOS reports Host only after both complete partitions pass.
+The real-tool `scripts/ci/native-host-coverage.test.mjs` requires actual complete
+default-target execution, accumulated Linux coverage, clean macOS Host coverage
+and a real uninstrumented Core execution marker. Both actual workflow blocks
+must reject single and simultaneous configured partition failures and report
+destination failures in both timing modes. The fixture retains empty-selection
+rejection and genuine
 parked-process termination while collection continues. Its short controlled
 watchdog exists only in the isolated fixture; production case budgets remain
 unchanged. Source-shape checks do not replace this hosted pinned-tool evidence.
@@ -1738,8 +1749,18 @@ explicit shared key. Only the cache step normalizes the inherited color/thread
 environment to its previous key inputs; actual tests keep serial execution and
 plain diagnostic output. Pull requests restore caches; only main publishes them.
 
+Windows uses finer independent serial execution units instead of extending a job
+watchdog when a large progressing partition exceeds hosted capacity. The producer
+still compiles once and every runnable case executes once; eight consumers add
+archive transfers/setup but preserve full instrumentation, per-case/job limits and
+zero retries. Acceptance uses the actual native jobs directly, without another
+aggregation layer. The existing required-check owner migrates retired four-part
+names only after every replacement has successful current-head app-bound evidence;
+strictness, unrelated checks and the shared release-source policy remain intact.
+Hosted execution cost and runner variation still need measurement.
+
 The owning `scripts/ci/windows-coverage.mjs` helper validates every default Cargo test target, the full inventory,
-default ignored markers and the exact disjoint union of all four runnable partitions.
+default ignored markers and the exact disjoint union of all eight runnable partitions.
 Producer and consumers must match source/run/attempt, compiler, Cargo, dev/test
 profile environment, feature
 resolution, lock/config/helper hashes, platform and the original absolute checkout
@@ -1753,7 +1774,7 @@ official binary/Cargo metadata and offline reporting must work from a fresh Carg
 home. Execution receipts verify each selected test starts and passes exactly
 once; missing, duplicate, failed or skipped selected cases fail the check.
 Each consumer validates and uploads its partial LCOV plus source/inventory/digest
-receipts. All four consumer checks and the producer are directly required; a skipped
+receipts. All eight native consumer checks and the producer are directly required; a skipped
 consumer after a failed build cannot certify acceptance. Diagnostic timing keeps
 machine-readable events separate from successful-test phase output.
 
@@ -1765,7 +1786,7 @@ execution and coverage validation produce an acceptance receipt; partial output
 never certifies a shard. Each output stream remains bounded to 128 MiB.
 
 The producer executes a tiny real archive/consumer CLI regression before expensive
-workspace compilation or accepting the full archive. Its local Git fixture, all four partitions, runtime and compiled
+workspace compilation or accepting the full archive. Its local Git fixture, all eight partitions, runtime and compiled
 helper paths, default ignored case, clean source, offline LCOV and captured timing
 exercise the same helper. Run its tests with the pinned nextest/coverage tools and
 LLVM tools matching rustc; portable Health does not install those tools.

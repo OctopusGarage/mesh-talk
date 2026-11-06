@@ -129,13 +129,23 @@ is exercised by the real maintenance-hold Noise regression in
 alongside stalled-handshake retirement and the single-worker negative control.
 Custom protocol and failed-initial-custody recovery fixtures must retain that
 same independent host and retirement owner, including separate reactors for both
-full-host participants and the synchronous history observer. A source's synchronous durable append must not run on the receiver's
+full-host participants and the synchronous history observer. The single-participant
+connection-limit/retirement fixture likewise uses the production two-worker host;
+retain its seven-slot saturation, original admission/retirement bounds and actual
+socket closure checks, alongside the held-worker positive and single-thread
+negative controls. This qualifies fixture capacity without attributing every
+historical late admission to scheduler starvation. A source's synchronous durable append must not run on the receiver's
 reactor. The growing-history regression in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
 holds the actual source writer until a receiver page imports, then measures
 continuation progress separately from setup and checks advancing cursors.
 Full-host file fixtures retain a separate two-worker reactor for each simulated
-application. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+application. This includes the explicit account File result/retry rigs: use the
+existing independent peer owner for source, requester, recipient and the launched
+fresh sibling, keeping inactive retry phases and every byte/manifest assertion.
+Release fault helpers before joining hosts, and preserve body failure after
+actual retirement. A shared-reactor timeout does not by itself prove starvation
+caused that historical failure. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
 holds both sibling workers after its durable copy completes and requires target
 confirmation while they remain held; unrelated devices cannot share that stall.
 
@@ -156,6 +166,25 @@ Transfer required ownership into the actual work. Dropping an observer or timing
 out a future is not evidence that external side effects stopped. Retain mutation
 serialization and cleanup responsibility until real completion; bound admission
 so repeated user retries cannot accumulate detached work.
+
+A permit declared inside a blocking closure drops before the closure's remaining
+captures. When those captures retain Node or storage handles, waking retirement
+at that point can make close-before-reopen fail. Use the existing blocking work
+owner in [runtime work](../crates/mesh-talk-core/src/node/runtime_work.rs) for
+[file/media maintenance](../crates/mesh-talk-core/src/node/participant_runtime.rs),
+so captures and undelivered results are destroyed before admission is released.
+Keep the direct capture-drop ordering regression, queued cancellation and
+undelivered-output controls, and the real native observer Node-release assertion;
+do not narrow that assertion to conceal another producer retaining the profile.
+
+A same-profile restart fixture must consume the existing retired storage close
+before constructing its replacement. Joining producers through `stop()` alone
+is not the fixture's proof that all Node and storage handles have closed. Keep
+`stop_for_storage().await.close()` failure visible, including retained-handle
+rejection, and preserve the subsequent durable reopen assertions. The shared
+settings projection/restart scenario exercises this boundary with its old weak
+application token still present; do not replace closure with a sleep or remove
+the restart tail.
 
 Follow the existing retirement protocol: close admission, signal cancellation,
 release guards needed for completion, join owned tasks and drain admitted work.
@@ -531,11 +560,77 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Keep a test's observation scope equal to its named requirement. The
+growing-history fixture measures exact durable originals during continuation,
+then checks the full public
+projection after retiring its continuously appending peers. Its projection read
+must not compete with an endless writer inside the continuation latency bound.
+Paused-clock maintenance tests wait for actual retry attempts and assert minimum
+backoff spacing; real measured database duty time cannot imply a fixed number of
+attempts inside an arbitrary virtual-time window. Preserve cancellation, other
+maintenance-class progress and the no-early-retry assertions.
+
+Prefer one qualified scenario for a requirement over repeated whole-host
+variants with weaker preparation. The same-source control receipt owner retains
+its five prepared partial-corpus Noise scenarios, including the exact live child
+at admission, both preserved checkpoints, unchanged eight-second receipt,
+cancellation and post-release recovery. Its former empty-corpus duplicate could
+lose a natural read between setup notification and admission; removing that
+variant does not qualify a separate fresh empty-corpus timing boundary. Keep the
+retired-child observer and interrupted-preparation controls rather than adding
+sleep, suppressing publication or accepting a stale child to rescue setup.
+
+A progressing serial test partition can exhaust its job watchdog without a hung
+case. The Windows archive owner uses eight native serial execution partitions,
+with direct required checks and the existing sealed once-only inventory contract.
+Exercise actual pinned archive consumers and omission/duplication/failed-execution
+controls. Preserve watchdogs, product assertions and full coverage. The existing
+protection migration owner requires every successful current-head app-bound
+replacement before retiring oversized partition names; skipped or partial runs
+cannot qualify. Account for additional archive/setup cost and hosted variation.
+The shared union verifier takes the caller-owned partition count; Windows capacity
+changes must not alter the independent four-part ASan contract. Run both real-tool
+protocol fixtures and their missing/duplicate/failed-receipt controls.
+
+A total functional browser-case watchdog is not a product performance SLA.
+Trace the failed interval: when several individually successful cold-load,
+rendering and interaction steps exhaust the total, use the existing generous
+functional allowance consistently across platforms. Preserve individual
+assertion bounds and explicit latency contracts. The real Playwright watchdog
+control derives the actual source configuration, accelerates only its duration,
+and requires timeout failure plus later-case execution with joined descendants;
+never disable the watchdog or use retries to qualify a failure.
+
+Independent message kinds should have independent browser scenarios. The
+[automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks
+text, sticker and file-card Awaiting/explicit projection separately; keep the
+file disclosure and keyboard assertions in its file case. Three unrelated send
+journeys can exhaust one functional watchdog before their final assertion.
+Update the authoritative browser inventory alongside the split, retaining strict
+trace/error evidence and every kind's confirmation predicate.
+
+Functional browser scenarios should use the smallest data set that exercises
+all named state transitions. Recovery-batch navigation needs distinct partial
+and terminal deliveries plus concurrent live and duplicate signals; repeated
+extra rows only multiply traced render work. Keep the separate large-history
+window case and deterministic announcement-coalescing/deduplication tests in
+[conversation reception](group-conversation-reception.md).
+
 Use barriers, deferred promises, injected provider/storage stalls and controlled
 clocks at the actual boundary. Prefer an observable progress assertion to an
 arbitrary sleep or a test that checks only that a timeout helper was called.
 Verify successful behavior, failure, cleanup and replacement through the same
 production owner; a mock that bypasses the problematic lock proves little.
+
+The group-inventory held-peer fixture rejects a real authenticated setup
+exchange before admitting its independent publication measurement. Snapshot
+exact-peer/group begin and end counters only after the actual Fingerprint hold
+enters; require exactly one live round, unchanged counters and an open transport
+through the original eight-second publication bound. A setup failure is not a
+measured-window completion. A server task parked after client EOF is not a live
+hold; observe transport retirement and join it on cancellation. The owner is
+`group_inventory_publication_progresses_while_unrelated_peer_sync_is_held` in
+`account_documents/tests.rs`, selected by core-account-group validation.
 
 Give connection setup and capability negotiation their own bounded watchdog.
 Start a progress deadline only after the required stalled operation is admitted,
@@ -596,6 +691,14 @@ focused transfer/authority controls own ownership changes; the small two-node
 departure proof owns actual offline pause/relaunch and retry of the original
 signed event and parent cut. Do not chain unrelated controls and reconnection
 requirements onto an already complete invitation scenario.
+
+A fixture with a live authoritative identity observer must not simulate account
+replacement by changing only a derived UI store. A later valid backend observation
+can restore that store. Keep the [startup browser proof](../frontend/e2e/theme-picker.spec.ts)
+focused on startup and real logout/relogin; the [scoped pack](../frontend/src/store/packs.test.ts)
+and [linked appearance](../frontend/src/lib/linkedAppearance.test.ts) controls own
+replacement and stale callbacks. A browser test of an actual account transition
+must change its authoritative identity boundary consistently.
 
 Keep a scheduling control's corpus at the protocol boundary it needs. The
 [queued-source controls](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)

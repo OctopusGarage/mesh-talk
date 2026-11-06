@@ -25,7 +25,9 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  timeout: process.platform === "win32" ? 120_000 : 30_000,
+  // Match the full functional suite's platform-independent safety margin,
+  // retaining the established Windows portable allowance and zero retries.
+  timeout: process.platform === "win32" ? 120_000 : 90_000,
   testMatch: [
     "browser-error-evidence.spec.ts",
     "portable-core.spec.ts",

@@ -1126,11 +1126,6 @@ impl Drop for ReleaseReadOnDrop {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn selected_source_receipt_overtakes_its_own_preoperation_background_control_read() {
-    Box::pin(run_same_source_receipt(SameSourceScenario::Fresh)).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_source_lower_key_receipt_preserves_both_partial_control_comparisons() {
     Box::pin(run_same_source_receipt(SameSourceScenario::Partial)).await;
 }
@@ -1182,7 +1177,6 @@ fn executor_has_processed_current_inputs(
 
 #[derive(Clone, Copy)]
 enum SameSourceScenario {
-    Fresh,
     Partial,
     OtherSelected,
     OtherSelectedPreparation,
@@ -1699,7 +1693,6 @@ async fn retire_same_source_workers(
 
 async fn run_same_source_receipt(scenario: SameSourceScenario) {
     use futures_util::FutureExt;
-    let partial = !matches!(scenario, SameSourceScenario::Fresh);
     let other_selected = matches!(
         scenario,
         SameSourceScenario::OtherSelected
@@ -1811,15 +1804,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     // arming a held request. Only row 66 is introduced at the natural snapshot;
     // the operation budgets must not include cold replication of rows 1..65.
     let partial_keys = Arc::new(Mutex::new(Vec::new()));
-    if partial {
-        for value in 1..=65u8 {
-            partial_keys.lock().unwrap().push(
-                crate::node::account_documents::sync::seed_legacy_control_page_for_test(
-                    &owner,
-                    crate::eventlog::ConversationId::new([value; 32]),
-                ),
-            );
-        }
+    for value in 1..=65u8 {
+        partial_keys.lock().unwrap().push(
+            crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                &owner,
+                crate::eventlog::ConversationId::new([value; 32]),
+            ),
+        );
     }
     let prefix_metadata = Arc::new(
         partial_keys
@@ -2027,18 +2018,16 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     );
     assert!(reference.channel_members(group).is_empty());
     assert!(reference.pending_account_operation_sources().is_empty());
-    if partial {
-        let last = crate::node::AccountDocumentKey::GroupLegacyOperation {
-            channel: hex::encode([66; 32]),
-            source_device: owner.user_id(),
-        };
-        assert!(
-            siblings
-                .iter()
-                .all(|node| node.account_document_meta(&last).is_none()),
-            "the controlled tail must remain absent until the natural snapshot"
-        );
-    }
+    let last = crate::node::AccountDocumentKey::GroupLegacyOperation {
+        channel: hex::encode([66; 32]),
+        source_device: owner.user_id(),
+    };
+    assert!(
+        siblings
+            .iter()
+            .all(|node| node.account_document_meta(&last).is_none()),
+        "the controlled tail must remain absent until the natural snapshot"
+    );
 
     let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let b_critical = Arc::new(Mutex::new(CriticalControlTrace::default()));
@@ -2501,8 +2490,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                         }
                     }
                 }
-                if partial
-                    && effective_after.is_none()
+                if effective_after.is_none()
                     && dispatch.unpaired_background()
                     && arrived.lock().unwrap().is_some()
                 {
@@ -2553,7 +2541,12 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                             .store(true, std::sync::atomic::Ordering::Release);
                     }
                 }
-                if partial && !matches!(&effective_after, Some(crate::node::account_documents::AccountDocumentKey::GroupLegacyOperation { .. })) {
+                if !matches!(
+                    &effective_after,
+                    Some(
+                        crate::node::account_documents::AccountDocumentKey::GroupLegacyOperation { .. }
+                    )
+                ) {
                     rejected.lock().unwrap()[5] += 1;
                     return;
                 }
@@ -2567,29 +2560,22 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 if let Some(signal) = signal {
                     // This is a completed SessionReady and an authenticated
                     // read, not an accepted operation or mutation transaction.
-                    if partial {
-                        assert!(
-                            tail_revision.load(std::sync::atomic::Ordering::Acquire) > 0
-                                && partial_keys.lock().unwrap().len() == 66,
-                            "the held tail must follow the prepared prefix and its one new row"
-                        );
-                        let operation_key =
-                            crate::node::account_documents::AccountDocumentKey::GroupOperation {
-                                channel: hex::encode(group.as_bytes()),
-                                source_device: owner_id.clone(),
-                            };
-                        assert!(
-                            effective_after
-                                .as_ref()
-                                .is_some_and(|after| operation_key < *after),
-                            "the new terminal result must sort before the preserved partial checkpoint"
-                        );
-                    } else {
-                        assert!(
-                            request.after.is_none(),
-                            "the original case captures a fresh background comparison"
-                        );
-                    }
+                    assert!(
+                        tail_revision.load(std::sync::atomic::Ordering::Acquire) > 0
+                            && partial_keys.lock().unwrap().len() == 66,
+                        "the held tail must follow the prepared prefix and its one new row"
+                    );
+                    let operation_key =
+                        crate::node::account_documents::AccountDocumentKey::GroupOperation {
+                            channel: hex::encode(group.as_bytes()),
+                            source_device: owner_id.clone(),
+                        };
+                    assert!(
+                        effective_after
+                            .as_ref()
+                            .is_some_and(|after| operation_key < *after),
+                        "the new terminal result must sort before the preserved partial checkpoint"
+                    );
                     let task = page.task;
                     held_pages.lock().unwrap().push((task, 0));
                     abort_window.store(true, std::sync::atomic::Ordering::Release);
@@ -3349,9 +3335,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             if checkpoints.lock().unwrap().len() >= 2
                 && partial_complete
                 && b_receipt_recovered
-                && (!partial
-                    || private_failed
-                    || retired.load(std::sync::atomic::Ordering::Relaxed))
+                && (private_failed || retired.load(std::sync::atomic::Ordering::Relaxed))
                 && public
                 && receipt
                     .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)

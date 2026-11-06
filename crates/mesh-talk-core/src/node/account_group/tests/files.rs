@@ -1098,6 +1098,8 @@ fn trace_initial_file_result(
 }
 
 async fn file_result_roundtrip(mode: u8) {
+    use crate::node::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
     use std::time::Duration;
     let initial_clock = std::time::Instant::now();
     let dir = tempfile::tempdir().unwrap();
@@ -1165,11 +1167,14 @@ async fn file_result_roundtrip(mode: u8) {
         }
         left.cache_discovered_peers().unwrap();
     }
+    let mut peer_runtimes = Vec::new();
     for (target, listener) in [&source, &origin, &external].into_iter().zip(listeners) {
-        // The accept-loop owner already runs delivery; a second producer has
-        // its own scheduler and competes for the same bounded session pool.
-        tasks.spawn(target.clone().run_accept_loop(listener));
+        let mut runtime =
+            IndependentPeerRuntime::start_multithreaded(target.clone(), listener).await;
+        runtime.launch();
+        peer_runtimes.push(runtime);
     }
+    let outcome = std::panic::AssertUnwindSafe(async {
     source.publish_account_group_access(&mut None);
     prepare_file_source_control(
         &origin,
@@ -1184,7 +1189,7 @@ async fn file_result_roundtrip(mode: u8) {
         AccountGroupRole::Member
     );
     assert!(origin.channel_members(group).is_empty());
-    if let Some(hold) = reverse_bootstrap.as_mut() {
+    if let Some(mut hold) = reverse_bootstrap.take() {
         super::cold_account_setup(async {
             (&mut hold.arrived)
                 .await
@@ -1813,9 +1818,10 @@ async fn file_result_roundtrip(mode: u8) {
     );
     let mut fresh_listener = Some(listener);
     if mode < 4 {
-        let fresh_clone = fresh.clone();
         let listener = fresh_listener.take().unwrap();
-        tasks.spawn(async move { Box::pin(fresh_clone.run_accept_loop(listener)).await });
+        let mut runtime = IndependentPeerRuntime::start_multithreaded(fresh.clone(), listener).await;
+        runtime.launch();
+        peer_runtimes.push(runtime);
     }
     let fresh_raw = fresh_path.join("explicit.bin");
     let mut retry_bytes = bytes.clone();
@@ -1880,16 +1886,15 @@ async fn file_result_roundtrip(mode: u8) {
             .unwrap();
         assert_eq!(retained.phase, AccountGroupOperationPhase::Committed);
         assert_eq!(retained.primary_event, Some(event_id));
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
         return;
     }
     let retry = retry.expect("a foreign-origin matching retry must resolve the original reference");
     if mode >= 4 {
         assert_eq!(retry.phase, AccountGroupOperationPhase::Committed);
-        let fresh_clone = fresh.clone();
         let listener = fresh_listener.take().unwrap();
-        tasks.spawn(async move { Box::pin(fresh_clone.run_accept_loop(listener)).await });
+        let mut runtime = IndependentPeerRuntime::start_multithreaded(fresh.clone(), listener).await;
+        runtime.launch();
+        peer_runtimes.push(runtime);
     }
     assert!(retry.primary_event.is_none() || retry.primary_event == Some(event_id));
     if mode == 2 {
@@ -1917,8 +1922,6 @@ async fn file_result_roundtrip(mode: u8) {
             Some(false),
             "retirement cannot durably complete the result copy"
         );
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
         return;
     }
     let fresh_status = super::functional_account_convergence(async {
@@ -1997,6 +2000,27 @@ async fn file_result_roundtrip(mode: u8) {
             .count(),
         1
     );
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
+    }).catch_unwind().await;
+    // Release fault helpers before joining the real host owners. A body panic
+    // cannot detach accepted connections or admitted file/storage work.
+    drop(reverse_bootstrap.take());
+    tasks.shutdown().await;
+    let cleanup = std::panic::AssertUnwindSafe(async {
+        for runtime in peer_runtimes {
+            runtime.stop().await;
+        }
+    })
+    .catch_unwind()
+    .await;
+    if let Err(error) = cleanup {
+        let retained = dir.keep();
+        eprintln!("file fixture retirement failed; retaining private store at {retained:?}");
+        if let Err(body) = outcome {
+            std::panic::resume_unwind(body);
+        }
+        std::panic::resume_unwind(error);
+    }
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
 }

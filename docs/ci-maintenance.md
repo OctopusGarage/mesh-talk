@@ -76,6 +76,50 @@ purpose of each gate. A job timeout is a safety bound, not a performance target.
 Record material budget changes and their rationale in the owning configuration
 and review, rather than inventing universal minute limits in this guide.
 
+Stop an already failed candidate before starting another expensive compilation
+partition. Linux/macOS native testing finishes all selected Host cases, then
+admits the remaining complete workspace only if Host passed. Both partitions
+still have to pass before reporting coverage; per-partition terminal result
+collection, independent matrix jobs, default targets and zero retries remain
+unchanged. The existing actual-tool coverage regression checks Host rejection,
+remaining-partition rejection, successful coverage accumulation, timing pipelines
+and report errors. Preserve partial backend evidence after a failure, while
+requiring evidence on passing jobs; a producer skipped by an upstream failure
+must not create a second missing-artifact error.
+
+Keep complete tests distinct from duplicate instrumentation. macOS instruments
+Host for its native desktop/updater branches, then runs every remaining default
+workspace target with pinned Nextest without coverage instrumentation. Linux and
+Windows retain full instrumented workspace coverage. This removes the separate
+instrumented Core test build on Apple Silicon; it does not claim full macOS Core
+line coverage. The actual-tool regression executes both workflow blocks, requires
+all default targets and the Core execution marker, proves a clean macOS report
+retains Host hits without a Core test cohort, and keeps both partition failures,
+report failures, timing pipelines and process termination controls. All platform
+assertions, doctests, zero retries and direct required checks remain unchanged.
+
+A progressing serial test partition can exhaust its job watchdog without a hung
+case. Windows reuses one sealed instrumented workspace archive across eight
+independent serial consumers; every selected case still executes once with full
+coverage, default targets, existing watchdogs and zero retries. Acceptance uses
+those actual native checks directly. Do not add a second qualification workflow
+or extend a job timeout to compensate for oversized units. Four extra setup and
+archive transfers are a material cost; measure them alongside execution and runner
+variation. The existing required-check owner retires old partition names only
+after every current-source replacement passes with its bound app. Preserve strict
+protection, unrelated checks and exact-source release acceptance together.
+
+Treat a browser's total functional-case watchdog separately from its action,
+assertion and product deadlines. A cold page, several successful state checks and
+real interactions can cumulatively exhaust a short total bound without any one
+operation failing. Full Chromium uses its existing Windows/coverage safety margin
+on all hosts; portable execution retains its existing Windows allowance. Keep
+state-based readiness, all assertions, explicit latency limits, zero retries and
+first-failure traces. Do not erase a failed assertion by increasing its timeout.
+The real-runner control derives both configured watchdogs, accelerates only their
+duration, requires actual parked-case failure and subsequent-case execution, and
+verifies descendant retirement before removing its fixture.
+
 ## Reuse compatible work with verifiable inputs
 
 Prefer one producer for an expensive output when consumers need the same inputs

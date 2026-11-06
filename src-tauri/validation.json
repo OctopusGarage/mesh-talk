@@ -833,7 +833,7 @@
       ],
       "consumers": ["desktop-chat"],
       "escalation": [
-        "Persisted settings and live policy application require frontend settings and native session/revision evidence."
+        "Persisted settings and live policy application require frontend settings and native session/revision evidence. Same-profile restart consumes the retired storage close before reopen and at final cleanup, preserving retained-handle rejection, portable preferences, device-local paths and old applied-token invalidation without a release-delay sleep."
       ]
     },
     {
