@@ -1,0 +1,25 @@
+分析一下目前的app打包完为什么占用19M，都是什么东西，是否可以优化，之前才9M而已
+
+---
+
+你参考这里的大小吧：https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.5-nightly.42176726886.1， 对比这个lite版本才9M：https://github.com/OctopusGarage/mesh-talk/releases#release-v0.4.4
+
+---
+
+那你仔细排查一下吧，仔细分析调查清楚什么原因，是否有必要，是否可以优化吧
+
+---
+
+那你仔细排查一下吧，仔细分析调查清楚什么原因，是否有必要，是否可以优化，拆分精简之类的吧，专业的分析清楚
+
+---
+
+那你逐个优化下吧
+
+---
+
+还有什么可以优化，逐个都优化完，能优化的逐个优化完，没必要的就放着， 完成了才停下来
+
+---
+
+全部改动提交到https://github.com/OctopusGarage/mesh-talk/pull/333 这个PR

@@ -3,10 +3,14 @@
   "checkpoint_id": "01M6RD4J2D4EK5SRDW5F81KQ5N",
   "strategy": "manual-commit",
   "branch": "perf/actions-verification",
-  "checkpoints_count": 4,
+  "checkpoints_count": 9,
   "files_touched": [
+    ".github/workflows/release.yml",
+    "docs/updates.md",
     "hooks/commit-msg",
-    "hooks/pre-push"
+    "hooks/pre-push",
+    "scripts/diagnostics/release-workflow.test.mjs",
+    "scripts/validation/validation.json"
   ],
   "sessions": [
     {
@@ -22,14 +26,21 @@
       "compact_transcript": "/1/transcript.jsonl",
       "content_hash": "/1/content_hash.txt",
       "prompt": "/1/prompt.txt"
+    },
+    {
+      "metadata": "/2/metadata.json",
+      "transcript": "/2/full.jsonl",
+      "compact_transcript": "/2/transcript.jsonl",
+      "content_hash": "/2/content_hash.txt",
+      "prompt": "/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 14782634,
+    "input_tokens": 15006004,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 2923634944,
-    "output_tokens": 6944086,
-    "api_call_count": 15283,
+    "cache_read_tokens": 2937460608,
+    "output_tokens": 6971456,
+    "api_call_count": 15409,
     "subagent_tokens": {
       "input_tokens": 907430,
       "cache_creation_tokens": 0,
@@ -40,14 +51,14 @@
     "subagent_tokens_complete": false
   },
   "redaction": {
-    "replacements": 2440,
+    "replacements": 2479,
     "layers": {
-      "betterleaks": 42,
+      "betterleaks": 44,
       "connection_string": 0,
       "credential_key": 0,
-      "credential_value": 28,
+      "credential_value": 30,
       "credentialed_uri": 0,
-      "entropy": 2453,
+      "entropy": 2488,
       "key_context": 0,
       "provider_token": 0,
       "shell_stdin": 0
