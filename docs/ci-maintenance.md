@@ -45,6 +45,16 @@ increasing a test count does not establish useful coverage.
 
 ## Measure the bottleneck before choosing the optimization
 
+For a CI optimization task, use `gh` to collect the last 50 workflow runs and
+their paginated, attempt-specific job and step records before editing workflows.
+Keep successful, failed, cancelled and incomplete observations distinguishable.
+For each job, separate dispatch/wait time, runner setup (checkout, tools,
+dependencies, cache transfer and compilation) and test/check execution. Preserve
+artifact/reporting overhead in the accounting rather than silently dropping it.
+Where a step mixes compilation and tests, use its logs or Cargo timings and mark
+any unresolved split as unknown. API dispatch timestamps can include `needs`
+waits; they do not by themselves measure runner queue time.
+
 Use the existing [timing reports](testing-feedback-loop.md#measure-feedback-before-tuning-capacity).
 Distinguish time to actionable feedback, time until required checks complete,
 runner execution minutes and failure/rerun frequency. A change can improve one
@@ -146,6 +156,27 @@ eviction; a reported hit alone does not prove a faster build. Preserve the
 existing trust boundaries and write policy. GitHub documents cache matching,
 branch access and eviction in its [dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
 
+Prefer setup actions' built-in dependency caching: configure `setup-node` for
+npm and the actual lockfiles; `setup-go` normally enables its cache by default;
+use `Swatinem/rust-cache` for compatible Rust outputs. Check the repository's
+current cache allowance and usage before adding archives. Keep a frontend-only
+job free of Cargo cache restoration, and do not cache installed outputs that are
+cheaper to recreate than transfer. A cache key must describe compatible inputs,
+not merely create more apparent hits. Avoid publishing identical archives from
+every shard; preserve trusted write policy and existing producer ownership.
+
+Download pinned prebuilt development tools through the existing installer where
+available. Compiling tools with `go install` or `cargo install` is recurring setup
+work; retain source installation only when the required tool has no suitable
+trusted binary or the test explicitly validates its build.
+
+Build twice consecutively with identical source, profile, features and environment.
+Inspect unexpected second-build work before enlarging caches or runner counts:
+missing `rerun-if-changed` inputs, generated files that change every invocation,
+unnecessary frontend rebuilds, and container layers that copy source before
+installing locked dependencies. A bundler may intentionally rebuild quickly;
+judge the observed cost instead of requiring it to behave like Cargo's no-op build.
+
 An artifact used as acceptance evidence has a stronger contract. Its consumer
 must validate the actual tested head or merge source, workflow/run/attempt, platform and architecture,
 relevant toolchain/features, expected inventory and content digests required by
@@ -196,6 +227,17 @@ run when a dependency fails and explicitly reject failed, cancelled, missing or
 unexpectedly skipped required work. An `always()` condition schedules a collector;
 it does not validate its dependencies. See [required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
 
+Before adding docs-only path filters, inspect actual branch protection and the
+app-bound checks it requires, including external coverage and security checks.
+Define which documentation is inert: generated help, executable examples, eval
+prompts, fixtures and policy inputs can change product or acceptance behavior.
+Keep applicable documentation checks. Use workflow-level filters only when no
+required consumer will wait for their missing result. A lightweight selection or
+collector job must retain the required check identity and reject failed selection;
+it must not fabricate coverage or security results belonging to another app.
+Preserve complete main-commit verification required by release consumers even
+when a PR has a separately validated docs-only path.
+
 The UI HTML collector follows the mandatory full-shard producers, independently
 of the optional extended-browser jobs. If Health prevents desktop shards from
 starting, their missing reports remain incomplete evidence. The collector checks
@@ -203,6 +245,14 @@ all four current-attempt shards per OS; fixing the upstream failure and rerunnin
 the selected producers supplies that evidence, rather than omitting those OSes.
 
 ## Bound parallelism and preserve isolation
+
+Run independent checks in parallel, but inspect each `needs` edge before removing
+it: artifact availability, coverage provenance and deliberate runner admission
+are real dependencies even when no explicit job output is passed. Put portable
+formatting, source lint and dependency auditing on Ubuntu. Retain macOS/Windows
+execution when assertions exercise their native behavior. Count macOS jobs across
+all workflows against the account's actual concurrency allowance; moving one
+workflow's bottleneck into another workflow's queue is not an improvement.
 
 Choose shards from observed work and available runner capacity. Count setup and
 artifact overhead as well as execution. More shards can increase queueing and
@@ -331,6 +381,15 @@ Workflow, runner and tool upgrades can change CLI semantics, report formats,
 selectors and archive compatibility. Validate affected real tool invocations and
 failure paths through the existing diagnostic owners; YAML parsing or unit mocks
 alone do not establish the behavior of the installed tool.
+
+After pushing, observe the actual hosted candidate until the relevant jobs finish.
+Compare before and after setup time, test time, required-check latency and runner
+minutes with sample sizes and cache conditions. Inspect first failures and queue
+changes, then make another measured pass when evidence identifies remaining waste.
+A pushed branch, a local green subset, or a faster isolated step does not establish
+an end-to-end speedup. Keep the candidate reviewable and continue in a clean
+worktree when unrelated local edits prevent publication; do not discard those
+edits or treat them as a reason to stop the optimization.
 
 Revisit timing and failure evidence when a gate becomes slower, starts rerunning,
 gains another platform/dependency, or repeatedly exceeds its expected budget.
