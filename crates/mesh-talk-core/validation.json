@@ -1054,6 +1054,7 @@
             "channel_owner_query_preserves_later_unobserved_ownership_loss",
             "channel_projection_control_does_not_drain_historical_ancestry_in_one_turn",
             "channel_receiver_and_source_handles_stay_stale_after_account_returns",
+            "channel_completed_causal_cut_",
             "channel_decision_replacement_rejects_old_predicate_publication",
             "participant_network_canonical_authority_respects_each_preparation_budget",
             "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
@@ -1086,7 +1087,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact retained commit cutoffs distinguish pre-open sources from later message and invitation-release arrivals within one bounded continuation, preserving expiry, silent repair and visible legacy batch completion without changing durable receipt counts. Legacy-stream fixtures distinguish explicitly typed metadata-only batch terminals from content, preserve empty content and retain the original message deadlines and payload assertions. Exact discard evidence and independent role terminal facts survive retries and restart.",
+            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Repeated completed historical membership cuts perform no SQL mutations under the same repository, exact canonical source, normalized roots and inclusion mode. A fixed eight-entry shared memo retains indexed query leases, rechecks account lifetimes and source fences, preserves borrowed eviction facts and never caches failed construction or current authorization decisions. Exact retained commit cutoffs distinguish pre-open sources from later message and invitation-release arrivals within one bounded continuation, preserving expiry, silent repair and visible legacy batch completion without changing durable receipt counts. Legacy-stream fixtures distinguish explicitly typed metadata-only batch terminals from content, preserve empty content and retain the original message deadlines and payload assertions. Exact discard evidence and independent role terminal facts survive retries and restart.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

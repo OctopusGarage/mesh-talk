@@ -1708,11 +1708,11 @@ fn channel_indexed_legacy_parent_cut_rebuild_preserves_account_lifetime_and_leas
             .unwrap(),
         "moved authority retains its causal fact lease"
     );
+    let profile = fixture.store.profile.clone();
     drop(held);
+    drop(fixture.store);
     assert!(
-        !fixture
-            .store
-            .profile
+        !profile
             .database()
             .read(|c| c
                 .query_row(
@@ -1722,10 +1722,10 @@ fn channel_indexed_legacy_parent_cut_rebuild_preserves_account_lifetime_and_leas
                 )
                 .map_err(Into::into))
             .unwrap(),
-        "the last authority owner retires the causal query"
+        "the last authority and completed-cut owner retires the causal query"
     );
     let before = repository.body_read_counts();
-    let warm = ChannelCheckpointStore::open(fixture.store.profile.clone()).unwrap();
+    let warm = ChannelCheckpointStore::open(profile).unwrap();
     assert!(
         warm.project_step(repository, &fixture.me, fixture.channel)
             .unwrap()
@@ -2775,4 +2775,272 @@ fn channel_hot_source_queries_reuse_prepared_vms_and_read_fresh_state() {
         runs.iter().all(|runs| *runs >= 4),
         "hot owner VM run counts: {runs:?}"
     );
+}
+
+#[test]
+fn channel_completed_causal_cut_reuses_facts_without_sql_writes() {
+    let fixture = Fixture::new(130);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let first = fixture
+        .store
+        .causal_projection(repository, fixture.channel, target)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first.state.as_ref().unwrap().owner(),
+        fixture.sender.user_id()
+    );
+    assert!(!first.contains_event(target).unwrap());
+    let changes = || {
+        fixture
+            .store
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap()
+    };
+    let before = changes();
+    for _ in 0..3 {
+        let repeated = fixture
+            .store
+            .causal_projection(repository, fixture.channel, target)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repeated.state.as_ref().unwrap().owner(),
+            fixture.sender.user_id()
+        );
+        assert!(!repeated.contains_event(target).unwrap());
+    }
+    assert_eq!(
+        changes(),
+        before,
+        "unchanged historical membership must reuse its completed leased facts without rebuilding or retiring SQL selections"
+    );
+}
+
+#[test]
+fn channel_completed_causal_cut_distinguishes_roots_and_account_lifetime() {
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let fixture = Fixture::new(3);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let excluded = fixture
+        .store
+        .causal_projection(repository, fixture.channel, target)
+        .unwrap()
+        .unwrap();
+    let included = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(!excluded.contains_event(target).unwrap());
+    assert!(included.contains_event(target).unwrap());
+    assert!(matches!(
+        fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[]),
+        Err(LogError::InvalidPageBudget)
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[target; 257]),
+        Err(LogError::InvalidPageBudget)
+    ));
+    let database = fixture.store.profile.database();
+    let next = Account::generate();
+    prepare_adoption(database, &fixture.account.public(), &next.public()).unwrap();
+    finish_adoption(database, &next.public()).unwrap();
+    prepare_adoption(database, &next.public(), &fixture.account.public()).unwrap();
+    finish_adoption(database, &fixture.account.public()).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .store
+                .causal_projection(repository, fixture.channel, target),
+            Err(LogError::StaleCursor)
+        ),
+        "returning to the account must not revive an earlier completed causal owner"
+    );
+}
+
+#[test]
+fn channel_completed_causal_cut_eviction_preserves_borrowed_lease() {
+    let fixture = Fixture::new(12);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let first_target = fixture.messages[0].id;
+    let held = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[first_target])
+        .unwrap()
+        .unwrap();
+    for message in &fixture.messages[1..9] {
+        let cut = fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[message.id])
+            .unwrap()
+            .unwrap();
+        assert!(cut.contains_event(message.id).unwrap());
+    }
+    let active = || {
+        fixture
+            .store
+            .profile
+            .database()
+            .read(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM channel_projection_queries WHERE retired=0",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        active(),
+        9,
+        "eight cache owners plus the borrowed evicted cut"
+    );
+    assert!(
+        held.contains_event(first_target).unwrap(),
+        "eviction cannot destroy borrowed historical facts"
+    );
+    drop(held);
+    assert_eq!(active(), 8, "last borrowed owner retires the evicted cut");
+}
+
+#[test]
+fn channel_completed_causal_cut_rechecks_source_and_retirement() {
+    let fixture = Fixture::new(3);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let held = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    let tail = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        100,
+        vec![target],
+        100,
+        100,
+        EventKind::Message,
+        vec![1],
+    );
+    repository.append(&tail).unwrap();
+    fixture.project();
+    assert!(matches!(
+        held.contains_event(target),
+        Err(LogError::StaleCursor)
+    ));
+    let current = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(current.contains_event(target).unwrap());
+    let changes = fixture
+        .store
+        .profile
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    let same = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target, target])
+        .unwrap()
+        .unwrap();
+    assert!(same.contains_event(target).unwrap());
+    assert_eq!(
+        fixture
+            .store
+            .profile
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        changes,
+        "equivalent normalized roots reuse the current generation"
+    );
+    let transfer = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        101,
+        vec![fixture.genesis],
+        2,
+        2,
+        EventKind::ChannelOwnerTransfer,
+        fixture.me.user_id().into_bytes(),
+    );
+    repository.append(&transfer).unwrap();
+    fixture.project();
+    assert!(matches!(
+        current.contains_event(target),
+        Err(LogError::StaleCursor)
+    ));
+    let reordered = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reordered.state.as_ref().unwrap().owner(),
+        fixture.sender.user_id(),
+        "the historical parent cut cannot borrow an unobserved canonical ownership transfer"
+    );
+    repository.begin_retirement(&fixture.channel).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .store
+                .causal_projection_basis(repository, fixture.channel, &[target]),
+            Err(LogError::ConversationRetiring)
+        ),
+        "retirement cannot return a cached membership projection"
+    );
+}
+
+#[test]
+fn channel_completed_causal_cut_failed_construction_remains_retryable() {
+    let fixture = Fixture::new(3);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    let database = fixture.store.profile.database();
+    database.transaction(|c| { c.execute_batch("CREATE TEMP TRIGGER fail_causal_cut BEFORE INSERT ON channel_projection_queries BEGIN SELECT RAISE(ABORT,'causal cut failure'); END;")?; Ok(()) }).unwrap();
+    assert!(
+        fixture
+            .store
+            .causal_projection_basis(repository, fixture.channel, &[target])
+            .is_err()
+    );
+    database
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_causal_cut")?;
+            Ok(())
+        })
+        .unwrap();
+    let recovered = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(recovered.contains_event(target).unwrap());
+    let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+    let same = fixture
+        .store
+        .causal_projection_basis(repository, fixture.channel, &[target])
+        .unwrap()
+        .unwrap();
+    assert!(same.contains_event(target).unwrap());
+    assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
 }

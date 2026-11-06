@@ -232,7 +232,14 @@ Observing a completed projection must not manufacture and immediately retire
 durable work on every poll. Qualify quiet reads against the owning source and
 generation, while preserving durable demand before any preparation can mutate
 or yield. Cover source changes between preparation and installation, not only
-an unchanged single-threaded read.
+an unchanged single-threaded read. Historical membership cuts must retain their
+completed indexed fact lease rather than rebuilding per-event checkpoints for
+unchanged roots. The [causal checkpoint owner](../crates/mesh-talk-core/src/node/channel/checkpoint/causal.rs)
+qualifies bounded completed cuts by repository binding, exact canonical source,
+root set and inclusion mode; every hit rechecks the account lifetime and source.
+The `channel_completed_causal_cut_` regressions assert quiet SQL mutations,
+source and account invalidation, failed-construction retry and borrowed eviction
+leases. Current caller authorization and discovery proofs remain fresh.
 Separate due retries, cooled jobs and unfinished discovery or preparation.
 Reserve a retry deadline before cancellable work and retain its wake through the
 existing scheduler. Scope each reservation to the exact attempt and eligible route;

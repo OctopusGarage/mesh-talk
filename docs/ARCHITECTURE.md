@@ -2384,6 +2384,16 @@ quantified predicates retain their last fully checked fact key. Partial decision
 never publish receiver state, transcripts, reception effects or authority. Decision
 progress is fenced by the exact control as well as its source generation.
 
+Synchronous historical membership cuts retain at most eight completed shared
+projections per checkpoint owner, with at most 256 normalized roots per entry.
+Keys bind the repository identity, channel, exact canonical job/revision, roots
+and inclusion mode. Every hit rechecks the current account lifetime and source;
+callers still evaluate current proofs, heads and access decisions. Retained query
+leases keep historical facts in SQL, and eviction destroys leases after releasing
+cache and query-serialization locks. This bounds retained cut count and current
+membership snapshots, not total heap or process RSS. Missing or failed work is
+never cached as completed authority.
+
 Causal query handles return Pending with charged work or one complete leased
 projection. Owner queries additionally retain the validated strict-causal state
 until later ownership-loss checks finish. Runtime-owned ancestor selections retire
