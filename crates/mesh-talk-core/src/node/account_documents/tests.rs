@@ -4779,6 +4779,7 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
     let peer_server = peer.clone();
     let expected_source = source.identity.public();
     tasks.spawn(async move {
+        let mut reject_first_sync = true;
         loop {
             let (stream, _) = peer_listener.accept().await.unwrap();
             let Ok(mut channel) = peer_server.privacy_accept(stream).await else {
@@ -4792,13 +4793,19 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
                 // A separate metadata query cannot satisfy the sync hold.
                 continue;
             }
+            if reject_first_sync {
+                // A real failed preparation exchange must not poison the
+                // later independent held-publication measurement.
+                reject_first_sync = false;
+                continue;
+            }
             held.store(true, Ordering::Release);
             let _held = Held(held);
             let _ = entered.send(());
-            // Hold this authenticated response until the fixture parent cancels
-            // it; no response, grant or history body is fabricated.
-            std::future::pending::<()>().await;
-            drop(channel);
+            // Withhold the response while observing actual transport liveness.
+            // EOF or another frame retires the hold; a stale server task must
+            // not qualify a client round that already completed or timed out.
+            let _ = channel.recv().await;
             break;
         }
     });
@@ -4810,6 +4817,7 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
     let armed = Arc::new(AtomicBool::new(false));
     let turns = Arc::new(AtomicUsize::new(0));
     let first_pending = Arc::new(AtomicBool::new(false));
+    let peer_begins = Arc::new(AtomicUsize::new(0));
     let peer_ends = Arc::new(AtomicUsize::new(0));
     let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     let started = std::time::Instant::now();
@@ -4818,12 +4826,20 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
         let armed = armed.clone();
         let turns = turns.clone();
         let first_pending = first_pending.clone();
+        let peer_begins = peer_begins.clone();
         let peer_ends = peer_ends.clone();
         let phases = phases.clone();
+        let expected_peer = peer.identity.public();
+        let begin = format!("channel_recovery_peer_begin channel={held_group:?}");
         let end = format!("channel_recovery_peer_end channel={held_group:?}");
-        move |_, phase| {
-            if phase.starts_with(&end) {
-                peer_ends.fetch_add(1, Ordering::Relaxed);
+        move |remote, phase| {
+            if remote == expected_peer {
+                if phase == begin {
+                    peer_begins.fetch_add(1, Ordering::Relaxed);
+                }
+                if phase.starts_with(&end) {
+                    peer_ends.fetch_add(1, Ordering::Relaxed);
+                }
             }
             if armed.load(Ordering::Acquire)
                 && phase == "channel_recovery_plaintext_done"
@@ -4866,7 +4882,17 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
             .expect("the unrelated authenticated sync request must enter its real peer hold")
             .unwrap();
         assert!(active.load(Ordering::Acquire));
-        assert_eq!(peer_ends.load(Ordering::Relaxed), 0);
+        let ends_before = peer_ends.load(Ordering::Relaxed);
+        let begins_before = peer_begins.load(Ordering::Relaxed);
+        assert!(
+            ends_before >= 1,
+            "the real preparation failure must be observed"
+        );
+        assert_eq!(
+            begins_before,
+            ends_before + 1,
+            "exactly one peer round must remain live"
+        );
         let event = Event::new(
             &peer.identity,
             new_group,
@@ -4936,8 +4962,13 @@ async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_hel
         );
         assert_eq!(
             peer_ends.load(Ordering::Relaxed),
-            0,
+            ends_before,
             "peer timeout or completion cannot rescue local publication"
+        );
+        assert_eq!(
+            peer_begins.load(Ordering::Relaxed),
+            begins_before,
+            "a replacement peer round cannot rescue local publication"
         );
         delivered.expect(
             "new signed Directory publication must not wait for an unrelated peer sync response",

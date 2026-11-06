@@ -433,6 +433,16 @@ arbitrary sleep or a test that checks only that a timeout helper was called.
 Verify successful behavior, failure, cleanup and replacement through the same
 production owner; a mock that bypasses the problematic lock proves little.
 
+The group-inventory held-peer fixture rejects a real authenticated setup
+exchange before admitting its independent publication measurement. Snapshot
+exact-peer/group begin and end counters only after the actual Fingerprint hold
+enters; require exactly one live round, unchanged counters and an open transport
+through the original eight-second publication bound. A setup failure is not a
+measured-window completion. A server task parked after client EOF is not a live
+hold; observe transport retirement and join it on cancellation. The owner is
+`group_inventory_publication_progresses_while_unrelated_peer_sync_is_held` in
+`account_documents/tests.rs`, selected by core-account-group validation.
+
 Give connection setup and capability negotiation their own bounded watchdog.
 Start a progress deadline only after the required stalled operation is admitted,
 and prove the competing work is still incomplete at that point. Release only
