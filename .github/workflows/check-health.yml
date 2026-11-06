@@ -156,7 +156,19 @@ jobs:
       - name: Install source scanners
         uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-deny,cargo-machete,typos-cli,shellcheck,actionlint@1.7.12
+          tool: cargo-deny,cargo-machete,typos-cli,shellcheck
+      - name: Install pinned prebuilt workflow scanner
+        shell: bash
+        run: |
+          scanner_dir="$RUNNER_TEMP/actionlint"
+          mkdir -p "$scanner_dir"
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$scanner_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $scanner_dir/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$scanner_dir/actionlint.tar.gz" -C "$scanner_dir" actionlint
+          "$scanner_dir/actionlint" -version
+          echo "$scanner_dir" >> "$GITHUB_PATH"
       - name: Source and supply-chain policy
         run: |
           typos

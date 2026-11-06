@@ -17,7 +17,10 @@ test("health installs source scanners while Gitleaks owns the full-history scan"
   const secrets = readFileSync(new URL("../../.github/workflows/gitleaks.yml", import.meta.url), "utf8");
   assert.match(secrets, /fetch-depth: 0/);
   assert.match(secrets, /GITLEAKS_VERSION: 8\.30\.1/);
-  assert.match(workflow, /tool: .*actionlint@1\.7\.12/);
+  assert.match(workflow, /https:\/\/github\.com\/rhysd\/actionlint\/releases\/download\/v1\.7\.12\/actionlint_1\.7\.12_linux_amd64\.tar\.gz/);
+  assert.match(workflow, /8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8/);
+  assert.match(workflow, /sha256sum --check/);
+  assert.doesNotMatch(workflow, /go install|setup-go|tool: .*actionlint/);
   assert.match(readFileSync(new URL("../check-health.sh", import.meta.url), "utf8"), /for tool in cargo-deny cargo-machete typos gitleaks shellcheck actionlint/);
 });
 
