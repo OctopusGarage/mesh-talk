@@ -1,0 +1,13 @@
+Speed up this repo's GitHub Actions as much as possible without dropping any necessary tests or checks.
+尽可能加快此仓库的 GitHub Actions 速度，同时不删除任​​何必要的测试或检查。
+
+1. Start by using gh to pull the last 50 runs and split each job into three phases: queue, setup and the actual test run. Look for patterns. Often the slow part is setup, not the tests themselves.
+2. When a PR gets several pushes in a row, only run the latest one and cancel the older runs with cancel-in-progress. Don't do this on main, though: every commit on main needs a complete run before a release.
+3. Commits that only touch the README or docs shouldn't trigger CI, so filter them out with paths. Watch out: a required check that gets skipped stays pending and blocks the PR from merging, so plan for that up front.
+4. Prefer the built-in caching in setup actions: turn on cache in setup-node, setup-go has it on by default, and use Swatinem/rust-cache for Rust. Each repo only gets 10 GB of cache, so don't put anything in there you won't actually reuse.
+5. Build twice in a row locally. The second build should take almost no time. If something still takes time, something is set up wrong, like a Dockerfile that copies the whole repo before installing dependencies, or a build script watching a file that doesn't exist. Check for anything similar.
+6. Download prebuilt tools instead of compiling them on the spot with go install or cargo install, which eats a lot of time.
+7. Run jobs that don't depend on each other in parallel, remove needs edges that don't pass any data, and split your longest test suite across multiple machines.
+8. Free accounts can run at most 5 macOS jobs at once, shared across all workflows. Move anything that doesn't care about the OS, like formatting, linting and dependency audits, over to Ubuntu.
+9. Don't do the same work twice, and don't do work you don't need. If another job already ran a check, don't run it again, and a job that only builds the frontend doesn't need to pull the whole Rust cache.
+10. Once you're done, push and watch how the runs actually perform. Look at the timings, find the patterns, then do another pass to catch what you missed and get it as good as it can be. Finally, show me a before and after comparison.
