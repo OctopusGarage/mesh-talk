@@ -46,7 +46,7 @@ export function verifyAsanUnion(bundles, expected) {
     assert.equal(digest(selected), receipt.selectedSha256, "ASan selected inventory digest mismatch");
     assert.equal(hash(execution), receipt.executionSha256, "ASan execution digest mismatch");
   }
-  verifyPartition(full, bundles.map(bundle => bundle.selected));
+  verifyPartition(full, bundles.map(bundle => bundle.selected), partitions.length);
   let executedTests = 0;
   for (const { receipt, selected, execution } of bundles) {
     verifyExecution(execution, selected);

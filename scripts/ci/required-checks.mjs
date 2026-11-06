@@ -2,7 +2,9 @@
 // migration. PR-only and main-only policies deliberately remain separate.
 import assert from "node:assert/strict";
 
-const windowsPartitions = [1, 2, 3, 4].map(shard => `windows / Windows workspace tests (${shard}/4)`);
+import { windowsPartitions as nativePartitions } from "./windows-coverage.mjs";
+
+const windowsPartitions = nativePartitions.map(shard => `windows / Windows workspace tests (${shard}/${nativePartitions.length})`);
 const windows = ["windows / Windows workspace build", ...windowsPartitions];
 const workspace = [...["ubuntu-latest", "macos-latest"].map(os => `checks (${os})`), ...windows];
 const health = ["health / Source and supply-chain checks", ...["ubuntu-latest", "macos-26-intel", "windows-latest"].map(os => `health / Portable checks (${os})`)];
@@ -34,6 +36,7 @@ const replacements = new Map([
   ["verify", workspace],
   ["checks (windows-latest)", windows],
   ...[1, 2].map(shard => [`windows / Windows workspace tests (${shard}/2)`, windowsPartitions]),
+  ...[1, 2, 3, 4].map(shard => [`windows / Windows workspace tests (${shard}/4)`, windowsPartitions]),
   ["health / Portable checks (macos-latest)", ["health / Portable checks (macos-26-intel)"]],
   ["Backend core (macos-latest)", ["Backend core (macos-26-intel)"]],
   ["Portable UI (macos-latest, webkit)", ["Portable UI (macos-26-intel, webkit)"]],

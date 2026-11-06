@@ -98,6 +98,17 @@ retains Host hits without a Core test cohort, and keeps both partition failures,
 report failures, timing pipelines and process termination controls. All platform
 assertions, doctests, zero retries and direct required checks remain unchanged.
 
+A progressing serial test partition can exhaust its job watchdog without a hung
+case. Windows reuses one sealed instrumented workspace archive across eight
+independent serial consumers; every selected case still executes once with full
+coverage, default targets, existing watchdogs and zero retries. Acceptance uses
+those actual native checks directly. Do not add a second qualification workflow
+or extend a job timeout to compensate for oversized units. Four extra setup and
+archive transfers are a material cost; measure them alongside execution and runner
+variation. The existing required-check owner retires old partition names only
+after every current-source replacement passes with its bound app. Preserve strict
+protection, unrelated checks and exact-source release acceptance together.
+
 Treat a browser's total functional-case watchdog separately from its action,
 assertion and product deadlines. A cold page, several successful state checks and
 real interactions can cumulatively exhaust a short total bound without any one

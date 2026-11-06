@@ -1749,8 +1749,18 @@ explicit shared key. Only the cache step normalizes the inherited color/thread
 environment to its previous key inputs; actual tests keep serial execution and
 plain diagnostic output. Pull requests restore caches; only main publishes them.
 
+Windows uses finer independent serial execution units instead of extending a job
+watchdog when a large progressing partition exceeds hosted capacity. The producer
+still compiles once and every runnable case executes once; eight consumers add
+archive transfers/setup but preserve full instrumentation, per-case/job limits and
+zero retries. Acceptance uses the actual native jobs directly, without another
+aggregation layer. The existing required-check owner migrates retired four-part
+names only after every replacement has successful current-head app-bound evidence;
+strictness, unrelated checks and the shared release-source policy remain intact.
+Hosted execution cost and runner variation still need measurement.
+
 The owning `scripts/ci/windows-coverage.mjs` helper validates every default Cargo test target, the full inventory,
-default ignored markers and the exact disjoint union of all four runnable partitions.
+default ignored markers and the exact disjoint union of all eight runnable partitions.
 Producer and consumers must match source/run/attempt, compiler, Cargo, dev/test
 profile environment, feature
 resolution, lock/config/helper hashes, platform and the original absolute checkout
@@ -1764,7 +1774,7 @@ official binary/Cargo metadata and offline reporting must work from a fresh Carg
 home. Execution receipts verify each selected test starts and passes exactly
 once; missing, duplicate, failed or skipped selected cases fail the check.
 Each consumer validates and uploads its partial LCOV plus source/inventory/digest
-receipts. All four consumer checks and the producer are directly required; a skipped
+receipts. All eight native consumer checks and the producer are directly required; a skipped
 consumer after a failed build cannot certify acceptance. Diagnostic timing keeps
 machine-readable events separate from successful-test phase output.
 
@@ -1776,7 +1786,7 @@ execution and coverage validation produce an acceptance receipt; partial output
 never certifies a shard. Each output stream remains bounded to 128 MiB.
 
 The producer executes a tiny real archive/consumer CLI regression before expensive
-workspace compilation or accepting the full archive. Its local Git fixture, all four partitions, runtime and compiled
+workspace compilation or accepting the full archive. Its local Git fixture, all eight partitions, runtime and compiled
 helper paths, default ignored case, clean source, offline LCOV and captured timing
 exercise the same helper. Run its tests with the pinned nextest/coverage tools and
 LLVM tools matching rustc; portable Health does not install those tools.

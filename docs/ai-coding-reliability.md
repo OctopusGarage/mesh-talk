@@ -403,6 +403,18 @@ variant does not qualify a separate fresh empty-corpus timing boundary. Keep the
 retired-child observer and interrupted-preparation controls rather than adding
 sleep, suppressing publication or accepting a stale child to rescue setup.
 
+A progressing serial test partition can exhaust its job watchdog without a hung
+case. The Windows archive owner uses eight native serial execution partitions,
+with direct required checks and the existing sealed once-only inventory contract.
+Exercise actual pinned archive consumers and omission/duplication/failed-execution
+controls. Preserve watchdogs, product assertions and full coverage. The existing
+protection migration owner requires every successful current-head app-bound
+replacement before retiring oversized partition names; skipped or partial runs
+cannot qualify. Account for additional archive/setup cost and hosted variation.
+The shared union verifier takes the caller-owned partition count; Windows capacity
+changes must not alter the independent four-part ASan contract. Run both real-tool
+protocol fixtures and their missing/duplicate/failed-receipt controls.
+
 A total functional browser-case watchdog is not a product performance SLA.
 Trace the failed interval: when several individually successful cold-load,
 rendering and interaction steps exhaust the total, use the existing generous
