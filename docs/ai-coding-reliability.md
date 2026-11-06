@@ -204,6 +204,21 @@ older pending work; failed items pin a cursor; unbounded retries flood a queue;
 or a completion signal arrives between checking a condition and registering a
 waiter, leaving work asleep indefinitely.
 
+Bounded caches must preserve useful unfinished work between turns. Protecting
+only actively borrowed entries lets rotating demand evict every partial owner,
+retire its SQL selection and restart it on the next attempt. Defer new admission
+while admitted owners make progress; reclaim completed, revoked or genuinely
+stalled work through a finite progress deadline. Access, validation and repeated
+unchanged responses do not renew that deadline. Drop evicted owners outside
+cache guards when destruction can retire database work. Treat a contended entry
+as unavailable during admission rather than waiting for its SQL worker while
+holding the global cache guard. Classify lightweight receive/control demand
+separately from heavy historical preparation so productive bulk work cannot
+reserve every admission slot needed for incoming messages. The fifth-scope pressure
+and stale-progress controls in the
+[mailbox owner](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+qualify the actual selection identities, write commits and eventual completion.
+
 Review fairness across successive turns, not only the batch size. Use the existing
 cursor, coalescing and admission owners; distinguish independent lanes where
 needed. Failed publication must not indefinitely prevent later eligible work.

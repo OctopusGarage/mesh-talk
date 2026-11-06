@@ -14,9 +14,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 const MAX_VIEWS: usize = 4;
+const MAX_RECEIVE_OWNERS: usize = 2;
+const UNFINISHED_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_PENDING: usize = 256;
 const MAX_RESULTS: usize = 64;
-// Four entry owners, IDs only; independent of the 16-KiB receipt envelope.
+// Six entry owners, IDs only; independent of the 16-KiB receipt envelope.
 const MAX_REPAIR_HINT_BYTES: usize = 2 * 1024 * 1024;
 const PAGE_BYTES: usize = crate::transport::MAX_PLAINTEXT - 2048;
 
@@ -25,13 +27,24 @@ thread_local! {
     pub(super) static HISTORY_METADATA_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[derive(Clone, Copy, Debug)]
+enum UploadScope {
+    History,
+    ReceiveOnly,
+}
+
+type UploadEntryOwner = Arc<Mutex<UploadEntry>>;
+
 #[derive(Default)]
 pub(in crate::node) struct UploadCache {
-    entries: BTreeMap<Vec<u8>, Arc<Mutex<UploadEntry>>>,
+    entries: BTreeMap<Vec<u8>, UploadEntryOwner>,
+    receive_entries: BTreeMap<Vec<u8>, UploadEntryOwner>,
 }
 struct UploadEntry {
     busy: bool,
     used: std::time::Instant,
+    progress_at: std::time::Instant,
+    progress_generation: u64,
     view: Option<HistoryUpload>,
     rank: i64,
     complete: bool,
@@ -45,6 +58,19 @@ struct UploadEntry {
     repair_progress: std::time::Instant,
 }
 impl UploadEntry {
+    fn protect_unfinished(&self, generation: u64, now: std::time::Instant) -> bool {
+        self.view.is_some()
+            && !self.complete
+            && self.progress_generation == generation
+            && now.saturating_duration_since(self.progress_at) < UNFINISHED_IDLE
+    }
+    fn note_progress(&mut self, advanced: bool, generation: u64, now: std::time::Instant) {
+        if advanced {
+            self.progress_at = now;
+            self.progress_generation = generation;
+        }
+    }
+
     fn remember_repair_hint(
         &mut self,
         inner: EventId,
@@ -68,7 +94,7 @@ impl UploadEntry {
         Ok(self.repair_declarations.insert(inner))
     }
 }
-struct Lease(Arc<Mutex<UploadEntry>>);
+struct Lease(UploadEntryOwner);
 impl Drop for Lease {
     fn drop(&mut self) {
         self.0.lock().expect("upload entry").busy = false;
@@ -76,12 +102,26 @@ impl Drop for Lease {
 }
 impl UploadCache {
     pub(in crate::node) fn observed_len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() + self.receive_entries.len()
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.receive_entries.clear();
     }
 
     pub(in crate::node) fn clear_receive_repair_leases(&mut self) {
-        for entry in self.entries.values() {
-            let mut entry = entry.lock().expect("upload entry");
+        for entry in self.entries.values().chain(self.receive_entries.values()) {
+            let mut entry = match entry.try_lock() {
+                Ok(entry) => entry,
+                // Compaction protection is conservative, not publication
+                // authority. Retry contended owners on a later maintenance pass.
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    panic!("upload entry: {error}");
+                }
+            };
             entry.repair_lease = None;
             entry.repair_declarations.clear();
             if let Some(receipt) = entry.receipt.as_mut() {
@@ -90,8 +130,16 @@ impl UploadCache {
         }
     }
     pub(in crate::node) fn clear_stale_receive_repair_leases(&mut self, generation: u64) {
-        for entry in self.entries.values() {
-            let mut entry = entry.lock().expect("upload entry");
+        for entry in self.entries.values().chain(self.receive_entries.values()) {
+            let mut entry = match entry.try_lock() {
+                Ok(entry) => entry,
+                // Compaction protection is conservative, not publication
+                // authority. Retry contended owners on a later maintenance pass.
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    panic!("upload entry: {error}");
+                }
+            };
             if entry.repair_generation != generation
                 || entry.repair_progress.elapsed() > std::time::Duration::from_secs(30)
             {
@@ -127,26 +175,54 @@ impl UploadCache {
             }
         }
     }
-    fn acquire(&mut self, key: &[u8]) -> Result<Lease, session::SessionError> {
-        if !self.entries.contains_key(key) {
-            if self.entries.len() >= MAX_VIEWS {
-                let oldest = self
-                    .entries
+    // Return the removed owner to the caller: its SQL retirement must run only
+    // after the global cache guard is released.
+    fn acquire(
+        &mut self,
+        key: &[u8],
+        scope: UploadScope,
+        generation: u64,
+        now: std::time::Instant,
+    ) -> Result<(Lease, Option<UploadEntryOwner>), session::SessionError> {
+        // Receive-only work cannot construct a history selection. Its receipt
+        // and repair state has an independent, strictly bounded admission lane.
+        let (entries, limit) = match scope {
+            UploadScope::History => (&mut self.entries, MAX_VIEWS),
+            UploadScope::ReceiveOnly => (&mut self.receive_entries, MAX_RECEIVE_OWNERS),
+        };
+        let mut retired = None;
+        if !entries.contains_key(key) {
+            if entries.len() >= limit {
+                let oldest = entries
                     .iter()
                     .filter_map(|(k, e)| {
-                        let e = e.lock().expect("upload entry");
-                        (!e.busy).then_some((k.clone(), e.used))
+                        let e = match e.try_lock() {
+                            Ok(entry) => entry,
+                            Err(std::sync::TryLockError::WouldBlock) => return None,
+                            Err(std::sync::TryLockError::Poisoned(error)) => {
+                                panic!("upload entry: {error}");
+                            }
+                        };
+                        if e.busy || e.protect_unfinished(generation, now) {
+                            return None;
+                        }
+                        // Empty/completed entries yield before expired or
+                        // authority-stale unfinished work. Capacity stays fixed.
+                        let pending = e.view.is_some() && !e.complete;
+                        Some((k.clone(), pending, e.used))
                     })
-                    .min_by_key(|(_, t)| *t)
-                    .map(|(k, _)| k)
+                    .min_by_key(|(_, pending, used)| (*pending, *used))
+                    .map(|(k, _, _)| k)
                     .ok_or(session::SessionError::ResourceUnavailable)?;
-                self.entries.remove(&oldest);
+                retired = entries.remove(&oldest);
             }
-            self.entries.insert(
+            entries.insert(
                 key.to_vec(),
                 Arc::new(Mutex::new(UploadEntry {
                     busy: false,
-                    used: std::time::Instant::now(),
+                    used: now,
+                    progress_at: now,
+                    progress_generation: generation,
                     view: None,
                     rank: -1,
                     complete: false,
@@ -161,20 +237,24 @@ impl UploadCache {
                 })),
             );
         }
-        let entry = self
-            .entries
-            .get(key)
-            .expect("installed upload entry")
-            .clone();
+        let entry = entries.get(key).expect("installed upload entry").clone();
         {
-            let mut e = entry.lock().expect("upload entry");
+            let mut e = match entry.try_lock() {
+                Ok(entry) => entry,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(session::SessionError::ResourceUnavailable);
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    panic!("upload entry: {error}");
+                }
+            };
             if e.busy {
                 return Err(session::SessionError::ResourceUnavailable);
             }
             e.busy = true;
-            e.used = std::time::Instant::now();
+            e.used = now;
         }
-        Ok(Lease(entry))
+        Ok((Lease(entry), retired))
     }
 }
 #[derive(Default)]
@@ -337,7 +417,15 @@ impl Node {
             p.uploaded.remove(0);
         }
         p.uploaded.push((inner, outer));
-        state(p).lease.0.lock().expect("upload entry").last = Some((inner, outer));
+        {
+            let mut entry = state(p).lease.0.lock().expect("upload entry");
+            let changed = entry.last != Some((inner, outer));
+            entry.last = Some((inner, outer));
+            // Only validated preparation may advance the authority generation;
+            // an acknowledgement cannot relabel an old view after revocation.
+            let generation = entry.progress_generation;
+            entry.note_progress(changed, generation, std::time::Instant::now());
+        }
         self.opaque_receive_cache
             .lock()
             .expect("opaque cache")
@@ -1156,11 +1244,19 @@ impl Node {
                 return Ok(None);
             }
             let key = cache_key(p)?;
-            let lease = self
-                .opaque_upload_cache
-                .lock()
-                .expect("upload cache")
-                .acquire(&key)?;
+            let generation = self.privacy.generation.load(Ordering::Acquire);
+            let scope = if p.conversation.is_none() {
+                UploadScope::ReceiveOnly
+            } else {
+                UploadScope::History
+            };
+            let (lease, retired) = {
+                self.opaque_upload_cache
+                    .lock()
+                    .expect("upload cache")
+                    .acquire(&key, scope, generation, std::time::Instant::now())?
+            };
+            drop(retired);
             let hot = lease.0.lock().expect("upload entry").receipt.clone();
             let receipt =
                 self.load_mailbox_receipt_with_runtime(&key, p.mailbox.id(), hot.clone())?;
@@ -1473,19 +1569,29 @@ impl Node {
             let page = {
                 let owner = self.sync_store(&p.recipient);
                 let store = owner.lock().expect("projection");
-                let e = state(p).lease.0.lock().expect("upload entry");
-                let view = e.view.as_ref().expect("upload view");
-                let step = store.prepare_history_upload_step(
-                    view,
-                    crate::eventlog::sync::network::PreparationBudget::default(),
-                )?;
+                let mut e = state(p).lease.0.lock().expect("upload entry");
+                let generation = self.privacy.generation.load(Ordering::Acquire);
+                let (step, advanced) = {
+                    let view = e.view.as_ref().expect("upload view");
+                    let before = view.preparation_progress();
+                    let step = store.prepare_history_upload_step(
+                        view,
+                        crate::eventlog::sync::network::PreparationBudget::default(),
+                    )?;
+                    let advanced = step.rows != 0
+                        || step.edges != 0
+                        || step.bytes != 0
+                        || view.preparation_progress() != before;
+                    (step, advanced)
+                };
+                e.note_progress(advanced, generation, std::time::Instant::now());
                 #[cfg(test)]
                 HISTORY_METADATA_ROWS.with(|rows| rows.set(rows.get() + step.rows));
                 if !step.ready {
                     return Ok(());
                 }
                 let page = store.history_upload_id_page(
-                    view,
+                    e.view.as_ref().expect("upload view"),
                     e.rank,
                     crate::eventlog::sync::network::IdPageBudget {
                         ids: 16,
@@ -1526,8 +1632,11 @@ impl Node {
             let complete = state(p).history_complete;
             {
                 let mut e = state(p).lease.0.lock().expect("upload entry");
+                let advanced = after > e.rank || (complete && !e.complete);
                 e.rank = after;
                 e.complete = complete;
+                let generation = e.progress_generation;
+                e.note_progress(advanced, generation, std::time::Instant::now());
             }
             state_mut(p).history_done = complete;
         }
@@ -1551,5 +1660,301 @@ impl Node {
         self.send_mailbox_event(channel, p, event, current, true)
             .await?
             .ok_or(session::SessionError::NoProgress)
+    }
+}
+
+#[cfg(test)]
+mod upload_admission_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+
+    #[test]
+    fn upload_maintenance_does_not_wait_for_a_held_entry_owner() {
+        for (stale_only, scope) in [
+            (false, UploadScope::History),
+            (true, UploadScope::History),
+            (false, UploadScope::ReceiveOnly),
+            (true, UploadScope::ReceiveOnly),
+        ] {
+            let now = std::time::Instant::now();
+            let mut cache = UploadCache::default();
+            let (lease, retired) = cache.acquire(b"held", scope, 0, now).unwrap();
+            assert!(retired.is_none());
+            let held = lease.0.clone();
+            drop(lease);
+            let cache = Arc::new(Mutex::new(cache));
+            let (entered, entered_rx) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _entry = held.lock().unwrap();
+                entered.send(()).unwrap();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let (finished, finished_rx) = std::sync::mpsc::channel();
+            let worker_cache = cache.clone();
+            let worker = std::thread::spawn(move || {
+                let mut cache = worker_cache.lock().unwrap();
+                if stale_only {
+                    cache.clear_stale_receive_repair_leases(1);
+                } else {
+                    cache.clear_receive_repair_leases();
+                }
+                let _ = finished.send(());
+            });
+            let completed = finished_rx.recv_timeout(std::time::Duration::from_secs(2));
+            let _ = release.send(());
+            holder.join().unwrap();
+            worker.join().unwrap();
+            assert!(
+                completed.is_ok(),
+                "maintenance waited on a held entry (stale_only={stale_only}, scope={scope:?})"
+            );
+            // The skipped entry remains available for a later cleanup pass.
+            let mut cache = cache.lock().unwrap();
+            cache.clear_stale_receive_repair_leases(1);
+            cache.clear_receive_repair_leases();
+        }
+    }
+
+    #[test]
+    fn upload_admission_does_not_wait_for_an_unrelated_entry_owner() {
+        for (same_key, scope) in [
+            (true, UploadScope::History),
+            (false, UploadScope::History),
+            (true, UploadScope::ReceiveOnly),
+            (false, UploadScope::ReceiveOnly),
+        ] {
+            let now = std::time::Instant::now();
+            let mut cache = UploadCache::default();
+            let limit = match scope {
+                UploadScope::History => MAX_VIEWS,
+                UploadScope::ReceiveOnly => MAX_RECEIVE_OWNERS,
+            };
+            for key in 0..limit as u8 {
+                let (lease, retired) = cache.acquire(&[key], scope, 0, now).unwrap();
+                assert!(retired.is_none());
+                drop(lease);
+            }
+            let held = match scope {
+                UploadScope::History => &cache.entries,
+                UploadScope::ReceiveOnly => &cache.receive_entries,
+            }
+            .get([0u8].as_slice())
+            .unwrap()
+            .clone();
+            let cache = Arc::new(Mutex::new(cache));
+            let (entered, entered_rx) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let holder_entry = held.clone();
+            let holder = std::thread::spawn(move || {
+                let _guard = holder_entry.lock().unwrap();
+                entered.send(()).unwrap();
+                // Independent escape hatch also releases the fixture if its
+                // observer unwinds before sending the normal release signal.
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("entry holder did not become active");
+            let (finished, finished_rx) = std::sync::mpsc::channel();
+            let worker_cache = cache.clone();
+            let worker = std::thread::spawn(move || {
+                let key: &[u8] = if same_key { &[0] } else { b"fifth" };
+                let result = { worker_cache.lock().unwrap().acquire(key, scope, 0, now) };
+                let valid = match result {
+                    Err(session::SessionError::ResourceUnavailable) => same_key,
+                    Ok((lease, retired)) => {
+                        let valid = !same_key
+                            && retired
+                                .as_ref()
+                                .is_some_and(|owner| !Arc::ptr_eq(owner, &held));
+                        // Any removed SQL owner drops after the global guard.
+                        drop(lease);
+                        drop(retired);
+                        valid
+                    }
+                    Err(_) => false,
+                };
+                let _ = finished.send(valid);
+            });
+            let completed = finished_rx.recv_timeout(std::time::Duration::from_secs(2));
+            // Release before asserting or joining: baseline acquire blocks on
+            // this actual entry mutex while retaining the global cache guard.
+            let _ = release.send(());
+            holder.join().unwrap();
+            worker.join().unwrap();
+            assert!(
+                completed.is_ok(),
+                "admission waited for a held entry owner (same_key={same_key}, scope={scope:?})"
+            );
+            assert!(
+                completed.unwrap(),
+                "held same-key work must defer; fifth scope must use another eligible owner"
+            );
+        }
+    }
+
+    #[test]
+    fn unfinished_upload_admission_bounds_busy_stalled_and_changed_generation_work() {
+        let root = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            root.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation =
+            crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(crate::eventlog::Event::new(
+                &node.identity,
+                conversation,
+                1,
+                vec![],
+                1,
+                0,
+                crate::eventlog::EventKind::Message,
+                vec![7; 32],
+            ))
+            .unwrap();
+        let now = std::time::Instant::now();
+        let generation = node.privacy.generation.load(Ordering::Acquire);
+        let pending = || {
+            let mut cache = UploadCache::default();
+            for key in 0..MAX_VIEWS as u8 {
+                let (lease, retired) = cache
+                    .acquire(&[key], UploadScope::History, generation, now)
+                    .unwrap();
+                assert!(retired.is_none());
+                lease.0.lock().unwrap().view = Some(
+                    node.sync_store(&peer.public())
+                        .lock()
+                        .unwrap()
+                        .open_history_upload(&conversation)
+                        .unwrap(),
+                );
+                drop(lease);
+            }
+            cache
+        };
+        let mut cache = pending();
+        assert!(matches!(
+            cache.acquire(b"fifth", UploadScope::History, generation, now),
+            Err(session::SessionError::ResourceUnavailable)
+        ));
+        // Acquiring and validating an idle owner does not renew actual progress.
+        let later = now + std::time::Duration::from_secs(29);
+        let (lease, retired) = cache
+            .acquire(&[0], UploadScope::History, generation, later)
+            .unwrap();
+        assert!(retired.is_none());
+        lease
+            .0
+            .lock()
+            .unwrap()
+            .note_progress(false, generation, later);
+        assert_eq!(lease.0.lock().unwrap().progress_at, now);
+        drop(lease);
+        let (lease, retired) = cache
+            .acquire(
+                b"fifth",
+                UploadScope::History,
+                generation,
+                now + UNFINISHED_IDLE,
+            )
+            .unwrap();
+        assert!(
+            retired.is_some(),
+            "stalled unfinished work must be reclaimable at its deadline"
+        );
+        assert_eq!(cache.entries.len(), MAX_VIEWS);
+        drop(lease);
+        drop(retired);
+
+        let mut cache = pending();
+        let mut held = Vec::new();
+        for key in 0..MAX_VIEWS as u8 {
+            let (lease, retired) = cache
+                .acquire(&[key], UploadScope::History, generation, now)
+                .unwrap();
+            assert!(retired.is_none());
+            held.push(lease);
+        }
+        assert!(
+            matches!(
+                cache.acquire(
+                    b"fifth",
+                    UploadScope::History,
+                    generation + 1,
+                    now + UNFINISHED_IDLE
+                ),
+                Err(session::SessionError::ResourceUnavailable)
+            ),
+            "busy leases cannot be reclaimed even when stale or expired"
+        );
+        drop(held);
+        let (lease, retired) = cache
+            .acquire(b"fifth", UploadScope::History, generation + 1, now)
+            .unwrap();
+        assert!(
+            retired.is_some(),
+            "changed privacy generation releases idle obsolete work"
+        );
+        drop(lease);
+        drop(retired);
+
+        let mut cache = pending();
+        // A completed view is preferred even over older expired pending work.
+        cache
+            .entries
+            .get([3u8].as_slice())
+            .unwrap()
+            .lock()
+            .unwrap()
+            .complete = true;
+        let (lease, retired) = cache
+            .acquire(
+                b"fifth",
+                UploadScope::History,
+                generation,
+                now + UNFINISHED_IDLE,
+            )
+            .unwrap();
+        assert!(retired.as_ref().unwrap().lock().unwrap().complete);
+        assert!(!cache.entries.contains_key([3u8].as_slice()));
+        drop(lease);
+        drop(retired);
+
+        let mut cache = pending();
+        {
+            let mut entry = cache.entries.get([0u8].as_slice()).unwrap().lock().unwrap();
+            entry.note_progress(true, generation, later);
+            assert_eq!(entry.progress_at, later);
+        }
+        let (lease, retired) = cache
+            .acquire(
+                b"fifth",
+                UploadScope::History,
+                generation,
+                now + UNFINISHED_IDLE,
+            )
+            .unwrap();
+        assert!(retired.is_some());
+        assert!(
+            cache.entries.contains_key([0u8].as_slice()),
+            "measured work or a zero-work phase transition protects productive unfinished work"
+        );
+        drop(lease);
+        drop(retired);
     }
 }

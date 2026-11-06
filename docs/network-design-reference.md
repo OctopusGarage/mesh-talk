@@ -2426,8 +2426,9 @@ A deleted local record or recalled event does not recall already copied data fro
 | Group initial text/sticker seeding        | Small-group threshold five members; larger groups normally seed two peers.                                                                                                                                                                                                                | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                                                                                                                                                                                                                                           |
 | Group recovery                            | At most two active groups, each selecting three peers; coalesced wakes visit up to eight joined channels. Jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                                                                       | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                                                                                                                                                                                                                                                                 |
 | Group control fanout                      | At most four concurrent contacts.                                                                                                                                                                                                                                                         | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                                                                                                                                                                                                                                          |
+| Participant mailbox preparation           | Four history owners and two receive-only owners; 30-second meaningful-progress protection; 2 MiB repair-ID state per owner (at most 12 MiB).                                                                                                                                              | Receive-only work never prepares history. Busy or contended owners defer admission, while finished, revoked or stalled work remains reclaimable.                                                                                                                                                                                                                                                                                    |
 
-The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `node/opaque_relay/incremental.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `storage/database.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
 ### Idle mailbox work and rejected pages
 
@@ -2541,8 +2542,20 @@ source guard. Ordinary appends therefore cannot make the two consumers restart
 each other's graph work. Legacy future-cut changes retire those answers through
 the existing bounded cleanup owner. Cold preparation yields between bounded
 turns so other runtime work can progress.
-The node retains at most four scoped views, with at most 16 selected outgoing history
-IDs and 64 recent result hints per exchange. Bodies are fetched and wrapped
+The node retains at most four scoped history-view owners and two independent
+receive-only owners, with at most 16 selected outgoing history IDs and 64 recent
+result hints per exchange. Receive-only owners never acquire a history view;
+large outgoing history cannot consume their admission capacity. Each lane
+enforces its own bound and preserves busy ownership through cancellation.
+Admission prefers inactive completed
+or empty entries. An unfinished view retains its slot for 30 seconds after actual
+preparation or acknowledged upload progress; new scopes defer while all slots
+hold protected work. Acquiring or repeatedly validating a view does not renew
+this deadline. Privacy-generation changes and expired progress permit bounded
+reclamation; current authority is still revalidated before reuse and publication.
+Evicted owners retire after releasing the cache guard, so SQL cleanup does not
+run while global cache admission is locked. Contended entry locks defer that
+entry without blocking unrelated admission. Bodies are fetched and wrapped
 only for selected IDs without confirmed wrapper custody.
 Terminal export preparation rechecks selection and network authority without
 rewriting an unchanged export cursor. Direct framed export and incremental

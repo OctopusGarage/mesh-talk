@@ -32,6 +32,21 @@ pub(in crate::node) struct HistoryUpload {
     export_ready: Mutex<bool>,
 }
 
+impl HistoryUpload {
+    /// Runtime scheduling progress only; never authorization or custody evidence.
+    pub(in crate::node) fn preparation_progress(&self) -> (u8, bool, bool) {
+        let phase = self
+            .view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .progress_phase();
+        let initialized = *self.export_initialized.lock().expect("upload export lock");
+        let ready = *self.export_ready.lock().expect("upload export lock");
+        (phase, initialized, ready)
+    }
+}
+
 #[cfg(test)]
 pub(in crate::node) struct HistoryUploadPage {
     pub(in crate::node) events: Vec<Event>,

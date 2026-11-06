@@ -394,7 +394,6 @@
           },
           {
             "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. The existing recovery slot alternates competing external replication and missing sibling reports across message scan cycles, with independent peer rotation and no added exchange or timeout; authenticated read-only sibling queries never grant membership; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls. Direct certificate projection starts with a locally enqueued message and zero custody, then explicitly owns fresh serial authenticated sync/Have exchanges with both legacy holders inside its existing thirty-second preparation bound; typed protocol results and an exact positive Have must precede each canonical signed custody witness, which must commit before the cold sibling import and certificate-binding change. Explicit group sync installs the sibling's real message baseline while its account-document negotiation and custody key remain cold. A read-only observer does not drive an inbound-only fixture's missing recovery work. Custody and paired group-inventory fixture hosts, including both failed-initial-custody recovery scenarios, use independent two-worker reactors alongside synchronous observation; prepare hosts before observation, launch after the real failed send and empty custody checks, and join both owners while retaining the original eight-second History and repair assertions. Channel-specific signed metadata preparation uses serial authenticated requests before full-host startup. The independent Directory and durable custody scenarios retain real automatic propagation; global Optional/Wake readiness and helper-only controls are removed. Wake authentication, exact revision deduplication, local-edit notification and legacy periodic repair retain their dedicated real-protocol controls rather than a full-host self-test of the preparation helper. First failures plus admitted-work retirement survive setup panics.",
-
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -1060,7 +1059,6 @@
             "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
             "ancestor_preparation_obeys_caller_work_budget_across_wide_parents",
             "ancestor_disposable_query_crash_retires_incrementally",
-
             "ordinary_dm_receive_does_not_schedule_channel_projection",
             "ordinary_dm_receive_retires_legacy_channel_demand_without_rebuilding_order",
             "channel_receive_resumes_when_membership_arrives_after_nonchannel_rows",
@@ -1385,7 +1383,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
@@ -1513,6 +1511,10 @@
           },
           {
             "name": "Checked physical scalars and one known-main startup length comparison require no history-body scan; logical charges, free pages, SQL estimates, main/WAL file lengths and filesystem block release stay distinct. PASSIVE completion is outside the vacuum transaction, validates partial/no-WAL counters and has no 64-page engine-work cap.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Opt-in transaction work observations retain at most 64 static callers with bounded interval/overflow counts, contain no SQL values or private runtime identities, and never block database work or log under database/observer guards. Disabled observation allocates no collector; reads, rollback and commit failure retain their original transaction semantics. Logical work counters do not certify native disk throughput.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -2982,6 +2984,10 @@
           {
             "name": "Repeated exact custody requests reuse at most one exclusively owned connection-local prepared selection under its exact current stamp, denied state and view authority. Every answer retains fresh selected/durable/historical completion checks; cold/default views keep their leases through response sending, mismatches evict before preparation, and disconnect releases the selection under unchanged admission quotas.",
             "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
+          },
+          {
+            "name": "Four scoped upload slots preserve unfinished preparation across cancelled rounds. Two independent bounded receive-only owners never acquire history views and permit incoming processing under bulk saturation. New bulk scopes defer under productive saturation; completed or empty owners are preferred for eviction, and privacy-generation changes or 30 seconds without actual progress permit reclamation. Acquiring and validating do not renew progress; contended entries do not block unrelated admission. Evicted selection destruction occurs outside global cache admission.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]
       },

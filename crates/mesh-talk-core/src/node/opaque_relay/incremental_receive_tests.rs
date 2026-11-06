@@ -4,6 +4,250 @@ use crate::postoffice::{IndexedPostOffice, federation::IndexedRelayEndpoint};
 use crate::storage::profile::ProfileStorageLease;
 
 #[tokio::test]
+async fn incremental_unfinished_upload_survives_fifth_scope_pressure() {
+    use crate::transport::SecureChannel;
+    async fn connect(
+        node: &Node,
+        relay: &DeviceIdentity,
+        office: IndexedPostOffice,
+    ) -> (
+        SecureChannel<tokio::net::TcpStream>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let keys = relay.secret_bytes();
+        let endpoint = IndexedRelayEndpoint::new(office, None, None);
+        let task = tokio::spawn(async move {
+            let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+            let (socket, _) = listener.accept().await.unwrap();
+            let channel = SecureChannel::accept(socket, &identity).await.unwrap();
+            endpoint
+                .serve_connection_checked(channel, None)
+                .await
+                .unwrap();
+        });
+        let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let channel = SecureChannel::connect(socket, &node.identity, Some(&relay.public()))
+            .await
+            .unwrap();
+        (channel, task)
+    }
+    async fn join(task: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("relay owner did not close")
+            .unwrap();
+    }
+    Box::pin(tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let directory = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = crate::discovery::Announce::new_with_account(
+            &remote, &Account::generate(), "Remote", 47475);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(), DeviceIdentity::generate(), Account::generate(), &proof);
+        node.cached_peer_snapshot_async().await.unwrap();
+        node.set_post_office_permissions(true, true);
+        let conversation = super::super::conversation::dm_conversation_id(
+            &node.identity.public(), &remote.public());
+        let mut expected_inner = std::collections::BTreeSet::new();
+        for seq in 1..=128 {
+            let event = Event::new(
+                &node.identity, conversation, seq, vec![], seq, 0,
+                EventKind::Message, vec![7; 32],
+            );
+            expected_inner.insert(event.id);
+            node.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        let roots: Vec<_> = (0..5).map(|_| tempfile::tempdir().unwrap()).collect();
+        let relays: Vec<_> = roots.iter().map(|root| {
+            let relay = DeviceIdentity::generate();
+            let office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"), "pw", DeviceIdentity::generate(),
+            ).unwrap();
+            (relay, office)
+        }).collect();
+        // End each real round at the same bounded preparation boundary. Source
+        // and authority stay unchanged, unlike the invalidated-partial control.
+        for (relay, office) in relays.iter().take(4) {
+            let (mut channel, task) = connect(&node, relay, office.clone()).await;
+            let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+            let mut progress = OpaqueMailboxProgress::new(
+                &relay.public(), &remote.public(), Some(conversation), mailbox);
+            for _ in 0..2 {
+                assert!(!node.advance_opaque_mailbox(&mut channel, &mut progress).await.unwrap());
+            }
+            assert!(office.mailbox_delta_page(&progress.mailbox.id(), None, 128).unwrap().ids.is_empty());
+            drop(progress);
+            drop(channel);
+            join(task).await;
+        }
+        let database = node.storage.database();
+        let active_ids = || database.read(|c| {
+            let mut q = c.prepare("SELECT id FROM participant_sync_views WHERE retired=0 ORDER BY id")?;
+            Ok(q.query_map([], |r| r.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?)
+        }).unwrap();
+        let unfinished = active_ids();
+        assert_eq!(unfinished.len(), 4, "fixture must own four unfinished SQL selections");
+        // Observe actual selection creation, even if later cleanup deletes the
+        // original row. This connection-local fixture records no SQL payloads.
+        database.read(|c| {
+            c.execute_batch("CREATE TEMP TABLE observed_upload_creations(id BLOB PRIMARY KEY);
+                CREATE TEMP TRIGGER observe_upload_creation AFTER INSERT ON main.participant_sync_views
+                BEGIN INSERT INTO observed_upload_creations VALUES(NEW.id); END;")?;
+            Ok(())
+        }).unwrap();
+        let creations = || database.read(|c| Ok(c.query_row(
+            "SELECT count(*) FROM temp.observed_upload_creations", [], |r| r.get::<_, i64>(0))?)).unwrap();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let (relay, office) = &relays[4];
+        let (mut channel, task) = connect(&node, relay, office.clone()).await;
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(
+            &relay.public(), &remote.public(), Some(conversation), mailbox);
+        let admission = node.advance_opaque_mailbox(&mut channel, &mut progress).await;
+        drop(progress);
+        drop(channel);
+        join(task).await;
+        assert!(matches!(admission, Err(crate::node::session::SessionError::ResourceUnavailable)),
+            "fifth scope must defer rather than evict unchanged unfinished preparation: {admission:?}");
+        assert_eq!(active_ids(), unfinished, "pressure must preserve admitted SQL selection identities");
+        assert_eq!(creations(), 0, "pressure must not create replacement selections");
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes,
+            "deferred admission must not write retirement or replacement rows");
+        assert_eq!(database.successful_write_commits(), commits);
+
+        // Receiving is independent of the four unfinished history owners.
+        // A fresh authenticated consent echo exercises GET and real Decision
+        // processing without mutating those captured history/authority inputs.
+        let (relay, office) = &relays[4];
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let consent = super::super::file_consent::Decision {
+            file: ConversationId::new([219; 32]),
+            manifest: EventId::new([220; 32]),
+            sender: remote.public(),
+            recipient: node.identity.public(),
+            sender_account: proof.account_id(),
+            recipient_account: node.account_id(),
+            decision: crate::node::ReceiveDecision::Accepted,
+            completion: None,
+        }.event(&node.identity, 1).unwrap();
+        let outer = mailbox.wrap(&consent).unwrap();
+        let outer_id = outer.id;
+        crate::eventlog::sync::network::NetworkSyncStore::ingest(&mut office.clone(), outer).unwrap();
+        let reads = office.state.body_read_counts();
+        let receive_mailbox_id = mailbox.id();
+        let (mut channel, task) = connect(&node, relay, office.clone()).await;
+        let received = node.opaque_mailbox_round_confirmed(&mut channel, &remote.public(),
+            None, mailbox, None).await;
+        drop(channel);
+        join(task).await;
+        assert!(received.is_ok(), "protected uploads must not starve receive-only GET: {received:?}");
+        assert_ne!(office.state.body_read_counts(), reads, "receive-only round must perform actual GET");
+        assert!(node.consent_transport_seen(receive_mailbox_id, outer_id).unwrap(),
+            "receive-only GET must authenticate and process its Decision");
+        assert!(!node.log.lock().unwrap().has(&consent.id).unwrap(),
+            "transport classification must not manufacture retained custody");
+        assert_eq!(active_ids(), unfinished, "receive processing must preserve four history selection owners");
+        assert_eq!(creations(), 0, "receive-only admission must not construct HistoryUpload selections");
+
+        // Two receive owners may be active; a third must defer until cancellation
+        // releases a lane. No unbounded ephemeral fallback is acceptable.
+        let mut receiving = Vec::new();
+        for (relay, office) in relays.iter().take(2) {
+            let (mut channel, task) = connect(&node, relay, office.clone()).await;
+            let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+            let mut progress = OpaqueMailboxProgress::new(&relay.public(), &remote.public(), None, mailbox);
+            assert!(!node.advance_opaque_mailbox(&mut channel, &mut progress).await.unwrap());
+            receiving.push((progress, channel, task));
+        }
+        let (relay, office) = &relays[2];
+        let (mut channel, task) = connect(&node, relay, office.clone()).await;
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(&relay.public(), &remote.public(), None, mailbox);
+        let saturated = node.advance_opaque_mailbox(&mut channel, &mut progress).await;
+        drop(progress);
+        drop(channel);
+        join(task).await;
+        assert!(matches!(saturated, Err(crate::node::session::SessionError::ResourceUnavailable)),
+            "a third busy receive scope must respect the two-owner bound: {saturated:?}");
+        let (cancelled, channel, task) = receiving.pop().unwrap();
+        drop(cancelled);
+        drop(channel);
+        join(task).await;
+        let (mut channel, task) = connect(&node, relay, office.clone()).await;
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(&relay.public(), &remote.public(), None, mailbox);
+        assert!(!node.advance_opaque_mailbox(&mut channel, &mut progress).await.unwrap(),
+            "cancelled receive work must release admission capacity");
+        drop(progress);
+        drop(channel);
+        join(task).await;
+        for (progress, channel, task) in receiving {
+            drop(progress);
+            drop(channel);
+            join(task).await;
+        }
+        assert_eq!(active_ids(), unfinished);
+        assert_eq!(creations(), 0);
+
+        let (relay, office) = &relays[0];
+        let (mut channel, task) = connect(&node, relay, office.clone()).await;
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(
+            &relay.public(), &remote.public(), Some(conversation), mailbox);
+        assert!(!node.advance_opaque_mailbox(&mut channel, &mut progress).await.unwrap());
+        assert_eq!(active_ids(), unfinished, "reacquisition must resume the same SQL cursor owner");
+        let mut complete = false;
+        for _ in 0..4096 {
+            if node.advance_opaque_mailbox(&mut channel, &mut progress).await.unwrap() {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "admitted work must finish under bounded continuation");
+        assert_eq!(creations(), 0, "resuming unchanged work must not restart preparation");
+        let mailbox_id = progress.mailbox.id();
+        drop(progress);
+        drop(channel);
+        join(task).await;
+        assert_eq!(office.mailbox_delta_page(&mailbox_id, None, 256).unwrap().ids.len(), 128);
+
+        // A completed owner is now reclaimable; no fifth resident slot is needed.
+        let (relay, office) = &relays[4];
+        let (mut channel, task) = connect(&node, relay, office.clone()).await;
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mailbox_id = mailbox.id();
+        node.opaque_mailbox_round_confirmed(&mut channel, &remote.public(),
+            Some(conversation), mailbox, None).await.unwrap();
+        drop(channel);
+        join(task).await;
+        let page = office.mailbox_delta_page(&mailbox_id, None, 256).unwrap();
+        assert_eq!(page.ids.len(), 129,
+            "fifth relay must retain exactly 128 uploaded history wrappers plus its seeded consent wrapper");
+        assert!(page.ids.contains(&outer_id), "receiving must not remove the relay's seeded consent wrapper");
+        assert!(page.complete);
+        let decoder = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut actual_inner = std::collections::BTreeSet::new();
+        for ids in page.ids.chunks(32) {
+            for outer in office.mailbox_delta_events(&mailbox_id, &page.cursor, ids,
+                crate::transport::MAX_PLAINTEXT - 2048).unwrap()
+            {
+                actual_inner.insert(decoder.open(&outer).unwrap().id);
+            }
+        }
+        expected_inner.insert(consent.id);
+        assert_eq!(actual_inner, expected_inner,
+            "fifth relay must contain every exact history event and the seeded consent, without substitutes");
+        assert_eq!(creations(), 1, "only the newly admitted fifth scope needs a new SQL selection");
+        assert!((4..=6).contains(&node.opaque_upload_cache.lock().unwrap().observed_len()),
+            "four history owners and at most two receive owners must remain bounded");
+    })).await.expect("bounded upload admission failed to make progress");
+}
+
+#[tokio::test]
 async fn incremental_receive_exact_consent_mapping_survives_reopen() {
     assert_consent_mapping_survives_reopen(false).await;
 }

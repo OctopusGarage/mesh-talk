@@ -13,6 +13,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+mod observation;
+
 // Part of the on-disk key format; prevents SQLCipher raw-key syntax bypass.
 const PASSPHRASE_DOMAIN: &str = "mesh-talk:profile-indexed-database:v1:";
 const APPLICATION_ID: i64 = 0x4d544442;
@@ -176,6 +178,7 @@ pub(crate) struct EncryptedDatabase {
     connection: Mutex<Connection>,
     path: PathBuf,
     faulted: AtomicBool,
+    write_observer: Option<Mutex<observation::Observer>>,
     #[cfg(test)]
     successful_write_commits: std::sync::atomic::AtomicUsize,
 }
@@ -301,6 +304,7 @@ impl EncryptedDatabase {
             connection: Mutex::new(connection),
             path,
             faulted: AtomicBool::new(false),
+            write_observer: observation::from_env(),
             #[cfg(test)]
             successful_write_commits: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -475,6 +479,7 @@ impl EncryptedDatabase {
         self.successful_write_commits.load(Ordering::Relaxed)
     }
 
+    #[track_caller]
     pub(crate) fn transaction<T>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
@@ -493,6 +498,7 @@ impl EncryptedDatabase {
         )?;
         #[cfg(test)]
         let changes_before = tx.total_changes();
+        let observed_before = self.write_observer.as_ref().map(|_| tx.total_changes());
         match self.checked_operation(operation(&tx)) {
             Ok(value) => match tx.commit() {
                 Ok(()) => {
@@ -500,6 +506,21 @@ impl EncryptedDatabase {
                     if connection.total_changes() != changes_before {
                         self.successful_write_commits
                             .fetch_add(1, Ordering::Relaxed);
+                    }
+                    let changed_rows = observed_before
+                        .map(|before| connection.total_changes().saturating_sub(before));
+                    // Observation/logging never retain the durable connection owner.
+                    drop(connection);
+                    if let (Some(observer), Some(rows)) = (&self.write_observer, changed_rows)
+                        && let Some(snapshot) = observation::record(
+                            observer,
+                            observation::Site::caller(std::panic::Location::caller()),
+                            rows,
+                        )
+                    {
+                        // Existing native work-observation target remains visible
+                        // in release builds whose general log level is WARN.
+                        log::info!(target: "mesh_talk_core::node::node", "{snapshot}");
                     }
                     Ok(value)
                 }
@@ -729,6 +750,72 @@ mod tests {
         })
         .unwrap();
         assert_eq!(db.successful_write_commits(), before + 1);
+    }
+
+    #[test]
+    fn opt_in_write_observation_excludes_reads_rollbacks_and_private_values() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = create(&root.path().join("profile.db"));
+        db.write_observer = Some(Mutex::new(observation::Observer::new(
+            std::time::Instant::now(),
+        )));
+        db.transaction(|tx| {
+            let _: i64 = tx.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?;
+            Ok(())
+        })
+        .unwrap();
+        let failed: Result<(), LogError> = db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES (?1)", [SECRET])?;
+            Err(LogError::StaleCursor)
+        });
+        assert!(matches!(failed, Err(LogError::StaleCursor)));
+        assert_eq!(
+            db.write_observer.as_ref().unwrap().lock().unwrap().totals(),
+            (0, 0)
+        );
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES (?1)", [SECRET])?;
+            tx.execute("INSERT INTO messages VALUES (?1)", [PASSWORD])?;
+            Ok(())
+        })
+        .unwrap();
+        let mut observed = db.write_observer.as_ref().unwrap().lock().unwrap();
+        assert_eq!(observed.totals(), (1, 2));
+        let output = observed.snapshot_for_test().to_string();
+        assert!(output.contains("database.rs:"));
+        assert!(!output.contains(SECRET));
+        assert!(!output.contains(PASSWORD));
+    }
+
+    #[test]
+    fn contended_observation_does_not_block_a_durable_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = create(&root.path().join("profile.db"));
+        db.write_observer = Some(Mutex::new(observation::Observer::new(
+            std::time::Instant::now(),
+        )));
+        let db = std::sync::Arc::new(db);
+        let observer = db.write_observer.as_ref().unwrap().lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = db.clone();
+        let task = std::thread::spawn(move || {
+            let result = worker.transaction(|tx| {
+                tx.execute("INSERT INTO messages VALUES ('new')", [])?;
+                Ok(())
+            });
+            send.send(result.is_ok()).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(1));
+        drop(observer);
+        task.join().unwrap();
+        assert_eq!(result, Ok(true));
+        assert_eq!(
+            db.read(|c| Ok(
+                c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?
+            ))
+            .unwrap(),
+            2
+        );
     }
 
     #[test]

@@ -171,6 +171,11 @@ impl Preparation {
         true
     }
 
+    // A phase transition can make progress without charging a row or byte.
+    pub(super) fn progress_phase(&self) -> u8 {
+        self.phase as u8
+    }
+
     pub(super) fn ready(&self) -> bool {
         self.phase == Phase::Ready && !self.reload
     }

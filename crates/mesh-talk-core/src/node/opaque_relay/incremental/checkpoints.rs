@@ -790,12 +790,19 @@ mod tests {
         );
         node.set_post_office_permissions(false, true);
         let install = |key: &[u8]| {
-            let lease = node
-                .opaque_upload_cache
-                .lock()
-                .unwrap()
-                .acquire(key)
-                .unwrap();
+            let (lease, retired) = {
+                node.opaque_upload_cache
+                    .lock()
+                    .unwrap()
+                    .acquire(
+                        key,
+                        UploadScope::ReceiveOnly,
+                        node.privacy.generation.load(Ordering::Acquire),
+                        std::time::Instant::now(),
+                    )
+                    .unwrap()
+            };
+            drop(retired);
             let guard = node.acquire_profile_compaction_lease().unwrap();
             {
                 let mut entry = lease.0.lock().unwrap();
@@ -854,13 +861,19 @@ mod tests {
             std::time::Instant::now() - std::time::Duration::from_secs(1);
         drop(lease);
         for number in 0..MAX_VIEWS {
-            drop(
+            let acquired = {
                 node.opaque_upload_cache
                     .lock()
                     .unwrap()
-                    .acquire(&[number as u8])
-                    .unwrap(),
-            );
+                    .acquire(
+                        &[number as u8],
+                        UploadScope::ReceiveOnly,
+                        node.privacy.generation.load(Ordering::Acquire),
+                        std::time::Instant::now(),
+                    )
+                    .unwrap()
+            };
+            drop(acquired);
         }
         assert_eq!(
             count(),
@@ -872,7 +885,15 @@ mod tests {
     #[test]
     fn repair_runtime_id_budget_rejects_overflow_and_recovers_after_reclamation() {
         let mut cache = UploadCache::default();
-        let lease = cache.acquire(b"repair").unwrap();
+        let (lease, retired) = cache
+            .acquire(
+                b"repair",
+                UploadScope::ReceiveOnly,
+                0,
+                std::time::Instant::now(),
+            )
+            .unwrap();
+        drop(retired);
         let mut entry = lease.0.lock().unwrap();
         let id = |n: usize| {
             let mut bytes = [0; 32];
@@ -1140,7 +1161,7 @@ mod tests {
                 .put_checkpoint(&key, &signed)
                 .unwrap()
         );
-        node.opaque_upload_cache.lock().unwrap().entries.clear();
+        node.opaque_upload_cache.lock().unwrap().clear();
         let (mut channel, task) = connection(&node, office.clone(), &relay).await;
         let mut progress = OpaqueMailboxProgress::new(
             &relay.public(),
@@ -1390,7 +1411,7 @@ mod tests {
                     .unwrap()
                     .put_checkpoint(&key, &signed)
                     .unwrap();
-                node.opaque_upload_cache.lock().unwrap().entries.clear();
+                node.opaque_upload_cache.lock().unwrap().clear();
                 let (restored, _, custody) =
                     completed_round(&node, office.clone(), &relay, &remote, conversation).await;
                 assert!(
@@ -1437,7 +1458,7 @@ mod tests {
 
             // Force the compact-only path, then retire privacy authority while
             // its exact target selection yields between bounded turns.
-            node.opaque_upload_cache.lock().unwrap().entries.clear();
+            node.opaque_upload_cache.lock().unwrap().clear();
             let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
             let mut progress = OpaqueMailboxProgress::new(
                 &relay.public(),

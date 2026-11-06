@@ -1461,6 +1461,15 @@ queries. SQLCipher passphrases are domain-separated so user input cannot select
 the raw-key syntax. Production key derivation retains a 600,000-iteration
 password work factor; only existing test configurations reduce it.
 
+Opt-in transaction work diagnostics use `MESH_TALK_TRACE_WORK=1` and retain
+at most 64 static caller locations per connection in a 30-second observation
+window, with aggregate overflow counters. They record committed transaction and
+changed-row counts, never SQL text, bound values, account identities or runtime
+file paths. Observation uses nonblocking admission after the database guard is
+released; logging also occurs after the observation guard is released. Disabled
+owners retain no diagnostic collector. These logical work counts do not measure
+physical disk bytes; native filesystem tracing owns that acceptance evidence.
+
 Encrypted record logs retain a confirmation flag for their exact owned file
 incarnation and successful prefix. Confirmed prefixes make repeated sync calls
 read-only. Nondurable writes, failed write/rollback attempts and reopened existing files

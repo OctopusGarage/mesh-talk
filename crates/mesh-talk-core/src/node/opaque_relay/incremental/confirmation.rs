@@ -37,14 +37,23 @@ impl Node {
                 if entry.view.is_none() {
                     entry.view = Some(store.open_history_upload(&conversation)?);
                 }
-                let view = entry.view.as_ref().expect("confirmation view");
-                let step = store.prepare_history_upload_step(
-                    view,
-                    crate::eventlog::sync::network::PreparationBudget::default(),
-                )?;
+                let (step, advanced) = {
+                    let view = entry.view.as_ref().expect("confirmation view");
+                    let before = view.preparation_progress();
+                    let step = store.prepare_history_upload_step(
+                        view,
+                        crate::eventlog::sync::network::PreparationBudget::default(),
+                    )?;
+                    store.validate_history_upload(view)?;
+                    let advanced = step.rows != 0
+                        || step.edges != 0
+                        || step.bytes != 0
+                        || view.preparation_progress() != before;
+                    (step, advanced)
+                };
+                entry.note_progress(advanced, generation, std::time::Instant::now());
                 #[cfg(test)]
                 HISTORY_METADATA_ROWS.with(|rows| rows.set(rows.get() + step.rows));
-                store.validate_history_upload(view)?;
                 step.ready
             };
             if !self.upload_permitted(p, current)
