@@ -969,7 +969,10 @@ test("cheap execution admits only catalog static checks and propagates their fai
     calls.push([program, args]); return completed("");
   } });
   assert.deepEqual(calls.map(([, args]) => args[1]), ["format", "lint", "type"]);
-  assert(calls.every(([program, args]) => program === process.execPath && args[0].endsWith("scripts/validation/stage.mjs")));
+  for (const [program, args] of calls) {
+    assert.equal(program, process.execPath);
+    assert.equal(args[0], fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)));
+  }
   let attempted = 0;
   await assert.rejects(executeCheapChecks(selected, { log: () => {}, run: async () => {
     attempted++; return { ...completed("lint failure"), code: 7 };
