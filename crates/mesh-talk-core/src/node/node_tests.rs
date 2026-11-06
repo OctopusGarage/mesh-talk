@@ -6149,9 +6149,20 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
     )
     .unwrap();
 
-    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
-    tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
+    let mut peers = Vec::new();
+    for (node, listener) in [
+        (alice_node.clone(), alice_listener),
+        (bob_node.clone(), bob_listener),
+        (carol_node.clone(), carol_listener),
+    ] {
+        peers.push(
+            crate::node::test_support::IndependentPeerRuntime::start_multithreaded(node, listener)
+                .await,
+        );
+    }
+    for peer in &mut peers {
+        peer.launch();
+    }
 
     // Epoch 0: {Alice, Bob}. Alice sends; Bob receives.
     let channel = alice_node
@@ -6190,18 +6201,34 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
     .expect("channel stream open");
     assert_eq!(got0.text, b"epoch0 msg");
 
-    // Add Carol (epoch 1). She gets the MembershipChange via Alice's distribution.
+    // Observe real remote invitation readiness before the invitee can accept.
+    let mut carol_changes = carol_node.subscribe_channel_changes();
     alice_node
         .add_channel_member(channel, carol_pub)
         .await
         .unwrap();
-    assert!(
-        carol_node
-            .list_channels()
-            .unwrap()
-            .iter()
-            .any(|summary| summary.id == channel && summary.pending_invite)
-    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let pending = match carol_node.list_channels() {
+                Ok(channels) => channels
+                    .iter()
+                    .any(|row| row.id == channel && row.pending_invite),
+                Err(NodeError::Log(LogError::StaleCursor)) => false,
+                Err(error) => panic!("invitee channel observation failed: {error}"),
+            };
+            if pending {
+                break;
+            }
+            match carol_changes.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("invitee channel-change stream closed before invitation");
+                }
+            }
+        }
+    })
+    .await
+    .expect("the new member observes the real invitation before accepting");
     carol_node.accept_channel_invite(channel).await.unwrap();
 
     // Epoch 1: Alice sends. Her lazy SKD for epoch 1 is distributed before the seal,
@@ -6301,209 +6328,150 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
             .any(|member| member.user_id() == alice_uid)
     );
 
-    // The OWNER can remove Carol and it converges (legit owner-authored change).
-    alice_node
-        .remove_channel_member(channel, &carol_uid)
-        .await
-        .unwrap();
-    assert!(
-        !alice_node
-            .channel_members(channel)
-            .iter()
-            .any(|m| m.user_id() == carol_uid),
-        "the owner can remove a member",
-    );
-    alice_node
-        .transfer_channel_owner(channel, &bob_uid)
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while bob_node.channel_owner(channel) != bob_uid {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("recipient projects the transferred owner");
-    assert_eq!(bob_node.channel_owner(channel), bob_uid);
-    bob_node
-        .add_channel_member(channel, carol_node.identity.public())
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !alice_node
-            .channel_members(channel)
-            .iter()
-            .any(|member| member.user_id() == carol_uid)
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("recipient projects the new owner's membership change");
-    assert!(
-        alice_node
-            .channel_members(channel)
-            .iter()
-            .any(|member| member.user_id() == carol_uid)
-    );
-    bob_node
-        .transfer_channel_owner(channel, &alice_uid)
-        .await
-        .unwrap();
-    // Stop Alice's listener AND recovery loops. Replacing only Bob's dial route
-    // leaves Alice online: she can still pull Bob's leave from Bob or Carol.
-    alice_task.abort();
-    assert!(alice_task.await.unwrap_err().is_cancelled());
-    alice_node.sessions.clear();
-    tokio::time::timeout(Duration::from_secs(5), alice_node.runtime_work.drain())
-        .await
-        .expect("offline owner's accepted work must stop");
-    // The signed leave remains durable while its owner is actually offline.
-    bob_node.leave_channel(channel).await.unwrap();
-    assert!(
-        bob_node
-            .list_channels()
-            .unwrap()
-            .iter()
-            .any(|summary| summary.id == channel && summary.left)
-    );
-    assert!(
-        alice_node
-            .channel_members(channel)
-            .iter()
-            .any(|member| member.user_id() == bob_uid)
-    );
-    let departure_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-    let departure_started = std::time::Instant::now();
-    for (label, current, peer) in [
-        ("owner", &alice_node, bob_node.identity.public()),
-        ("departing", &bob_node, alice_node.identity.public()),
-    ] {
-        let trace = departure_trace.clone();
-        *current.account_client_test_hook.lock().unwrap() =
-            Some(Arc::new(move |observed, phase| {
-                if observed != peer
-                    || !(phase.starts_with("dial_") || phase.starts_with("channel_recovery_"))
-                {
-                    return;
-                }
-                let mut trace = trace.lock().unwrap();
-                if trace.len() == 64 {
-                    trace.pop_front();
-                }
-                trace.push_back((departure_started.elapsed().as_millis(), label, phase));
-            }));
+    // Ownership changes and offline departures have dedicated controls. This
+    // scenario ends after invitation, epoch delivery, isolation and permissions.
+    for node in [&alice_node, &bob_node, &carol_node] {
+        node.runtime_work.close();
     }
-    let resumed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let resumed_addr = resumed_listener.local_addr().unwrap();
-    let resumed_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(resumed_listener));
-    add_peer(
-        &bob_node.roster,
-        &alice_node.identity,
-        "Alice",
-        resumed_addr.port(),
-        &bob_uid,
+    for peer in peers {
+        peer.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_departure_retry_preserves_original_event_after_owner_reconnects() {
+    use crate::identity::account::Account;
+    use crate::node::test_support::IndependentPeerRuntime;
+    async fn serve(node: Arc<Node>, listener: TcpListener) -> IndependentPeerRuntime {
+        let mut peer =
+            IndependentPeerRuntime::start_multithreaded_with(node, listener, |node, listener| {
+                node.run_inbound_connections_for_test(listener)
+            })
+            .await;
+        peer.launch();
+        peer
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let owner = personal_message_node(
+        &dir.path().join("owner"),
+        DeviceIdentity::generate(),
+        Account::generate(),
     );
-    let departure = bob_node
+    let member = personal_message_node(
+        &dir.path().join("member"),
+        DeviceIdentity::generate(),
+        Account::generate(),
+    );
+    // No route exists during creation; one explicit real sync owns preparation.
+    let group = owner
+        .create_channel("departure retry", vec![member.identity.public()])
+        .await
+        .unwrap();
+    let owner_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let member_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let owner_addr = owner_listener.local_addr().unwrap();
+    let member_addr = member_listener.local_addr().unwrap();
+    for (observer, peer, address) in [
+        (&owner, &member, member_addr),
+        (&member, &owner, owner_addr),
+    ] {
+        add_peer(
+            &observer.roster,
+            &peer.identity,
+            "departure peer",
+            address.port(),
+            &observer.user_id(),
+        );
+    }
+    let owner_host = serve(owner.clone(), owner_listener).await;
+    let member_host = serve(member.clone(), member_listener).await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let public = member.identity.public();
+        let mut connection = owner.privacy_dial(member_addr, &public).await.unwrap();
+        let store = owner.sync_store(&public);
+        crate::node::session::request_round_paged(&mut connection, &store, group)
+            .await
+            .unwrap();
+        member.await_channel_metadata(group).await.unwrap();
+    })
+    .await
+    .expect("real signed membership must prepare before the owner goes offline");
+    assert_eq!(member.channel_owner(group), owner.user_id());
+    owner_host.pause().await;
+    member.leave_channel(group).await.unwrap();
+    let departure = member
         .log
         .lock()
         .unwrap()
-        .events(&channel)
+        .events(&group)
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == EventKind::ChannelLeave && event.author.user_id() == bob_uid)
-        .max_by_key(|event| (event.lamport, event.id))
-        .expect("the offline departure must retain its original signed event");
+        .find(|event| {
+            event.kind == EventKind::ChannelLeave && event.author.user_id() == member.user_id()
+        })
+        .expect("the offline leave retains its original signed event");
     assert!(
         departure.ciphertext.is_empty()
             && departure.verify_signature()
             && departure.verify_integrity()
     );
-    // A retry is a best-effort exchange, not a remote acceptance receipt. Keep
-    // using the real retry owner until both canonical and displayed membership
-    // reflect the original signed leave after Alice's listener restarts.
-    let mut retry_turns = 0usize;
-    let mut finished_retry_turns = 0usize;
-    // Background repair is a functional convergence check. Its real per-peer
-    // exchange permits 15 seconds; allow that exchange and one bounded retry.
-    let recovered = tokio::time::timeout(Duration::from_secs(30), async {
+    assert!(
+        owner
+            .log
+            .lock()
+            .unwrap()
+            .get(&departure.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        owner
+            .channel_members(group)
+            .iter()
+            .any(|peer| peer.user_id() == member.user_id())
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let resumed = serve(owner.clone(), listener).await;
+    add_peer(
+        &member.roster,
+        &owner.identity,
+        "reconnected owner",
+        address.port(),
+        &member.user_id(),
+    );
+    // A completed retry is not a remote receipt. Keep the original functional
+    // budget and require both canonical authorization and displayed membership.
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            retry_turns += 1;
-            bob_node.retry_channel_departures().await;
-            finished_retry_turns += 1;
-            let canonical = match alice_node.account_group_projection(channel) {
-                Ok(canonical) => canonical,
-                Err(crate::eventlog::LogError::StaleCursor) => {
-                    tokio::task::yield_now().await;
-                    continue;
+            member.retry_channel_departures().await;
+            match owner.account_group_projection(group) {
+                Ok(projection)
+                    if projection.is_authorized(departure.id).unwrap()
+                        && projection
+                            .state
+                            .as_ref()
+                            .is_some_and(|state| !state.is_member(&member.user_id()))
+                        && owner
+                            .channel_members(group)
+                            .iter()
+                            .all(|peer| peer.user_id() != member.user_id()) =>
+                {
+                    break;
                 }
+                Ok(_) | Err(LogError::StaleCursor) => {}
                 Err(error) => panic!("departure projection failed: {error}"),
-            };
-            if canonical.is_authorized(departure.id).unwrap()
-                && canonical
-                    .state
-                    .as_ref()
-                    .is_some_and(|state| !state.is_member(&bob_uid))
-                && alice_node
-                    .channel_members(channel)
-                    .iter()
-                    .all(|member| member.user_id() != bob_uid)
-            {
-                break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await;
-    for current in [&alice_node, &bob_node] {
-        *current.account_client_test_hook.lock().unwrap() = None;
-    }
-    if recovered.is_err() {
-        let phases = departure_trace
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let owner_capacity = alice_node.sessions.test_capacity_snapshot();
-        let departing_capacity = bob_node.sessions.test_capacity_snapshot();
-        let (raw_leave, parent_cut_present, canonical_leave, canonical_member) = {
-            let log = alice_node.log.lock().unwrap();
-            let projection = crate::node::channel::ChannelBook::project_membership(
-                channel,
-                &log.events(&channel).unwrap(),
-            );
-            (
-                log.get(&departure.id).unwrap().is_some(),
-                departure
-                    .parents
-                    .iter()
-                    .all(|parent| log.get(parent).unwrap().is_some()),
-                projection.authorized.contains(&departure.id),
-                projection
-                    .state
-                    .as_ref()
-                    .is_some_and(|state| state.is_member(&bob_uid)),
-            )
-        };
-        let retry_pending = bob_node
-            .channels
-            .lock()
-            .unwrap()
-            .pending_departures(&bob_uid)
-            .iter()
-            .any(|(id, _)| *id == channel);
-        let resumed_route = bob_node.routing_peer(&alice_uid).is_some_and(|peer| {
-            peer.addr == resumed_addr && peer.public == alice_node.identity.public()
-        });
-        panic!(
-            "offline departure retry failed: raw_leave={raw_leave} parent_cut_present={parent_cut_present} canonical_leave={canonical_leave} canonical_member={canonical_member} retry_pending={retry_pending} resumed_route={resumed_route} retry_turns={retry_turns} finished_retry_turns={finished_retry_turns} owner_capacity={owner_capacity:?} departing_capacity={departing_capacity:?} phases={phases:?}"
-        );
-    }
-    resumed_task.abort();
-    assert!(resumed_task.await.unwrap_err().is_cancelled());
-    alice_node.sessions.clear();
-    alice_node.runtime_work.drain().await;
+    .await
+    .expect("reconnection must deliver the original offline departure and its parent cut");
+    assert_eq!(
+        owner.log.lock().unwrap().get(&departure.id).unwrap(),
+        Some(departure)
+    );
+    tokio::join!(resumed.stop(), member_host.stop());
 }
 
 /// Forward-secrecy rig: Alice + Bob channel; Alice sends two messages; Bob reads

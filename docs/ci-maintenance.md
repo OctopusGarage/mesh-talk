@@ -166,6 +166,15 @@ runner minutes; more workers per machine can increase memory pressure, port
 exhaustion and test interference. Review the product of platform, architecture,
 browser, feature and shard dimensions before expanding a matrix.
 
+macOS browser coverage uses `macos-26-intel` for WebKit and Chromium, including
+extended scenarios. Its contract is the macOS/browser behavior; the ARM workspace
+and real native app/CLI checks retain `macos-latest`. Keep artifact labels and
+per-OS collectors aligned with the actual selected image. Avoid coupling browser
+admission to scarce ARM capacity needed by native builds. A job that never obtains
+a runner has no test result; preserve its infrastructure failure separately.
+UI coverage and reports require one complete attempt, so recover that workflow
+as a whole when an unallocated producer prevents its current-attempt evidence.
+
 Retain fresh process/context isolation, owned temporary directories, dynamically
 allocated ports where supported, and deterministic cleanup. Keep compile jobs,
 test workers and network/rendering resource limits explicit. Do not multiply

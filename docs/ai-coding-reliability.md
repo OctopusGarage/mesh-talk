@@ -127,8 +127,9 @@ child's retirement permit. The [inbound serving owner](../crates/mesh-talk-core/
 is exercised by the real maintenance-hold Noise regression in
 [account action tests](../crates/mesh-talk-core/src/node/account_group/tests/message_action_reference.rs),
 alongside stalled-handshake retirement and the single-worker negative control.
-Custom protocol fixtures must retain that same independent host and retirement
-owner. A source's synchronous durable append must not run on the receiver's
+Custom protocol and failed-initial-custody recovery fixtures must retain that
+same independent host and retirement owner, including separate reactors for both
+full-host participants and the synchronous history observer. A source's synchronous durable append must not run on the receiver's
 reactor. The growing-history regression in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
 holds the actual source writer until a receiver page imports, then measures
@@ -539,7 +540,10 @@ the explicit operation and consume its transport capacity. Reuse the bounded
 scenario drives requests directly; keep full-host recovery tests separate. The
 [certificate refresh fixture](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
 requires no prior sibling negotiation or imported custody key, then positively
-witnesses its real explicit negotiation and durable projection.
+witnesses its real explicit negotiation and durable projection. It commits its
+baseline without fanout and explicitly drives each real sync/Have exchange before
+observing custody. A passive observer cannot advance pending work when the
+fixture deliberately has no autonomous recovery owner.
 
 Keep fixture validation at the narrow boundary it owns. A full-host scenario
 whose only assertion concerns another test helper adds unrelated synchronization
@@ -548,7 +552,19 @@ and business scenarios instead: [Wake authentication and recovery controls](../c
 own linked identity, revision deduplication and notification-driven convergence;
 [custody scenarios](../crates/mesh-talk-core/src/node/account_documents/tests.rs)
 own authenticated preparation, held-domain independence and durable custody.
-Do not add a clock switch solely to rescue a helper's self-test.
+Custody accounting preparation uses serial real channel-document requests on
+inbound-only peers before autonomous workers start. A mutable whole-Optional or
+Wake-settled snapshot is not a prerequisite for that accounting contract: it can
+restart and create unrelated capacity contention while an observer waits. Remove
+the global observer and its helper-only full-host tests; retain signed channel
+floors, exact-peer capabilities and the real automatic custody/offline controls.
+Do not add a clock switch solely to rescue a helper's self-test. Keep a loopback
+business scenario focused on its named behavior. The member-invitation proof
+ends after epoch delivery, pre-join isolation and role rejection. Existing
+focused transfer/authority controls own ownership changes; the small two-node
+departure proof owns actual offline pause/relaunch and retry of the original
+signed event and parent cut. Do not chain unrelated controls and reconnection
+requirements onto an already complete invitation scenario.
 
 Keep a scheduling control's corpus at the protocol boundary it needs. The
 [queued-source controls](../crates/mesh-talk-core/src/node/account_group/tests/selected_queued_source_control_latency.rs)
