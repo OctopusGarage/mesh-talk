@@ -140,7 +140,7 @@ jobs:
   mutation-gate:
     name: mutants
     needs: [runner-contract, mutants]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

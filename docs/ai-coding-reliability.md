@@ -556,7 +556,12 @@ consumers after merging new callers or changing a shared helper. Static scans,
 passing unit tests and browser IPC mocks do not establish native OS behavior or
 the absence of every deadlock. Cancelled, interrupted, empty and unavailable runs
 remain distinct from passes. Completed individual commands do not turn a cancelled
-parent run into a passing full gate. Follow the
+parent run into a passing full gate. Verification collectors must release cancelled workflows while still rejecting
+upstream failures. An unconditional collector can retain a cancelled candidate
+and block its replacement in the concurrency group. The
+[CI maintenance guide](ci-maintenance.md) owns this scheduling rule;
+[merge-queue regressions](../scripts/diagnostics/merge-queue.test.mjs) exercise
+eligibility after failure and ineligibility after cancellation. Follow the
 [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
 and keep unresolved native, cross-platform and stress obligations explicit.
 

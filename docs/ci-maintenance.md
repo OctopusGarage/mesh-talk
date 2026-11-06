@@ -224,8 +224,12 @@ Workflow path filters and job conditions have different required-check behavior.
 GitHub warns that a workflow skipped by path or branch filtering can leave its
 required check pending; a skipped job can report success. A collector must still
 run when a dependency fails and explicitly reject failed, cancelled, missing or
-unexpectedly skipped required work. An `always()` condition schedules a collector;
-it does not validate its dependencies. See [required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+unexpectedly skipped required work. Use `!cancelled()` for verification collector jobs: it permits explicit rejection
+after upstream failure, but releases superseded workflows on cancellation. An
+unconditional `always()` collector can remain queued after its producers are
+cancelled and hold the concurrency group needed by the latest candidate. Keep
+necessary resource cleanup independent. The scheduling condition does not
+validate dependencies; the collector must still inspect every required result. See [required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
 
 Before adding docs-only path filters, inspect actual branch protection and the
 app-bound checks it requires, including external coverage and security checks.

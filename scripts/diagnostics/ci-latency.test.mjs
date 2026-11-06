@@ -172,7 +172,7 @@ test("the final UI gate rejects failed, cancelled or missing required jobs", () 
 test("the protected Full Linux UI regression name remains a fail-closed check", () => {
   const coverage = read("e2e-ui.yml").split("  coverage:\n")[1]?.split("  reports:\n")[0];
   assert.match(coverage, /name: Full Linux UI regression/);
-  assert.match(coverage, /if: always\(\)/);
+  assert.match(coverage, /if: \$\{\{ !cancelled\(\) \}\}/);
   for (const result of ["success", "failure", "cancelled", "skipped"]) {
     assert.equal(runGate("e2e-ui.yml", "Require all browser shards", { BASELINE: result, UNIT_COVERAGE: "success" }).status === 0, result === "success");
   }

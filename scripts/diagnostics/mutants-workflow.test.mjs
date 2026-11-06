@@ -9,7 +9,7 @@ const wrapper = readFileSync(new URL("../release/run-mutants.mjs", import.meta.u
 
 test("main pushes cannot cancel scheduled deep assurance", () => {
   assert.match(workflow, /group: mutants-\$\{\{ github.event_name \}\}-/);
-  assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \|\| github.event_name == 'push' \}\}/);
+  assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}/);
 });
 
 test("skipped deep jobs cannot impersonate the protected mutation gate", () => {
@@ -42,7 +42,7 @@ test("the protected mutation gate requires runner contracts and every selected d
   assert.ok(gate);
   assert.match(gate, /name: mutants\n/);
   assert.match(gate, /needs: \[runner-contract, mutants\]/);
-  assert.match(gate, /if: always\(\)/);
+  assert.match(gate, /if: \$\{\{ !cancelled\(\) \}\}/);
   const script = gate.split("        run: |\n")[1].replace(/^          /gm, "");
   for (const deep of ["true", "false"]) {
     for (const contracts of ["success", "failure", "cancelled", "skipped", ""]) {

@@ -48,7 +48,7 @@ jobs:
     # successful shards plus their complete current-source coverage upload.
     name: Full Linux UI regression
     needs: [linux, health]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -103,7 +103,7 @@ jobs:
   portable-evidence:
     name: Chromium portable evidence
     needs: [linux, desktop]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -148,7 +148,7 @@ jobs:
   reports:
     name: Merged UI reports
     needs: [linux, desktop]
-    if: always() && !cancelled()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -295,7 +295,7 @@ jobs:
           EVAL_SOURCE_SHA: ${{ github.sha }}
           EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
       - name: Preserve scenario reports screenshots and traces
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: portable-ui-${{ matrix.os }}-${{ matrix.browser }}-${{ github.run_attempt }}
@@ -399,7 +399,7 @@ jobs:
   ui-gate:
     name: Playwright UI E2E
     needs: [linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
       - name: Require complete selected UI matrices

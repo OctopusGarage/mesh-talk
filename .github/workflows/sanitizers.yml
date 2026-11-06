@@ -117,7 +117,7 @@ jobs:
           MESH_ASAN_SHARD: ${{ matrix.shard }}
         run: node scripts/ci/asan.mjs shard "$MESH_ASAN_SHARD" tmp/asan-evidence
       - name: Preserve ASan inventory and raw execution evidence
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
@@ -127,7 +127,7 @@ jobs:
   asan:
     name: ASan + LeakSanitizer (core)
     needs: [cohort, shards]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
       MESH_ASAN_TOOLCHAIN: ${{ needs.cohort.outputs.toolchain }}

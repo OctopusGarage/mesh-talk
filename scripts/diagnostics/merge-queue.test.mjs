@@ -42,3 +42,18 @@ for (const name of ["ci", "check-health", "e2e-backend", "e2e-ui", "sanitizers",
     assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}/);
   });
 }
+
+for (const [workflow, names] of [["sanitizers", ["asan"]], ["mutants", ["mutation-gate"]], ["e2e-ui", ["coverage", "portable-evidence", "ui-gate"]]]) {
+  test(`${workflow} collectors reject upstream failure without blocking cancelled runs`, () => {
+    const source = read(workflow);
+    for (const name of names) {
+      const job = source.split(`  ${name}:\n`)[1]?.split(/^  [a-z][\w-]*:\n/m)[0];
+      assert.ok(job, `${workflow}/${name}`);
+      const expression = job.match(/^    if: \$\{\{ (.+) \}\}$/m)?.[1];
+      assert.equal(expression, "!cancelled()", `${workflow}/${name} must remain eligible after upstream failure`);
+      const eligible = Function("cancelled", `return (${expression})`);
+      assert.equal(eligible(() => false), true);
+      assert.equal(eligible(() => true), false);
+    }
+  });
+}
