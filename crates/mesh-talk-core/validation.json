@@ -2495,7 +2495,7 @@
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks. Consent discovery coalesces replayable cursor checkpoints while preserving bounded fair rotation, restart progress and exact owner fencing.",
+            "name": "Four heavy authorization views retain and advance finite pending work; bounded job qualifications compare current nonmissing authority versions before unchanged retries, without replacing fresh offer, consent or exact custody checks. Consent discovery coalesces replayable cursor checkpoints while preserving bounded fair rotation, restart progress and exact owner fencing. Indexed group-custody publication has an explicit outgoing intent and local checkpoint namespace: it performs no incoming ID processing, pending repair or unrelated consent sweep, preserves old duplex receipt bytes, retains identity supplements and renewed custody after remote replacement, and consumes approvals/refusals from independent runtime drains. Legacy duplex fallback and global receive policy remain unchanged.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {

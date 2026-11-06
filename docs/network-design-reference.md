@@ -2557,6 +2557,18 @@ receive-only owners, with at most 16 selected outgoing history IDs and 64 recent
 result hints per exchange. Receive-only owners never acquire a history view;
 large outgoing history cannot consume their admission capacity. Each lane
 enforces its own bound and preserves busy ownership through cancellation.
+Group-file custody uses an explicit history-publication intent on indexed relays.
+It probes fresh remote incarnation/destructive metadata and publishes authorized
+history plus identity supplements, without processing incoming IDs, resuming inbox
+repairs or republishing unrelated receive-consent sweeps for every file. Its fresh
+remote probe still returns one bounded metadata page. The
+participant runtime's independent mailbox drains import approvals, refusals and
+completion; custody callbacks still check their latest durable state before
+sending. A purpose-specific local hint key uses the same bounded owner and
+receipt encoding, leaving old duplex cursors and pending repair records untouched.
+Remote reset still invalidates outgoing completion and requires actual renewed
+custody. Legacy negotiation retains its existing duplex behavior; global receive
+permissions and default duplex callers are unchanged.
 Admission prefers inactive completed
 or empty entries. An unfinished view retains its slot for 30 seconds after actual
 preparation or acknowledged upload progress; new scopes defer while all slots

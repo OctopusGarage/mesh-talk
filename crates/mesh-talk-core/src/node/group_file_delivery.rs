@@ -830,10 +830,10 @@ impl Node {
                                         let federated = RelayMailbox::is_federated_id(&mailbox_id);
                                         let bridge = self.bridge_generation.load(Ordering::SeqCst);
                                         let mut progress =
-                                            super::opaque_relay::OpaqueMailboxProgress::new(
+                                            super::opaque_relay::OpaqueMailboxProgress::new_history_publication(
                                                 &relay.public,
                                                 &job.recipient,
-                                                Some(job.file),
+                                                job.file,
                                                 mailbox,
                                             );
                                         let current = || {

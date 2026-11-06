@@ -411,6 +411,271 @@ async fn queued_fixture() -> QueuedFixture {
 }
 
 #[tokio::test]
+async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
+    use super::super::opaque_relay::incremental::RECEIVE_ENTRY_CALLS;
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    use crate::postoffice::{IndexedPostOffice, federation::IndexedRelayEndpoint};
+    use crate::storage::profile::ProfileStorageLease;
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    node.refill_group_file_delivery().unwrap();
+    let (key, job) = {
+        let mut jobs = node.group_file_delivery.jobs.lock().unwrap();
+        for job in jobs.values_mut() {
+            job.retry_after =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        }
+        let (key, job) = jobs.iter_mut().next().unwrap();
+        job.retry_after = None;
+        (*key, job.clone())
+    };
+    assert!(settle_job(node, &job));
+    let recipient = fixture
+        .peers
+        .iter()
+        .find(|peer| peer.public() == job.recipient)
+        .unwrap();
+    let proof = node.historical_author(&job.recipient.ed25519_pub).unwrap();
+    let relay = DeviceIdentity::generate();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let announce = Announce::new_post_office_with_account(
+        &relay,
+        &crate::identity::account::Account::generate(),
+        "Publish relay",
+        listener.local_addr().unwrap().port(),
+    );
+    assert!(announce.valid_presence());
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&announce, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let relay_root = tempfile::tempdir().unwrap();
+    let mut office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+        &relay_root.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    let mailbox = RelayMailbox::new(&node.identity, &job.recipient, &relay.public()).unwrap();
+    let historical = node.log.lock().unwrap().events(&fixture.channel).unwrap();
+    let mut seeded = 0;
+    let mut pending_outer = None;
+    for event in historical
+        .iter()
+        .filter(|event| event.kind == EventKind::Message)
+        .take(8)
+    {
+        let outer = mailbox.wrap(event).unwrap();
+        office.ingest(outer.clone()).unwrap();
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .remember(mailbox.id(), &[(outer.id, event.id)]);
+        pending_outer.get_or_insert(outer.id);
+        seeded += 1;
+    }
+    assert_eq!(seeded, 8);
+    let (old_receipt_key, old_receipt_bytes) = node.seed_duplex_receipt_pending_for_test(
+        &relay.public(),
+        &job.recipient,
+        fixture.file,
+        pending_outer.unwrap(),
+    );
+    let chunks = node
+        .files
+        .lock()
+        .unwrap()
+        .retention_for(fixture.file)
+        .unwrap()
+        .unwrap()
+        .chunks;
+    let final_chunk = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .authored_header(
+            &fixture.file,
+            Author::from_ed25519(node.identity.public().ed25519_pub),
+            u64::from(chunks),
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let final_event = node.log.lock().unwrap().get(&final_chunk).unwrap().unwrap();
+    let final_outer = mailbox.wrap(&final_event).unwrap().id;
+    let relay_store = Arc::new(Mutex::new(office.clone()));
+    let served_store = relay_store.clone();
+    let replacement_root = tempfile::tempdir().unwrap();
+    let (reset_server, mut reset_requests) =
+        tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let endpoint = IndexedRelayEndpoint::new(served_store.lock().unwrap().clone(), None, None);
+                    let relay = DeviceIdentity::from_secret_bytes(relay.secret_bytes().0, relay.secret_bytes().1);
+                    let announce = announce.clone();
+                    connections.spawn(async move {
+                        let channel = crate::transport::SecureChannel::accept_with_presence(
+                            stream, &relay, Some(&announce), |_| true,
+                        ).await.unwrap();
+                        endpoint.serve_connection_checked(channel, None).await.unwrap();
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+                reset = reset_requests.recv() => {
+                    let completed = reset.expect("reset owner closed before server retirement");
+                    connections.shutdown().await;
+                    let _ = completed.send(());
+                }
+            }
+        }
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
+        node.retry_group_file_delivery().await;
+        let publisher_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
+        let held_before_approval = office.durable_have(&mailbox.id(), &final_outer).unwrap();
+        let preserved_receipt = node
+            .opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_checkpoint(&old_receipt_key)
+            .unwrap()
+            == Some(old_receipt_bytes.clone());
+        // Replace the real relay store under the same authenticated endpoint.
+        // Closing its existing sockets ensures the next exchange reaches that
+        // replacement instead of an old pooled connection's retained store.
+        office = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(replacement_root.path()).unwrap(),
+            &replacement_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        *relay_store.lock().unwrap() = office.clone();
+        let (reset_done, reset_finished) = tokio::sync::oneshot::channel();
+        reset_server.send(reset_done).unwrap();
+        reset_finished.await.unwrap();
+        assert!(!office.durable_have(&mailbox.id(), &final_outer).unwrap());
+        RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
+        for _ in 0..2 {
+            node.group_file_delivery
+                .jobs
+                .lock()
+                .unwrap()
+                .get_mut(&key)
+                .unwrap()
+                .retry_after = None;
+            node.retry_group_file_delivery().await;
+            if office.durable_have(&mailbox.id(), &final_outer).unwrap() {
+                break;
+            }
+        }
+        let replacement_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
+        let restored_custody = office.durable_have(&mailbox.id(), &final_outer).unwrap();
+        let preserved_after_reset = node
+            .opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_checkpoint(&old_receipt_key)
+            .unwrap()
+            == Some(old_receipt_bytes.clone());
+        let declined = Decision {
+            file: fixture.file,
+            manifest: fixture.manifest,
+            sender: node.identity.public(),
+            recipient: job.recipient.clone(),
+            sender_account: Some(node.account_id()),
+            recipient_account: proof.account_id().unwrap(),
+            decision: ReceiveDecision::Declined,
+            completion: None,
+        }
+        .event(recipient, 1)
+        .unwrap();
+        office.ingest(mailbox.wrap(&declined).unwrap()).unwrap();
+        RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
+        node.drain_from_post_office().await;
+        let drain_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
+        let refused = !settle_job(node, &job);
+        if let Some(job) = node.group_file_delivery.jobs.lock().unwrap().get_mut(&key) {
+            job.retry_after = None;
+        }
+        node.retry_group_file_delivery().await;
+        let retired = !node
+            .group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .contains_key(&key);
+        (
+            publisher_reads,
+            held_before_approval,
+            drain_reads,
+            refused,
+            retired,
+            preserved_receipt,
+            replacement_reads,
+            restored_custody,
+            preserved_after_reset,
+        )
+    })
+    .await;
+    server.abort();
+    let _ = server.await;
+    let (
+        publisher_reads,
+        held,
+        drain_reads,
+        refused,
+        retired,
+        preserved_receipt,
+        replacement_reads,
+        restored_custody,
+        preserved_after_reset,
+    ) = result.unwrap();
+    assert!(
+        held,
+        "publication must obtain real final-chunk custody before approval"
+    );
+    assert!(
+        drain_reads > 0,
+        "the dedicated drain must still own real incoming work"
+    );
+    assert!(
+        refused && retired,
+        "a refusal imported by the drain must revoke and retire the outgoing job"
+    );
+    assert_eq!(
+        publisher_reads, 0,
+        "outgoing group-file custody scanned {publisher_reads} unrelated incoming mailbox IDs"
+    );
+    assert!(
+        preserved_receipt,
+        "publishing must preserve the old duplex Some(file) receipt byte for byte, including pending work and all receive bindings"
+    );
+    assert_eq!(
+        replacement_reads, 0,
+        "remote store replacement must not turn publication into incoming work"
+    );
+    assert!(
+        restored_custody,
+        "the replacement relay must actually regain the final chunk; an old completion proof is insufficient"
+    );
+    assert!(
+        preserved_after_reset,
+        "remote replacement must preserve the original duplex receipt byte for byte"
+    );
+}
+
+#[tokio::test]
 async fn group_file_queue_restarts_skip_queued_prefix_and_admit_all_five_recipients() {
     let fixture = queued_fixture().await;
     let node = &fixture.node;

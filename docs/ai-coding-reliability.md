@@ -228,6 +228,17 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 ## R05: Bounded work must also make progress
 
+Bound work across owners as well as inside a page. One physical mailbox must not
+be rescanned by every outgoing attachment merely because its export conversation
+differs. The [group publication regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+drives actual indexed custody and requires zero unrelated receive steps, unchanged
+old duplex receipt bytes, renewed custody after relay replacement, and refusal
+processing through the independent drain. Its history-publication intent retains
+identity supplements and fresh authority/remote checks under existing quotas;
+legacy duplex behavior remains separate. Prefer a purpose-specific local hint
+namespace over letting an outgoing worker rewrite incoming runtime or repair
+bindings in a shared envelope.
+
 **Failure pattern:** taking the first N entries every turn permanently excludes
 older pending work; failed items pin a cursor; unbounded retries flood a queue;
 or a completion signal arrives between checking a condition and registering a

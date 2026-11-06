@@ -183,6 +183,12 @@ impl SyncStore for OpaqueRoundStore<'_> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MailboxIntent {
+    Duplex,
+    HistoryPublication,
+}
+
 /// One mailbox projection retained only between complete protocol exchanges.
 /// Cancellation requires discarding this state together with its channel.
 /// Retains principal-bound IDs and a two-MiB wrapper cache. Outgoing pages are
@@ -190,6 +196,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
 /// wrapper is generated for its ID and again only when its upload page misses
 /// the bounded cache; ordinary streamed transfer therefore performs O(N) wraps.
 pub(in crate::node) struct OpaqueMailboxProgress {
+    intent: MailboxIntent,
     mailbox: RelayMailbox,
     recipient: PublicIdentity,
     relay: PublicIdentity,
@@ -216,6 +223,7 @@ impl OpaqueMailboxProgress {
         mailbox: RelayMailbox,
     ) -> Self {
         Self {
+            intent: MailboxIntent::Duplex,
             mailbox,
             recipient: recipient.clone(),
             relay: relay.clone(),
@@ -233,6 +241,19 @@ impl OpaqueMailboxProgress {
             incremental: incremental::Mode::default(),
             uninvited_channels: super::privacy_sync::UninvitedChannelStaging::new(relay),
         }
+    }
+
+    /// Publish one conversation without duplicating the dedicated inbox drain.
+    /// Legacy endpoints retain their existing duplex compatibility exchange.
+    pub(in crate::node) fn new_history_publication(
+        relay: &PublicIdentity,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        mailbox: RelayMailbox,
+    ) -> Self {
+        let mut progress = Self::new(relay, recipient, Some(conversation), mailbox);
+        progress.intent = MailboxIntent::HistoryPublication;
+        progress
     }
 
     pub(in crate::node) fn uploaded(&self) -> &[(EventId, EventId)] {
@@ -557,18 +578,25 @@ impl Node {
                     }
                 }
             }
-            if progress.consent_offers.is_none() {
-                progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
+            // Receive decisions are published by the shared duplex drain, not
+            // once again for every unrelated outgoing file. Keep identity
+            // supplements above so relay-only receivers can authenticate data.
+            if progress.intent == MailboxIntent::Duplex
+                || !matches!(progress.incremental, incremental::Mode::Active(_))
+            {
+                if progress.consent_offers.is_none() {
+                    progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
+                }
+                controls.extend(
+                    self.file_consent_controls(
+                        &progress.recipient,
+                        progress.consent_offers.as_deref().unwrap_or(&[]),
+                        false,
+                    )?
+                    .into_iter()
+                    .map(|event| (event.id, event)),
+                );
             }
-            controls.extend(
-                self.file_consent_controls(
-                    &progress.recipient,
-                    progress.consent_offers.as_deref().unwrap_or(&[]),
-                    false,
-                )?
-                .into_iter()
-                .map(|event| (event.id, event)),
-            );
         }
         Ok(controls)
     }

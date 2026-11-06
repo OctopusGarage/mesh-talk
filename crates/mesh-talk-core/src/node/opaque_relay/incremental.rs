@@ -25,6 +25,7 @@ const PAGE_BYTES: usize = crate::transport::MAX_PLAINTEXT - 2048;
 #[cfg(test)]
 thread_local! {
     pub(super) static HISTORY_METADATA_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(in crate::node) static RECEIVE_ENTRY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -403,15 +404,58 @@ fn state_mut(p: &mut OpaqueMailboxProgress) -> &mut State {
     }
 }
 fn cache_key(p: &OpaqueMailboxProgress) -> Result<Vec<u8>, session::SessionError> {
-    bincode::serialize(&(
+    let mut key = bincode::serialize(&(
         p.relay.clone(),
         p.recipient.clone(),
         p.mailbox.id(),
         p.conversation,
     ))
-    .map_err(|e| session::SessionError::Serialization(e.to_string()))
+    .map_err(|e| session::SessionError::Serialization(e.to_string()))?;
+    if p.intent == MailboxIntent::HistoryPublication {
+        // Local hint namespace only: leave every old duplex cursor, pending
+        // repair and runtime binding untouched. The wire mailbox is unchanged.
+        key.extend_from_slice(b"\0history-publication-v1");
+    }
+    Ok(key)
 }
 impl Node {
+    fn incremental_receive_allowed(&self, p: &OpaqueMailboxProgress) -> bool {
+        p.intent == MailboxIntent::Duplex && self.relay_receive_allowed(&p.relay)
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn seed_duplex_receipt_pending_for_test(
+        &self,
+        relay: &PublicIdentity,
+        recipient: &PublicIdentity,
+        conversation: ConversationId,
+        pending: EventId,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mailbox = RelayMailbox::new(&self.identity, recipient, relay).unwrap();
+        let progress = OpaqueMailboxProgress::new(relay, recipient, Some(conversation), mailbox);
+        let key = cache_key(&progress).unwrap();
+        let mut receipt = self
+            .load_mailbox_receipt(&key, progress.mailbox.id())
+            .unwrap();
+        receipt.pending = vec![pending];
+        let sealed = self
+            .seal_mailbox_hint(&key, bincode::serialize(&receipt).unwrap())
+            .unwrap();
+        assert!(
+            self.opaque_receive_cache
+                .lock()
+                .unwrap()
+                .put_checkpoint(&key, &sealed)
+                .unwrap()
+        );
+        assert!(
+            self.load_mailbox_receipt(&key, progress.mailbox.id())
+                .unwrap()
+                == receipt
+        );
+        (key, sealed)
+    }
+
     fn record_mailbox_result(&self, p: &mut OpaqueMailboxProgress, inner: EventId, outer: EventId) {
         if p.uploaded.len() >= MAX_RESULTS {
             p.uploaded.remove(0);
@@ -505,7 +549,9 @@ impl Node {
         id: EventId,
         retry: bool,
     ) -> Result<(), session::SessionError> {
-        if !self.relay_receive_allowed(&p.relay) {
+        #[cfg(test)]
+        RECEIVE_ENTRY_CALLS.with(|calls| calls.set(calls.get() + 1));
+        if !self.incremental_receive_allowed(p) {
             return Err(
                 LogError::AdmissionRejected("mailbox receive permission revoked".into()).into(),
             );
@@ -558,7 +604,7 @@ impl Node {
                 let events = mailbox::get(channel, p.mailbox.id(), &cursor, &[id]).await?;
                 // A policy change can arrive while the authenticated GET is in
                 // flight. Keep this ID queued without admitting its response.
-                if !self.relay_receive_allowed(&p.relay) {
+                if !self.incremental_receive_allowed(p) {
                     return Err(LogError::AdmissionRejected(
                         "mailbox receive permission revoked".into(),
                     )
@@ -583,7 +629,7 @@ impl Node {
                 }
             }
         }
-        if !self.relay_receive_allowed(&p.relay) {
+        if !self.incremental_receive_allowed(p) {
             return Err(
                 LogError::AdmissionRejected("mailbox receive permission revoked".into()).into(),
             );
@@ -818,7 +864,7 @@ impl Node {
                     continue;
                 };
                 attempted.insert(inner);
-                if !self.relay_receive_allowed(&p.relay) {
+                if !self.incremental_receive_allowed(p) {
                     return Err(LogError::AdmissionRejected(
                         "mailbox receive permission revoked".into(),
                     )
@@ -829,7 +875,7 @@ impl Node {
                 }
                 self.validate_mailbox_repair(p)?;
                 let wrappers = mailbox::get(channel, p.mailbox.id(), cursor, &[outer]).await?;
-                if !self.relay_receive_allowed(&p.relay) {
+                if !self.incremental_receive_allowed(p) {
                     return Err(LogError::AdmissionRejected(
                         "mailbox receive permission revoked".into(),
                     )
@@ -1082,7 +1128,7 @@ impl Node {
                 self.finish_mailbox_repair(p)?;
                 return Ok(());
             }
-            if !self.relay_receive_allowed(&p.relay) {
+            if !self.incremental_receive_allowed(p) {
                 let lease = state(p)
                     .lease
                     .0
@@ -1112,7 +1158,7 @@ impl Node {
                     .scan
                     .clone();
                 let page = mailbox::delta(channel, p.mailbox.id(), Some(&scan)).await?;
-                if !self.relay_receive_allowed(&p.relay) {
+                if !self.incremental_receive_allowed(p) {
                     return Err(LogError::AdmissionRejected(
                         "mailbox receive permission revoked".into(),
                     )
@@ -1149,7 +1195,7 @@ impl Node {
                 self.trace_account_client(&p.recipient, || "mailbox_repair_body_admitted".into());
                 let wrappers =
                     mailbox::get(channel, p.mailbox.id(), &page.cursor, &[outer]).await?;
-                if !self.relay_receive_allowed(&p.relay) {
+                if !self.incremental_receive_allowed(p) {
                     return Err(LogError::AdmissionRejected(
                         "mailbox receive permission revoked".into(),
                     )
@@ -1301,7 +1347,7 @@ impl Node {
         if !state(p).remote_done && state(p).page.is_none() {
             // A send-only probe observes the current finite upper, never an old
             // receive window; it does not advance the incoming receive cursor.
-            let prior = if self.relay_receive_allowed(&p.relay) {
+            let prior = if self.incremental_receive_allowed(p) {
                 state(p).receipt.cursor.as_ref()
             } else {
                 None
@@ -1353,48 +1399,54 @@ impl Node {
                 drop(lease);
                 state_mut(p).retry = None;
             }
-            if self.relay_receive_allowed(&p.relay) {
+            if self.incremental_receive_allowed(p) {
                 state_mut(p).incoming = page.ids.iter().copied().collect();
                 state_mut(p).page = Some(page);
             } else {
                 state_mut(p).remote_done = true;
             }
         }
-        if let Some(id) = state(p).incoming.front().copied() {
-            self.incremental_receive_one(channel, p, id, false).await?;
-            state_mut(p).incoming.pop_front();
-        }
-        if state(p).incoming.is_empty() && state(p).page.is_some() {
-            let page = state_mut(p).page.take().expect("active page");
-            state_mut(p).receipt.cursor = Some(page.cursor);
-            state_mut(p).remote_done = page.complete;
-            self.save_mailbox_receipt(p)?;
-        }
-        if state(p).remote_done {
-            if state(p).retry.is_none() {
-                let mut retry: VecDeque<_> = state(p).receipt.pending.iter().copied().collect();
-                if let Some(owner) = state(p)
-                    .receipt
-                    .repair
-                    .as_ref()
-                    .filter(|repair| repair.active)
-                    .map(|repair| repair.owner)
-                    && retry.contains(&owner)
-                {
-                    retry.retain(|id| *id != owner);
-                    retry.push_front(owner);
-                }
-                state_mut(p).retry = Some(retry);
+        if p.intent == MailboxIntent::Duplex {
+            if let Some(id) = state(p).incoming.front().copied() {
+                self.incremental_receive_one(channel, p, id, false).await?;
+                state_mut(p).incoming.pop_front();
             }
-            if let Some(id) = state(p).retry.as_ref().and_then(|ids| ids.front().copied()) {
-                self.incremental_receive_one(channel, p, id, true).await?;
-                state_mut(p)
-                    .retry
-                    .as_mut()
-                    .expect("active retry queue")
-                    .pop_front();
+            if state(p).incoming.is_empty() && state(p).page.is_some() {
+                let page = state_mut(p).page.take().expect("active page");
+                state_mut(p).receipt.cursor = Some(page.cursor);
+                state_mut(p).remote_done = page.complete;
                 self.save_mailbox_receipt(p)?;
             }
+            if state(p).remote_done {
+                if state(p).retry.is_none() {
+                    let mut retry: VecDeque<_> = state(p).receipt.pending.iter().copied().collect();
+                    if let Some(owner) = state(p)
+                        .receipt
+                        .repair
+                        .as_ref()
+                        .filter(|repair| repair.active)
+                        .map(|repair| repair.owner)
+                        && retry.contains(&owner)
+                    {
+                        retry.retain(|id| *id != owner);
+                        retry.push_front(owner);
+                    }
+                    state_mut(p).retry = Some(retry);
+                }
+                if let Some(id) = state(p).retry.as_ref().and_then(|ids| ids.front().copied()) {
+                    self.incremental_receive_one(channel, p, id, true).await?;
+                    state_mut(p)
+                        .retry
+                        .as_mut()
+                        .expect("active retry queue")
+                        .pop_front();
+                    self.save_mailbox_receipt(p)?;
+                }
+            }
+        } else {
+            // No incoming page or repair is admitted for this operation. This
+            // local queue is not evidence that any persisted pending ID arrived.
+            state_mut(p).retry = Some(VecDeque::new());
         }
         if state(p).controls.is_none() {
             let controls = self.opaque_controls(p, current)?;
