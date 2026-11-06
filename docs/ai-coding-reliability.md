@@ -403,6 +403,15 @@ variant does not qualify a separate fresh empty-corpus timing boundary. Keep the
 retired-child observer and interrupted-preparation controls rather than adding
 sleep, suppressing publication or accepting a stale child to rescue setup.
 
+A total functional browser-case watchdog is not a product performance SLA.
+Trace the failed interval: when several individually successful cold-load,
+rendering and interaction steps exhaust the total, use the existing generous
+functional allowance consistently across platforms. Preserve individual
+assertion bounds and explicit latency contracts. The real Playwright watchdog
+control derives the actual source configuration, accelerates only its duration,
+and requires timeout failure plus later-case execution with joined descendants;
+never disable the watchdog or use retries to qualify a failure.
+
 Independent message kinds should have independent browser scenarios. The
 [automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks
 text, sticker and file-card Awaiting/explicit projection separately; keep the

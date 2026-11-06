@@ -98,6 +98,17 @@ retains Host hits without a Core test cohort, and keeps both partition failures,
 report failures, timing pipelines and process termination controls. All platform
 assertions, doctests, zero retries and direct required checks remain unchanged.
 
+Treat a browser's total functional-case watchdog separately from its action,
+assertion and product deadlines. A cold page, several successful state checks and
+real interactions can cumulatively exhaust a short total bound without any one
+operation failing. Full Chromium uses its existing Windows/coverage safety margin
+on all hosts; portable execution retains its existing Windows allowance. Keep
+state-based readiness, all assertions, explicit latency limits, zero retries and
+first-failure traces. Do not erase a failed assertion by increasing its timeout.
+The real-runner control derives both configured watchdogs, accelerates only their
+duration, requires actual parked-case failure and subsequent-case execution, and
+verifies descendant retirement before removing its fixture.
+
 ## Reuse compatible work with verifiable inputs
 
 Prefer one producer for an expensive output when consumers need the same inputs
