@@ -534,14 +534,18 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   compare scalar summaries before creating SQL selections. Missing observations
   and changed stamps use ordinary bounded preparation; cached summaries never
   authorize export, custody or admission.
-  Repeated exact custody queries may reuse one ready authorization selection
-  owned by their authenticated connection. The captured exact history stamp,
+  Repeated exact custody queries and ordinary history Requests may reuse one
+  ready authorization selection owned exclusively by their authenticated connection. The captured exact history stamp,
   current denied state and ordinary view validation qualify reuse. Each query
   still checks selected membership, synchronizes retained storage when required,
   evaluates current historical completion and validates authority before replying;
   no Boolean custody answer is cached. Missing or changed qualification evicts
-  before cold preparation. Export/Have staging never shares this selection.
-  Checked-out views drop on failure/cancellation; the connection releases its
+  before cold preparation. Sequential ordinary Requests may also reuse completed
+  export preparation when the exact current source/authority stamp and remote
+  Have digest match. Fresh export cursors, bounded reads and authority checks
+  remain mandatory; mutable staging is never shared between concurrent requests.
+  Ordinary responses return the view only after Response and terminal Have sends
+  both succeed. Checked-out views drop on failure/cancellation; the connection releases its
   retained view through existing bounded selection retirement. Its one slot
   remains charged to the unchanged selection admission limit.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,

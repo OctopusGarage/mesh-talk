@@ -138,7 +138,7 @@ pub trait NetworkSyncStore {
         Ok(None)
     }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
-    /// Optionally transfer one already prepared, currently qualified custody-only
+    /// Optionally transfer one already prepared, currently qualified connection-owned
     /// view to the caller. It must not share mutable export/Have state with any
     /// other request. A miss uses ordinary bounded authorization preparation.
     fn take_custody_view(
@@ -147,9 +147,10 @@ pub trait NetworkSyncStore {
     ) -> Result<Option<Self::View>, LogError> {
         Ok(None)
     }
-    /// Return ownership after the exact custody query and final validation.
-    /// Return an uncached view so its lease stays alive through response sending.
-    /// This never caches the custody answer.
+    /// Return ownership after an exact custody query and final validation, or
+    /// after an ordinary Response and its terminal Have have both been sent.
+    /// Custody callers keep an uncached view alive through response sending.
+    /// This never caches the custody answer or a partially sent ordinary response.
     fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
         Ok(Some(view))
     }
@@ -166,6 +167,16 @@ pub trait NetworkSyncStore {
             ready: true,
             ..Default::default()
         })
+    }
+    /// Reuse completed export preparation only for this exclusively owned view
+    /// and the exact Have under fresh source and authority qualification. This
+    /// never skips bounded export reads or their current validation.
+    fn reusable_export(
+        &self,
+        _view: &Self::View,
+        _have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        Ok(false)
     }
     /// Have-dependent closure has the same bounded, cancellable work boundary.
     fn reset_export_step(

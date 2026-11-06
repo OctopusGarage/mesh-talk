@@ -873,6 +873,27 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             next,
         })
     }
+    fn reusable_export(
+        &self,
+        view: &Self::View,
+        have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        self.validate_view(view)?;
+        // Ordinary appends preserve a finite view's validity, but must prevent
+        // reuse of its completed answer on the next independent request.
+        if view.metadata_stamp.is_none()
+            || self.history_sync_stamp(&view.conversation)?.as_ref() != view.metadata_stamp.as_ref()
+            || !view
+                .preparation
+                .lock()
+                .expect("view preparation lock")
+                .ready()
+        {
+            return Ok(false);
+        }
+        let fingerprint = crate::eventlog::sync::fingerprint(have.iter().copied().collect());
+        Ok(*view.export_have.lock().expect("view export lock") == Some(fingerprint))
+    }
     fn reset_export_step(
         &self,
         view: &Self::View,

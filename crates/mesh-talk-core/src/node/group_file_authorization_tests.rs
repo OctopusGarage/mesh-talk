@@ -1042,6 +1042,7 @@ async fn group_file_live_exchange_rechecks_consent_membership_and_source() {
 }
 
 async fn assert_live_group_offer_checks(change: &'static str) {
+    use futures_util::FutureExt;
     let fixture = queued_fixture().await;
     let node = &fixture.node;
     node.refill_group_file_delivery().unwrap();
@@ -1089,8 +1090,15 @@ async fn assert_live_group_offer_checks(change: &'static str) {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay = DeviceIdentity::generate();
-    let announce =
-        Announce::new_post_office(&relay, "Cost relay", listener.local_addr().unwrap().port());
+    let relay_public = relay.public();
+    let relay_address = listener.local_addr().unwrap();
+    let announce = Announce::new_post_office_with_account(
+        &relay,
+        &crate::identity::account::Account::generate(),
+        "Cost relay",
+        listener.local_addr().unwrap().port(),
+    );
+    assert!(announce.valid_presence());
     node.roster
         .lock()
         .unwrap()
@@ -1105,9 +1113,58 @@ async fn assert_live_group_offer_checks(change: &'static str) {
         )
         .unwrap(),
     ));
-    let server = tokio::spawn(super::super::postbox::run_relay_accept_loop(
-        relay, listener, store,
-    ));
+    // Match the signed role advertised in the roster during authentication.
+    // Own this one connection directly so fixture teardown also joins its server.
+    store.lock().unwrap().require_opaque_envelopes();
+    let expected_client = node.identity.public();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        stream.set_nodelay(true).unwrap();
+        crate::transport::net::set_tcp_keepalive(&stream);
+        let channel = crate::transport::SecureChannel::accept_with_presence(
+            stream,
+            &relay,
+            Some(&announce),
+            |peer| peer.public_identity() == &expected_client,
+        )
+        .await
+        .unwrap();
+        super::super::postbox::serve_relay_connection(channel, store).await;
+    });
+    // Qualify real authentication and one complete framed mailbox exchange
+    // outside the measured custody attempt. Never prime the file payload itself.
+    let setup = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        std::panic::AssertUnwindSafe(async {
+            let mut channel = node.privacy_sync_dial(relay_address, &relay_public).await?;
+            let mailbox = RelayMailbox::new(&node.identity, &recipient, &relay_public).unwrap();
+            // A decoded legacy matched=false reply completes the framed capability
+            // probe. Malformed replies or transport failures still fail setup.
+            let incremental_supported =
+                super::super::session::mailbox::negotiate(&mut channel, mailbox.id()).await?;
+            assert!(
+                !incremental_supported,
+                "{change}: setup must preserve this fixture's legacy relay protocol"
+            );
+            node.recycle_sync_channel(channel);
+            let (channel, reused) = node
+                .privacy_sync_dial_with_reuse(relay_address, &relay_public)
+                .await?;
+            assert!(
+                reused,
+                "{change}: authenticated setup channel was not reusable"
+            );
+            node.recycle_sync_channel(channel);
+            Ok::<_, super::super::session::SessionError>(())
+        })
+        .catch_unwind(),
+    )
+    .await;
+    if !matches!(setup, Ok(Ok(Ok(())))) {
+        server.abort();
+        let _ = server.await;
+        panic!("{change}: authenticated relay setup failed before measured custody: {setup:?}");
+    }
     let observations = Arc::new(Mutex::new(Vec::new()));
     let recorded = observations.clone();
     let weak = Arc::downgrade(node);
@@ -1120,10 +1177,12 @@ async fn assert_live_group_offer_checks(change: &'static str) {
         let node = weak.upgrade().unwrap();
         let allowed = value == "true";
         let mut observations = recorded.lock().unwrap();
-        let first = observations.is_empty();
         observations.push((allowed, node.received_files.lock().unwrap().body_reads()));
+        // Check zero is pre-dial. Check one is the actual mailbox owner's
+        // callback after the authenticated channel has been checked out.
+        let admitted_mailbox = observations.len() == 2;
         drop(observations);
-        if first && allowed {
+        if admitted_mailbox && allowed {
             match change {
                 "consent" => {
                     node.accept_file_consent_event(&declined, &recipient)
@@ -1155,20 +1214,34 @@ async fn assert_live_group_offer_checks(change: &'static str) {
     }));
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        node.retry_group_file_delivery(),
+        std::panic::AssertUnwindSafe(node.retry_group_file_delivery()).catch_unwind(),
     )
     .await;
     *node.account_client_test_hook.lock().unwrap() = None;
     server.abort();
     let joined = server.await;
-    assert!(joined.is_err_and(|error| error.is_cancelled()));
-    result.expect("live group mailbox cost fixture watchdog");
+    if let Err(error) = joined {
+        assert!(
+            error.is_cancelled(),
+            "{change}: owned relay server failed: {error}"
+        );
+    }
+    result
+        .unwrap_or_else(|error| panic!("{change}: measured live group mailbox watchdog: {error}"))
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let observed = observations.lock().unwrap();
     assert!(
-        observed.len() >= 2,
-        "must observe multiple real current checks in one admitted attempt: {observed:?}"
+        observed.len() >= 3,
+        "{change}: must observe preflight and multiple post-authentication mailbox current checks: {observed:?}"
     );
-    assert!(observed[0].0, "first current check must be authorized");
+    assert!(
+        observed[0].0,
+        "{change}: preflight current check must be authorized"
+    );
+    assert!(
+        observed[1].0,
+        "{change}: admitted mailbox check must be authorized before mutation"
+    );
     if change == "unchanged" {
         assert!(observed.iter().all(|step| step.0));
         assert_eq!(
@@ -1178,7 +1251,7 @@ async fn assert_live_group_offer_checks(change: &'static str) {
         );
     } else {
         assert!(
-            observed.iter().skip(1).all(|step| !step.0),
+            observed.iter().skip(2).all(|step| !step.0),
             "{change} must revoke the next current check: {observed:?}"
         );
     }

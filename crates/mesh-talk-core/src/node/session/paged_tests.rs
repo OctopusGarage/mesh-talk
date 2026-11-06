@@ -5,6 +5,186 @@ use crate::identity::device::DeviceIdentity;
 use crate::storage::database::EncryptedDatabase;
 use std::sync::Arc;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
+    use crate::discovery::{Announce, DiscoveryVisibility};
+    use crate::identity::account::Account;
+    async fn request(
+        channel: &mut SecureChannel<tokio::net::TcpStream>,
+        conversation: ConversationId,
+        have: Vec<EventId>,
+    ) -> Vec<EventId> {
+        channel
+            .send(
+                &encode(&SyncWire::RequestV4(SyncRequest {
+                    conversation,
+                    have: Vec::new(),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        channel
+            .send(
+                &encode(&SyncWire::ReqHave(HaveChunk {
+                    conversation,
+                    ids: have,
+                    more: false,
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let SyncWire::Response(response) = decode(&channel.recv().await.unwrap()).unwrap() else {
+            panic!("ordinary request did not receive an ordinary response");
+        };
+        assert_eq!(response.conversation, conversation);
+        loop {
+            let SyncWire::RespHave(chunk) = decode(&channel.recv().await.unwrap()).unwrap() else {
+                panic!("ordinary response did not stream its complete Have set");
+            };
+            assert_eq!(chunk.conversation, conversation);
+            if !chunk.more {
+                break;
+            }
+        }
+        response.events.into_iter().map(|event| event.id).collect()
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let peer_account = Account::generate();
+    let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.configure_privacy(
+        directory.path(),
+        "pw",
+        &node.own_group_proof(),
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    node.privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .proofs
+        .record(&proof)
+        .unwrap();
+    node.set_allowed(&peer_account.account_id(), true)
+        .await
+        .unwrap();
+    node.set_invisible(true).await.unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+    let append = |seq| {
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            seq,
+            vec![],
+            seq,
+            0,
+            EventKind::Message,
+            vec![7; 256],
+        );
+        let id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        id
+    };
+    let first = append(1);
+    let counters = || {
+        (
+            node.storage
+                .database()
+                .read(|connection| Ok(connection.total_changes()))
+                .unwrap(),
+            node.storage.database().successful_write_commits(),
+        )
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = node.clone();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let channel = server.privacy_accept(stream).await.unwrap();
+        server.serve_connection(channel).await;
+    });
+    let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut channel = SecureChannel::connect_with_presence(
+        stream,
+        &peer,
+        Some(&node.identity.public()),
+        Some(&proof),
+    )
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for _ in 0..3 {
+            assert_eq!(request(&mut channel, conversation, vec![]).await, vec![first]);
+            // An authenticated next request fences completion of the preceding
+            // response, including selection retention or retirement after send.
+            assert!(request_durable_have(&mut channel, conversation, first).await.unwrap());
+        }
+        let warm = counters();
+        for _ in 0..3 {
+            assert_eq!(request(&mut channel, conversation, vec![]).await, vec![first]);
+            assert!(request_durable_have(&mut channel, conversation, first).await.unwrap());
+        }
+        let quiet = counters();
+        let tail = append(2);
+        let changed = request(&mut channel, conversation, vec![first]).await;
+        let different_have = request(&mut channel, conversation, vec![tail]).await;
+        node.set_allowed(&peer_account.account_id(), false).await.unwrap();
+        // Privacy revocation may retire the authenticated socket itself. Either
+        // closure or a freshly empty response must withhold the retained data.
+        let revoked = match channel.send(&encode(&SyncWire::RequestV4(SyncRequest {
+            conversation, have: Vec::new(),
+        })).unwrap()).await {
+            Err(_) => true,
+            Ok(()) => match channel.send(&encode(&SyncWire::ReqHave(HaveChunk {
+                conversation, ids: Vec::new(), more: false,
+            })).unwrap()).await {
+                Err(_) => true,
+                Ok(()) => match channel.recv().await {
+                    Err(_) => true,
+                    Ok(bytes) => matches!(decode(&bytes), Ok(SyncWire::Response(response)) if response.events.is_empty()),
+                },
+            },
+        };
+        (warm, quiet, tail, changed, different_have, revoked)
+    }).await;
+    drop(channel);
+    tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let (warm, quiet, tail, changed, different_have, revoked) = result.unwrap();
+    assert_eq!(
+        quiet, warm,
+        "repeated identical ordinary Requests must not commit selection or export mutations after warming"
+    );
+    assert_eq!(
+        changed,
+        vec![tail],
+        "new server data must invalidate the finite selection"
+    );
+    assert_eq!(
+        different_have,
+        vec![first],
+        "changed remote Have must select a fresh export"
+    );
+    assert!(
+        revoked,
+        "retained ordinary selection must not outlive current peer authority"
+    );
+}
+
 #[tokio::test]
 async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
     let preparation_started = std::time::Instant::now();
@@ -1590,4 +1770,246 @@ async fn paged_preparation_yields_unlocked_and_observes_concurrent_revocation() 
         "a competing task must run before preparation drains the source"
     );
     assert!(guard.preparation_rows.load(Ordering::Relaxed) > 0);
+}
+
+/// Inject only after the first complete application frame, never during Noise.
+struct TerminalHaveFaultIo {
+    inner: tokio::io::DuplexStream,
+    armed: Arc<AtomicBool>,
+    flushed: Arc<AtomicUsize>,
+    entered: Arc<AtomicBool>,
+    notification: Arc<tokio::sync::Notify>,
+    fail: bool,
+}
+impl tokio::io::AsyncRead for TerminalHaveFaultIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut self.inner), cx, buffer)
+    }
+}
+impl tokio::io::AsyncWrite for TerminalHaveFaultIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.armed.load(Ordering::SeqCst) && self.flushed.load(Ordering::SeqCst) > 0 {
+            self.entered.store(true, Ordering::SeqCst);
+            self.notification.notify_one();
+            return if self.fail {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "injected terminal Have send failure",
+                )))
+            } else {
+                // The test cancels the actual responder future at this boundary.
+                std::task::Poll::Pending
+            };
+        }
+        tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(&mut self.inner), cx, bytes)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let result = tokio::io::AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.inner), cx);
+        if matches!(result, std::task::Poll::Ready(Ok(()))) {
+            self.flushed.fetch_add(1, Ordering::SeqCst);
+        }
+        result
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut self.inner), cx)
+    }
+}
+
+#[tokio::test]
+async fn ordinary_request_terminal_send_failure_and_cancellation_release_retained_selection() {
+    use crate::discovery::{Announce, DiscoveryVisibility};
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    use crate::identity::account::Account;
+    use std::time::Duration;
+
+    for fail in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let peer_account = Account::generate();
+        let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.configure_privacy(
+            directory.path(),
+            "pw",
+            &node.own_group_proof(),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&proof)
+            .unwrap();
+        node.set_allowed(&peer_account.account_id(), true)
+            .await
+            .unwrap();
+        node.set_invisible(true).await.unwrap();
+        let conversation =
+            super::super::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        let event = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![7; 256],
+        );
+        let event_id = event.id;
+        node.log.lock().unwrap().append_durable(event).unwrap();
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let armed = Arc::new(AtomicBool::new(false));
+        let flushed = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicBool::new(false));
+        let notification = Arc::new(tokio::sync::Notify::new());
+        let io = TerminalHaveFaultIo {
+            inner: server_io,
+            armed: armed.clone(),
+            flushed: flushed.clone(),
+            entered: entered.clone(),
+            notification: notification.clone(),
+            fail,
+        };
+        let server_public = node.identity.public();
+        let (client, server) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                SecureChannel::connect(client_io, &peer, Some(&server_public)),
+                SecureChannel::accept(io, &node.identity),
+            )
+        })
+        .await
+        .unwrap();
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+        let store = node.serve_sync_store(&peer.public());
+        let request = encode(&SyncWire::RequestV4(SyncRequest {
+            conversation,
+            have: vec![],
+        }))
+        .unwrap();
+        let have = encode(&SyncWire::ReqHave(HaveChunk {
+            conversation,
+            ids: vec![],
+            more: false,
+        }))
+        .unwrap();
+        // Qualify a genuinely retained ordinary-response selection first. A cold
+        // metadata stamp is not evidence that the cache lifetime was exercised.
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (served, ()) = tokio::join!(serve_one_paged(&mut server, &store), async {
+                    client.send(&request).await.unwrap();
+                    client.send(&have).await.unwrap();
+                    assert!(matches!(
+                        decode(&client.recv().await.unwrap()).unwrap(),
+                        SyncWire::Response(_)
+                    ));
+                    assert!(matches!(
+                        decode(&client.recv().await.unwrap()).unwrap(),
+                        SyncWire::RespHave(HaveChunk { more: false, .. })
+                    ));
+                });
+                assert!(matches!(served.unwrap(), Served::Handled(c) if c == conversation));
+            })
+            .await
+            .unwrap();
+        }
+        let warm = NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation)
+            .unwrap();
+        assert!(
+            warm.is_some(),
+            "ordinary response did not establish the retained-view precondition"
+        );
+        let uncached =
+            NetworkSyncStore::retain_custody_view(&mut *store.lock().unwrap(), warm.unwrap())
+                .unwrap();
+        assert!(uncached.is_none());
+        flushed.store(0, Ordering::SeqCst);
+        armed.store(true, Ordering::SeqCst);
+        client.send(&request).await.unwrap();
+        client.send(&have).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            if fail {
+                assert!(serve_one_paged(&mut server, &store).await.is_err());
+            } else {
+                let mut serving = Box::pin(serve_one_paged(&mut server, &store));
+                tokio::select! {
+                    result = &mut serving => panic!("terminal send did not remain admitted: {result:?}"),
+                    _ = notification.notified() => {},
+                }
+                drop(serving);
+            }
+        }).await.unwrap();
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "actual terminal Have send was not admitted"
+        );
+        let SyncWire::Response(response) = decode(&client.recv().await.unwrap()).unwrap() else {
+            panic!("first ordinary Response frame was not completed");
+        };
+        assert_eq!(
+            response
+                .events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![event_id]
+        );
+        // Keep the store alive: dropping the whole connection here would mask
+        // premature retention of an incompletely framed responder selection.
+        let cached =
+            NetworkSyncStore::take_custody_view(&mut *store.lock().unwrap(), &conversation)
+                .unwrap();
+        assert!(
+            cached.is_none(),
+            "incomplete response retained its SQL selection"
+        );
+        let active: i64 = node
+            .storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM participant_sync_views WHERE retired=0",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            active, 0,
+            "failed/cancelled responder must release the owned selection while its store stays alive"
+        );
+        drop(server);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), client.recv())
+                .await
+                .unwrap()
+                .is_err(),
+            "partial response must not publish terminal Have"
+        );
+    }
 }

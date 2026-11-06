@@ -367,7 +367,29 @@ current qualification; recompute mutable answers and preserve durability and
 authority checks. The connection-owned custody regression in the
 [participant network adapter](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
 checks unchanged present/missing queries, unrelated and same-conversation appends,
-authority revocation and selection release on disconnect.
+authority revocation and selection release on disconnect. The ordinary Request
+regressions in the [paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+require unchanged warm requests to perform no SQL mutations or commits, while
+source appends, changed remote Have and revoked authority remain fresh. Reuse
+only completed export preparation under its exact Have and current source stamp;
+authority-only view validation deliberately permits a finite old source cutoff.
+Do not leave a completed lookup reconstruction classified as protected unfinished
+bulk work. Retire a selection created only for that finished lookup without
+marking bulk coverage complete or discarding a preexisting partial upload. The
+[six-scope mailbox regression](../crates/mesh-talk-core/src/node/opaque_relay/incremental_tests.rs)
+resolves a target outside the bounded recent-target memo across more scopes than
+heavy view slots; actual unfinished-upload pressure retains its separate oracle.
+Retain an ordinary responder view only after all response frames succeed, and
+test terminal-send failure and cancellation while its store remains alive.
+Measure repeated cryptographic work separately from writes: stable event IDs and
+zero SQL mutations do not prove quiet CPU. A positive intrinsic verification memo
+must bind the complete serialized input, including its signature, and be bounded
+independently of retained history. Read current ownership and selected data before
+lookup; recheck requested identities and mutable authorization on every use.
+The [indexed consent tests](../crates/mesh-talk-core/src/node/file_consent_store/indexed.rs)
+count real signature invocations and cover same-ID tampering, requested identity
+changes, fixed-capacity eviction and re-verification, alongside policy and owner
+recovery tests.
 Apply the same rule to empty selected federation slices: validate session,
 completion and resource authority, but do not rewrite unchanged session/global
 charges. The raw-selection regression in the
@@ -581,7 +603,19 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
-Keep a test's observation scope equal to its named requirement. The
+Keep a test's observation scope equal to its named requirement. A live
+transport-authorization fixture must first qualify actual authentication and
+clean channel reuse outside the measured attempt, then change authority only
+after the measured mailbox callback is admitted. A pre-dial check does not
+prove a live exchange or a missing post-revocation check. The
+[group file authorization fixture](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+retains its production and measured watchdogs, requires multiple post-authentication
+checks and labels the failing mutation and phase. If reuse is a setup requirement,
+a fixture must authenticate the same signed role it advertises in the roster;
+identity-only Noise cannot stand in for an authenticated post-office role.
+Keep the matching presence, actual pool checkout and owned server retirement
+rather than weakening the production role-binding check.
+The
 growing-history fixture measures exact durable originals during continuation,
 then checks the full public
 projection after retiring its continuously appending peers. Its projection read

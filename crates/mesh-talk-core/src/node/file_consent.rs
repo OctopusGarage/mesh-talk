@@ -12,6 +12,22 @@ const FRAME: &[u8] = b"mesh-talk-file-consent-control-v1\0\0\0\0\0\0\0\0";
 const MAX_BYTES: usize = 1024;
 
 #[cfg(test)]
+pub(super) mod signature_observations {
+    thread_local! {
+        static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub fn reset() {
+        CHECKS.with(|checks| checks.set(0));
+    }
+    pub fn count() -> usize {
+        CHECKS.with(std::cell::Cell::get)
+    }
+    pub(super) fn check() {
+        CHECKS.with(|checks| checks.set(checks.get() + 1));
+    }
+}
+
+#[cfg(test)]
 pub(super) mod offered_observations {
     thread_local! {
         static CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -80,7 +96,11 @@ impl Decision {
             || event.kind != EventKind::Message
             || !event.is_canonical()
             || !event.verify_integrity()
-            || !event.verify_signature()
+            || !{
+                #[cfg(test)]
+                signature_observations::check();
+                event.verify_signature()
+            }
         {
             return None;
         }
@@ -271,19 +291,18 @@ impl Node {
                     decision,
                     completion,
                 };
-                let previous = store.published_control(manifest)?;
+                let previous = store.published_control_with_decision(manifest)?;
                 let previous_generation = store.published_generation(manifest)?;
                 if decision == ReceiveDecision::Pending && previous.is_none() && !include_pending {
                     continue;
                 }
-                let event = if let Some(event) = previous.as_ref().filter(|event| {
-                    previous_generation == Some(generation)
-                        && Decision::open(event).as_ref() == Some(&payload)
+                let event = if let Some((event, _)) = previous.as_ref().filter(|(_, decision)| {
+                    previous_generation == Some(generation) && *decision == payload
                 }) {
                     event.clone()
                 } else {
                     let revision = previous
-                        .map_or(Some(1), |event| event.seq.checked_add(1))
+                        .map_or(Some(1), |(event, _)| event.seq.checked_add(1))
                         .ok_or_else(|| {
                             LogError::Serialization("file consent revision exhausted".into())
                         })?;

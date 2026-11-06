@@ -133,6 +133,18 @@ impl Node {
             // The caller still performs its exact durable-have exchange.
             return Ok(Some(outer));
         }
+        // A completed upload may have only its compact certificate left. A
+        // view reconstructed solely for this lookup is not unfinished upload
+        // work and must not pin the cache's protected preparation slots.
+        let confirmation_only = matches!(p.incremental, Mode::Active(_))
+            && state(p).history_done
+            && state(p)
+                .lease
+                .0
+                .lock()
+                .expect("upload entry")
+                .view
+                .is_none();
         self.prepare_opaque_confirmation(p, current).await?;
         let outer = self.opaque_confirmed_wrapper(p, inner)?;
         if !self.upload_permitted(p, current)
@@ -167,6 +179,10 @@ impl Node {
                 != generation
         {
             return Err(session::SessionError::UnexpectedMessage);
+        }
+        if confirmation_only {
+            let retired = state(p).lease.0.lock().expect("upload entry").view.take();
+            drop(retired);
         }
         Ok(outer)
     }

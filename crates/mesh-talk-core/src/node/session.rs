@@ -1144,7 +1144,12 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             // requester's streamed have, then answer.
             let have =
                 recv_have_owned(channel, true, conversation, backend.remote_have_budget()).await?;
-            let view = backend::open_prepared_view(backend, &conversation).await?;
+            // Transfer the existing connection-owned lease before awaiting.
+            // Incomplete responses drop it; only a fully sent response is retained.
+            let view = match backend.take_custody_view(&conversation)? {
+                Some(view) => view,
+                None => backend::open_prepared_view(backend, &conversation).await?,
+            };
             let metadata = backend.metadata(&view)?;
             have_count(metadata.count)?;
             let response = if unsupported_metadata(metadata, v2, v3, v4, v5) {
@@ -1173,6 +1178,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
                 }))?)
                 .await?;
             send_have_pages(channel, backend, &view, conversation, SyncWire::RespHave).await?;
+            drop(backend.retain_custody_view(view)?);
             Ok(Served::Handled(conversation))
         }
         SyncWire::Followup(followup)

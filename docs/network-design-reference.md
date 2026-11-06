@@ -1013,6 +1013,16 @@ hint. Every turn still validates the current source, account incarnation and
 durable cursor. A required checkpoint failure retains the previous progress;
 an independent writer's newer durable cursor supersedes the runtime hint.
 Decisions and completion remain freshly selected before sending signed controls.
+Repeated selected consent reads reuse intrinsic signature verification through a
+store-owned positive memo capped at 1,024 entries. Its key hashes the complete
+bounded serialized control, including its signature; a claimed event ID alone
+never qualifies reuse. Each read still checks the current source barrier and
+account owner, selects the actual SQL row, decodes it and compares the requested
+manifest and recipient. The memo retains only verified Decision values, not event
+bodies or authorization snapshots. Eviction requires verification again; failed
+verification is not cached, and successful owner recapture clears the memo.
+Outgoing reuse compares that verified value with the complete freshly computed
+Decision and current durable policy generation under their existing guards.
 
 This worker deposits the original sender's retained chunks. Existing authorized
 sharing-member recovery still works over reachable application routes; it does
@@ -2587,7 +2597,11 @@ Each qualification retains at most 64 exact selected inner/wrapper pairs. An
 explicit target can reuse that membership only after comparing the current local
 stamp and freshly authenticated remote binding and floors. A missing target
 lazily prepares the existing bounded selection before extending the same valid
-qualification. New local generations replace its pairs; they never inherit
+qualification. A view created solely for an already finished confirmation is
+retired after its validated lookup; it must not occupy a protected unfinished
+upload slot. Existing incomplete upload views and interrupted preparation keep
+their original progress protection. This retirement never claims bulk completion.
+New local generations replace its pairs; they never inherit
 membership from an older selection. Every custody check still requires fresh
 exact remote evidence. Reading an unchanged pair does not rewrite its checkpoint.
 Older signed checkpoints preserve incoming cursor and pending retry evidence;

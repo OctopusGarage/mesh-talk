@@ -716,7 +716,9 @@ async fn counted_scope_exchange(
     let uploaded = node
         .opaque_mailbox_round_confirmed(&mut channel, peer, Some(conversation), mailbox, confirm)
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!("counted scope exchange failed: federated={federated} confirm={confirm:?} conversation={conversation:?} error={error:?}")
+        });
     if let Some(inner) = confirm {
         for (_, outer) in uploaded.iter().filter(|(id, _)| *id == inner) {
             assert!(
@@ -745,6 +747,7 @@ async fn counted_scope_exchange(
 #[tokio::test]
 async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet() {
     for count in [32, 128] {
+        eprintln!("six-scope phase=prepare count={count}");
         let directory = tempfile::tempdir().unwrap();
         let remote = DeviceIdentity::generate();
         let proof = crate::discovery::Announce::new_with_account(
@@ -903,6 +906,7 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
             .unwrap()
             .id;
         let (relay, office) = &relays[0];
+        eprintln!("six-scope phase=first-old-target-confirmation count={count}");
         let known = counted_scope_exchange(
             &node,
             office.clone(),
@@ -927,8 +931,11 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
         );
         // The first target resolution may reconstruct its selected view. Once
         // qualified, the SAME old target must survive six-scope view rotation.
-        for (relay, office) in &relays {
+        for (scope_relay, (relay, office)) in relays.iter().enumerate() {
             for federated in [false, true] {
+                eprintln!(
+                    "six-scope phase=qualified-old-target-rotation count={count} relay={scope_relay} federated={federated}"
+                );
                 let observed = counted_scope_exchange(
                     &node,
                     office.clone(),

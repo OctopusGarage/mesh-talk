@@ -40,6 +40,13 @@ pub(super) trait SessionBackend {
             ..Default::default()
         })
     }
+    fn reusable_export(
+        &self,
+        _view: &Self::View,
+        _have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        Ok(false)
+    }
     fn reset_export_step(
         &self,
         view: &Self::View,
@@ -370,6 +377,16 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .expect("store mutex not poisoned")
             .prepare_view_step(v, budget)
     }
+    fn reusable_export(
+        &self,
+        view: &Self::View,
+        have: &HashSet<EventId>,
+    ) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .reusable_export(view, have)
+    }
     fn reset_export_step(
         &self,
         view: &Self::View,
@@ -693,35 +710,37 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
     have: &HashSet<EventId>,
     max_frames: usize,
 ) -> Result<Vec<SyncFollowup>, SessionError> {
-    loop {
-        if backend
-            .reset_export_step(view, PreparationBudget::default())?
-            .ready
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
-    for id in have {
-        have_batch.push(*id);
-        if have_batch.len() == PreparationBudget::default().rows {
-            backend.stage_export_have(view, &have_batch)?;
-            have_batch.clear();
+    if !backend.reusable_export(view, have)? {
+        loop {
+            if backend
+                .reset_export_step(view, PreparationBudget::default())?
+                .ready
+            {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    }
-    if !have_batch.is_empty() {
-        backend.stage_export_have(view, &have_batch)?;
-    }
-    loop {
-        if backend
-            .prepare_export_step(view, have, PreparationBudget::default())?
-            .ready
-        {
-            break;
+        let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
+        for id in have {
+            have_batch.push(*id);
+            if have_batch.len() == PreparationBudget::default().rows {
+                backend.stage_export_have(view, &have_batch)?;
+                have_batch.clear();
+                tokio::task::yield_now().await;
+            }
         }
-        tokio::task::yield_now().await;
+        if !have_batch.is_empty() {
+            backend.stage_export_have(view, &have_batch)?;
+        }
+        loop {
+            if backend
+                .prepare_export_step(view, have, PreparationBudget::default())?
+                .ready
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
     }
     let frame_budget = event_frame_budget(conversation)?;
     let mut frames = Vec::new();

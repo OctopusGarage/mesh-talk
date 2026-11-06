@@ -20,8 +20,10 @@ use crate::{
 };
 use bincode::Options;
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -139,25 +141,6 @@ fn body(event: &Event) -> Result<Vec<u8>, LogError> {
     }
     bincode::serialize(event).map_err(|e| LogError::Serialization(e.to_string()))
 }
-fn decode(body: &[u8], manifest: EventId, recipient: Option<&[u8; 32]>) -> Result<Event, LogError> {
-    if body.len() > CONTROL_BYTES {
-        return Err(invalid("oversized indexed file consent"));
-    }
-    let event: Event = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(CONTROL_BYTES as u64)
-        .reject_trailing_bytes()
-        .deserialize(body)
-        .map_err(|_| invalid("invalid indexed file consent"))?;
-    let decision =
-        Decision::open(&event).ok_or_else(|| invalid("invalid signed indexed file consent"))?;
-    if decision.manifest != manifest
-        || recipient.is_some_and(|key| key != &decision.recipient.ed25519_pub)
-    {
-        return Err(invalid("indexed file consent identity changed"));
-    }
-    Ok(event)
-}
 fn apply_on(c: &Connection, account: &str, record: Record, limit: usize) -> Result<(), LogError> {
     initialize_on(c, account)?;
     let (event, published, direct) = match record {
@@ -215,15 +198,65 @@ fn apply_on(c: &Connection, account: &str, record: Record, limit: usize) -> Resu
 // Older binaries miss this marker and safely publish a new runtime-bound control.
 const DURABLE_POLICY_MARKER: &[u8; 16] = b"MTConsentPolicy1";
 
+// Intrinsic signature facts only; current SQL ownership, selection and policy
+// remain authoritative. No Event bodies or authorization snapshots are retained.
+const VERIFIED_CONTROL_LIMIT: usize = 1024;
+#[derive(Default)]
+struct VerifiedControls {
+    decisions: HashMap<[u8; 32], Decision>,
+    order: VecDeque<[u8; 32]>,
+}
 pub(crate) struct IndexedFileConsentStore {
     source: PublishedHistorySource,
     owner: Option<ParticipantEventOwner>,
     limit: usize,
     offer_scans: HashMap<[u8; 32], OfferScanProgress>,
+    verified_controls: RefCell<VerifiedControls>,
     #[cfg(test)]
     fail_writes: bool,
 }
 impl IndexedFileConsentStore {
+    fn decode_control(
+        &self,
+        body: &[u8],
+        manifest: EventId,
+        recipient: Option<&[u8; 32]>,
+    ) -> Result<(Event, Decision), LogError> {
+        if body.len() > CONTROL_BYTES {
+            return Err(invalid("oversized indexed file consent"));
+        }
+        let event: Event = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(CONTROL_BYTES as u64)
+            .reject_trailing_bytes()
+            .deserialize(body)
+            .map_err(|_| invalid("invalid indexed file consent"))?;
+        // Bind every byte, including signature and claimed ID. A claimed ID by
+        // itself cannot qualify another unverified representation of an event.
+        let key: [u8; 32] = Sha256::digest(body).into();
+        let cached = self.verified_controls.borrow().decisions.get(&key).cloned();
+        let decision = match cached.as_ref() {
+            Some(decision) => decision.clone(),
+            None => Decision::open(&event)
+                .ok_or_else(|| invalid("invalid signed indexed file consent"))?,
+        };
+        if decision.manifest != manifest
+            || recipient.is_some_and(|key| key != &decision.recipient.ed25519_pub)
+        {
+            return Err(invalid("indexed file consent identity changed"));
+        }
+        if cached.is_none() {
+            let mut verified = self.verified_controls.borrow_mut();
+            if verified.decisions.len() == VERIFIED_CONTROL_LIMIT
+                && let Some(oldest) = verified.order.pop_front()
+            {
+                verified.decisions.remove(&oldest);
+            }
+            verified.decisions.insert(key, decision.clone());
+            verified.order.push_back(key);
+        }
+        Ok((event, decision))
+    }
     fn durable_offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
         self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
@@ -395,6 +428,7 @@ impl IndexedFileConsentStore {
             owner: None,
             limit,
             offer_scans: HashMap::new(),
+            verified_controls: RefCell::default(),
             #[cfg(test)]
             fail_writes: false,
         };
@@ -416,6 +450,7 @@ impl IndexedFileConsentStore {
     pub(crate) fn recapture(&mut self) -> Result<(), LogError> {
         self.capture(false)?;
         self.offer_scans.clear();
+        *self.verified_controls.get_mut() = VerifiedControls::default();
         Ok(())
     }
     fn check_on<'a>(&'a self, c: &Connection) -> Result<&'a ParticipantEventOwner, LogError> {
@@ -437,11 +472,21 @@ impl IndexedFileConsentStore {
         self.check_write_failure()?;
         self.source.check_write()
     }
+    #[cfg(test)]
     pub(crate) fn published_control(&self, id: EventId) -> Result<Option<Event>, LogError> {
+        Ok(self
+            .published_control_with_decision(id)?
+            .map(|(event, _)| event))
+    }
+    pub(crate) fn published_control_with_decision(
+        &self,
+        id: EventId,
+    ) -> Result<Option<(Event, Decision)>, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c|{
             let owner=self.check_on(c)?;
             let bytes:Option<Vec<u8>>=c.query_row("SELECT CASE WHEN length(body)<=2048 THEN body ELSE NULL END FROM file_consent_published WHERE account=?1 AND manifest=?2",params![owner.namespace(),id.as_bytes().as_slice()],|r|r.get(0)).optional()?;
-            bytes.map(|bytes|decode(&bytes,id,None)).transpose()
+            bytes.map(|bytes|self.decode_control(&bytes,id,None)).transpose()
         })
     }
     pub(crate) fn published_generation(&self, id: EventId) -> Result<Option<u64>, LogError> {
@@ -500,6 +545,7 @@ impl IndexedFileConsentStore {
         })
     }
     fn received_on(
+        &self,
         c: &Connection,
         account: &str,
         id: EventId,
@@ -507,14 +553,18 @@ impl IndexedFileConsentStore {
     ) -> Result<Option<Event>, LogError> {
         let bytes:Option<Vec<u8>>=c.query_row("SELECT CASE WHEN length(body)<=2048 THEN body ELSE NULL END FROM file_consent_received WHERE account=?1 AND manifest=?2 AND recipient=?3",params![account,id.as_bytes().as_slice(),recipient.as_slice()],|r|r.get(0)).optional()?;
         bytes
-            .map(|bytes| decode(&bytes, id, Some(recipient)))
+            .map(|bytes| {
+                self.decode_control(&bytes, id, Some(recipient))
+                    .map(|(event, _)| event)
+            })
             .transpose()
     }
     pub(crate) fn received_control(&self, id: EventId) -> Result<Option<Event>, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
             let account = self.check_on(c)?.namespace();
             match Self::unique_recipient_on(c, &account, id)? {
-                Some(recipient) => Self::received_on(c, &account, id, &recipient),
+                Some(recipient) => self.received_on(c, &account, id, &recipient),
                 None => Ok(None),
             }
         })
@@ -524,8 +574,9 @@ impl IndexedFileConsentStore {
         id: EventId,
         recipient: &PublicIdentity,
     ) -> Result<Option<Event>, LogError> {
+        self.source.check_barrier()?;
         self.source.profile().database().read(|c| {
-            Self::received_on(
+            self.received_on(
                 c,
                 &self.check_on(c)?.namespace(),
                 id,
@@ -670,7 +721,7 @@ impl IndexedFileConsentStore {
                 let id:Vec<u8>=row.get(0)?;
                 let key:Vec<u8>=row.get(1)?;
                 let body:Vec<u8>=row.get(2)?;
-                events.push(decode(&body,EventId::new(id.try_into().map_err(|_|invalid("invalid consent manifest"))?),Some(&key.try_into().map_err(|_|invalid("invalid consent recipient"))?))?);
+                events.push(self.decode_control(&body,EventId::new(id.try_into().map_err(|_|invalid("invalid consent manifest"))?),Some(&key.try_into().map_err(|_|invalid("invalid consent recipient"))?))?.0);
             }
             Ok(events)
         }).unwrap().into_iter()
@@ -986,12 +1037,18 @@ mod tests {
                 .unwrap();
             let commits = database.successful_write_commits();
             crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+            crate::node::file_consent::signature_observations::reset();
             for _ in 0..3 {
                 assert!(
                     node.file_consent_events(&sender.public()).unwrap() == expected,
                     "quiet polling must refresh the same signed consent controls"
                 );
             }
+            assert_eq!(
+                crate::node::file_consent::signature_observations::count(),
+                0,
+                "unchanged quiet consent polling must reuse intrinsic verification while refreshing current authority"
+            );
             assert_eq!(
                 database
                     .read(|connection| Ok(connection.total_changes()))
@@ -1005,6 +1062,51 @@ mod tests {
                 0,
                 "quiet consent discovery must not synchronize the parent directory"
             );
+            let valid = &expected[0];
+            let manifest = Decision::open(valid).unwrap().manifest;
+            let mut bad_signature = valid.clone();
+            bad_signature.sig[0] ^= 1;
+            let mut bad_body = valid.clone();
+            *bad_body.ciphertext.last_mut().unwrap() ^= 1;
+            let mut bad_header = valid.clone();
+            bad_header.seq += 1;
+            for malformed in [bad_signature, bad_body, bad_header] {
+                assert_eq!(malformed.id, valid.id, "tampering preserves the claimed ID");
+                database
+                    .transaction(|connection| {
+                        connection.execute(
+                            "UPDATE file_consent_published SET body=?1 WHERE manifest=?2",
+                            params![body(&malformed)?, manifest.as_bytes().as_slice()],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(
+                    node.file_consent
+                        .lock()
+                        .unwrap()
+                        .published_control(manifest)
+                        .is_err(),
+                    "a warmed claimed ID must not authenticate changed signature, payload or headers"
+                );
+                database
+                    .transaction(|connection| {
+                        connection.execute(
+                            "UPDATE file_consent_published SET body=?1 WHERE manifest=?2",
+                            params![body(valid)?, manifest.as_bytes().as_slice()],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(
+                    node.file_consent
+                        .lock()
+                        .unwrap()
+                        .published_control(manifest)
+                        .unwrap(),
+                    Some(valid.clone())
+                );
+            }
             let path = directory.path().join("file-consent-controls.log");
             let barrier = std::fs::read(&path).unwrap();
             std::fs::write(&path, vec![0; barrier.len()]).unwrap();
@@ -1510,5 +1612,94 @@ mod tests {
             reopened.remote_decision(first.manifest).unwrap(),
             Some(ReceiveDecision::Declined)
         );
+    }
+    #[test]
+    fn indexed_verified_control_memo_is_bounded_and_rechecks_requested_identity() {
+        use crate::node::file_consent::signature_observations;
+        let root = tempfile::tempdir().unwrap();
+        let store = IndexedFileConsentStore::open(&root.path().join("controls"), "pw").unwrap();
+        let recipient = DeviceIdentity::generate();
+        let decision = payload(&recipient, 1);
+        let first = decision.event(&recipient, 1).unwrap();
+        let first_body = body(&first).unwrap();
+        let recipient_key = recipient.public().ed25519_pub;
+        let (decoded, verified) = store
+            .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+            .unwrap();
+        assert_eq!(decoded, first);
+        assert!(verified == decision);
+        signature_observations::reset();
+        for _ in 0..3 {
+            let (decoded, verified) = store
+                .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+                .unwrap();
+            assert_eq!(decoded, first);
+            assert!(verified == decision);
+        }
+        assert_eq!(signature_observations::count(), 0);
+        let wrong_recipient = DeviceIdentity::generate().public().ed25519_pub;
+        assert!(
+            store
+                .decode_control(&first_body, EventId::new([254; 32]), Some(&recipient_key))
+                .is_err()
+        );
+        assert!(
+            store
+                .decode_control(&first_body, decision.manifest, Some(&wrong_recipient))
+                .is_err()
+        );
+        assert_eq!(
+            signature_observations::count(),
+            0,
+            "warm intrinsic verification must still reject a different requested manifest or recipient"
+        );
+        // Distinct correctly signed revisions have the same Decision payload but
+        // different complete Event bytes; they occupy distinct bounded entries.
+        for revision in 2..=VERIFIED_CONTROL_LIMIT as u64 + 1 {
+            let event = decision.event(&recipient, revision).unwrap();
+            let (decoded, verified) = store
+                .decode_control(
+                    &body(&event).unwrap(),
+                    decision.manifest,
+                    Some(&recipient_key),
+                )
+                .unwrap();
+            assert_eq!(decoded, event);
+            assert!(verified == decision);
+            assert!(store.verified_controls.borrow().decisions.len() <= VERIFIED_CONTROL_LIMIT);
+            assert!(store.verified_controls.borrow().order.len() <= VERIFIED_CONTROL_LIMIT);
+        }
+        assert_eq!(
+            store.verified_controls.borrow().decisions.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        assert_eq!(
+            store.verified_controls.borrow().order.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        signature_observations::reset();
+        let (decoded, verified) = store
+            .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+            .unwrap();
+        assert_eq!(decoded, first);
+        assert!(verified == decision);
+        assert_eq!(
+            signature_observations::count(),
+            1,
+            "FIFO eviction must require genuine signature verification before restoring a positive entry"
+        );
+        assert_eq!(
+            store.verified_controls.borrow().decisions.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        assert_eq!(
+            store.verified_controls.borrow().order.len(),
+            VERIFIED_CONTROL_LIMIT
+        );
+        signature_observations::reset();
+        store
+            .decode_control(&first_body, decision.manifest, Some(&recipient_key))
+            .unwrap();
+        assert_eq!(signature_observations::count(), 0);
     }
 }
