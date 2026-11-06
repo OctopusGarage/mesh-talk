@@ -403,6 +403,14 @@ variant does not qualify a separate fresh empty-corpus timing boundary. Keep the
 retired-child observer and interrupted-preparation controls rather than adding
 sleep, suppressing publication or accepting a stale child to rescue setup.
 
+Independent message kinds should have independent browser scenarios. The
+[automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks
+text, sticker and file-card Awaiting/explicit projection separately; keep the
+file disclosure and keyboard assertions in its file case. Three unrelated send
+journeys can exhaust one functional watchdog before their final assertion.
+Update the authoritative browser inventory alongside the split, retaining strict
+trace/error evidence and every kind's confirmation predicate.
+
 Functional browser scenarios should use the smallest data set that exercises
 all named state transitions. Recovery-batch navigation needs distinct partial
 and terminal deliveries plus concurrent live and duplicate signals; repeated

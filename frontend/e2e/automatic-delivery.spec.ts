@@ -328,79 +328,94 @@ test("delivery details close on navigation and app lock, including a late status
   await expect(page.getByTestId("delivery-details-trigger")).toHaveCount(0);
 });
 
-test("text, sticker and file card stay Awaiting until explicit authoritative mock projection", async ({
-  page,
-}) => {
-  await seedMarketPacks(page, ["cats"]);
-  await enterChat(page);
-  await openBobDm(page);
-  await page.evaluate(() => {
-    const w = window as unknown as Record<string, unknown>;
-    const internals = w.__TAURI_INTERNALS__ as {
-      invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
-    };
-    const original = internals.invoke;
-    const accepted: string[] = [];
-    w.__acceptedDeliveryIds = accepted;
-    internals.invoke = async (cmd, args) => {
-      if (cmd === "plugin:dialog|open") return "/tmp/card.txt";
-      const result = await original(cmd, args);
-      if (cmd === "owner_enqueue_text" || cmd === "owner_enqueue_sticker")
-        accepted.push(result as string);
-      if (cmd === "owner_enqueue_file")
-        accepted.push((result as { id: string }).id);
-      return result;
-    };
+for (const kind of ["text", "sticker", "file card"] as const) {
+  test(`${kind} stays Awaiting until explicit authoritative mock projection`, async ({
+    page,
+  }) => {
+    if (kind === "sticker") await seedMarketPacks(page, ["cats"]);
+    await enterChat(page);
+    await openBobDm(page);
+    await page.evaluate(() => {
+      const w = window as unknown as Record<string, unknown>;
+      const internals = w.__TAURI_INTERNALS__ as {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      const original = internals.invoke;
+      const accepted: string[] = [];
+      w.__acceptedDeliveryIds = accepted;
+      internals.invoke = async (cmd, args) => {
+        if (cmd === "plugin:dialog|open") return "/tmp/card.txt";
+        const result = await original(cmd, args);
+        if (cmd === "owner_enqueue_text" || cmd === "owner_enqueue_sticker")
+          accepted.push(result as string);
+        if (cmd === "owner_enqueue_file")
+          accepted.push((result as { id: string }).id);
+        return result;
+      };
+    });
+    if (kind === "text") {
+      await page.getByTestId("composer-input").fill("automatic delivery");
+      await page.getByTestId("composer-send").click();
+    } else if (kind === "sticker") {
+      await revealComposerTools(page);
+      await page.getByTestId("composer-emoji").click();
+      await page.getByTestId("composer-stickers").click();
+      await page.getByTestId("sticker-pack-cats").click();
+      await page.getByTestId("sticker-option-pack:cats:cat-01-01").click();
+    } else {
+      await revealComposerTools(page);
+      await page.getByTestId("composer-attach").click();
+      await expect(
+        page.getByTestId("message-bubble").filter({ hasText: "card.txt" }),
+      ).toBeVisible();
+    }
+    await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(1);
+    await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(0);
+    const awaitingCard = page
+      .getByTestId("message-bubble")
+      .filter({ hasText: "card.txt" });
+    if (kind === "file card") {
+      await awaitingCard.getByTestId("delivery-details-trigger").click();
+      const fileDetails = page.getByTestId("delivery-details");
+      await expect(fileDetails).toContainText(
+        "File download and reading are separate.",
+      );
+      await expect(fileDetails).not.toContainText("File card delivered.");
+      await fileDetails.press("Escape");
+    }
+    // This is a UI presentation mock, not authenticated receipt protocol evidence.
+    await page.evaluate((account) => {
+      const w = window as unknown as {
+        __acceptedDeliveryIds: string[];
+        __mockSetDelivery: (
+          account: string,
+          id: string,
+          status: string,
+        ) => void;
+      };
+      for (const id of w.__acceptedDeliveryIds)
+        w.__mockSetDelivery(account, id, "delivered");
+    }, BOB.account);
+    await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(1);
+    if (kind === "file card") {
+      const cardReceipt = page
+        .getByTestId("message-bubble")
+        .filter({ hasText: "card.txt" })
+        .locator('[data-delivery="delivered"]');
+      await expect(cardReceipt).toHaveAccessibleName("File offer received");
+      await cardReceipt.focus();
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
+      await expect(cardReceipt).toHaveAttribute("aria-expanded", "false");
+      await cardReceipt.press("Enter");
+      await expect(awaitingCard.getByTestId("message-status")).toContainText(
+        "File card delivered",
+      );
+    }
   });
-  await page.getByTestId("composer-input").fill("automatic delivery");
-  await page.getByTestId("composer-send").click();
-  await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(1);
-  await revealComposerTools(page);
-  await page.getByTestId("composer-emoji").click();
-  await page.getByTestId("composer-stickers").click();
-  await page.getByTestId("sticker-pack-cats").click();
-  await page.getByTestId("sticker-option-pack:cats:cat-01-01").click();
-  await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(2);
-  await revealComposerTools(page);
-  await page.getByTestId("composer-attach").click();
-  await expect(
-    page.getByTestId("message-bubble").filter({ hasText: "card.txt" }),
-  ).toBeVisible();
-  await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(3);
-  await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(0);
-  const awaitingCard = page
-    .getByTestId("message-bubble")
-    .filter({ hasText: "card.txt" });
-  await awaitingCard.getByTestId("delivery-details-trigger").click();
-  const fileDetails = page.getByTestId("delivery-details");
-  await expect(fileDetails).toContainText(
-    "File download and reading are separate.",
-  );
-  await expect(fileDetails).not.toContainText("File card delivered.");
-  await fileDetails.press("Escape");
-  // This is a UI presentation mock, not authenticated receipt protocol evidence.
-  await page.evaluate((account) => {
-    const w = window as unknown as {
-      __acceptedDeliveryIds: string[];
-      __mockSetDelivery: (account: string, id: string, status: string) => void;
-    };
-    for (const id of w.__acceptedDeliveryIds)
-      w.__mockSetDelivery(account, id, "delivered");
-  }, BOB.account);
-  await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(3);
-  const cardReceipt = page
-    .getByTestId("message-bubble")
-    .filter({ hasText: "card.txt" })
-    .locator('[data-delivery="delivered"]');
-  await expect(cardReceipt).toHaveAccessibleName("File offer received");
-  await cardReceipt.focus();
-  await expect(page.getByRole("tooltip")).toHaveCount(0);
-  await expect(cardReceipt).toHaveAttribute("aria-expanded", "false");
-  await cardReceipt.press("Enter");
-  await expect(awaitingCard.getByTestId("message-status")).toContainText(
-    "File card delivered",
-  );
-});
+}
 
 test("a native picker completed after conversation navigation cannot send to the new conversation", async ({
   page,
