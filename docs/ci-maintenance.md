@@ -77,7 +77,7 @@ Record material budget changes and their rationale in the owning configuration
 and review, rather than inventing universal minute limits in this guide.
 
 Stop an already failed candidate before starting another expensive compilation
-partition. Linux/macOS native coverage finishes all selected Host cases, then
+partition. Linux/macOS native testing finishes all selected Host cases, then
 admits the remaining complete workspace only if Host passed. Both partitions
 still have to pass before reporting coverage; per-partition terminal result
 collection, independent matrix jobs, default targets and zero retries remain
@@ -86,6 +86,17 @@ remaining-partition rejection, successful coverage accumulation, timing pipeline
 and report errors. Preserve partial backend evidence after a failure, while
 requiring evidence on passing jobs; a producer skipped by an upstream failure
 must not create a second missing-artifact error.
+
+Keep complete tests distinct from duplicate instrumentation. macOS instruments
+Host for its native desktop/updater branches, then runs every remaining default
+workspace target with pinned Nextest without coverage instrumentation. Linux and
+Windows retain full instrumented workspace coverage. This removes the separate
+instrumented Core test build on Apple Silicon; it does not claim full macOS Core
+line coverage. The actual-tool regression executes both workflow blocks, requires
+all default targets and the Core execution marker, proves a clean macOS report
+retains Host hits without a Core test cohort, and keeps both partition failures,
+report failures, timing pipelines and process termination controls. All platform
+assertions, doctests, zero retries and direct required checks remain unchanged.
 
 ## Reuse compatible work with verifiable inputs
 

@@ -25,15 +25,23 @@ test("native workspace coverage bounds both complete partitions with Nextest", (
   );
   assert.equal(
     nextest.length,
-    4,
-    "both OS steps must bound Host and remaining workspace tests",
+    3,
+    "both OS steps instrument Host; Linux also instruments the remaining workspace",
   );
   const flags =
     "--no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4";
   const host = `cargo llvm-cov nextest --no-report --locked -p mesh-talk ${flags}`;
   const rest = `cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk ${flags}`;
   assert.equal(nextest.filter((line) => line === host).length, 2);
-  assert.equal(nextest.filter((line) => line === rest).length, 2);
+  assert.equal(nextest.filter((line) => line === rest).length, 1);
+  assert.equal(
+    commands.filter(
+      (line) =>
+        line ===
+        `cargo nextest run --locked --workspace --exclude mesh-talk ${flags}`,
+    ).length,
+    1,
+  );
   assert.ok(
     !commands.some((line) =>
       line.startsWith(
@@ -154,7 +162,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
   ];
   assert.equal(
     commands.filter((line) => line === `cargo ${rest.join(" ")}`).length,
-    2,
+    1,
   );
   assert.equal(
     commands.filter(
@@ -260,99 +268,142 @@ test("native Host isolation preserves default targets, accumulated coverage and 
   const step = workflow
     .split(/^      - /m)
     .find((value) => value.startsWith("name: Test + coverage (macOS)"));
-  const block = step
+  const blockMac = step
     .split("        run: |\n")[1]
     .split("          # llvm-cov runs")[0]
     .replace(/^          /gm, "");
-  for (const failure of ["HOST", "CORE", "BOTH"]) {
-    for (const timing of ["0", "1"]) {
-      rmSync(join(root, "lcov.info"));
-      const marker = join(root, `rest-${failure}-${timing}`);
-      const failedPartition = spawnSync(
-        "bash",
-        ["-e", "-o", "pipefail", "-c", block],
-        {
-          cwd: root,
-          env: {
-            ...env,
-            ...(failure === "BOTH"
-              ? { MESH_FAIL_HOST: "1", MESH_FAIL_CORE: "1" }
-              : { [`MESH_FAIL_${failure}`]: "1" }),
-            MESH_REST_MARKER: marker,
-            MESH_TALK_TEST_TIMING: timing,
-            RUNNER_TEMP: root,
-          },
-          encoding: "utf8",
-          timeout: 120_000,
-        },
-      );
-      assert.equal(
-        failedPartition.status,
-        100,
-        `${failedPartition.error ?? ""}\n${failedPartition.stdout}\n${failedPartition.stderr}`,
-      );
-      assert.match(
-        failedPartition.stdout + failedPartition.stderr,
-        new RegExp(
-          `${failure === "BOTH" ? "host" : failure.toLowerCase()} failure control`,
-          "u",
-        ),
-      );
-      assert.equal(
-        existsSync(marker),
-        failure === "CORE",
-        "only a passing Host may admit the remaining workspace partition",
-      );
-      if (failure === "BOTH")
-        assert.doesNotMatch(
-          failedPartition.stdout + failedPartition.stderr,
-          /core failure control/u,
-          "a failed Host must stop before starting another compilation/test partition",
+  // Execute the actual macOS block in a clean coverage cohort. Core's real
+  // default targets must run, but must not require another instrumented build.
+  run(["llvm-cov", "clean", "--workspace"]);
+  const macMarker = join(root, "mac-core-executed");
+  const macPass = spawnSync("bash", ["-e", "-o", "pipefail", "-c", blockMac], {
+    cwd: root,
+    env: {
+      ...env,
+      MESH_REST_MARKER: macMarker,
+      MESH_TALK_TEST_TIMING: "0",
+      RUNNER_TEMP: root,
+    },
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+  assert.equal(macPass.status, 0, macPass.stdout + macPass.stderr);
+  assert.equal(
+    (macPass.stdout + macPass.stderr).match(
+      /4 tests run: 4 passed, 1 skipped/gu,
+    )?.length,
+    2,
+  );
+  assert.equal(readFileSync(macMarker, "utf8"), "rest execution");
+  const macCoverage = readFileSync(join(root, "lcov.info"), "utf8");
+  assert.match(macCoverage, /^FNDA:[1-9]\d*,[^\n]*host_unit/mu);
+  assert.doesNotMatch(
+    macCoverage,
+    /^FNDA:[1-9]\d*,[^\n]*core_/mu,
+    "macOS must execute Core normally while Linux/Windows own its full instrumented coverage",
+  );
+  const linuxStep = workflow
+    .split(/^      - /m)
+    .find((value) => value.startsWith("name: Test + coverage (Linux)"));
+  const linuxBlock = linuxStep
+    .split("        run: |\n")[1]
+    .replace(/^          /gm, "");
+  for (const block of [blockMac, linuxBlock]) {
+    rmSync(join(root, "lcov.info"), { recursive: true, force: true });
+    writeFileSync(join(root, "lcov.info"), "previous report");
+    for (const failure of ["HOST", "CORE", "BOTH"]) {
+      for (const timing of ["0", "1"]) {
+        rmSync(join(root, "lcov.info"));
+        const marker = join(
+          root,
+          `rest-${block === blockMac ? "mac" : "linux"}-${failure}-${timing}`,
         );
-      assert.equal(
-        existsSync(join(root, "lcov.info")),
-        false,
-        "either failed partition must stop before report",
-      );
-      if (timing === "1")
+        const failedPartition = spawnSync(
+          "bash",
+          ["-e", "-o", "pipefail", "-c", block],
+          {
+            cwd: root,
+            env: {
+              ...env,
+              ...(failure === "BOTH"
+                ? { MESH_FAIL_HOST: "1", MESH_FAIL_CORE: "1" }
+                : { [`MESH_FAIL_${failure}`]: "1" }),
+              MESH_REST_MARKER: marker,
+              MESH_TALK_TEST_TIMING: timing,
+              RUNNER_TEMP: root,
+            },
+            encoding: "utf8",
+            timeout: 120_000,
+          },
+        );
+        assert.equal(
+          failedPartition.status,
+          100,
+          `${failedPartition.error ?? ""}\n${failedPartition.stdout}\n${failedPartition.stderr}`,
+        );
         assert.match(
-          readFileSync(join(root, "mesh-talk-test-timing.log"), "utf8"),
+          failedPartition.stdout + failedPartition.stderr,
           new RegExp(
             `${failure === "BOTH" ? "host" : failure.toLowerCase()} failure control`,
             "u",
           ),
         );
-      // Restore the report only for the next independent failure-control iteration.
-      writeFileSync(join(root, "lcov.info"), "previous report");
+        assert.equal(
+          existsSync(marker),
+          failure === "CORE",
+          "only a passing Host may admit the remaining workspace partition",
+        );
+        if (failure === "BOTH")
+          assert.doesNotMatch(
+            failedPartition.stdout + failedPartition.stderr,
+            /core failure control/u,
+            "a failed Host must stop before starting another compilation/test partition",
+          );
+        assert.equal(
+          existsSync(join(root, "lcov.info")),
+          false,
+          "either failed partition must stop before report",
+        );
+        if (timing === "1")
+          assert.match(
+            readFileSync(join(root, "mesh-talk-test-timing.log"), "utf8"),
+            new RegExp(
+              `${failure === "BOTH" ? "host" : failure.toLowerCase()} failure control`,
+              "u",
+            ),
+          );
+        // Restore the report only for the next independent failure-control iteration.
+        writeFileSync(join(root, "lcov.info"), "previous report");
+      }
     }
-  }
-  for (const timing of ["0", "1"]) {
-    rmSync(join(root, "lcov.info"), { recursive: true, force: true });
-    // A real report destination failure must fail even after both suites pass.
-    mkdirSync(join(root, "lcov.info"));
-    const reportFailure = spawnSync(
-      "bash",
-      ["-e", "-o", "pipefail", "-c", block],
-      {
-        cwd: root,
-        env: { ...env, MESH_TALK_TEST_TIMING: timing, RUNNER_TEMP: root },
-        encoding: "utf8",
-        timeout: 120_000,
-      },
-    );
-    assert.equal(reportFailure.error, undefined);
-    assert.notEqual(
-      reportFailure.status,
-      0,
-      reportFailure.stdout + reportFailure.stderr,
-    );
-    assert.equal(
-      (reportFailure.stdout + reportFailure.stderr).match(
-        /4 tests run: 4 passed, 1 skipped/gu,
-      )?.length,
-      2,
-      "report failure must remain nonzero after both complete partitions pass",
-    );
+    for (const timing of ["0", "1"]) {
+      rmSync(join(root, "lcov.info"), { recursive: true, force: true });
+      // A real report destination failure must fail even after both suites pass.
+      mkdirSync(join(root, "lcov.info"));
+      const reportFailure = spawnSync(
+        "bash",
+        ["-e", "-o", "pipefail", "-c", block],
+        {
+          cwd: root,
+          env: { ...env, MESH_TALK_TEST_TIMING: timing, RUNNER_TEMP: root },
+          encoding: "utf8",
+          timeout: 120_000,
+        },
+      );
+      assert.equal(reportFailure.error, undefined);
+      assert.notEqual(
+        reportFailure.status,
+        0,
+        reportFailure.stdout + reportFailure.stderr,
+      );
+      assert.equal(
+        (reportFailure.stdout + reportFailure.stderr).match(
+          /4 tests run: 4 passed, 1 skipped/gu,
+        )?.length,
+        2,
+        "report failure must remain nonzero after both complete partitions pass",
+      );
+    }
   }
   rmSync(join(root, "lcov.info"), { recursive: true, force: true });
   const emptyHost = run([...host, "-E", "test(=absent_case)"], {}, 4);
