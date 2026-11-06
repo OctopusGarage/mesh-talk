@@ -17,7 +17,7 @@ test("health installs source scanners while Gitleaks owns the full-history scan"
   const secrets = readFileSync(new URL("../../.github/workflows/gitleaks.yml", import.meta.url), "utf8");
   assert.match(secrets, /fetch-depth: 0/);
   assert.match(secrets, /GITLEAKS_VERSION: 8\.30\.1/);
-  assert.match(workflow, /go install github\.com\/rhysd\/actionlint\/cmd\/actionlint@v1\.7\.12/);
+  assert.match(workflow, /tool: .*actionlint@1\.7\.12/);
   assert.match(readFileSync(new URL("../check-health.sh", import.meta.url), "utf8"), /for tool in cargo-deny cargo-machete typos gitleaks shellcheck actionlint/);
 });
 
@@ -37,7 +37,7 @@ test("health runs for every PR and retains independent platform results", () => 
   const caller = readFileSync(new URL("../../.github/workflows/e2e-ui.yml", import.meta.url), "utf8");
   assert.match(caller, /^  pull_request:$/m);
   assert.match(caller, /uses: \.\/\.github\/workflows\/check-health\.yml/);
-  assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \|\| github.event_name == 'push' \}\}$/m);
+  assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}$/m);
   assert.match(workflow, /^      fail-fast: false$/m);
 });
 

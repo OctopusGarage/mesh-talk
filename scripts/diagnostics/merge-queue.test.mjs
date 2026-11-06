@@ -34,3 +34,11 @@ test("Health checks are called by the merge-candidate UI orchestrator", () => {
   assert.match(read("check-health"), /^  workflow_call:$/m);
   assert.match(read("e2e-ui"), /uses: \.\/\.github\/workflows\/check-health\.yml/);
 });
+
+for (const name of ["ci", "check-health", "e2e-backend", "e2e-ui", "sanitizers", "codeql", "gitleaks", "mutants"]) {
+  test(`${name} preserves every push while cancelling superseded PRs`, () => {
+    const workflow = read(name);
+    assert.match(workflow, /group: .*github.event_name == 'push' && github.run_id/);
+    assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}/);
+  });
+}
