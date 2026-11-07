@@ -432,6 +432,12 @@ verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnosti
 and [cheap CI policy regressions](../scripts/diagnostics/ci-latency.test.mjs)
 protect this boundary; actual compiler fixtures still exercise native behavior.
 
+Source-integrity fixtures must not ignore tool output that production leaves
+untracked. Keep generated evidence outside the source checkout and assert the
+checkout stays clean after real tool execution; also prove unrelated untracked
+source is still rejected. The [shared mutation controls](../scripts/release/run-mutants.test.mjs)
+own this regression without weakening the production cleanliness gate.
+
 Keep unrelated tool-version startup outside process-lifecycle assertions. The
 [supervisor isolation regression](../scripts/diagnostics/windows-process-owner.test.mjs)
 uses the existing version fixture while retaining real stage and output-limit

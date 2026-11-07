@@ -79,6 +79,9 @@ native compiler fixtures do not. Keep static policy assertions independently run
 without native tool setup. Scope fixture configuration changes to their owning
 table or profile; repeated valid values elsewhere must remain unchanged. Update the existing policy assertion when its
 requirement changes instead of adding a second overlapping test in another file.
+Write generated reports into the task-owned evidence directory, not the source
+checkout. Fixtures for source-integrity checks must preserve production ignore
+rules; adding a fixture-only ignore can hide a real dirty-worktree failure.
 For entry-point changes, also run the affected contract tests selected by the
 existing validation plan before publication. A syntax pass or a hand-picked
 filename sample cannot detect stale semantic routing expectations; cheap PR

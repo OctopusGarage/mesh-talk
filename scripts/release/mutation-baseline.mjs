@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCommand, requireCommandStdout } from "../pr-platform/guest.mjs";
@@ -114,7 +114,7 @@ export async function runMutationTool(args, directory, evidence, phase, seconds,
   return result;
 }
 const command = runMutationTool;
-export const mutationOptions = shard => ["--test-tool", "nextest", "--cargo-arg=--locked", "--cargo-test-arg=--profile=mutants", "--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", String(mutationBudgets.testSeconds), "--build-timeout", String(mutationBudgets.compileSeconds), "--output", ".."];
+export const mutationOptions = (shard, output = "..") => ["--test-tool", "nextest", "--cargo-arg=--locked", "--cargo-test-arg=--profile=mutants", "--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", String(mutationBudgets.testSeconds), "--build-timeout", String(mutationBudgets.compileSeconds), "--output", output];
 async function selection(directory, shard, evidence) {
   const result = await command(["mutants", "--list", "--json", ...mutationOptions(shard)], directory, evidence, "selection", 180);
   return parseSelectedMutants(requireCommandStdout(result), result.code);
@@ -205,6 +205,8 @@ export async function runMutationWorker(planDirectory, baselineDirectory, direct
   mkdirSync(directory, { recursive: true });
   write(path.join(directory, "admission.json"), { phase: "worker", index, startedAt: new Date().toISOString() });
   const workspace = root(), identity = mutationIdentity(workspace);
+  const relativeEvidence = path.relative(realpathSync(workspace), realpathSync(directory));
+  assert.ok(relativeEvidence === ".." || relativeEvidence.startsWith(`..${path.sep}`) || path.isAbsolute(relativeEvidence), "mutation worker evidence must be outside the source workspace");
   const envelope = loadPlan(planDirectory, identity), plan = envelope.plan;
   const worker = plan.workers[index];
   assert.ok(Number.isSafeInteger(index) && worker && worker.selected.length > 0 && worker.selected.length <= mutationBudgets.maxMutants, "invalid or oversized mutation worker");
@@ -212,14 +214,11 @@ export async function runMutationWorker(planDirectory, baselineDirectory, direct
   const baseline = loadBaseline(baselineDirectory, identity, plan);
   const selected = await selection(path.join(workspace, "src-tauri"), worker.shard, directory);
   assert.deepEqual(selected, worker.selected, "actual mutation selection differs from bounded plan");
-  let result;
-  try {
-    result = await command(["mutants", ...mutationOptions(worker.shard), "--baseline", "skip", "--", "--test-threads=4"], path.join(workspace, "src-tauri"), directory, "mutants", worker.selected.length * (mutationBudgets.compileSeconds + mutationBudgets.testSeconds) + 60, [0, 2]);
-  } finally {
-    const reports = path.join(workspace, "mutants.out");
-    if (existsSync(reports)) cpSync(reports, path.join(directory, "raw"), { recursive: true });
-  }
-  const report = read(path.join(workspace, "mutants.out/outcomes.json"));
+  // cargo-mutants creates mutants.out INSIDE --output. Write directly into the
+  // retained evidence tree, including on failure, without dirtying clean source.
+  const reports = path.join(path.resolve(directory), "raw");
+  const result = await command(["mutants", ...mutationOptions(worker.shard, reports), "--baseline", "skip", "--", "--test-threads=4"], path.join(workspace, "src-tauri"), directory, "mutants", worker.selected.length * (mutationBudgets.compileSeconds + mutationBudgets.testSeconds) + 60, [0, 2]);
+  const report = read(path.join(reports, "mutants.out/outcomes.json"));
   const summary = validateMutationReport(selected.length, report, result.code, baseline);
   verifyMutationOutcomes(selected, report);
   assert.deepEqual(mutationIdentity(workspace), identity, "in-place mutation did not restore source identity");
