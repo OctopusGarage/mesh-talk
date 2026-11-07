@@ -3,12 +3,17 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const fixture = vi.hoisted(() => ({
+  readMediaPreview: vi.fn(),
   readMedia: vi.fn(),
   readFile: vi.fn(),
   current: true,
 }));
 vi.mock("@/lib/api", () => ({
-  chat: { readMedia: fixture.readMedia, readFile: fixture.readFile },
+  chat: {
+    readMediaPreview: fixture.readMediaPreview,
+    readMedia: fixture.readMedia,
+    readFile: fixture.readFile,
+  },
 }));
 vi.mock("@/store/auth", () => ({
   useAuth: (selector: (state: unknown) => unknown) =>
@@ -134,4 +139,18 @@ it("does not report stale read errors or schedule work after ownership changes",
   expect(fixture.readFile).not.toHaveBeenCalled();
   await act(async () => vi.advanceTimersByTimeAsync(5000));
   expect(fixture.readMedia).toHaveBeenCalledOnce();
+});
+
+it("uses bounded preview bytes without original fallback or repeated decode on failure", async () => {
+  fixture.readMediaPreview.mockRejectedValue(new Error("preview limit"));
+  function Probe() {
+    useFileObjectUrl("file", true, "image/png", { preview: true });
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  expect(fixture.readMediaPreview).toHaveBeenCalledOnce();
+  expect(fixture.readMedia).not.toHaveBeenCalled();
+  expect(fixture.readFile).not.toHaveBeenCalled();
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(fixture.readMediaPreview).toHaveBeenCalledOnce();
 });

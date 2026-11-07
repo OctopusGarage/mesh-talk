@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "./recoveryRefresh";
 import { accountDocuments } from "./api/accountDocuments";
 import { avatars } from "@/lib/api/contacts";
 import { useAvatars } from "@/store/avatars";
@@ -63,11 +64,13 @@ export function startLinkedAvatarOverrides(owner: string): () => void {
   const unlisten = subscribeSyncInvalidation((event) => {
     if (event.owner === owner && event.kind === "state") void refresh();
   });
-  const timer = window.setInterval(() => void refresh(), 10_000);
+  const stopRecovery = startRecoveryRefresh(() => void refresh(), {
+    background: false,
+  });
   void refresh();
   return () => {
     active = false;
     unlisten();
-    window.clearInterval(timer);
+    stopRecovery();
   };
 }

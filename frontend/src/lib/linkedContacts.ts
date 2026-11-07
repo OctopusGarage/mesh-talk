@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "./recoveryRefresh";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { readWithDeadline } from "./readDeadline";
 import { subscribeSyncInvalidation } from "./syncInvalidation";
@@ -303,11 +304,11 @@ export function startLinkedContacts(owner: string): () => void {
       void reconcile();
   });
   void reconcile();
-  const timer = window.setInterval(() => void reconcile(), 10_000);
+  const stopRecovery = startRecoveryRefresh(() => void reconcile());
   return () => {
     active = false;
     publisher.stop();
     unlisten();
-    window.clearInterval(timer);
+    stopRecovery();
   };
 }

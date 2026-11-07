@@ -350,3 +350,60 @@ it.each(["bundled", "missing", "tombstone"] as const)(
     expect(use.getState().preparedThemeId).toBeNull();
   },
 );
+
+it("reads authoritative pending rows without enumerating installed assets", async () => {
+  const { io } = memory();
+  const pending = vi.fn(async () => [] as StoredPack[]);
+  const list = vi.spyOn(io, "list");
+  const store = createPacksStore({ ...io, pending }).getState();
+  store.setScope("owner", "account");
+  expect(await store.pendingChanges()).toEqual([]);
+  expect(pending).toHaveBeenCalledWith({
+    owner: "owner",
+    account: "account",
+    session: undefined,
+  });
+  expect(list).not.toHaveBeenCalled();
+});
+
+it("surfaces pending lookup failures without falling back to full asset enumeration", async () => {
+  const { io } = memory();
+  const list = vi.spyOn(io, "list");
+  const store = createPacksStore({
+    ...io,
+    pending: async () => {
+      throw new Error("pending storage unavailable");
+    },
+  }).getState();
+  store.setScope("owner", "account");
+  await expect(store.pendingChanges()).rejects.toThrow(
+    "pending storage unavailable",
+  );
+  expect(list).not.toHaveBeenCalled();
+});
+
+it("discards a pending lookup completed after the desktop session changes", async () => {
+  const { io } = memory();
+  let finish!: (rows: StoredPack[]) => void;
+  const store = createPacksStore({
+    ...io,
+    pending: () =>
+      new Promise<StoredPack[]>((resolve) => {
+        finish = resolve;
+      }),
+  }).getState();
+  store.setScope("owner", "account", "first");
+  const read = store.pendingChanges();
+  store.setScope("owner", "account", "next");
+  finish([
+    {
+      id: "old",
+      pack: null,
+      archive: null,
+      sequence: 1,
+      pending: true,
+      version: null,
+    },
+  ]);
+  expect(await read).toEqual([]);
+});

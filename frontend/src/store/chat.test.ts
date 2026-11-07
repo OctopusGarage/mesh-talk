@@ -6300,3 +6300,78 @@ it("does not hold visible history behind a pending reaction projection", async (
     await opening;
   }
 });
+
+it("does not advance the presentation clock when no content expires", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const now = useChat.getState().expiryNow;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(useChat.getState().expiryNow).toBe(now);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("expires content at its exact deadline between former polling ticks", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    const now = Date.now();
+    useChat.setState({
+      messages: {
+        "account:friend": [
+          {
+            id: "exact-deadline",
+            fromMe: false,
+            who: "Friend",
+            text: "temporary",
+            wallClock: now,
+            replyTo: null,
+            expiresAtMs: now + 10500,
+          },
+        ],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(10499);
+    expect(useChat.getState().messages["account:friend"]).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(useChat.getState().messages["account:friend"]).toEqual([]);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps roster reconciliation quiet with native push after startup", async () => {
+  vi.useFakeTimers();
+  const { setPushStateSupport } = await import("@/lib/syncInvalidation");
+  invoke.mockImplementation((command: string) =>
+    command === "owner_node_identity"
+      ? Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+          supports_push_state: true,
+        })
+      : Promise.resolve([]),
+  );
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(2100);
+    setPushStateSupport("host");
+    const reads = () =>
+      invoke.mock.calls.filter(([command]) => command === "list_peers").length;
+    const before = reads();
+    expect(before).toBeGreaterThan(0);
+    expect(useChat.getState().ready).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(reads()).toBe(before);
+  } finally {
+    stop();
+    setPushStateSupport(null);
+    vi.useRealTimers();
+  }
+});

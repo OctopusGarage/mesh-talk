@@ -299,7 +299,7 @@ identities rather than invented account associations.
 | Public authenticated contact                               | 15 seconds                                 | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
 | Directory/federation introduction                          | Original origin expiry, at most 15 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
 
-Push invalidations refresh the desktop snapshot; a two-second clock ages freshness and source-specific
+Push invalidations refresh the desktop snapshot; actual-deadline timers age freshness and source-specific
 presentation deadlines locally, even when IPC fails. LAN-only observations lose
 Online at their 15-second deadline; cross-network observations at 120 seconds
 without a new valid public observation. Explicit withdrawal remains immediate. Route retention is independent: authenticated
@@ -334,7 +334,7 @@ explicit withdrawal by deleting the bounded public-origin history. Roster cleanu
 preserves that history until its original 120-second deadline; it never renews it.
 Explicit bridge disable clears both active and expired mailbox introductions.
 Committed origin renewal emits a presence-only watch notification, not an
-expensive mesh recovery wake; the desktop's thirty-second fallback is not the
+expensive mesh recovery wake; the desktop's sparse recovery fallback is not the
 normal heartbeat delivery path. The frontend schedules exact presentation expiry independently
 of polling and suppresses the stranded prompt while a recently observed
 cross-network peer remains Online under the bounded tolerance. Shell, group
@@ -371,7 +371,7 @@ such claim and opens no new connections.
 
 The isolated frontend store uses pushed snapshots with bounded fallback reads,
 permits at most two active UI refreshes, guards owner/runtime generations and
-response ordering, and ages every observation on the shared two-second clock even
+response ordering, and ages observations at their actual evidence deadlines even
 during failure. Timed-out native operations retain their global admission slots
 until they actually settle. IPC timeouts,
 failed reads and discovery task termination produce a global availability notice,
@@ -1068,7 +1068,7 @@ document and checks current holder binding, tombstones, membership and replica
 policy. Unknown counts remain distinct from confirmed zero, and own-account
 copies and post-office copies remain separate from member-copy targets.
 
-Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
+Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A five-minute modern-host metadata fallback and foreground activation repair missed events; older hosts retain compatibility polling; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
 ```mermaid
 flowchart LR
@@ -3112,6 +3112,15 @@ producers subscribe before installation, wait for the installation barrier, and
 stop with their exact runtime authority. Invalidations carry host owner, account,
 device and domain; locked sessions suppress emission and frontend consumers reject
 retired scopes. Boot/unlock and periodic reconciliation repair missed notifications.
+
+The [performance requirements](performance-requirements.md) own cross-cutting
+idle measurement and demand-driven-work rules. Modern desktop projection recovery
+uses coalesced foreground activation and a five-minute fallback; accepted edits
+and scoped native invalidations remain prompt. Legacy presence and roster keep
+their two-second compatibility reads; watched-file legacy reads use five seconds.
+Actual expiry/quality deadlines and pending boot/group-control recovery are
+independent of these fallback intervals. Available receipt pages continue in
+bounded batches rather than waiting for another fallback tick.
 
 The desktop advertises push support through its owner identity snapshot. Supported
 clients refresh roster, delivery, file availability and sibling preferences on

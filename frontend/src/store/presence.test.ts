@@ -878,3 +878,19 @@ it("fresh current-device evidence keeps the local account in group counts withou
   expect(agePresence(snapshot, 14).group.online_count).toBe(1);
   expect(agePresence(snapshot, 15).group.online_count).toBe(0);
 });
+
+it("uses native pushes and a long recovery interval for a quiet modern host", async () => {
+  getPresence.mockResolvedValue({});
+  setPushStateSupport("alice");
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getPresence).toHaveBeenCalledOnce();
+    notifySyncInvalidation({ owner: "alice", kind: "roster" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPresence).toHaveBeenCalledTimes(2);
+  } finally {
+    stop();
+    setPushStateSupport(null);
+  }
+});

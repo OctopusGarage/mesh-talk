@@ -153,3 +153,137 @@ it.each([false, true])(
     expect(ports.mark).not.toHaveBeenCalledWith(expect.anything(), "removed");
   },
 );
+
+it("drains ready receipt pages without waiting for the recovery fallback", async () => {
+  const { ports, sync } = fixture();
+  const cursor = {
+    kind: "read_receipt" as const,
+    conversation: { kind: "account" as const, id: accountId },
+    message_id: "first",
+  };
+  ports.list.mockResolvedValueOnce({ items: [], next: cursor, digest: [] });
+  try {
+    await sync.poll();
+    expect(ports.list).toHaveBeenCalledTimes(2);
+    expect(ports.list).toHaveBeenNthCalledWith(2, cursor);
+    expect(ports.apply).toHaveBeenCalledWith(key, ["remote"]);
+  } finally {
+    sync.stop();
+  }
+});
+
+it("bounds receipt catchup batches and cancels continuation with its owner", async () => {
+  vi.useFakeTimers();
+  const { ports, sync } = fixture();
+  let page = 0;
+  ports.list.mockImplementation(async () => ({
+    items: [],
+    digest: [],
+    next: {
+      kind: "read_receipt",
+      conversation: { kind: "account", id: accountId },
+      message_id: String(++page),
+    },
+  }));
+  try {
+    await sync.poll();
+    expect(ports.list).toHaveBeenCalledTimes(8);
+    expect(vi.getTimerCount()).toBe(1);
+    sync.stop();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.list).toHaveBeenCalledTimes(8);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    sync.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("stops a nonadvancing receipt page instead of spinning", async () => {
+  const { ports, sync } = fixture();
+  const cursor = {
+    kind: "read_receipt",
+    conversation: { kind: "account", id: accountId },
+    message_id: "same",
+  };
+  ports.list.mockResolvedValue({ items: [], next: cursor, digest: [] });
+  try {
+    await sync.poll();
+    expect(ports.list).toHaveBeenCalledTimes(2);
+  } finally {
+    sync.stop();
+  }
+});
+
+it("continues known local receipt work after exhausting a bounded write batch", async () => {
+  vi.useFakeTimers();
+  const { ports, sync } = fixture();
+  ports.list.mockResolvedValue({ items: [], next: null, digest: [] });
+  ports.ledger = () => ({
+    [key]: {
+      local: { seen: true, late: false },
+      ...Object.fromEntries(
+        Array.from({ length: 64 }, (_, i) => [
+          `seen-${i}`,
+          { seen: true, late: false },
+        ]),
+      ),
+    },
+  });
+  try {
+    await sync.poll();
+    for (let i = 0; i < 200; i++) await Promise.resolve();
+    expect(ports.mark).toHaveBeenCalledTimes(64);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.mark).toHaveBeenCalledTimes(65);
+    sync.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    sync.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("retains one receipt invalidation arriving during an active observation", async () => {
+  vi.useFakeTimers();
+  const { ports, sync } = fixture();
+  const first = deferred<AccountDocumentPage>();
+  ports.list.mockReturnValueOnce(first.promise);
+  const observing = sync.poll();
+  try {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(ports.list).toHaveBeenCalledOnce();
+    for (let i = 0; i < 5; i++) await sync.poll();
+    expect(ports.list).toHaveBeenCalledOnce();
+    first.resolve({ items: [], next: null, digest: [] });
+    await observing;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ports.list).toHaveBeenCalledTimes(2);
+    expect(ports.apply).toHaveBeenCalledWith(key, ["remote"]);
+  } finally {
+    first.resolve({ items: [], next: null, digest: [] });
+    await observing;
+    sync.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("does not turn receipt observation or write failure into a hot retry", async () => {
+  vi.useFakeTimers();
+  const { ports, sync } = fixture();
+  ports.list.mockRejectedValueOnce(new Error("offline"));
+  ports.mark.mockRejectedValue(new Error("read only"));
+  try {
+    await sync.poll();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ports.list).toHaveBeenCalledOnce();
+    await sync.poll();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ports.list).toHaveBeenCalledTimes(2);
+    expect(ports.mark).toHaveBeenCalledOnce();
+  } finally {
+    sync.stop();
+    vi.useRealTimers();
+  }
+});

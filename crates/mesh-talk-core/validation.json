@@ -3019,6 +3019,32 @@
         "Exercise real Noise loopback negotiation, legacy fallback, unchanged populated sync, incremental append, interrupted/revoked permission, retry, restart, expiry and destructive reset. Run normal production node acceptance separately; synthetic tests do not certify installed desktop startup.",
         "Cancellation-repair fixtures independently bound setup and arm the unchanged progress deadline at exact repair-body admission. Held metadata must not consume that budget, while a held repair body must still cancel and retire the actual future and server. Preserve backward-ancestor recovery, optional-write faults, finite frontier progress and existing attempt/deadline limits."
       ]
+    },
+    {
+      "id": "core-inline-media-preview",
+      "paths": ["crates/mesh-talk-core/src/node/files.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::files::bounded_preview_tests::",
+            "node::files::indexed_file_payload_tests::bounded_preview_"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Derive bounded ordinary static thumbnails without changing stored originals or receive authority.",
+        "guide": "docs/module-boundaries.md#inline-media-presentation",
+        "invariants": [
+          {
+            "name": "Ordinary static previews are bounded derived images with current consent, expiry and immutable-source rechecks; originals and protected reveals retain independent access paths.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          }
+        ]
+      },
+      "escalation": [
+        "Validate encoded/pixel/decode allocation limits, current consent, expiry/protection rejection and EXIF/alpha behavior. Browser mock bytes do not prove native decode bounds."
+      ]
     }
   ],
   "prScenarios": [

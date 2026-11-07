@@ -253,6 +253,7 @@ export function useFileObjectUrl(
   options?: {
     onReadError?: (error: unknown) => void;
     retryKey?: number;
+    preview?: boolean;
     /** Bounded reuse for ordinary previews; never enable for protected reveals. */
     reuse?: boolean;
   },
@@ -263,6 +264,7 @@ export function useFileObjectUrl(
   }, [options?.onReadError]);
   const retryKey = options?.retryKey;
   const reuse = options?.reuse === true;
+  const preview = options?.preview === true;
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const run = useChat((s) => s.runEpoch);
@@ -274,6 +276,7 @@ export function useFileObjectUrl(
     run,
     identityEpoch,
     fileConv,
+    preview,
     mime,
     retryKey,
   ]);
@@ -298,6 +301,10 @@ export function useFileObjectUrl(
       if (!current()) return;
       try {
         const readBlob = async (admitted: () => boolean) => {
+          if (preview) {
+            const bytes = await chat.readMediaPreview(fileConv);
+            return new Blob([bytes], { type: "image/png" });
+          }
           let bytes: ArrayBuffer;
           try {
             bytes = await chat.readMedia(fileConv);
@@ -327,6 +334,7 @@ export function useFileObjectUrl(
         releaseShared = undefined;
         if (!current()) return;
         onReadError.current?.(error);
+        if (preview) return;
         const delay = Math.min(200 * 2 ** failures, 2000);
         failures = Math.min(failures + 1, 4);
         timer = setTimeout(() => {
@@ -342,7 +350,7 @@ export function useFileObjectUrl(
       releaseShared?.();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [key, enabled, owner, ready, fileConv, mime, run, reuse]);
+  }, [key, enabled, owner, ready, fileConv, mime, run, reuse, preview]);
   if (!enabled || !owner || !ready) return null;
   // Reused URLs are owned by the cache, which can revoke them independently of
   // a component render during session retirement. Never return a stale copy.

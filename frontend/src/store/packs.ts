@@ -7,6 +7,7 @@ import { captureRuntimeOwner } from "./ownership";
 const LEGACY_DB = "mesh-talk-customization";
 const PUBLIC_DB = "mesh-talk-customization-bundled-v2";
 const STORE = "packs";
+const PENDING_INDEX = "pendingSync";
 const BUNDLED_IDS = (import.meta.env.VITE_BUNDLED_PACK_IDS as string)
   .split(",")
   .filter(Boolean);
@@ -34,6 +35,7 @@ export interface PackStorage {
   publicPacks(): Promise<CustomizationPack[]>;
   legacyPacks(): Promise<CustomizationPack[]>;
   list(scope: PackScope): Promise<StoredPack[]>;
+  pending?(scope: PackScope): Promise<StoredPack[]>;
   get?(scope: PackScope, id: string): Promise<StoredPack | undefined>;
   update(
     scope: PackScope,
@@ -115,14 +117,35 @@ function database(
   existingOnly = false,
 ): Promise<IDBDatabase | null> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(name, existingOnly ? undefined : 1);
+    const request = indexedDB.open(name, existingOnly ? undefined : 2);
     let absent = false;
     request.onupgradeneeded = () => {
       if (existingOnly) {
         absent = true;
         request.transaction?.abort();
-      } else if (!request.result.objectStoreNames.contains(STORE))
-        request.result.createObjectStore(STORE, { keyPath: "id" });
+      } else {
+        const store = request.result.objectStoreNames.contains(STORE)
+          ? request.transaction!.objectStore(STORE)
+          : request.result.createObjectStore(STORE, { keyPath: "id" });
+        if (
+          name.startsWith("mesh-talk-customization-account:") &&
+          !store.indexNames.contains(PENDING_INDEX)
+        ) {
+          // Boolean values are not IndexedDB keys. A sparse numeric index
+          // selects pending edits without cloning acknowledged archive payloads.
+          store.createIndex(PENDING_INDEX, PENDING_INDEX);
+          const cursor = store.openCursor();
+          cursor.onsuccess = () => {
+            const row = cursor.result;
+            if (!row) return;
+            const value = row.value;
+            if (value.pending) value[PENDING_INDEX] = 1;
+            else delete value[PENDING_INDEX];
+            row.update(value);
+            row.continue();
+          };
+        }
+      }
     };
     request.onerror = () => (absent ? resolve(null) : reject(request.error));
     request.onsuccess = () => resolve(request.result);
@@ -162,7 +185,17 @@ async function update<T extends { id: string }>(
       request.onsuccess = () => {
         try {
           result = mutate(request.result as T | undefined);
-          if (result) store.put(result);
+          if (result) {
+            const value = { ...result } as T & {
+              pending?: boolean;
+              pendingSync?: number;
+            };
+            if (store.indexNames.contains(PENDING_INDEX)) {
+              if (value.pending) value.pendingSync = 1;
+              else delete value.pendingSync;
+            }
+            store.put(value);
+          }
         } catch (error) {
           failure = error;
           tx.abort();
@@ -207,6 +240,21 @@ const storage: PackStorage = {
     );
   },
   list: (scope) => all<StoredPack>(dbName(scope)),
+  async pending(scope) {
+    const db = await database(dbName(scope));
+    if (!db) throw new Error("Pack storage unavailable");
+    try {
+      return await new Promise<StoredPack[]>((resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).index(PENDING_INDEX).getAll(1);
+        tx.oncomplete = () => resolve(request.result as StoredPack[]);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  },
   async get(scope, id) {
     const db = await database(dbName(scope));
     if (!db) return undefined;
@@ -403,7 +451,9 @@ export function createPacksStore(
       async pendingChanges() {
         const lease = capture();
         if (!lease.scope) return [];
-        const rows = await io.list(lease.scope);
+        const rows = await (io.pending
+          ? io.pending(lease.scope)
+          : io.list(lease.scope));
         return lease.current()
           ? rows.filter((row) => row.pending && !busy.has(row.id))
           : [];

@@ -1423,3 +1423,40 @@ it("retains typed group File admission and retries its original path and ID", as
     "real-file",
   );
 });
+
+it("preserves every cache reference when an expiry check changes nothing", async () => {
+  const { expireConversationMessages } = await import("./conversationState");
+  const state = {
+    ...emptyConversationCache(),
+    messages: { key: [row("live")] },
+  };
+  const patch = expireConversationMessages(state, 1000);
+  expect(patch.messages).toBe(state.messages);
+  expect(patch.reactions).toBe(state.reactions);
+  expect(patch.intents).toBe(state.intents);
+});
+
+it("evicts old payload-heavy conversations before reaching the conversation count cap", async () => {
+  const { openConversationState } = await import("./conversationState");
+  const state = {
+    ...emptyConversationCache(),
+    cacheOrder: ["account:old", "account:recent"],
+    messages: {
+      "account:old": [{ ...row("old"), text: "x".repeat(3 * 1024 * 1024) }],
+      "account:recent": [
+        { ...row("recent"), text: "y".repeat(3 * 1024 * 1024) },
+      ],
+    },
+  };
+  const patch = openConversationState(
+    state,
+    { kind: "account", id: "active", name: "Active" },
+    undefined,
+    1,
+  );
+  expect(patch.messages["account:old"]).toBeUndefined();
+  expect(patch.messages["account:recent"]).toBe(
+    state.messages["account:recent"],
+  );
+  expect(patch.cacheOrder).toEqual(["account:recent", "account:active"]);
+});

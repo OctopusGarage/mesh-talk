@@ -572,6 +572,7 @@ mod tests {
         assert!(allowed_while_locked("initial_presentation_ready"));
         assert!(!allowed_while_locked("account_history"));
         assert!(!allowed_while_locked("read_media"));
+        assert!(!allowed_while_locked("read_media_preview"));
         assert!(!allowed_while_locked("owner_enqueue_text"));
     }
 

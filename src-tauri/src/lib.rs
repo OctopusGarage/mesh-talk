@@ -476,6 +476,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::safety_number,
                 crate::chat_commands::read_file,
                 crate::chat_commands::read_media,
+                crate::chat_commands::read_media_preview,
                 crate::chat_commands::react_dm,
                 crate::chat_commands::react_channel,
                 crate::chat_commands::search,

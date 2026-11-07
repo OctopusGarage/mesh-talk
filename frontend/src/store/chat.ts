@@ -1,4 +1,9 @@
 import {
+  startRecoveryRefresh,
+  RECOVERY_REFRESH_MS,
+} from "@/lib/recoveryRefresh";
+import { startChatExpiry } from "./chatExpiry";
+import {
   reception as receptionApi,
   type HostReception,
 } from "@/lib/api/reception";
@@ -1220,30 +1225,38 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       void delivery?.wake();
     };
     synchronizeDelivery();
-    const expiryWallStart = Date.now();
-    const expiryMonotonicStart = performance.now();
-    const expire = () => {
-      if (!lease.current()) return;
-      const now = Math.max(
-        get().expiryNow,
-        Date.now(),
-        expiryWallStart + Math.floor(performance.now() - expiryMonotonicStart),
-      );
-      const expiredFiles = get().incomingFiles.filter(
-        (file) => file.expiresAtMs != null && file.expiresAtMs <= now,
-      );
-      set((state) => ({
-        ...expireConversationMessages(state, now),
-        ...receptionPatch(state, expireReception(state, now)),
-        incomingFiles: state.incomingFiles.filter(
-          (file) => file.expiresAtMs == null || file.expiresAtMs > now,
-        ),
-        expiryNow: now,
-      }));
-      for (const file of expiredFiles)
-        notifyIncomingFileDismissed(file.fileConv);
-    };
-    const expiry = setInterval(expire, 1000);
+    const expiry = startChatExpiry({
+      get,
+      current: lease.current,
+      expire: (now) => {
+        const expiredFiles = get().incomingFiles.filter(
+          (file) => file.expiresAtMs != null && file.expiresAtMs <= now,
+        );
+        set((state) => ({
+          ...expireConversationMessages(state, now),
+          ...receptionPatch(state, expireReception(state, now)),
+          incomingFiles: expiredFiles.length
+            ? state.incomingFiles.filter(
+                (file) => file.expiresAtMs == null || file.expiresAtMs > now,
+              )
+            : state.incomingFiles,
+          expiryNow: now,
+        }));
+        for (const file of expiredFiles)
+          notifyIncomingFileDismissed(file.fileConv);
+      },
+    });
+    const expire = expiry.refresh;
+    const stopExpiryObservation = useChat.subscribe((state, previous) => {
+      if (
+        state.messages !== previous.messages ||
+        state.intents !== previous.intents ||
+        state.ledger !== previous.ledger ||
+        state.incomingFiles !== previous.incomingFiles ||
+        state.searchTarget !== previous.searchTarget
+      )
+        expiry.schedule();
+    });
     const resumeReception = () => {
       if (
         typeof document === "undefined" ||
@@ -1280,39 +1293,48 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         rosterBusy = false;
       }
     };
-    let nextRosterFallback = 0;
-    let nextStatusFallback = 0;
-    let nextBootRecovery = 0;
-    let bootFailureObserved = false;
-    const roster = setInterval(() => {
-      if (lease.current() && get().ready) {
-        bootFailureObserved = false;
-        void refreshGroupOperationIntents(rawSet, get);
-        const now = performance.now();
-        if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
-          nextRosterFallback = now + 30000;
-          wakeReception();
-          void refreshRoster();
-        }
-        if (!supportsPushState(lease.owner) || now >= nextStatusFallback) {
-          nextStatusFallback = now + 30000;
-          void get().refreshStatuses();
-        }
-      } else if (lease.current() && !get().bootBusy) {
-        const failed = get().bootFailed;
-        const now = performance.now();
-        if (failed && !bootFailureObserved) {
-          bootFailureObserved = true;
-          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
-        }
-        if (!failed || now >= nextBootRecovery) {
-          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
-          // A failed boot remains visible while one bounded background read checks
-          // for recovery. Never let a transient identity timeout become terminal.
-          get().retryBoot(failed);
-        }
-      }
-    }, 2000);
+    const stopRosterRecovery = startRecoveryRefresh(
+      () => {
+        if (!lease.current() || !get().ready) return;
+        wakeReception();
+        void refreshRoster();
+        void get().refreshStatuses();
+      },
+      {
+        intervalMs: () =>
+          supportsPushState(lease.owner) ? RECOVERY_REFRESH_MS : 2000,
+      },
+    );
+    let controlTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleControl = () => {
+      if (controlTimer !== undefined) clearTimeout(controlTimer);
+      controlTimer = undefined;
+      if (cancelled || !lease.current()) return;
+      const state = get();
+      if (state.ready && !Object.keys(state.groupOperations ?? {}).length)
+        return;
+      if (!state.ready && state.bootBusy) return;
+      controlTimer = setTimeout(
+        () => {
+          controlTimer = undefined;
+          if (cancelled || !lease.current()) return;
+          if (get().ready) void refreshGroupOperationIntents(rawSet, get);
+          else get().retryBoot(get().bootFailed);
+          scheduleControl();
+        },
+        !state.ready && state.bootFailed ? BOOT_RECOVERY_INTERVAL_MS : 2000,
+      );
+    };
+    const stopControlObservation = useChat.subscribe((state, previous) => {
+      if (
+        state.ready !== previous.ready ||
+        state.bootBusy !== previous.bootBusy ||
+        state.bootFailed !== previous.bootFailed ||
+        state.groupOperations !== previous.groupOperations
+      )
+        scheduleControl();
+    });
+    scheduleControl();
 
     const unlisten = subscribeNodeEvents({
       onReceptionWake: (scope) => {
@@ -1416,8 +1438,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         window.removeEventListener("pagehide", flushReceipts);
       if (typeof document !== "undefined")
         document.removeEventListener?.("visibilitychange", flushReceipts);
-      clearInterval(roster);
-      clearInterval(expiry);
+      stopRosterRecovery();
+      stopControlObservation();
+      if (controlTimer !== undefined) clearTimeout(controlTimer);
+      stopExpiryObservation();
+      expiry.stop();
       if (typeof window !== "undefined") {
         window.removeEventListener("focus", expire);
         window.removeEventListener("focus", resumeReception);

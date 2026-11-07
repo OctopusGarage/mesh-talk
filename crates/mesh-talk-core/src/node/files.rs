@@ -1387,6 +1387,43 @@ impl Node {
         Ok(())
     }
 
+    /// Derived, ephemeral ordinary image bytes. Original storage and save remain unchanged.
+    pub fn read_media_preview(&self, file_conv: ConversationId) -> Result<Vec<u8>, NodeError> {
+        let check = || -> Result<crate::file::AnyManifest, NodeError> {
+            let manifest = self
+                .files
+                .lock()
+                .expect("files lock")
+                .manifest(file_conv)?
+                .ok_or_else(|| NodeError::File("unknown preview file".into()))?;
+            if manifest.size() > 16 * 1024 * 1024
+                || crate::file::sticker::is_sticker_name(manifest.name())
+            {
+                return Err(NodeError::File("preview input budget or type".into()));
+            }
+            if manifest.protection().is_some()
+                || self.expired_received_file(file_conv)?
+                || matches!(
+                    self.attachment_consent_status(file_conv)?,
+                    Some(super::ReceiveDecision::Pending | super::ReceiveDecision::Declined)
+                )
+            {
+                return Err(NodeError::Authorization("preview unavailable".into()));
+            }
+            Ok(manifest)
+        };
+        let manifest = check()?;
+        let bytes = match self.read_media_checked(file_conv)? {
+            Some(bytes) => bytes,
+            None => self.read_file(file_conv)?,
+        };
+        let preview = bounded_static_preview(&bytes)?;
+        if !same_file_transfer(&manifest, &check()?) {
+            return Err(NodeError::Authorization("preview source changed".into()));
+        }
+        Ok(preview)
+    }
+
     /// Read durable chat-media bytes for `file_conv` from the media store, for inline
     /// display. Returns `None` if no media is stored (e.g. a generic attachment, or media
     /// not yet received-complete). This is the DURABLE display path — distinct from
@@ -2139,6 +2176,60 @@ mod indexed_file_payload_tests {
     }
 
     #[test]
+    fn bounded_preview_enforces_current_receive_consent() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, file) = retained_file(directory.path(), 1);
+        node.set_attachment_global_auto(false).unwrap();
+        let image = image::DynamicImage::new_rgba8(20, 10);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        node.media
+            .store_bytes(file, "preview.png", &bytes.into_inner())
+            .unwrap();
+        assert!(matches!(
+            node.read_media_preview(file),
+            Err(NodeError::Authorization(_))
+        ));
+        node.decide_attachment(file, true).unwrap();
+        let preview = node.read_media_preview(file).unwrap();
+        assert_eq!(image::load_from_memory(&preview).unwrap().width(), 20);
+        node.decide_attachment(file, false).unwrap();
+        assert!(matches!(
+            node.read_media_preview(file),
+            Err(NodeError::Authorization(_))
+        ));
+    }
+
+    #[test]
+    fn bounded_preview_rejects_over_budget_before_payload_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let size = 16 * 1024 * 1024 + 1;
+        let (node, file) =
+            retained_file_with_size(directory.path(), chunk_count_for(size), size, 0);
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert!(node.read_media_preview(file).is_err());
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before
+        );
+        assert!(
+            node.read_media_preview(ConversationId::new([0; 32]))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn indexed_file_progress_reads_metadata_without_chunk_payloads() {
         let directory = tempfile::tempdir().unwrap();
         let (node, file) = retained_file(directory.path(), 128);
@@ -2309,4 +2400,97 @@ mod indexed_file_payload_tests {
         assert!(!node.media.contains(file));
         assert!(node.files.lock().unwrap().manifest(file).unwrap().is_none());
     }
+}
+
+#[cfg(test)]
+mod bounded_preview_tests {
+    #[test]
+    fn preview_applies_jpeg_exif_orientation() {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut bytes);
+        // Little-endian TIFF: one SHORT Orientation entry, rotate 90 degrees clockwise.
+        encoder
+            .set_exif_metadata(vec![
+                73, 73, 42, 0, 8, 0, 0, 0, 1, 0, 18, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+            ])
+            .unwrap();
+        encoder
+            .encode(&[100; 3 * 20 * 10], 20, 10, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let preview = super::bounded_static_preview(&bytes).unwrap();
+        let image = image::load_from_memory(&preview).unwrap();
+        assert_eq!((image.width(), image.height()), (10, 20));
+    }
+
+    #[test]
+    fn preview_bounds_dimensions_preserves_alpha_and_rejects_excess_pixels() {
+        let image = image::DynamicImage::new_rgba8(1600, 800);
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let preview = super::bounded_static_preview(&encoded.into_inner()).unwrap();
+        let decoded = image::load_from_memory(&preview).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (768, 384));
+        assert_eq!(decoded.to_rgba8().get_pixel(0, 0).0[3], 0);
+        assert!(super::preview_pixel_budget(4097, 4096).is_err());
+        assert!(super::bounded_static_preview(b"invalid").is_err());
+    }
+}
+
+fn preview_pixel_budget(width: u32, height: u32) -> Result<(), NodeError> {
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16 * 1024 * 1024 {
+        return Err(NodeError::File("preview pixel budget".into()));
+    }
+    Ok(())
+}
+
+fn bounded_static_preview(bytes: &[u8]) -> Result<Vec<u8>, NodeError> {
+    use image::ImageDecoder;
+    let failed = |error: image::ImageError| NodeError::File(format!("preview decode: {error}"));
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err(NodeError::File("preview input budget".into()));
+    }
+    let format = image::guess_format(bytes).map_err(failed)?;
+    if !matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg) {
+        return Err(NodeError::File("unsupported static preview".into()));
+    }
+    // Keep APNG animation intact. Inspect only checked chunk lengths; never decode a frame.
+    if format == image::ImageFormat::Png {
+        let mut offset = 8usize;
+        while let Some(header) = bytes.get(offset..offset.saturating_add(8)) {
+            let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+            if &header[4..8] == b"acTL" {
+                return Ok(bytes.to_vec());
+            }
+            offset = offset
+                .checked_add(length)
+                .and_then(|value| value.checked_add(12))
+                .ok_or_else(|| NodeError::File("invalid PNG length".into()))?;
+        }
+    }
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    limits.max_image_width = Some(16 * 1024 * 1024);
+    limits.max_image_height = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().map_err(failed)?;
+    let (width, height) = decoder.dimensions();
+    preview_pixel_budget(width, height)?;
+    if decoder.total_bytes() > 64 * 1024 * 1024 {
+        return Err(NodeError::File("preview allocation budget".into()));
+    }
+    let orientation = decoder.orientation().map_err(failed)?;
+    let mut decoded = image::DynamicImage::from_decoder(decoder).map_err(failed)?;
+    decoded.apply_orientation(orientation);
+    let thumbnail = decoded
+        .thumbnail(decoded.width().min(768), decoded.height().min(768))
+        .to_rgba8();
+    let mut output = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(thumbnail)
+        .write_to(&mut output, image::ImageFormat::Png)
+        .map_err(failed)?;
+    Ok(output.into_inner())
 }

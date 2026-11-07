@@ -7,7 +7,7 @@ import { useAuth } from "../src/store/auth";
 /** Browser-only real hook harness; no jsdom or mocked React lifecycle. */
 export function mountMediaProbe(
   container: HTMLElement,
-  options?: { reuse?: boolean },
+  options?: { reuse?: boolean; preview?: boolean },
 ) {
   const root = createRoot(container);
   function Probe({ enabled }: { enabled: boolean }) {

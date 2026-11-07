@@ -1,3 +1,4 @@
+import { RECOVERY_REFRESH_MS } from "./recoveryRefresh";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import { useAuth } from "@/store/auth";
@@ -182,7 +183,7 @@ it("imports validated assets and tombstones without republishing them", async ()
       meta: record("test.library", 2, true),
       bytes: null,
     });
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(usePacks.getState().packs).toEqual([]);
     expect(mocks.remove).not.toHaveBeenCalled();
   } finally {
@@ -197,7 +198,7 @@ it("retries durable pending archives after a CAS failure and binds every transfe
     await usePacks.getState().install(archive());
     await vi.waitFor(() => expect(mocks.put).toHaveBeenCalledTimes(1));
     expect(await usePacks.getState().pendingChanges()).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     await vi.waitFor(async () =>
       expect(await usePacks.getState().pendingChanges()).toHaveLength(0),
     );

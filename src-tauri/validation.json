@@ -446,7 +446,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -1389,6 +1389,41 @@
           }
         ]
       }
+    },
+    {
+      "id": "desktop-inline-media-preview",
+      "paths": ["src-tauri/src/chat_commands/files.rs", "src-tauri/src/lib.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::files::tests::preview_decode_wait_times_out_without_releasing_actual_work_capacity",
+            "app_lock::tests::locked_commands_allow_only_unlock_and_preferences",
+            "commands::tests::attachment_ipc_enforces_bounded_queries_and_persists_receive_policy",
+            "owner_commands::tests::registered_protected_image_reveal_requires_exact_authority_and_blocks_ordinary_reads",
+            "owner_commands::tests::registered_plaintext_and_trust_commands_reject_replaced_entry_authority",
+            "chat_commands::files::tests::preview_deadline_bounds_runtime_writer_wait_without_starting_work",
+            "chat_commands::files::tests::preview_timeout_keeps_actual_worker_owned_without_holding_session_lock"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Expose binary bounded media previews under existing runtime authority with bounded queue/decode admission.",
+        "guide": "docs/module-boundaries.md#inline-media-presentation",
+        "invariants": [
+          {
+            "name": "Ordinary static previews are bounded derived images with current consent, expiry and immutable-source rechecks; originals and protected reveals retain independent access paths.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "One observer deadline covers semaphore, runtime and blocking-pool admission; queued stale work cannot decode, actual child work retains permits and runtime ownership, and expensive decode holds no session guard.",
+            "reference": "docs/ai-coding-reliability.md#r03-actual-work-owns-its-lifetime"
+          }
+        ]
+      },
+      "escalation": [
+        "Require the focused native admission/lock/protected-command cases plus real desktop receive/preview/full-size verification. Browser mocks alone do not certify native image decoding or worker retirement."
+      ]
     }
   ],
   "prScenarios": [

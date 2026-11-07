@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "./recoveryRefresh";
 import { chat } from "./api/chat";
 import { installedStickers } from "./stickerPacks";
 import { snapshotSticker } from "./stickerMedia";
@@ -70,11 +71,11 @@ export function startInstalledStickerSources(owner: string): () => void {
     }
   };
   const unsubscribe = usePacks.subscribe(() => void reconcile());
-  const timer = window.setInterval(() => void reconcile(), 10_000);
+  const stopRecovery = startRecoveryRefresh(() => void reconcile());
   void reconcile();
   return () => {
     active = false;
     unsubscribe();
-    window.clearInterval(timer);
+    stopRecovery();
   };
 }

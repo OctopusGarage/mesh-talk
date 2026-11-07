@@ -90,12 +90,39 @@ export function MediaPreview({
   const available = !!savedPath || !!status?.ready;
   const video = isVideo(name);
   const withinCap = withinInlineCap(name, size);
-  const url = useFileObjectUrl(
+  const [explicitOriginal, setExplicitOriginal] = useState<string | null>(null);
+  const boundedPreview = /\.(png|jpe?g)$/i.test(name);
+  const [lightbox, setLightbox] = useState(false);
+  const [previewRetry, setPreviewRetry] = useState(0);
+  const [previewFailure, setPreviewFailure] = useState<string | null>(null);
+  const previewUrl = useFileObjectUrl(
     fileConv,
     available && withinCap,
     blobMime(name, mime),
+    {
+      reuse: true,
+      preview: boundedPreview,
+      retryKey: previewRetry,
+      onReadError: () => setPreviewFailure(fileConv),
+    },
+  );
+  const originalUrl = useFileObjectUrl(
+    fileConv,
+    lightbox && available && boundedPreview,
+    blobMime(name, mime),
     { reuse: true },
   );
+  const url =
+    boundedPreview && explicitOriginal === fileConv && lightbox
+      ? originalUrl
+      : previewUrl;
+  const fullUrl = boundedPreview ? originalUrl : url;
+  useEffect(() => {
+    if (!boundedPreview || previewFailure !== fileConv || previewUrl) return;
+    const retry = () => setPreviewRetry((value) => value + 1);
+    window.addEventListener("focus", retry);
+    return () => window.removeEventListener("focus", retry);
+  }, [boundedPreview, previewFailure, previewUrl, fileConv]);
   const [decoded, setDecoded] = useState<{
     url: string;
     width: number;
@@ -145,7 +172,6 @@ export function MediaPreview({
     imageGeometry.set(url, { width, height });
     setDecoded({ url, width, height });
   };
-  const [lightbox, setLightbox] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -262,11 +288,17 @@ export function MediaPreview({
   }, [lightbox, video, zoom, updateView]);
   useEffect(() => {
     setShareFile(null);
-    if (!lightbox || video || !url || !navigator.canShare || !navigator.share)
+    if (
+      !lightbox ||
+      video ||
+      !fullUrl ||
+      !navigator.canShare ||
+      !navigator.share
+    )
       return;
     let active = true;
     const lease = captureChatOwnership();
-    void fetch(url)
+    void fetch(fullUrl)
       .then((response) => response.blob())
       .then((blob) => {
         const file = new File([blob], displayName, { type: blob.type });
@@ -277,7 +309,7 @@ export function MediaPreview({
     return () => {
       active = false;
     };
-  }, [lightbox, video, url, displayName]);
+  }, [lightbox, video, fullUrl, displayName]);
   const copyFullImage = async () => {
     const lease = captureChatOwnership();
     if (!imageRef.current || copying || !lease.current()) return;
@@ -416,6 +448,17 @@ export function MediaPreview({
       >
         {t(msgKey)}
       </p>
+      {!readOnly && boundedPreview && (
+        <button
+          type="button"
+          onClick={() => {
+            setExplicitOriginal(fileConv);
+            setLightbox(true);
+          }}
+        >
+          {t("files.viewFullSize")}
+        </button>
+      )}
       {!readOnly && (
         <button
           type="button"
@@ -450,8 +493,11 @@ export function MediaPreview({
     );
   }
   // An image the webview couldn't decode (e.g. HEIC outside Safari).
-  if (!video && imgFailed) {
-    return unpreviewable("files.imageUnsupported", "file-image-unsupported");
+  if (!video && (imgFailed || (previewFailure === fileConv && !url))) {
+    return unpreviewable(
+      imgFailed ? "files.imageUnsupported" : "files.unavailable",
+      "file-image-unsupported",
+    );
   }
   if (!video && (!available || !url))
     return (
@@ -823,7 +869,7 @@ export function MediaPreview({
                       ref={imageRef}
                       draggable={false}
                       onLoad={() => updateView(1)}
-                      src={url}
+                      src={fullUrl ?? undefined}
                       alt={displayName}
                       layoutId={layoutId}
                       transition={layoutTransition}

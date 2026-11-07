@@ -104,6 +104,21 @@ their distinct authorization contracts.
 ### Inline media presentation
 
 `ui/features/chat/MediaPreview.tsx` owns ordinary inline image/video presentation.
+Static PNG/JPEG inline views request ephemeral `read_media_preview` binary bytes;
+core derives a PNG within 768 pixels without upscaling and preserves orientation
+and alpha. Encoded input is at most 16 MiB, static dimensions at most 16,777,216
+pixels and decoder allocation at most 64 MiB; this is not a whole-process budget.
+APNG retains its original animation, and GIF/WebP/video keep their existing paths.
+Current protection, expiry, consent and source identity are rechecked around work.
+The host admits at most 64 queued requests and one decode. One five-second
+observer deadline covers admission/runtime/pool waits; a detached parent retains
+runtime ownership through the real child, and decode holds no global session
+guard. An observer timeout never releases an actual worker's permits. Ordinary full-size bytes
+are requested only when explicitly opened. Closing that view releases its active
+original reference; failed previews never eagerly fall back to original reads and
+can retry on readiness changes or foreground activation. Protected reveal remains
+separate. Derived images are not persisted as plaintext or substituted for saved
+originals.
 Receiving, loading and unsupported states use a responsive provisional frame
 (up to 320 pixels wide, 4:3 for images and 16:9 for video). On image decode,
 the frame adopts the original aspect ratio within 320 by 320 pixels without
@@ -161,6 +176,21 @@ receive/decode geometry, remount reuse and owner cleanup; native trackpad moment
 and WKWebView decoding still require platform evidence.
 
 ### Coordinated state owners
+
+`ui/lib/recoveryRefresh.ts` owns coalesced foreground activation and sparse
+five-minute fallback for presentation/account projections. Native invalidations
+and accepted local edits remain prompt. Pure presentation can park fallback while
+hidden; durable publication retries remain owned in the background. Modern hosts
+avoid short polling; presence/file legacy compatibility retains its explicit
+cadence. Calls and network receive keep their own owners and deadlines.
+`ui/store/chatExpiry.ts` schedules the next actual loaded-message, receipt-ledger,
+file or search-context expiry with a monotonic floor and a sparse clock check
+only while expiring content exists. Quiet state publishes no clock tick. Chat
+boot/group controls retain a timer only while recovery or an operation is pending.
+`conversationState.ts` evicts inactive presentation arrays under the existing
+50-conversation cap and an 8 MiB charged-payload budget. The active page, durable
+reception/deletion evidence and pending send intents retain their existing owners;
+this budget is not a total renderer-residency ceiling.
 
 `core/eventlog/repository/` owns physical event counts and record-cost estimates,
 including their append and removal updates, conversation retirement authority,
@@ -1394,6 +1424,14 @@ before mutations or plaintext release. Frontend linked coordinators project
 accepted records into the owning draft, reception, pack and avatar stores; they
 never own another network synchronization loop. Pack validation remains in
 `pack.ts`; pack storage is namespaced by local owner and cryptographic account.
+Pack storage's version-two sparse numeric pending index selects pending records
+before cloning archived/image payloads. Upgrade backfill and every subsequent
+row/index update share their transaction; a failed commit cannot acknowledge an
+edit. Public and legacy namespaces preserve their existing records. Migration
+may scan old rows once; quiet pending reads must not enumerate the full library.
+Receipt projections drain available pages in bounded batches and yield between
+batches; owner retirement cancels queued continuation without claiming mutation
+completion. Initial/full library loading still enumerates assets; indexed pending lookup does not.
 `settings/shared.rs` owns the allowlist mapping of portable settings onto existing
 per-key account preferences. Device paths, system permissions, autostart and
 local-agent grants stay outside the replicated allowlist.

@@ -2,6 +2,12 @@
 
 ## Reliability before implementation
 
+- For background work, synchronization, storage, caching or UI-state changes, read
+  [performance requirements](docs/performance-requirements.md). Identify the work
+  trigger, resource budget, accumulation/reclamation policy and applicable
+  performance regression before editing; record measured limits and remaining
+  gaps. Extend its general rules when a confirmed defect reveals a new pattern.
+
 - Before implementing, refactoring, fixing or reviewing code, read the
   [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules
   triggered by the changed boundaries, and inspect the owning code and callers.

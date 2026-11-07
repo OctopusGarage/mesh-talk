@@ -1,4 +1,8 @@
 import {
+  startRecoveryRefresh,
+  RECOVERY_REFRESH_MS,
+} from "@/lib/recoveryRefresh";
+import {
   subscribeSyncInvalidation,
   supportsPushState,
 } from "@/lib/syncInvalidation";
@@ -150,7 +154,6 @@ export const usePresence = create<PresenceState>((set, get) => ({
     let lastApplied = 0;
     let inFlight = 0;
     let dirty = false;
-    let nextFallback = 0;
     let baseline: PresenceMap = {};
     // Presentation hysteresis only: delivery continues independently.
     const recoveryConfirmations = new Map<
@@ -212,7 +215,6 @@ export const usePresence = create<PresenceState>((set, get) => ({
         return;
       }
       inFlight++;
-      nextFallback = performance.now() + 30000;
       const pollId = ++nextPoll;
       const requested = performance.now();
       const fail = (failure: PresenceFailure) => {
@@ -376,14 +378,20 @@ export const usePresence = create<PresenceState>((set, get) => ({
       )
         void poll(true);
     });
-    const id = setInterval(() => {
-      if (!supportsPushState(lease.owner) || performance.now() >= nextFallback)
+    const stopRecovery = startRecoveryRefresh(
+      () => {
+        publishAge();
         void poll();
-      queueMicrotask(publishAge);
-    }, POLL_MS);
+      },
+      {
+        background: false,
+        intervalMs: () =>
+          supportsPushState(lease.owner) ? RECOVERY_REFRESH_MS : POLL_MS,
+      },
+    );
     return () => {
       cancelled = true;
-      clearInterval(id);
+      stopRecovery();
       clearTimeout(expiryTimer);
       unlisten();
       if (epoch === session) get().clear();

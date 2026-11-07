@@ -1,3 +1,4 @@
+import { RECOVERY_REFRESH_MS } from "./recoveryRefresh";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { accountDocuments } from "./api/accountDocuments";
 import { avatars } from "./api/contacts";
@@ -43,14 +44,14 @@ it("uses the existing domain digest to avoid repeatedly reading unchanged images
   stop = startLinkedAvatarOverrides("owner");
   await vi.advanceTimersByTimeAsync(0);
   expect(load).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(load).toHaveBeenCalledTimes(1);
   vi.mocked(accountDocuments.list).mockResolvedValue({
     items: [],
     next: null,
     digest: [2],
   });
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(load).toHaveBeenCalledTimes(2);
 });
 it("does not apply a delayed old-account digest after adoption", async () => {
@@ -84,9 +85,9 @@ it("retries the same digest after a failed projection read", async () => {
   load.mockResolvedValueOnce(false).mockResolvedValue(true);
   stop = startLinkedAvatarOverrides("owner");
   await vi.advanceTimersByTimeAsync(0);
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(load).toHaveBeenCalledTimes(2);
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(load).toHaveBeenCalledTimes(2);
 });
 it("retries digest observation after a stalled read and ignores its late response", async () => {
@@ -99,7 +100,7 @@ it("retries digest observation after a stalled read and ignores its late respons
   const load = useAvatars.getState().load;
   stop = startLinkedAvatarOverrides("owner");
   try {
-    await vi.advanceTimersByTimeAsync(10_001);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS + 1);
     expect(accountDocuments.list).toHaveBeenCalledTimes(2);
     expect(load).toHaveBeenCalledOnce();
     finish({ items: [], next: null, digest: [2] });
@@ -109,4 +110,25 @@ it("retries digest observation after a stalled read and ignores its late respons
     finish({ items: [], next: null, digest: [2] });
     await vi.advanceTimersByTimeAsync(0);
   }
+});
+
+it("keeps a quiet avatar projection idle and refreshes immediately on activation", async () => {
+  const events = new EventTarget();
+  vi.stubGlobal(
+    "window",
+    Object.assign(events, { setInterval, clearInterval }),
+  );
+  stop = startLinkedAvatarOverrides("owner");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(accountDocuments.list).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(accountDocuments.list).toHaveBeenCalledTimes(1);
+  events.dispatchEvent(new Event("focus"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(accountDocuments.list).toHaveBeenCalledTimes(2);
+  stop();
+  stop = undefined;
+  events.dispatchEvent(new Event("focus"));
+  await vi.advanceTimersByTimeAsync(300_000);
+  expect(accountDocuments.list).toHaveBeenCalledTimes(2);
 });

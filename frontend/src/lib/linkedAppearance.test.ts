@@ -1,3 +1,4 @@
+import { RECOVERY_REFRESH_MS } from "./recoveryRefresh";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuth } from "@/store/auth";
 import { useSettings } from "@/store/settings";
@@ -213,7 +214,7 @@ it("retries a failed local edit on the next poll", async () => {
   mocks.values.theme = "oled";
   for (const listener of mocks.listeners) listener();
   await vi.waitFor(() => expect(mocks.setPreference).toHaveBeenCalledTimes(1));
-  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
   expect(mocks.setPreference).toHaveBeenCalledTimes(2);
   stop();
 });
@@ -430,12 +431,12 @@ it("validates remote languages and resets a tombstone to canonical English", asy
     mocks.getPreferences.mockResolvedValue([
       { key: "language", value: "ja", revision: 11, device_id: "a".repeat(32) },
     ]);
-    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(i18n.language).toBe("ja");
     mocks.getPreferences.mockResolvedValue([
       { key: "language", value: null, revision: 12, device_id: "a".repeat(32) },
     ]);
-    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(RECOVERY_REFRESH_MS);
     expect(i18n.language).toBe("en");
     expect(mocks.setPreference).not.toHaveBeenCalled();
   } finally {

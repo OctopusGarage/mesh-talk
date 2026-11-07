@@ -238,7 +238,9 @@
         "frontend/src/components/identity/AvatarEditMenu.tsx",
         "frontend/src/components/identity/AvatarEditMenu.test.ts",
         "frontend/src/store/avatars.ts",
-        "frontend/src/store/avatars.test.ts"
+        "frontend/src/store/avatars.test.ts",
+        "frontend/src/store/packs.ts",
+        "frontend/e2e/customization-pending-storage.spec.ts"
       ],
       "frontend": [
         "src/lib/linkedAvatarOverrides.test.ts",
@@ -261,11 +263,16 @@
           {
             "name": "Avatar and receipt reads have bounded observation waits; a stalled receipt write retains mutation serialization while remote receipt polling continues independently, and retired owners cannot publish late snapshots.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Pending customization lookup selects indexed durable metadata before asset cloning; schema migration and row/index writes are atomic and failed acknowledgment cannot lose pending edits or tombstones.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
           }
         ]
       },
       "escalation": [
-        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence."
+        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence.",
+        "Run e2e/customization-pending-storage.spec.ts for real IndexedDB upgrade, indexed quiet reads and failed-write recovery; injected storage tests do not certify transaction behavior."
       ]
     },
     {
@@ -657,7 +664,20 @@
         "frontend/src/store/conversationModel.ts"
       ],
       "consumers": ["frontend-history", "frontend-outgoing"],
-      "frontend": ["src/store/reception.test.ts"]
+      "frontend": [
+        "src/store/reception.test.ts",
+        "src/store/outgoingIntent.test.ts"
+      ],
+      "capability": {
+        "summary": "Bound inactive presentation payloads while retaining active navigation and exact deletion/intent authority.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "Inactive caches retain the existing conversation cap plus an aggregate charged-payload budget; no-op expiry preserves references and active pages retain their own lifecycle.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-chat",
@@ -666,7 +686,8 @@
         "frontend/src/store/chat.test.ts",
         "frontend/src/store/chatRuntimeEffects.ts",
         "frontend/src/store/rosterRefresh.ts",
-        "frontend/e2e/connection-recovery.spec.ts"
+        "frontend/e2e/connection-recovery.spec.ts",
+        "frontend/src/store/chatExpiry.ts"
       ],
       "frontend": ["src/store/chat.test.ts"],
       "capability": {
@@ -675,6 +696,10 @@
         "invariants": [
           {
             "name": "The thirty-second identity boot window includes native read waits; failure retains bounded background recovery without crossing owner/run lifetimes",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Empty expiry state publishes no periodic clock; actual message, ledger, file and search-context deadlines retain monotonic/resume safety, and control recovery runs only while pending.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
@@ -1033,7 +1058,9 @@
         "frontend/e2e/audit-fixes.spec.ts",
         "frontend/src/lib/i18n.ts",
         "frontend/src/store/privacy.ts",
-        "frontend/src/store/privacy.test.ts"
+        "frontend/src/store/privacy.test.ts",
+        "frontend/src/lib/recoveryRefresh.ts",
+        "frontend/src/lib/recoveryRefresh.test.ts"
       ],
       "frontend": [
         "src/lib/readDeadline.test.ts",
@@ -1048,7 +1075,8 @@
         "src/features/chat/PersonalDevices.test.ts",
         "src/lib/api.test.ts",
         "src/features/chat/LinkDeviceDialog.test.ts",
-        "src/store/privacy.test.ts"
+        "src/store/privacy.test.ts",
+        "src/lib/recoveryRefresh.test.ts"
       ],
       "consumers": [
         "frontend-chat",
@@ -1078,6 +1106,10 @@
           },
           {
             "name": "Contact and privacy policy reads release presentation loading after a bounded wait, preserve explicit error recovery and reject late snapshots from expired reads or retired sessions without timing out mutation ownership.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Semantic invalidations and coalesced activation remain prompt; modern quiet projections use sparse recovery, presentation-only hidden owners park timers, and legacy reads preserve bounded progress.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
@@ -1651,6 +1683,10 @@
           {
             "name": "Sent v2 semantic labels survive pack removal and retry; compact surfaces share one summary with localized legacy fallback and protected/recalled/expired content takes priority.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Ordinary static previews are bounded derived images with current consent, expiry and immutable-source rechecks; originals and protected reveals retain independent access paths.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
           }
         ]
       },
@@ -2556,8 +2592,15 @@
     },
     {
       "id": "frontend-pack-acceptance",
-      "paths": ["frontend/e2e/packs.spec.ts"],
-      "browser": ["e2e/packs.spec.ts"]
+      "paths": [
+        "frontend/e2e/packs.spec.ts",
+        "frontend/src/store/packs.ts",
+        "frontend/e2e/customization-pending-storage.spec.ts"
+      ],
+      "browser": [
+        "e2e/packs.spec.ts",
+        "e2e/customization-pending-storage.spec.ts"
+      ]
     },
     {
       "id": "frontend-packs-empty-acceptance",

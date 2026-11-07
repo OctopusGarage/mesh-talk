@@ -657,6 +657,7 @@ mod tests {
                     crate::chat_commands::channel_history,
                     crate::chat_commands::read_file,
                     crate::chat_commands::read_media,
+                    crate::chat_commands::read_media_preview,
                     crate::trust::mark_verified,
                     crate::trust::get_trust,
                     crate::avatars::get_avatars,
@@ -2958,7 +2959,7 @@ mod tests {
                     )
                     .is_err()
             );
-            for read in ["read_media", "read_file"] {
+            for read in ["read_media", "read_media_preview", "read_file"] {
                 assert!(
                     fixture
                         .invoke(read, serde_json::json!({"fileConv":accepted["fileConv"]}))
@@ -4334,6 +4335,10 @@ mod tests {
                 ("read_file", serde_json::json!({"fileConv":"00".repeat(32)})),
                 (
                     "read_media",
+                    serde_json::json!({"fileConv":"00".repeat(32)}),
+                ),
+                (
+                    "read_media_preview",
                     serde_json::json!({"fileConv":"00".repeat(32)}),
                 ),
                 (

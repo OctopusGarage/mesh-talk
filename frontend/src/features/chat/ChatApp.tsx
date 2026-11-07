@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "@/lib/recoveryRefresh";
 import { useMessageFavorites } from "@/store/messageFavorites";
 import {
   startAutomaticDownloads,
@@ -47,9 +48,12 @@ export function ChatApp() {
   useEffect(() => {
     if (!owner || !ready || !accountId) return;
     void useDrafts.getState().start(owner, generation, accountId);
-    const timer = setInterval(() => {
-      void useDrafts.getState().refresh();
-    }, 15000);
+    const stopRecovery = startRecoveryRefresh(
+      () => {
+        void useDrafts.getState().refresh();
+      },
+      { background: false },
+    );
     const unsubscribe = subscribeSyncInvalidation((change) => {
       if (change.owner === owner) void useDrafts.getState().refresh();
     });
@@ -60,7 +64,7 @@ export function ChatApp() {
     document.addEventListener("visibilitychange", flush);
     window.addEventListener("pagehide", flush);
     return () => {
-      clearInterval(timer);
+      stopRecovery();
       unsubscribe();
       window.removeEventListener("blur", flush);
       document.removeEventListener("visibilitychange", flush);

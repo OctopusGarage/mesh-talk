@@ -1,4 +1,8 @@
 import {
+  startRecoveryRefresh,
+  RECOVERY_REFRESH_MS,
+} from "@/lib/recoveryRefresh";
+import {
   subscribeSyncInvalidation,
   supportsPushState,
 } from "@/lib/syncInvalidation";
@@ -66,10 +70,9 @@ export function invalidateFileAvailability(fileConvs: string[]) {
 }
 
 const watched = new Map<string, number>();
-let timer: ReturnType<typeof setInterval> | undefined;
+let stopRecovery: (() => void) | undefined;
 let inFlight = false;
 let dirty = false;
-let nextFallback = 0;
 let generation = 0;
 let invalidationCleanup: (() => void) | undefined;
 
@@ -89,13 +92,11 @@ async function poll(force = false) {
     if (force) dirty = true;
     return;
   }
-  if (!force && supportsPushState() && performance.now() < nextFallback) return;
   // Ready manifests can expire or be removed while a card remains mounted.
   const pending = [...watched.keys()];
   if (!pending.length) return;
   inFlight = true;
   dirty = false;
-  nextFallback = performance.now() + 30000;
   try {
     await refreshFileAvailability(pending);
   } catch {
@@ -111,8 +112,11 @@ async function poll(force = false) {
 
 export function watchFileAvailability(fileConv: string) {
   watched.set(fileConv, (watched.get(fileConv) ?? 0) + 1);
-  if (!timer) {
-    timer = setInterval(() => void poll(), 750);
+  if (!stopRecovery) {
+    stopRecovery = startRecoveryRefresh(() => void poll(), {
+      background: false,
+      intervalMs: () => (supportsPushState() ? RECOVERY_REFRESH_MS : 5000),
+    });
     invalidationCleanup = subscribeSyncInvalidation((change) => {
       if (change.kind === "files" || change.kind === "state") void poll(true);
     });
@@ -122,9 +126,9 @@ export function watchFileAvailability(fileConv: string) {
     const count = watched.get(fileConv) ?? 0;
     if (count <= 1) watched.delete(fileConv);
     else watched.set(fileConv, count - 1);
-    if (!watched.size && timer) {
-      clearInterval(timer);
-      timer = undefined;
+    if (!watched.size && stopRecovery) {
+      stopRecovery();
+      stopRecovery = undefined;
       invalidationCleanup?.();
       invalidationCleanup = undefined;
     }
@@ -166,7 +170,6 @@ export function markUnavailableFileError(
 
 export function resetFileAvailability() {
   generation++;
-  nextFallback = 0;
   useFileAvailability.getState().reset();
   if (watched.size) void poll(true);
 }

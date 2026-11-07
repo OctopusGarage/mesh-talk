@@ -38,7 +38,7 @@ async function seedImages(
       win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         const probe = win.__mediaScroll;
         if (
-          cmd === "read_media" &&
+          (cmd === "read_media" || cmd === "read_media_preview") &&
           String(args.fileConv).startsWith("scroll-image-")
         ) {
           const id = String(args.fileConv);

@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "./recoveryRefresh";
 import { startInstalledStickerSources } from "./installedStickerSources";
 import {
   accountDocuments,
@@ -207,13 +208,13 @@ export function startLinkedCustomizationPacks(
     if (change.owner === owner && change.kind === "state") void reconcile();
   });
   void reconcile();
-  const timer = window.setInterval(() => void reconcile(), 10_000);
+  const stopRecovery = startRecoveryRefresh(() => void reconcile());
   return () => {
     active = false;
     stopStickerSources();
     unsubscribe();
     unlisten();
-    window.clearInterval(timer);
+    stopRecovery();
     if (usePacks.getState().scope === installedScope)
       store.setScope(null, null);
   };

@@ -1,3 +1,4 @@
+import { startRecoveryRefresh } from "./recoveryRefresh";
 import {
   startLinkedCustomizationPacks,
   publishCustomizationPacksBeforeLink,
@@ -207,7 +208,7 @@ export function startLinkedAppearance(owner: string): () => void {
     if (change.owner === owner && change.kind === "state") void reconcile();
   });
   void reconcile();
-  const timer = window.setInterval(() => void reconcile(), 10_000);
+  const stopRecovery = startRecoveryRefresh(() => void reconcile());
   return () => {
     active = false;
     publisher.stop();
@@ -221,6 +222,6 @@ export function startLinkedAppearance(owner: string): () => void {
     unsubscribeLanguage();
     unsubscribePacks();
     unlisten();
-    window.clearInterval(timer);
+    stopRecovery();
   };
 }

@@ -3,6 +3,7 @@ import { test, expect } from "./helpers/portable-evidence";
 import { BOB, enterChat, seedThemeBeforeLoad } from "./helpers/session";
 
 type ReceivingWindow = Window & {
+  __mockEmit: (event: string, payload: unknown) => void;
   __imageReceiving: {
     done: number;
     ready: boolean;
@@ -50,7 +51,10 @@ async function seedImage(page: Page, done = 0, delayedDecode = false) {
             total: 4,
             ready: probe.ready,
           }));
-        if (command === "read_media" && args.fileConv === "receiving-image") {
+        if (
+          (command === "read_media" || command === "read_media_preview") &&
+          args.fileConv === "receiving-image"
+        ) {
           probe.reads++;
           await new Promise<void>((resolve) => {
             probe.releaseRead = resolve;
@@ -132,23 +136,50 @@ test("image receipt preserves its frame through chunks, local read and image loa
         () => (window as unknown as ReceivingWindow).__imageReceiving.reads,
       ),
     ).toBe(0);
-    await page.evaluate(() => {
-      (window as unknown as ReceivingWindow).__imageReceiving.done = 3;
+    await page.evaluate(async () => {
+      const host = window as unknown as ReceivingWindow;
+      host.__imageReceiving.done = 3;
+      const identity = await host.__TAURI_INTERNALS__.invoke(
+        "owner_node_identity",
+        { owner: "u_self" },
+      );
+      host.__mockEmit("node-state-changed", {
+        ...(identity as Record<string, unknown>),
+        kind: "files",
+      });
     });
     await expect(row.getByRole("progressbar")).toHaveAttribute(
       "aria-valuenow",
       "75",
     );
     await expect(row.getByText("Receiving image · 75%")).toBeVisible();
-    await page.evaluate(() => {
-      (window as unknown as ReceivingWindow).__imageReceiving.done = 4;
+    await page.evaluate(async () => {
+      const host = window as unknown as ReceivingWindow;
+      host.__imageReceiving.done = 4;
+      const identity = await host.__TAURI_INTERNALS__.invoke(
+        "owner_node_identity",
+        { owner: "u_self" },
+      );
+      host.__mockEmit("node-state-changed", {
+        ...(identity as Record<string, unknown>),
+        kind: "files",
+      });
     });
     await expect(
       row.getByRole("paragraph").filter({ hasText: /^Preparing image$/ }),
     ).toBeVisible();
     await expect(row.getByRole("progressbar")).toHaveCount(0);
-    await page.evaluate(() => {
-      (window as unknown as ReceivingWindow).__imageReceiving.ready = true;
+    await page.evaluate(async () => {
+      const host = window as unknown as ReceivingWindow;
+      host.__imageReceiving.ready = true;
+      const identity = await host.__TAURI_INTERNALS__.invoke(
+        "owner_node_identity",
+        { owner: "u_self" },
+      );
+      host.__mockEmit("node-state-changed", {
+        ...(identity as Record<string, unknown>),
+        kind: "files",
+      });
     });
     await expect
       .poll(() =>

@@ -1334,7 +1334,12 @@ mod tests {
             )
             .is_err()
         );
-        for command in ["decide_attachment", "save_file_to_dir", "read_media"] {
+        for command in [
+            "decide_attachment",
+            "save_file_to_dir",
+            "read_media",
+            "read_media_preview",
+        ] {
             let body = match command {
                 "decide_attachment" => serde_json::json!({ "fileConv": "invalid", "accept": true }),
                 "save_file_to_dir" => serde_json::json!({ "fileConv": "invalid", "dir": "/tmp" }),

@@ -39,6 +39,28 @@ export function emptyConversationCache(): ConversationCacheState {
 // many are evicted; `unread` (tiny, drives sidebar badges) is never touched, and a reopen
 // repopulates from the log via reload(). Active conversation is always retained.
 export const CONV_CACHE_LIMIT = 50;
+/** Charged retained payload, not a promise about engine/DOM residency. The active
+ * page remains usable; only inactive presentation arrays are budget-evicted. */
+export const INACTIVE_CONVERSATION_BYTES = 8 * 1024 * 1024;
+
+function retainedPayloadBytes(value: unknown): number {
+  const pending: unknown[] = [value];
+  const seen = new WeakSet<object>();
+  let bytes = 0;
+  while (pending.length && bytes <= INACTIVE_CONVERSATION_BYTES) {
+    const item = pending.pop();
+    if (typeof item === "string") bytes += item.length * 2;
+    else if (item && typeof item === "object" && !seen.has(item)) {
+      seen.add(item);
+      bytes += 32;
+      for (const [key, entry] of Object.entries(item)) {
+        bytes += 16 + key.length * 2;
+        pending.push(entry);
+      }
+    } else if (typeof item === "number") bytes += 8;
+  }
+  return bytes;
+}
 
 export function boundedConversationMap<T>(
   previous: Record<string, T>,
@@ -264,12 +286,25 @@ function evictCaches(
   order: string[],
   keep: string,
 ) {
-  if (order.length <= CONV_CACHE_LIMIT) return { messages, reactions, order };
-  const excess = order.length - CONV_CACHE_LIMIT;
+  const inactive = order.filter((key) => key !== keep);
+  const sizes = new Map(
+    inactive.map((key) => [
+      key,
+      retainedPayloadBytes(messages[key]) +
+        retainedPayloadBytes(reactions[key]),
+    ]),
+  );
+  let bytes = [...sizes.values()].reduce((sum, size) => sum + size, 0);
+  let count = order.length;
   const evicted = new Set<string>();
-  for (let i = 0; i < order.length && evicted.size < excess; i++) {
-    if (order[i] !== keep) evicted.add(order[i]);
+  for (const key of inactive) {
+    if (count <= CONV_CACHE_LIMIT && bytes <= INACTIVE_CONVERSATION_BYTES)
+      break;
+    evicted.add(key);
+    count--;
+    bytes -= sizes.get(key) ?? 0;
   }
+  if (!evicted.size) return { messages, reactions, order };
   const nextMessages: Record<string, ChatMessage[]> = {};
   for (const key of Object.keys(messages))
     if (!evicted.has(key)) nextMessages[key] = messages[key];
@@ -398,24 +433,27 @@ export function expireConversationMessages(
   state: ConversationCacheState,
   now: number,
 ): Partial<ConversationCacheState> {
-  const messages = { ...state.messages };
-  const reactions = { ...state.reactions };
-  for (const [key, rows] of Object.entries(messages)) {
+  let messages = state.messages;
+  let reactions = state.reactions;
+  for (const [key, rows] of Object.entries(state.messages)) {
     const expired = new Set(
       rows.filter((m) => messageExpired(m, now)).map((m) => m.id),
     );
-    if (!rows.some((m) => messageExpired(m, now))) continue;
+    if (!expired.size) continue;
+    if (messages === state.messages) messages = { ...messages };
     messages[key] = rows.filter((m) => !messageExpired(m, now));
-    if (reactions[key])
+    if (reactions[key]?.some((r) => expired.has(r.target))) {
+      if (reactions === state.reactions) reactions = { ...reactions };
       reactions[key] = reactions[key].filter((r) => !expired.has(r.target));
+    }
   }
-  return {
-    messages,
-    reactions,
-    intents: Object.fromEntries(
-      Object.entries(state.intents).filter(
-        ([, intent]) => !messageExpired(intent.message, now),
-      ),
-    ),
-  };
+  const expiredIntents = Object.keys(state.intents).filter((id) =>
+    messageExpired(state.intents[id].message, now),
+  );
+  let intents = state.intents;
+  if (expiredIntents.length) {
+    intents = { ...intents };
+    for (const id of expiredIntents) delete intents[id];
+  }
+  return { messages, reactions, intents };
 }

@@ -40,6 +40,10 @@ not require a new concurrency test. A changed async callback does require a
 lifetime review even when the diff is one line. Put task-specific reasoning and
 results in the PR or ignored local evidence, not a new permanent report.
 
+Cross-cutting idle budgets, demand-driven work and accumulation rules belong to
+[performance requirements](performance-requirements.md). Apply them alongside the
+correctness rules below; a smaller resource chart does not prove preserved recovery.
+
 ## Select rules by the changed boundary
 
 | Change or symptom                                                        | Read at least                                                                                                                                         |
@@ -119,6 +123,14 @@ progress while the worker is paused. Offloading a scan does not help other
 branches of a scheduler if that scheduler still waits for the entire scan inside
 one completion branch. Synchronous final persistence can still block; document
 that boundary instead of claiming a timer can preempt it.
+
+Trace guards inside a helper named `blocking`, not only the caller. A read-only
+image decode must not hold the global session/app-lock guard throughout its CPU
+work. The [preview owner](../src-tauri/src/chat_commands/files.rs) retains the
+runtime in a detached parent until its actual worker joins, checks one admission
+deadline before queued work starts, and revalidates lock revision before
+publication. Its held-worker regression checks unrelated session progress and
+that observer timeout does not release worker capacity or runtime ownership.
 
 Branches of one `select!` share a task; adding runtime workers does not let a
 blocked branch poll another branch of that same future. Independently scheduled
@@ -582,6 +594,14 @@ existing frame, file, count, depth and byte limits. Preserve exact account/devic
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
 do not remove backpressure to make a benchmark look faster.
+
+Filter lightweight metadata before cloning large payloads. An empty final result
+does not prove that a query avoided full-record reads. Durable selection indexes
+must migrate and update in the same transaction as their authoritative records;
+failed commits cannot acknowledge work. The customization storage regression in
+[packs tests](../frontend/src/store/packs.test.ts) and real
+[IndexedDB browser scenario](../frontend/e2e/customization-pending-storage.spec.ts)
+checks empty pending reads, old-data migration and failed writes.
 
 A bounded work item can still be unnecessary work. Classify demand from the
 owning source before constructing a derived index; stale queue entries alone
