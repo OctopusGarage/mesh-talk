@@ -593,6 +593,13 @@ Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
 run cannot qualify an unbounded environmental dependency for later main runs.
 
+Executable fixtures must own an independent copied image, not a hard link to
+the running test harness. Assert file identity before launch. After verified
+process retirement, use the shared bounded filesystem cleanup helper; persistent
+locks must still fail. Keep the Windows held-image failure and release controls
+in `release-reuse.test.mjs`; cleanup retries never retry the test assertion or
+substitute for process retirement.
+
 Git-path and mode controls should construct Git objects when the host cannot
 represent the input faithfully. Assert the actual delta and mode before checking
 rejection; an empty change rejected for another reason is not a valid negative

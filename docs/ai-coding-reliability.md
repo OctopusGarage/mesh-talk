@@ -642,6 +642,12 @@ validation instead of only the synthetic command. The
 checks both the retained output-limit failure and successful enclosing supervisor
 through an actual nested execution.
 
+Executable process fixtures must copy their image and assert independent file
+identity; a hard link aliases the live harness outside the child process owner.
+The process-owner and release-reuse fixtures share bounded filesystem cleanup
+after verified retirement, with a Windows held-image control that still rejects
+a persistent lock and succeeds only after release.
+
 Treat a lock-order suspicion, a reproduced bug and a passing regression as
 different evidence. A stack sample or total suite duration alone does not prove
 one test is deadlocked. Inspect the active operation, its duration and the actual

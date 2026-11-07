@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { execute } from "../validation/stage.mjs";
 import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
+import { removeCliFixture } from "./test-fixtures/cli.mjs";
 
 const windows = process.platform === "win32";
 const powershell = path.join(process.env.SystemRoot || "C:/Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -278,12 +279,19 @@ test("Windows native launch failure returns proof without unowned fallback", { s
 });
 
 test("Windows lookup preserves bare names, quoted PATH and duplicate environment selection", { skip: !windows, timeout: 10000 }, async t => {
-  const { mkdir, link } = await import("node:fs/promises");
+  const { mkdir, copyFile, stat } = await import("node:fs/promises");
   const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-path-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => removeCliFixture(root));
   const bin = path.join(root, "quoted bin");
   await mkdir(bin);
-  await link(process.execPath, path.join(bin, "owned-node.exe"));
+  const executable = path.join(bin, "owned-node.exe");
+  await copyFile(process.execPath, executable);
+  // The fixture image must not alias the still-running harness's executable.
+  // Child retirement cannot release an image owned by this external process.
+  const [harnessImage, fixtureImage] = await Promise.all([
+    stat(process.execPath, { bigint: true }), stat(executable, { bigint: true }),
+  ]);
+  assert.notDeepEqual([fixtureImage.dev, fixtureImage.ino], [harnessImage.dev, harnessImage.ino]);
   const output = [];
   const result = await run(["owned-node", "-e", "process.stdout.write(process.env.OWNER_VALUE)"], {
     cwd: root, env: { ...process.env, PATH: `"${bin}"`, Path: "D:/no-such-owned-path", OWNER_VALUE: "first", owner_value: "second" }, onOutput(chunk) { output.push(chunk); },
