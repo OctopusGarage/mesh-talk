@@ -498,6 +498,9 @@ grouped descendant retaining stdout or stderr must yield a failed structured
 result with unverified cleanup and a quarantined lease. Closing owned read ends
 does not prove the escaped process stopped. Keep real natural-exit, cancellation
 and no-success-receipt controls rather than signalling unknown process groups.
+Authorize PID cleanup only from a complete private acknowledgment, not a numeric
+prefix in a stdout chunk. Stream reads do not preserve message boundaries; a
+failed readiness publication must retire the child through its creation owner.
 Actual CLI regression fixtures need private output directories as well as private
 source directories; parallel Playwright commands otherwise delete one another's
 traces and manufacture failures. Missing hosted logs do not identify a slow case.

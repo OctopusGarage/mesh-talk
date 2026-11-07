@@ -918,17 +918,36 @@ test("CLI diagnostic failures cannot impersonate an owner-proven pre-admission c
   await assert.rejects(f.count(), /ENOENT/);
 });
 
+// The leader publishes only its acknowledged child's complete identity. Stream
+// chunks never authorize cleanup: stdout may split even a single numeric write.
+const escapedPipeLeaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+const escapedPipeLeader = "const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{detached:true,stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{try{if(pid!==c.pid||!Number.isSafeInteger(pid)||pid<=1)throw Error('invalid child acknowledgment');const ready=process.argv[2];fs.writeFileSync(ready+'.pending',String(pid)+'\\n');fs.renameSync(ready+'.pending',ready);process.exit(0)}catch(error){const fail=()=>{console.error(error.message);process.exit(1)};if(c.exitCode!==null||c.signalCode!==null){fail();return;}c.once('exit',fail);c.kill('SIGKILL');}});";
+async function publishedEscapedPid(filename) {
+  const text = await readFile(filename, "utf8");
+  assert.match(text, /^[1-9]\d*\n$/, "cleanup requires a complete atomic PID record");
+  const pid = Number(text);
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, "cleanup requires a safe child PID");
+  return pid;
+}
+async function awaitEscapedPid(filename) {
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const deadline = Date.now() + 3000;
+  while (true) {
+    try { return await publishedEscapedPid(filename); }
+    catch (error) { if (error.code !== "ENOENT" || Date.now() >= deadline) throw error; }
+    await pause(20);
+  }
+}
+
 for (const cancel of [false, true, "after-drain"]) test(`escaped inherited output pipes fail closed after leader exit${cancel === "after-drain" ? " and cancellation during output finish" : cancel ? " and cancellation" : ""}`, { skip: process.platform === "win32", timeout: 15000 }, async () => {
   const { execute } = await import("../validation/stage.mjs");
   const { Writable } = await import("node:stream");
   const { setTimeout: pause } = await import("node:timers/promises");
+  const privateRoot = await mkdtemp(path.join(tmpdir(), "mesh-escaped-pipe-"));
+  const readyFile = path.join(privateRoot, "ready");
   const controller = new AbortController();
   let escaped;
   let ownedGroup;
-  let ready;
-  const acknowledged = new Promise(resolve => { ready = resolve; });
-  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
-  const leader = "const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{detached:true,stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{console.log('ESCAPED_READY='+pid);process.exit(0)});";
   let cancelledDuringFinish = false;
   let completion;
   const bounded = async (promise, ms, description) => {
@@ -942,18 +961,15 @@ for (const cancel of [false, true, "after-drain"]) test(`escaped inherited outpu
     return !!state && !state.startsWith("Z");
   };
   try {
-    completion = execute([process.execPath, "-e", leader, leaf], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, signal: controller.signal,
+    completion = execute([process.execPath, "-e", escapedPipeLeader, escapedPipeLeaf, readyFile], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, signal: controller.signal,
       ...(cancel === "after-drain" ? { logPath: "fixture-owned-output", createLogStream: () => new Writable({ write(_chunk, _encoding, done) { done(); }, final(done) {
         // Output finish is entered only after the escaped read ends were closed.
         cancelledDuringFinish = true;
         controller.abort();
         done();
       } }) } : {}),
-      onSpawn: pid => { ownedGroup = pid; }, onOutput(chunk) {
-      const match = chunk.toString().match(/ESCAPED_READY=(\d+)/);
-      if (match) { escaped = Number(match[1]); ready(); }
-    } });
-    await bounded(acknowledged, 3000, "escaped worker did not acknowledge readiness");
+      onSpawn: pid => { ownedGroup = pid; }, onOutput() {} });
+    escaped = await awaitEscapedPid(readyFile);
     assert.ok(Number.isSafeInteger(escaped) && escaped > 1);
     if (cancel === true) {
       await bounded((async () => {
@@ -976,10 +992,13 @@ for (const cancel of [false, true, "after-drain"]) test(`escaped inherited outpu
     if (cancel === "after-drain") assert.equal(cancelledDuringFinish, true);
     assert.equal(running(), true, "owner must not signal an unknown escaped group");
   } finally {
+    // Recover the atomic record even when readiness or a semantic assertion fails.
+    if (!escaped) escaped = await awaitEscapedPid(readyFile);
     if (escaped && running()) process.kill(escaped, "SIGKILL");
     if (completion) await completion;
     for (let attempt = 0; attempt < 50 && running(); attempt++) await pause(20);
     assert.equal(running(), false, "fixture-owned escaped process must retire before completion");
+    await rm(privateRoot, { recursive: true, force: true });
   }
 });
 
@@ -990,8 +1009,6 @@ test("escaped pipe failure records diagnostics and quarantines stage leases with
   const resource = "escaped-pipe-fixture";
   const readyFile = path.join(f.root, "target/escaped-ready");
   const versions = toolVersionFixture(f.root, { ...process.env });
-  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
-  const leader = "const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{detached:true,stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{fs.writeFileSync(process.argv[2],String(pid));process.exit(0)});";
   let escaped;
   let completion;
   let timer;
@@ -1001,9 +1018,9 @@ test("escaped pipe failure records diagnostics and quarantines stage leases with
     return !!state && !state.startsWith("Z");
   };
   try {
-    completion = f.run({ name: "escaped-pipe", resource, env: versions.env, command: [process.execPath, "-e", leader, leaf, readyFile] });
+    completion = f.run({ name: "escaped-pipe", resource, env: versions.env, command: [process.execPath, "-e", escapedPipeLeader, escapedPipeLeaf, readyFile] });
     const result = await Promise.race([completion, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("stage did not finalize escaped-pipe failure")), 9000); })]);
-    escaped = Number(await readFile(readyFile, "utf8"));
+    escaped = await publishedEscapedPid(readyFile);
     assert.ok(Number.isSafeInteger(escaped) && escaped > 1);
     assert.notEqual(result.code, 0);
     assert.equal(result.cleanupUnverified, true);
@@ -1018,7 +1035,7 @@ test("escaped pipe failure records diagnostics and quarantines stage leases with
     assert.equal(alive(), true, "quarantine cannot claim the escaped process was killed");
   } finally {
     clearTimeout(timer);
-    if (!escaped) { try { escaped = Number(await readFile(readyFile, "utf8")); } catch {} }
+    if (!escaped) escaped = await awaitEscapedPid(readyFile);
     if (Number.isSafeInteger(escaped) && escaped > 1 && alive()) process.kill(escaped, "SIGKILL");
     if (completion) await completion;
     for (let attempt = 0; attempt < 50 && alive(); attempt++) await pause(20);

@@ -281,7 +281,7 @@
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           },
           {
-            "name": "POSIX signal fixtures atomically publish complete PID readiness after installing handlers, accept only positive safe integer PIDs and retain owned cleanup while a deterministic real write is held before publication",
+            "name": "POSIX signal fixtures atomically publish complete PID readiness after installing handlers, accept only positive safe integer PIDs and retain owned cleanup while a deterministic real write is held before publication. Stream fragments cannot authorize PID cleanup; failed publication retires the actual created child through its owner.",
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           },
           {
