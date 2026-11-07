@@ -70,7 +70,9 @@
     "copyFailed": "복사하지 못했습니다. 클립보드 접근 권한을 확인한 후 다시 시도하세요.",
     "clear": "지우기",
     "close": "닫기",
-    "dismiss": "닫기"
+    "dismiss": "닫기",
+    "retry": "다시 시도",
+    "loadFailed": "이 페이지를 불러오지 못했습니다."
   },
   "windowControls": {
     "minimize": "최소화",

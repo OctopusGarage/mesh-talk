@@ -70,7 +70,9 @@
     "copyFailed": "コピーできませんでした。クリップボードへのアクセスを確認して、もう一度お試しください。",
     "clear": "クリア",
     "close": "閉じる",
-    "dismiss": "非表示"
+    "dismiss": "非表示",
+    "retry": "再試行",
+    "loadFailed": "このページを読み込めませんでした。"
   },
   "windowControls": {
     "minimize": "最小化",

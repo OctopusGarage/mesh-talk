@@ -70,10 +70,16 @@ impl IndexedFileBook {
     pub(crate) fn claim_downloads(&self) -> Result<Vec<FileDownload>, LogError> {
         self.profile.database().transaction(|c| {
             self.check(c)?;
-            let mut statement=c.prepare_cached("SELECT file,revision FROM file_download_pending WHERE account=?1 ORDER BY ticket,file LIMIT 8")?;
+            let mut statement=c.prepare_cached("SELECT file,revision FROM file_download_pending WHERE account=?1 ORDER BY ticket,file LIMIT 9")?;
             let mut rows=statement.query([self.account.as_slice()])?;
             let mut selected=Vec::new();while let Some(row)=rows.next()? {selected.push(FileDownload {file:ConversationId::new(blob(row,0)?),revision:row.get(1)?});}
             drop(rows);drop(statement);
+            // When the whole queue fits, every pending file already gets a turn.
+            // Only contention requires durable rotation; retain one lookahead row.
+            if selected.len() <= 8 {
+                return Ok(selected);
+            }
+            selected.truncate(8);
             for work in &selected {
                 let ticket=next_ticket(c,&self.account)?;
                 c.execute("UPDATE file_download_pending SET ticket=?1 WHERE account=?2 AND file=?3",params![ticket,self.account.as_slice(),work.file.as_bytes().as_slice()])?;

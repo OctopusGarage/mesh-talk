@@ -70,7 +70,9 @@
     "copyFailed": "No se pudo copiar. Comprueba el acceso al portapapeles e inténtalo de nuevo.",
     "clear": "Borrar",
     "close": "Cerrar",
-    "dismiss": "Descartar"
+    "dismiss": "Descartar",
+    "retry": "Reintentar",
+    "loadFailed": "No se pudo cargar esta página."
   },
   "windowControls": {
     "minimize": "Minimizar",

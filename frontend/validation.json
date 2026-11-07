@@ -1827,14 +1827,20 @@
         "frontend/e2e/settings-categories.spec.ts",
         "frontend/src/features/chat/settings/HistoryStorageSummary.tsx",
         "frontend/src/features/chat/settings/HistoryStorageSummary.test.ts",
-        "frontend/e2e/history-storage.spec.ts"
+        "frontend/e2e/history-storage.spec.ts",
+        "frontend/src/features/chat/SettingsDialog.test.ts",
+        "frontend/src/features/chat/settings/SettingsPage.tsx",
+        "frontend/src/features/chat/settings/SettingsPage.test.ts",
+        "frontend/src/features/chat/settings/loadSettingsPage.ts"
       ],
       "frontend": [
         "src/features/chat/settings/HistoryStorageSummary.test.ts",
         "src/features/chat/settings/model.test.ts",
         "src/features/chat/settings/useSettingsController.test.ts",
         "src/features/chat/settingsDialogSession.test.ts",
-        "src/lib/settingsTranslations.test.ts"
+        "src/lib/settingsTranslations.test.ts",
+        "src/features/chat/SettingsDialog.test.ts",
+        "src/features/chat/settings/SettingsPage.test.ts"
       ],
       "capability": {
         "summary": "Navigate task-based settings with one mounted category and category-owned save feedback.",
@@ -1953,11 +1959,11 @@
         "src/features/chat/MembersDialog.test.ts"
       ],
       "capability": {
-        "summary": "Remove personal chats and optional history across linked devices without changing other accounts\u2019 membership or copies.",
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
         "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
         "invariants": [
           {
-            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account\u2019s data.",
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account’s data.",
             "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
           },
           {
@@ -2440,6 +2446,31 @@
       },
       "escalation": [
         "Exercise actual Tauri IPC with a stalled renderer, renderer reload, app lock and runtime/account replacement; mocked IPC does not certify the native queue boundary."
+      ]
+    },
+    {
+      "id": "frontend-offline-help-reader",
+      "paths": [
+        "frontend/src/features/help/",
+        "frontend/e2e/help.spec.ts",
+        "docs/help-system.md"
+      ],
+      "frontend": [
+        "src/features/help/HelpDialog.test.ts",
+        "src/features/help/targets.test.ts"
+      ],
+      "capability": {
+        "summary": "Open bundled offline help on demand while preserving scoped navigation and dialog focus.",
+        "guide": "docs/help-system.md#desktop-behavior",
+        "invariants": [
+          {
+            "name": "Closed help loads no article bodies or search/render work; failed imports retry locally and retired views cannot publish a reader or navigate.",
+            "reference": "docs/help-system.md#desktop-behavior"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/help.spec.ts for keyboard, offline reading, topic-to-settings handoff and focus; verify native window restoration separately from browser mocks."
       ]
     }
   ],
@@ -3146,6 +3177,21 @@
         "frontend/e2e/resource-idle.spec.ts"
       ],
       "browser": ["e2e/resource-idle.spec.ts"],
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-demand-loaded-pages-acceptance",
+      "paths": [
+        "frontend/src/features/help/",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/settings/SettingsPage.tsx",
+        "frontend/src/features/chat/settings/loadSettingsPage.ts"
+      ],
+      "browser": [
+        "e2e/help.spec.ts",
+        "e2e/settings-categories.spec.ts",
+        "e2e/settings-recovery.spec.ts"
+      ],
       "native": ["host"]
     }
   ]

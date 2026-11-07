@@ -70,7 +70,9 @@
     "copyFailed": "無法複製。請檢查剪貼簿權限後再試。",
     "clear": "清除",
     "close": "關閉",
-    "dismiss": "略過"
+    "dismiss": "略過",
+    "retry": "再試",
+    "loadFailed": "載入唔到呢個頁面。"
   },
   "windowControls": {
     "minimize": "最小化",

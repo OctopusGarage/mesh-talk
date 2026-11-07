@@ -617,6 +617,19 @@ failed commits cannot acknowledge work. The customization storage regression in
 [IndexedDB browser scenario](../frontend/e2e/customization-pending-storage.spec.ts)
 checks empty pending reads, old-data migration and failed writes.
 
+Read-only retry selection must not renumber a queue that already fits one turn.
+Retain authority checks and exact-revision completion; rotate durably only when
+contention changes fair order. The [filebook regressions](../crates/mesh-talk-core/src/node/filebook/indexed.rs)
+assert zero changed rows and write commits for all-fit claims, plus ninth-item
+progress and atomic rollback under contention.
+
+Closed UI is not demand loading if its static imports still initialize documents
+or inactive feature trees. Separate lightweight navigation from payload producers.
+Keep the dialog/controller owner stable while scoped imports settle or fail; test
+close, owner replacement, retry and eventual control focus. The [help reader](../frontend/src/features/help/HelpDialog.test.ts)
+and [settings page](../frontend/src/features/chat/settings/SettingsPage.test.ts)
+regressions exercise these lifetimes without weakening mutation ownership.
+
 A bounded work item can still be unnecessary work. Classify demand from the
 owning source before constructing a derived index; stale queue entries alone
 must not classify its domain. Preserve later valid demand while retiring stale

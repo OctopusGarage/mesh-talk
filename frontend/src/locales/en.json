@@ -70,7 +70,9 @@
     "copyFailed": "Couldn't copy. Check clipboard access and try again.",
     "clear": "Clear",
     "close": "Close",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "retry": "Retry",
+    "loadFailed": "Couldn’t load this page."
   },
   "windowControls": {
     "minimize": "Minimize",

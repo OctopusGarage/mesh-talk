@@ -1484,6 +1484,122 @@ mod tests {
     }
 
     #[test]
+    fn download_claim_all_fit_is_read_only() {
+        for count in [1, 8] {
+            let f = Fixture::new();
+            for n in 1..=count {
+                let (row, event, _) = f.fixture(n);
+                f.book
+                    .profile
+                    .database()
+                    .transaction(|c| Fixture::install(c, &row, &event))
+                    .unwrap();
+            }
+            let database = f.book.profile.database();
+            let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+            let commits = database.successful_write_commits();
+            let revision = f.book.revision().unwrap();
+            for _ in 0..8 {
+                let selected = f.book.claim_downloads().unwrap();
+                assert_eq!(selected.len(), usize::from(count));
+                assert_eq!(
+                    selected.iter().map(|work| work.file).collect::<Vec<_>>(),
+                    (1..=count)
+                        .map(|n| ConversationId::new([n; 32]))
+                        .collect::<Vec<_>>()
+                );
+                assert!(selected.iter().all(|work| work.revision == 1));
+            }
+            assert_eq!(
+                database.read(|c| Ok(c.total_changes())).unwrap(),
+                changes,
+                "all-fit queue of {count} must not rewrite tickets or counters"
+            );
+            assert_eq!(database.successful_write_commits(), commits);
+            assert_eq!(f.book.revision().unwrap(), revision);
+            assert_eq!(f.records.body_reads(), 0);
+        }
+    }
+
+    #[test]
+    fn download_claim_new_ninth_gets_a_bounded_fair_turn() {
+        let f = Fixture::new();
+        for n in 1..=8 {
+            let (row, event, _) = f.fixture(n);
+            f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &row, &event))
+                .unwrap();
+        }
+        for _ in 0..8 {
+            assert_eq!(f.book.claim_downloads().unwrap().len(), 8);
+        }
+        let (row, event, _) = f.fixture(9);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &row, &event))
+            .unwrap();
+        let database = f.book.profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let first = f.book.claim_downloads().unwrap();
+        assert_eq!(
+            first.iter().map(|work| work.file).collect::<Vec<_>>(),
+            (1..=8)
+                .map(|n| ConversationId::new([n; 32]))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap() - changes,
+            16
+        );
+        assert_eq!(database.successful_write_commits() - commits, 1);
+        let second = f.book.claim_downloads().unwrap();
+        assert_eq!(second.len(), 8);
+        assert_eq!(second[0].file, ConversationId::new([9; 32]));
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn download_claim_rotation_failure_preserves_queue_and_counter() {
+        let f = Fixture::new();
+        for n in 1..=9 {
+            let (row, event, _) = f.fixture(n);
+            f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &row, &event))
+                .unwrap();
+        }
+        let database = f.book.profile.database();
+        database.transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER fail_download_rotation BEFORE UPDATE ON file_download_pending WHEN OLD.ticket=2 BEGIN SELECT RAISE(ABORT,'injected rotation failure'); END")?;
+            Ok(())
+        }).unwrap();
+        let commits = database.successful_write_commits();
+        assert!(f.book.claim_downloads().is_err());
+        assert_eq!(database.successful_write_commits(), commits);
+        database.read(|c| {
+            assert_eq!(c.query_row("SELECT next_ticket FROM file_download_scan", [], |r| r.get::<_, i64>(0))?, 10);
+            assert_eq!(c.query_row("SELECT count(*) FROM file_download_pending WHERE ticket BETWEEN 1 AND 9 AND revision=1", [], |r| r.get::<_, i64>(0))?, 9);
+            Ok(())
+        }).unwrap();
+        database
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_download_rotation")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(f.book.claim_downloads().unwrap().len(), 8);
+        assert_eq!(
+            f.book.claim_downloads().unwrap()[0].file,
+            ConversationId::new([9; 32])
+        );
+    }
+
+    #[test]
     fn durable_download_work_is_bounded_fair_and_survives_reopen() {
         let f = Fixture::new();
         for n in 1..=130 {
@@ -1596,6 +1712,10 @@ mod tests {
         .unwrap();
         participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
         assert!(matches!(
+            f.book.claim_downloads(),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
             f.book.discover_downloads(7),
             Err(LogError::StaleCursor)
         ));
@@ -1606,6 +1726,10 @@ mod tests {
         )
         .unwrap();
         participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(matches!(
+            f.book.claim_downloads(),
+            Err(LogError::StaleCursor)
+        ));
         assert!(
             matches!(f.book.discover_downloads(7), Err(LogError::StaleCursor)),
             "returning to an account must not revive its retired scan owner"

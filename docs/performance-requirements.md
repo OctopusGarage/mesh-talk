@@ -72,12 +72,16 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
 4. **Bound every retained layer.** Budget bytes/pixels as well as entry count,
    concurrency and queues. Virtualized DOM is not a bounded data store. Keep a
    small active window; evict inactive payloads and load originals only on demand.
+   Closed feature imports must not eagerly load their data through another caller;
+   defer the producer as well as its component, with scoped cancellation and retry.
    Compressed file size is not decoded image memory. Avoid keeping archives,
    base64 strings, Blobs and decoded originals together without a measured need.
 5. **Write only durable changes.** No-op reads/heartbeats must not rewrite logs,
    snapshots or indexes. Batch safe related mutations under the existing durable
    transaction; atomically update derived indexes. Bound WAL/log maintenance;
    preserve crash recovery and acknowledgment semantics when reducing flushes.
+   Retry selection must not renumber an entire queue that already fits one turn;
+   preserve fair rotation under contention and exact completion revisions.
 6. **Plan for accumulation and deletion.** Give history, attachments, indexes,
    retries, diagnostics and deletion evidence an owner, quota, reclamation trigger
    and recovery rule; warn before configured capacity is exhausted. Reuse freed
