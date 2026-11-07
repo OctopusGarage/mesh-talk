@@ -228,7 +228,7 @@ Linux, eight macOS and four Windows runners. Linux coverage depends on its own s
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
-Desktop browser shards start after Health and WebKit complete, with at most three
+Desktop browser shards start after Health and WebKit complete, with at most four
 shards active per desktop OS at once. Linux retains four concurrent shards. These job
 dependencies and admission limits reduce macOS runner demand while retaining all
 platform-specific partitions and their complete same-attempt evidence. Portable Health and
@@ -1484,7 +1484,7 @@ partition and the complete scenario inventory; missing producers do not pass.
 
 Full Chromium tests use eight Playwright shards on macOS and four each on Linux
 and Windows, with one worker and zero retries per runner. Desktop admission allows
-three concurrent shards per OS after Health and WebKit; Linux starts independently.
+four concurrent shards per OS after Health and WebKit; Linux starts independently.
 The platform-specific inventory owner rejects incomplete or mismatched layouts.
 The full Chromium command reuses the validation process owner through
 `scripts/ci/ui-runner.mjs`. Its absolute deadline includes setup since budget

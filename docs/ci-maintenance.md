@@ -356,8 +356,13 @@ faster result does not prove that disk placement caused a prior failure. Preserv
 durability, ordering and deadlines while qualifying the new hosted environment.
 
 Full Chromium uses eight macOS partitions and four each on Linux and Windows.
-Desktop browsers have independent per-OS admission limits of three; preserve
+Desktop browsers inherit the reusable workflow's four-slot per-OS limit; preserve
 Health and WebKit admission before that burst and the existing job watchdog.
+Scope limits to the actual resource pool rather than applying a macOS restriction
+to Windows. Inspect late queued work after other native jobs finish; an overly
+small limit can leave capacity unused. Four macOS browser jobs leave nominal room
+under the five-job account limit, but do not reserve global capacity or bypass
+other workflows' queues. Qualify changes on hosted runners.
 Strict collectors require the platform-specific complete layout, including the
 last partition, and reject layout discovery failures.
 

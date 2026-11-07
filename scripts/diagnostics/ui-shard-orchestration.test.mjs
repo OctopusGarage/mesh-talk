@@ -99,7 +99,7 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
 test("desktop browser burst waits for Health and WebKit with bounded admission while Linux starts independently", () => {
   const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
   assert.match(job("desktop"), /needs: \[health, portable\]/);
-  assert.match(job("desktop"), /max_parallel: 3/);
+  assert.doesNotMatch(job("desktop"), /max_parallel:/, "desktop inherits the same four-slot owner without a Mac-specific Windows restriction");
   assert.match(reusable, /max_parallel:\n        type: number\n        default: 4/);
   assert.match(reusable, /max-parallel: \$\{\{ inputs.max_parallel \}\}/);
   assert.doesNotMatch(job("linux"), /max_parallel:/);
