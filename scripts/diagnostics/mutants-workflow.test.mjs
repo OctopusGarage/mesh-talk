@@ -2,6 +2,7 @@ import { nextestProfileSection } from "./test-fixtures/nextest.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { mutationBudgets, requireMutationGate } from "../release/mutation-evidence.mjs";
 const workflow = readFileSync(new URL("../../.github/workflows/mutants.yml", import.meta.url), "utf8");
@@ -53,8 +54,8 @@ test("gate truth table rejects absent, failed, cancelled or unexpected deep evid
 
 test("gate CLI consumes the actual dependency verdicts", () => {
   for (const [baseline, expected] of [["success", 0], ["failure", 1]]) {
-    const result = spawnSync(process.execPath, [new URL("../release/run-mutants.mjs", import.meta.url).pathname, "--gate"], { env: { ...process.env, CONTRACTS: "success", DEEP: "true", PLAN: "success", BASELINE: baseline, SHARDS: "success", SELECTED: "1" } });
-    assert.equal(result.status === 0, expected === 0);
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("../release/run-mutants.mjs", import.meta.url)), "--gate"], { env: { ...process.env, CONTRACTS: "success", DEEP: "true", PLAN: "success", BASELINE: baseline, SHARDS: "success", SELECTED: "1" } });
+    assert.equal(result.status, expected, `${result.error?.message ?? ""}\n${result.stderr}`);
   }
 });
 
