@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test test-focused test-plan test-changed verify-plan verify-changed version-check version-sync version-prepare standards-check validation-report validation-audit test-timing e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
+.PHONY: dev build pr-check test test-focused test-plan test-changed verify-plan verify-changed version-check version-sync version-prepare standards-check validation-report validation-audit test-timing e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
 
 # Managed commands coordinate with cache eviction across all local worktrees.
 MANAGED_BUILD = python3 scripts/build-retention.py run --
@@ -34,6 +34,10 @@ test-plan:
 
 test-changed:
 	$(MANAGED_BUILD) node scripts/validation/changed.mjs --run $(VALIDATION_ARGS)
+
+# Cheap PR preparation: static/policy checks, no application suites or builds.
+pr-check:
+	node scripts/validation/changed.mjs --cheap --base origin/main $(VALIDATION_ARGS)
 
 verify-plan:
 	node scripts/validation/changed.mjs --checks $(VALIDATION_ARGS)

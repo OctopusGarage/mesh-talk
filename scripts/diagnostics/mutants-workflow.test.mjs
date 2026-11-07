@@ -9,7 +9,7 @@ const wrapper = readFileSync(new URL("../release/run-mutants.mjs", import.meta.u
 
 test("main pushes cannot cancel scheduled deep assurance", () => {
   assert.match(workflow, /group: mutants-\$\{\{ github.event_name \}\}-/);
-  assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \|\| github.event_name == 'push' \}\}/);
+  assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}/);
 });
 
 test("skipped deep jobs cannot impersonate the protected mutation gate", () => {
@@ -42,7 +42,7 @@ test("the protected mutation gate requires runner contracts and every selected d
   assert.ok(gate);
   assert.match(gate, /name: mutants\n/);
   assert.match(gate, /needs: \[runner-contract, mutants\]/);
-  assert.match(gate, /if: always\(\)/);
+  assert.match(gate, /if: \$\{\{ !cancelled\(\) \}\}/);
   const script = gate.split("        run: |\n")[1].replace(/^          /gm, "");
   for (const deep of ["true", "false"]) {
     for (const contracts of ["success", "failure", "cancelled", "skipped", ""]) {
@@ -65,7 +65,11 @@ test("deep mutation samples use process-isolated tests with bounded execution", 
   assert.match(wrapper, /"--test-tool", "nextest"/);
   assert.match(wrapper, /"--cargo-test-arg=--profile=mutants"/);
   assert.match(wrapper, /"--", "--test-threads=4"/);
-  assert.doesNotMatch(workflow, /continue-on-error: true/);
+  const storage = workflow.split(/^      - /mu).find(step => step.startsWith("name: Preserve runner storage measurements\n"));
+  assert.match(storage, /uses: actions\/upload-artifact@/u);
+  assert.match(storage, /name: runner-storage-/u);
+  const acceptance = workflow.replace(storage, storage.replace(/^        continue-on-error: true\n/mu, ""));
+  assert.doesNotMatch(acceptance, /continue-on-error/u);
   assert.doesNotMatch(workflow, /cargo test --workspace/);
   assert.doesNotMatch(wrapper, /"--baseline", "skip"/);
   assert.match(workflow, /tool: cargo-mutants@27\.1\.0/);

@@ -28,6 +28,8 @@ test("scheduled workflows invoke checked owners and pass dispatch input through 
     /FUZZ_MAX_TOTAL_TIME: \$\{\{ github\.event\.inputs\.max_total_time \|\| '120' \}\}/,
   );
   assert.match(fuzz, /run: python3 -B scripts\/ci\/fuzz-targets\.py/);
+  assert.ok(fuzz.indexOf("fuzz-targets.py --validate") < fuzz.indexOf("name: Install Rust nightly"));
+  assert.equal((fuzz.match(/FUZZ_MAX_TOTAL_TIME:/g) ?? []).length, 1);
   assert.doesNotMatch(fuzz, /for target in \$\(/);
   assert.match(fuzz, /timeout-minutes: 45/);
   assert.match(fuzz, /name: Upload crash artifacts\s+if: failure\(\)/);

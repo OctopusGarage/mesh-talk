@@ -95,7 +95,11 @@ require_file "frontend/e2e/ui-audit-message-log.spec.ts"
 require_file "frontend/e2e/ui-audit-composer.spec.ts"
 require_file "frontend/e2e/ui-audit-dialogs.spec.ts"
 require_contains "frontend/package.json" "\"e2e\": \"playwright test\"" "frontend e2e npm entry"
-require_contains ".github/workflows/e2e-ui.yml" "npx playwright test" "UI e2e CI entry"
+# Launcher wiring and execution semantics belong to ui-shard-orchestration and
+# ui-runner regressions; this smoke only checks their maintained entry points.
+require_file ".github/workflows/e2e-ui.yml"
+require_file ".github/workflows/ui-shards.yml"
+require_file "scripts/ci/ui-runner.mjs"
 
 # AI / agent rule contracts. These are deterministic prompt-contract checks, not LLM scoring.
 require_file "AGENTS.md"

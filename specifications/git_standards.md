@@ -72,6 +72,20 @@ fix(ratchet): resolve session establishment failure
 Commits **must be GPG-signed**. `scripts/setup-hooks.sh` (run by `make dev`) points
 `core.hooksPath` at `hooks/` and enables `commit.gpgsign`; the `pre-push` hook rejects any
 commit lacking a `gpgsig`. The `pre-commit` hook checks staged whitespace and
-source formatting; run affected tests during development and full gates before
-PR review. Generate a key with `gpg --full-generate-key` and set it via
+source formatting, ownership, hygiene and changed-script/workflow syntax; run
+affected tests during development and the required gates before merge. Hook
+installation does not run comprehensive health. Generate a key with `gpg --full-generate-key` and set it via
 `git config --global user.signingkey <KEY_ID>` if you don't have one.
+
+## Pull Request Merge Strategy
+
+When the user asks to merge a pull request, use **squash merge by default**
+(`gh pr merge --squash <PR>`), unless the user explicitly requests another
+strategy. Use a clear Conventional Commit title and a final message describing
+the completed change rather than its intermediate debugging history.
+
+A merge request authorizes the merge only after the current PR head passes all
+required checks and repository review requirements. Recheck the exact head before
+merging; local checks, earlier green runs and the default strategy do not bypass
+those gates. Follow the repository's worktree cleanup and branch-preservation
+rules after integration.

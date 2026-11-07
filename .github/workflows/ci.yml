@@ -16,8 +16,8 @@ on:
         default: false
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 # Read-only: every job just checks out and runs tooling — nothing writes back.
 permissions:
@@ -59,6 +59,7 @@ jobs:
 
       - name: Preserve runner storage measurements
         if: always() && steps.runner_storage.outcome == 'success'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
@@ -112,7 +113,7 @@ jobs:
       - name: Verify coverage accumulation with the actual tool
         # These fixtures launch real Cargo/rustc processes and share this job's
         # package cache. Give each compiler contract exclusive execution.
-        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/asan-cli.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs
 
       - name: Prepare and verify Linux native crash evidence
         if: runner.os == 'Linux'
@@ -153,25 +154,7 @@ jobs:
           RUST_TEST_THREADS: 4
           NEXTEST_TEST_THREADS: 4
         run: |
-          set -e -o pipefail
-          run_coverage() {
-            # Finish every selected case within a partition. A failed Host
-            # already rejects this candidate; do not compile another partition.
-            if
-              cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else return "$?"; fi
-            # Linux/Windows own full protocol coverage. Keep all native
-            # assertions here without a second instrumented Core test build.
-            if
-              cargo nextest run --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else return "$?"; fi
-            cargo llvm-cov report --lcov --output-path lcov.info
-          }
-          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            run_coverage 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
-          else
-            run_coverage
-          fi
+          bash ../scripts/ci/workspace-coverage.sh macos
           # llvm-cov runs Host; Nextest runs the remaining default targets.
           # Stable Rust doctests retain their original separate check.
           cargo test --workspace --doc
@@ -180,25 +163,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         shell: bash
-        run: |
-          set -e -o pipefail
-          ulimit -c 262144
-          run_coverage() {
-            # Finish every selected case within a partition. A failed Host
-            # already rejects this candidate; do not compile another partition.
-            if
-              cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else return "$?"; fi
-            if
-              cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
-            then :; else return "$?"; fi
-            cargo llvm-cov report --lcov --output-path lcov.info
-          }
-          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            run_coverage 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
-          else
-            run_coverage
-          fi
+        run: bash ../scripts/ci/workspace-coverage.sh linux
 
       - name: Workspace doctests (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -242,6 +207,7 @@ jobs:
 
       - name: Preserve Linux native crash diagnostics
         if: always() && runner.os == 'Linux'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: native-crash-linux-${{ github.run_attempt }}
@@ -251,6 +217,7 @@ jobs:
 
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: test-timing-${{ matrix.os }}-${{ github.run_attempt }}

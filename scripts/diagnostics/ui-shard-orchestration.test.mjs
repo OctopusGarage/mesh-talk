@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
@@ -25,6 +26,7 @@ test("Linux coverage requires Linux and Health without waiting for desktop shard
 test("portable acceptance and final UI gate reject every unsuccessful Linux or desktop result", () => {
   const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
   for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop\]/);
+  assert.match(job("portable-evidence"), /node scripts\/evals\/chromium-evidence\.mjs collect-artifacts/);
   assert.match(job("ui-gate"), /needs: \[linux, desktop,/);
   for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
     for (const desktop of ["success", "failure", "cancelled", "skipped", ""]) {
@@ -35,16 +37,17 @@ test("portable acceptance and final UI gate reject every unsuccessful Linux or d
   }
 });
 
-test("one reusable shard implementation retains twelve runners and all evidence identities", () => {
+test("one reusable shard implementation retains platform-sized runners and all evidence identities", () => {
   const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
   assert.match(reusable, /operating_systems:\n        type: string\n        required: true/);
   assert.match(reusable, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
-  assert.match(reusable, /shard: \[1, 2, 3, 4\]/);
+  assert.match(reusable, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
   assert.match(job("linux"), /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(job("desktop"), /- os: macos-26-intel\n            shards: '\[1,2,3,4,5,6,7,8\]'\n            total: 8/);
+  assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
   assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 2);
   assert.ok(!root().includes("name: Run UI E2E"));
-  assert.match(reusable, /npx playwright test --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4 --reporter=list,blob,json/);
+  assert.match(reusable, /node \.\.\/scripts\/ci\/ui-runner\.mjs --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\} --reporter=list,blob,json,\.\.\/scripts\/ci\/ui-runner\.mjs/);
   assert.match(reusable, /MESH_TALK_E2E_COVERAGE: \$\{\{ runner.os == 'Linux' && '1' \|\| '0' \}\}/);
   for (const prefix of ["playwright-ui", "chromium-portable"]) assert.ok(reusable.includes(`name: ${prefix}-`));
   assert.match(reusable, /SOURCE_SHA: \$\{\{ github.sha \}\}/);
@@ -52,15 +55,42 @@ test("one reusable shard implementation retains twelve runners and all evidence 
   assert.match(reusable, /if-no-files-found: error/);
 });
 
+test("browser job budget reserves cleanup before dependency work and persists interruption evidence", () => {
+  const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
+  assert.match(reusable, /timeout_minutes:\n        type: number\n        default: 25/);
+  assert.match(reusable, /timeout-minutes: \$\{\{ inputs.timeout_minutes \}\}/);
+  assert.ok(reusable.indexOf("name: Reserve browser cleanup") < reusable.indexOf("name: Install dependencies"));
+  assert.match(reusable, /frontend\/ui-runner-evidence\//);
+  const block = reusable.split(/^      - /m).find(value => value.startsWith("name: Reserve browser cleanup and evidence time\n"));
+  assert.match(block, /shell: bash/);
+  const script = block.split("        run: |\n")[1].replace(/^          /gm, "");
+  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-budget-"));
+  try {
+    for (const minutes of ["25", "2", "invalid"]) {
+      const envFile = path.join(directory, "environment");
+      writeFileSync(envFile, "");
+      const result = spawnSync("bash", ["-e", "-c", script], { cwd: directory, encoding: "utf8", env: { ...process.env, UI_JOB_MINUTES: minutes, GITHUB_ENV: envFile } });
+      assert.equal(result.status === 0, minutes === "25", result.stderr);
+      if (minutes === "25") {
+        const budget = JSON.parse(readFileSync(path.join(directory, "ui-runner-evidence/budget.json"), "utf8"));
+        assert.equal(budget.deadline - budget.startedAt, 23 * 60000);
+        assert.equal(readFileSync(envFile, "utf8"), `MESH_UI_DEADLINE_MS=${budget.deadline}\n`);
+      }
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("macOS browsers, Health and backend use Intel while Rust and native retain ARM", () => {
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
-  assert.match(job("portable"), /os: macos-26-intel, browser: webkit/);
+  assert.match(job("desktop"), /- os: macos-26-intel\n            shards: '\[1,2,3,4,5,6,7,8\]'\n            total: 8/);
+  assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
+  assert.match(job("portable-shards"), /runs-on: macos-26-intel/);
+  assert.match(job("portable"), /name: Portable UI \(macos-26-intel, webkit\)/);
   assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
-  assert.match(job("portable-evidence"), /macos-26-intel:darwin/);
-  assert.match(job("reports"), /for os in ubuntu-24.04 macos-26-intel windows-latest/);
+  assert.match(job("portable-evidence"), /chromium-evidence.mjs collect-artifacts/);
+  assert.match(job("reports"), /chromium-evidence.mjs render-artifacts/);
   assert.match(health, /os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
   assert.match(rust, /os: \[ubuntu-latest, macos-latest\]/);
   assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
@@ -69,7 +99,7 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
 test("desktop browser burst waits for Health and WebKit with bounded admission while Linux starts independently", () => {
   const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
   assert.match(job("desktop"), /needs: \[health, portable\]/);
-  assert.match(job("desktop"), /max_parallel: 3/);
+  assert.doesNotMatch(job("desktop"), /max_parallel:/, "desktop inherits the same four-slot owner without a Mac-specific Windows restriction");
   assert.match(reusable, /max_parallel:\n        type: number\n        default: 4/);
   assert.match(reusable, /max-parallel: \$\{\{ inputs.max_parallel \}\}/);
   assert.doesNotMatch(job("linux"), /max_parallel:/);
@@ -77,7 +107,7 @@ test("desktop browser burst waits for Health and WebKit with bounded admission w
   assert.doesNotMatch(job("linux"), /needs:/);
 });
 
-test("HTML reports require all four current-attempt shards for every admitted OS", () => {
+test("HTML reports require all platform-specific current-attempt shards", () => {
   const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   const complete = { desktop: "success", platforms };
   assert.equal(renderReports(complete).status, 0);
@@ -85,6 +115,10 @@ test("HTML reports require all four current-attempt shards for every admitted OS
     const partial = renderReports({ ...complete, missing: [`${os}-2`, `${os}-3`, `${os}-4`] });
     assert.notEqual(partial.status, 0, `${os} accepted only one shard`);
   }
+  assert.notEqual(renderReports({ ...complete, missing: ["macos-26-intel-8"] }).status, 0, "macOS eighth shard is mandatory");
+  const discovery = renderReports({ ...complete, discoveryFailure: true });
+  assert.notEqual(discovery.status, 0);
+  assert.deepEqual(discovery.rendered, [], "failed layout discovery cannot silently render an incomplete report");
   assert.notEqual(renderReports({ ...complete, attempt: "2" }).status, 0, "another attempt cannot satisfy current artifacts");
 });
 
@@ -120,7 +154,7 @@ test("UI and reusable Health isolate caller/event streams while superseded candi
     assert.equal(concurrency(owner, { ...context, event_name: "workflow_dispatch" }).cancel, false);
     for (const event_name of ["pull_request", "merge_group", "push"]) {
       const candidate = { ...context, event_name, ref: event_name === "push" ? "refs/heads/main" : "refs/merge-queue/main/candidate", event: event_name === "pull_request" ? { pull_request: { number: 42 } } : { pull_request: {} } };
-      assert.equal(concurrency(owner, candidate).cancel, true);
+      assert.equal(concurrency(owner, candidate).cancel, event_name !== "push");
       assert.equal(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, sha: "replacement" }).group);
       assert.notEqual(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, ref: event_name === "push" ? "refs/heads/dev" : "refs/merge-queue/main/other", event: event_name === "pull_request" ? { pull_request: { number: 43 } } : { pull_request: {} } }).group);
     }
@@ -134,7 +168,7 @@ for (const owner of ["ci", "e2e-backend"]) test(`${owner} isolates evidence even
     const event = { ...context, event_name };
     const observed = concurrency(owner, event);
     groups.push(observed.group);
-    assert.equal(observed.cancel, ["push", "pull_request", "merge_group"].includes(event_name));
+    assert.equal(observed.cancel, ["pull_request", "merge_group"].includes(event_name));
     assert.equal(observed.group, concurrency(owner, { ...event, sha: "replacement" }).group);
     assert.notEqual(observed.group, concurrency(owner, { ...event, ref: "refs/heads/other" }).group);
   }
@@ -165,19 +199,27 @@ test("Firefox core runs on ordinary candidates and the final gate requires its r
   }
 });
 
-function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0" } = {}) {
+function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0", discoveryFailure = false } = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-inventory-"));
   try {
     mkdirSync(path.join(directory, "frontend"));
-    for (const os of platforms) for (const shard of [1, 2, 3, 4]) {
+    mkdirSync(path.join(directory, "scripts/evals"), { recursive: true });
+    for (const file of ["chromium-evidence.mjs", "browser-report.mjs", "png-evidence.mjs", "trace-evidence.mjs"]) copyFileSync(new URL(`../evals/${file}`, import.meta.url), path.join(directory, "scripts/evals", file));
+    if (discoveryFailure) writeFileSync(path.join(directory, "scripts/evals/chromium-evidence.mjs"), "process.exit(37);\n");
+    for (const os of platforms) for (const shard of os === "macos-26-intel" ? [1, 2, 3, 4, 5, 6, 7, 8] : [1, 2, 3, 4]) {
       if (`${os}-${shard}` === omit || missing.includes(`${os}-${shard}`)) continue;
       const blob = path.join(directory, "target", "ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
       mkdirSync(blob, { recursive: true });
       writeFileSync(path.join(blob, `report-${shard}.zip`), "actual shard blob placeholder");
     }
-    const block = root().split(/^      - /m).find(value => value.startsWith("name: Render each OS report from its raw blobs\n"));
-    const script = block.split("        run: |\n")[1].replace(/^          /gm, "").replaceAll("${{ github.run_attempt }}", "3");
-    const result = spawnSync("bash", ["-e", "-c", 'npx() { printf "%s\\n" "$PLAYWRIGHT_HTML_OUTPUT_DIR" >> "$RENDERED"; return "$RENDER_EXIT"; };\n' + script], {
+    const module = pathToFileURL(path.join(directory, "scripts/evals/chromium-evidence.mjs")).href;
+    const script = `import {renderDownloadedReports} from ${JSON.stringify(module)};
+      import {appendFileSync} from 'node:fs';
+      try { await renderDownloadedReports('../target/ui-reports', '../target/ui-report-blobs',
+        {runAttempt:'3', linuxResult:process.env.LINUX_RESULT, desktopResult:process.env.DESKTOP_RESULT},
+        {merge:async(_directory,os)=>{appendFileSync(process.env.RENDERED,'playwright-report/'+os+'\\n');if(process.env.RENDER_EXIT!=='0')throw Error('renderer failed')}});
+      } catch(error) { console.error(error.message); process.exitCode=1; }`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       cwd: path.join(directory, "frontend"), encoding: "utf8",
       env: { ...process.env, LINUX_RESULT: linux, DESKTOP_RESULT: desktop, RENDERED: path.join(directory, "rendered"), RENDER_EXIT: renderExit },
     });
@@ -214,4 +256,21 @@ test("HTML reports render admitted producers and distinguish skipped desktop fro
   }
   assert.equal(renderReports({ linux: "skipped", desktop: "success", platforms: ["macos-26-intel", "windows-latest"] }).status, 0);
   assert.notEqual(renderReports({ linux: "skipped", desktop: "skipped", platforms: [] }).status, 0, "empty presentation cannot claim a rendered report");
+});
+
+test("the stable required WebKit check admits only both successful partitions", () => {
+  const producer = job("portable-shards"), collector = job("portable");
+  assert.match(producer, /runs-on: macos-26-intel/);
+  assert.match(producer, /shard: \[1, 2\]/);
+  assert.match(producer, /timeout-minutes: 20/);
+  assert.match(producer, /ui-runner.mjs.*--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/2/);
+  assert.match(collector, /name: Portable UI \(macos-26-intel, webkit\)/);
+  assert.match(collector, /needs: portable-shards/);
+  assert.match(collector, /portable-runner.mjs collect-partitions/);
+  const block = root().split(/^      - /m).find(value => value.startsWith("name: Require both WebKit partitions\n"));
+  const script = block.match(/        run: (.*)/)[1];
+  for (const status of ["success", "failure", "cancelled", "skipped", "", "in_progress"]) {
+    const result = spawnSync("bash", ["-e", "-c", script], { encoding: "utf8", env: { ...process.env, PRODUCER: status } });
+    assert.equal(result.status === 0, status === "success");
+  }
 });

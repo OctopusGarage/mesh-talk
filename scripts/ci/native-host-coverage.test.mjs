@@ -11,6 +11,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+const helper = fileURLToPath(
+  new URL("./workspace-coverage.sh", import.meta.url),
+);
+const helperSource = readFileSync(helper, "utf8");
 import test from "node:test";
 import { versions } from "./windows-coverage.mjs";
 
@@ -19,20 +24,24 @@ test("native workspace coverage bounds both complete partitions with Nextest", (
     new URL("../../.github/workflows/ci.yml", import.meta.url),
     "utf8",
   );
-  const commands = workflow.split("\n").map((line) => line.trim());
+  const commands = `${workflow}\n${helperSource}`
+    .split("\n")
+    .map((line) =>
+      line.trim().replace(/^run_phase (?:host|remaining|report) /u, ""),
+    );
   const nextest = commands.filter((line) =>
     line.startsWith("cargo llvm-cov nextest "),
   );
   assert.equal(
     nextest.length,
-    3,
-    "both OS steps instrument Host; Linux also instruments the remaining workspace",
+    2,
+    "the shared Host command and Linux-only instrumented remainder are explicit",
   );
   const flags =
     "--no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4";
   const host = `cargo llvm-cov nextest --no-report --locked -p mesh-talk ${flags}`;
   const rest = `cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk ${flags}`;
-  assert.equal(nextest.filter((line) => line === host).length, 2);
+  assert.equal(nextest.filter((line) => line === host).length, 1);
   assert.equal(nextest.filter((line) => line === rest).length, 1);
   assert.equal(
     commands.filter(
@@ -108,14 +117,17 @@ test("native Host isolation preserves default targets, accumulated coverage and 
       `cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`,
     ),
   );
-  const commands = workflow.split("\n").map((line) => line.trim());
+  const commands = `${workflow}\n${helperSource}`
+    .split("\n")
+    .map((line) =>
+      line.trim().replace(/^run_phase (?:host|remaining|report) /u, ""),
+    );
   const hostCommands = commands.filter(
     (line) =>
       line.startsWith("cargo llvm-cov nextest ") &&
       line.includes(" -p mesh-talk "),
   );
-  assert.equal(hostCommands.length, 2);
-  assert.equal(hostCommands[0], hostCommands[1]);
+  assert.equal(hostCommands.length, 1);
   const host = hostCommands[0].split(/\s+/u).slice(1);
   assert.deepEqual(host, [
     "llvm-cov",
@@ -168,7 +180,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     commands.filter(
       (line) => line === "cargo llvm-cov report --lcov --output-path lcov.info",
     ).length,
-    2,
+    1,
   );
   assert.match(workflow, /NEXTEST_TEST_THREADS: 4/u);
   const config = readFileSync(
@@ -265,18 +277,20 @@ test("native Host isolation preserves default targets, accumulated coverage and 
         `${directory} ${target} coverage must accumulate`,
       );
     }
-  const step = workflow
-    .split(/^      - /m)
-    .find((value) => value.startsWith("name: Test + coverage (macOS)"));
-  const blockMac = step
-    .split("        run: |\n")[1]
-    .split("          # llvm-cov runs")[0]
-    .replace(/^          /gm, "");
+  assert.match(
+    workflow,
+    /bash \.\.\/scripts\/ci\/workspace-coverage\.sh macos/u,
+  );
+  assert.match(
+    workflow,
+    /bash \.\.\/scripts\/ci\/workspace-coverage\.sh linux/u,
+  );
+  const blockMac = "macos";
   // Execute the actual macOS block in a clean coverage cohort. Core's real
   // default targets must run, but must not require another instrumented build.
   run(["llvm-cov", "clean", "--workspace"]);
   const macMarker = join(root, "mac-core-executed");
-  const macPass = spawnSync("bash", ["-e", "-o", "pipefail", "-c", blockMac], {
+  const macPass = spawnSync("bash", [helper, blockMac], {
     cwd: root,
     env: {
       ...env,
@@ -302,12 +316,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     /^FNDA:[1-9]\d*,[^\n]*core_/mu,
     "macOS must execute Core normally while Linux/Windows own its full instrumented coverage",
   );
-  const linuxStep = workflow
-    .split(/^      - /m)
-    .find((value) => value.startsWith("name: Test + coverage (Linux)"));
-  const linuxBlock = linuxStep
-    .split("        run: |\n")[1]
-    .replace(/^          /gm, "");
+  const linuxBlock = "linux";
   for (const block of [blockMac, linuxBlock]) {
     rmSync(join(root, "lcov.info"), { recursive: true, force: true });
     writeFileSync(join(root, "lcov.info"), "previous report");
@@ -318,29 +327,38 @@ test("native Host isolation preserves default targets, accumulated coverage and 
           root,
           `rest-${block === blockMac ? "mac" : "linux"}-${failure}-${timing}`,
         );
-        const failedPartition = spawnSync(
-          "bash",
-          ["-e", "-o", "pipefail", "-c", block],
-          {
-            cwd: root,
-            env: {
-              ...env,
-              ...(failure === "BOTH"
-                ? { MESH_FAIL_HOST: "1", MESH_FAIL_CORE: "1" }
-                : { [`MESH_FAIL_${failure}`]: "1" }),
-              MESH_REST_MARKER: marker,
-              MESH_TALK_TEST_TIMING: timing,
-              RUNNER_TEMP: root,
-            },
-            encoding: "utf8",
-            timeout: 120_000,
+        const failedPartition = spawnSync("bash", [helper, block], {
+          cwd: root,
+          env: {
+            ...env,
+            ...(failure === "BOTH"
+              ? { MESH_FAIL_HOST: "1", MESH_FAIL_CORE: "1" }
+              : { [`MESH_FAIL_${failure}`]: "1" }),
+            MESH_REST_MARKER: marker,
+            MESH_TALK_TEST_TIMING: timing,
+            RUNNER_TEMP: root,
           },
-        );
+          encoding: "utf8",
+          timeout: 120_000,
+        });
         assert.equal(
           failedPartition.status,
           100,
           `${failedPartition.error ?? ""}\n${failedPartition.stdout}\n${failedPartition.stderr}`,
         );
+        const diagnostic = failedPartition.stdout + failedPartition.stderr;
+        if (process.platform === "darwin" && block === blockMac) {
+          assert.match(diagnostic, /native-resource phase=host/u);
+          assert.match(diagnostic, /maximum resident set size/u);
+          assert.match(diagnostic, /hw\.memsize:/u);
+          assert.match(diagnostic, /vm\.swapusage:/u);
+          if (failure === "CORE")
+            assert.match(diagnostic, /native-resource phase=remaining/u);
+          else
+            assert.doesNotMatch(diagnostic, /native-resource phase=remaining/u);
+        } else {
+          assert.doesNotMatch(diagnostic, /native-resource phase=/u);
+        }
         assert.match(
           failedPartition.stdout + failedPartition.stderr,
           new RegExp(
@@ -380,16 +398,12 @@ test("native Host isolation preserves default targets, accumulated coverage and 
       rmSync(join(root, "lcov.info"), { recursive: true, force: true });
       // A real report destination failure must fail even after both suites pass.
       mkdirSync(join(root, "lcov.info"));
-      const reportFailure = spawnSync(
-        "bash",
-        ["-e", "-o", "pipefail", "-c", block],
-        {
-          cwd: root,
-          env: { ...env, MESH_TALK_TEST_TIMING: timing, RUNNER_TEMP: root },
-          encoding: "utf8",
-          timeout: 120_000,
-        },
-      );
+      const reportFailure = spawnSync("bash", [helper, block], {
+        cwd: root,
+        env: { ...env, MESH_TALK_TEST_TIMING: timing, RUNNER_TEMP: root },
+        encoding: "utf8",
+        timeout: 120_000,
+      });
       assert.equal(reportFailure.error, undefined);
       assert.notEqual(
         reportFailure.status,

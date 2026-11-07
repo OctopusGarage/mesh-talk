@@ -161,10 +161,16 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   migration floor is historical provenance; never advance it during ordinary version bumps.
 
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
-  `specifications/git_standards.md`. Squash WIP; link issues.
+  `specifications/git_standards.md`. Squash WIP; link issues. When asked to merge,
+  default to squash merge unless the user explicitly requests another strategy;
+  follow the [merge policy](specifications/git_standards.md#pull-request-merge-strategy)
+  and current-head required checks.
 - Create PRs through `./scripts/create-pr.sh -- <gh pr create options>`.
   The default checks the clean committed candidate, comparison base, argument safety,
-  whitespace, structural standards and repository hygiene before publication.
+  whitespace, cheap affected static checks, ownership blockers, structural standards,
+  repository hygiene and applicable verified frontend patch coverage before publication.
+  Use `make pr-check` for the same cheap static phase; missing current coverage
+  evidence reports its explicit generation command and never starts suites implicitly.
   Full cross-platform CI runs after publication; all required checks must pass on the
   current PR head before merging. Creating a PR does not certify test acceptance.
 - To run comprehensive checks locally before publication, use

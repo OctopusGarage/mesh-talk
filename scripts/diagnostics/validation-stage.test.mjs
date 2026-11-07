@@ -188,7 +188,11 @@ test("cancellation immediately before spawn prevents command side effects", asyn
   await assert.rejects(f.run({
     signal: controller.signal,
     log: message => { if (message.startsWith("started after")) controller.abort(); },
-  }), /abort/iu);
+  }), error => {
+    assert.equal(error.name, "AbortError");
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
   await assert.rejects(f.count(), /ENOENT/u);
   assert.equal((await f.run()).code, 0);
 });
@@ -412,6 +416,22 @@ test("stage CLI publishes structured launch and reused results outside receipt i
   assert.equal(result.error, undefined, result.stdout + result.stderr);
   assert.equal(JSON.parse(await readFile(output, "utf8")).failureKind, "unavailable");
   assert.deepEqual([...new Set((await readFile(probes, "utf8")).trim().split("\n"))].sort(), ["cargo", "npm", "rustc"]);
+});
+
+test("stage CLI rejects local result publication failure after a successful child", async t => {
+  const f = await fixture(t);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const { env } = toolVersionFixture(f.root, { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined });
+  // The child creates artifact as a file, so it cannot become a result directory.
+  // This is deterministic on every platform, unlike chmod-based permissions.
+  const result = spawnSync(process.execPath, [cli, "result-write-failure", "--result", path.join(f.root, "artifact/result.json"), "--", ...f.command], {
+    cwd: f.root, env, encoding: "utf8", timeout: 60_000,
+  });
+  assert.equal(result.error, undefined, result.stdout + result.stderr);
+  assert.notEqual(result.status, 0, "successful execution cannot hide failed local publication");
+  assert.equal(await f.count(), 1, "the actual child completed before result publication failed");
+  assert.equal(await readFile(path.join(f.root, "artifact"), "utf8"), "measured");
+  assert.match(result.stderr, /artifact/u);
 });
 
 test("successful command with changed source is invalidated rather than reported as a test failure", async t => {
@@ -685,4 +705,356 @@ test("process-group retirement bounds probes and pauses by one monotonic deadlin
   assert.deepEqual(budgets, [5000, 2600, 200]);
   assert.deepEqual(pauses, [100, 100]);
   assert.equal(clock, 5000);
+});
+
+test("verification-only evidence never executes on missing, stale, tampered or busy receipts", async t => {
+  const f = await fixture(t);
+  const { verifyStageEvidence } = await import("../validation/stage.mjs");
+  const options = { root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    artifacts: ["artifact"], log: () => {},
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined } };
+  const verify = extra => verifyStageEvidence({ ...options, ...extra });
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await assert.rejects(readFile(path.join(f.root, "count")), /ENOENT/);
+  const first = await f.run({ artifacts: ["artifact"] });
+  const original = await readFile(first.receipt, "utf8");
+  const successful = await verify();
+  assert.equal(successful.reused, true);
+  assert.equal(successful.code, 0);
+  assert.deepEqual(successful.artifacts, first.artifacts);
+  assert.equal(await f.count(), 1);
+  const { createHash } = await import("node:crypto");
+  const heavyLease = path.join(f.root, ".git/validation-resources", createHash("sha256").update("verification-heavy").digest("hex"));
+  await mkdir(heavyLease, { recursive: true });
+  assert.equal((await verify({ resource: "verification-heavy" })).reused, true,
+    "verification must not acquire even a busy heavy resource lease");
+  const stale = JSON.parse(original); stale.finished = Date.now() - 86_400_001;
+  await writeFile(first.receipt, JSON.stringify(stale));
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await writeFile(first.receipt, original);
+  await writeFile(path.join(f.root, "artifact"), "tampered");
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await writeFile(path.join(f.root, "artifact"), "measured");
+  const log = await readFile(first.logPath);
+  await writeFile(first.logPath, "tampered log");
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  await writeFile(first.logPath, log);
+  const lease = path.join(f.root, "target/validation/locks", first.key);
+  await mkdir(lease);
+  await writeFile(path.join(lease, "owner.json"), JSON.stringify({ pid: process.pid }));
+  await assert.rejects(verify(), /busy or has an unresolved lease/);
+  // A stale owner must not be reaped by a verification-only request.
+  await writeFile(path.join(lease, "owner.json"), JSON.stringify({ pid: 2147483647 }));
+  await assert.rejects(verify(), /busy or has an unresolved lease/);
+  assert.equal(JSON.parse(await readFile(path.join(lease, "owner.json"))).pid, 2147483647);
+  await rm(lease, { recursive: true });
+  await writeFile(path.join(f.root, "source"), "dirty");
+  await assert.rejects(verify(), /dirty source/);
+  await writeFile(path.join(f.root, "source"), "one");
+  for (const extra of [{ fresh: true }, { env: { ...options.env, CI: "1" } }, { env: { ...options.env, MESH_VALIDATION_FRESH: "1" } }])
+    await assert.rejects(verify(extra), /CI, or fresh execution/);
+  await writeFile(path.join(f.root, "source"), "new committed source");
+  f.git(["add", "source"]);
+  f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "source drift"]);
+  await assert.rejects(verify(), /Missing, stale, or invalid/);
+  assert.equal(await f.count(), 1, "verification failures must never execute the producer");
+});
+
+test("verification-only finalization rejects source drift after successful receipt inspection", async t => {
+  const f = await fixture(t);
+  const { verifyStageEvidence } = await import("../validation/stage.mjs");
+  const { writeFileSync } = await import("node:fs");
+  await f.run();
+  await assert.rejects(verifyStageEvidence({ root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined },
+    log: () => writeFileSync(path.join(f.root, "source"), "changed during verification"),
+  }), /changed during validation finalization/);
+  assert.equal(await f.count(), 1);
+});
+
+test("verification-only leases declare no admitted work and dead readers do not quarantine producers", async t => {
+  const f = await fixture(t);
+  const { verifyStageEvidence } = await import("../validation/stage.mjs");
+  const { readFileSync } = await import("node:fs");
+  const first = await f.run();
+  const lease = path.join(f.root, "target/validation/locks", first.key);
+  let descriptor;
+  await verifyStageEvidence({ root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined },
+    log: () => { descriptor = JSON.parse(readFileSync(path.join(lease, "owner.json"), "utf8")); },
+  });
+  assert.equal(descriptor.noWork, true);
+  assert.equal(descriptor.retirementRequired, false);
+  assert.equal(descriptor.windowsRetirementRequired, undefined);
+  const cancelled = new AbortController();
+  await assert.rejects(verifyStageEvidence({ root: f.root, cwd: f.root, name: "fixture", command: f.command,
+    env: { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined },
+    signal: cancelled.signal, log: () => cancelled.abort(),
+  }));
+  await assert.rejects(readFile(path.join(lease, "owner.json")), /ENOENT/);
+  assert.equal(await f.count(), 1, "cancelled verification admits no child work");
+  // Model a verifier dying after publishing its actual no-work descriptor.
+  // Normal producer recovery may reap this lease on Windows as well as POSIX.
+  await mkdir(lease);
+  await writeFile(path.join(lease, "owner.json"), JSON.stringify({ ...descriptor, pid: 2147483647 }));
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const recovered = await f.run({ fresh: true, signal: controller.signal });
+    assert.equal(recovered.code, 0);
+    assert.equal(await f.count(), 2);
+  } finally { clearTimeout(deadline); }
+});
+
+test("stage CLI rejects invalid budgets and persists cancellation at an absolute deadline", { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const env = { ...process.env, CI: "1" }; delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER;
+  for (const deadline of ["invalid", String(Date.now() - 1), String(Date.now() + 1e12)]) {
+    const launch = path.join(f.root, "target/failed-launch.json");
+    const result = spawnSync(process.execPath, [cli, "deadline-invalid", "--deadline", deadline, "--result", launch, "--", ...f.command], { cwd: f.root, env, encoding: "utf8", timeout: 10000 });
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /deadline/);
+    const failure = JSON.parse(await readFile(launch, "utf8"));
+    assert.equal(failure.launched, false); assert.equal(failure.code, 1);
+  }
+  const receipt = path.join(f.root, "target/deadline-result.json");
+  const result = spawnSync(process.execPath, [cli, "deadline-parked", "--deadline", String(Date.now() + 2000), "--result", receipt, "--", process.execPath, "-e", "setInterval(()=>{},1000)"], { cwd: f.root, env, encoding: "utf8", timeout: 15000 });
+  assert.equal(result.status, 130, result.stderr);
+  const record = JSON.parse(await readFile(receipt, "utf8"));
+  assert.equal(record.code, 130); assert.equal(record.cleanupUnverified, false);
+  // A long unused deadline must not retain an otherwise finished CLI process.
+  const normal = spawnSync(process.execPath, [cli, "deadline-normal", "--deadline", String(Date.now() + 60000), "--", process.execPath, "-e", "process.exit(0)"], { cwd: f.root, env, encoding: "utf8", timeout: 15000 });
+  assert.equal(normal.status, 0, normal.stderr);
+});
+
+
+test("pre-admission abort preserves the original rejection without mutating its reason", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(f.run({ signal: controller.signal }), error => {
+    assert.equal(error, controller.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+  await assert.rejects(f.count(), /ENOENT/);
+  const reader = new AbortController(); reader.abort();
+  await assert.rejects(f.run({ reuseOnly: true, signal: reader.signal }), error => {
+    assert.equal(error, reader.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+});
+
+test("resource-wait abort reports no admission and releases only its own key lease", async t => {
+  const f = await fixture(t);
+  const { createHash } = await import("node:crypto");
+  const resource = "pre-admission-resource";
+  const directory = path.join(f.root, ".git/validation-resources", createHash("sha256").update(resource).digest("hex"));
+  await mkdir(directory, { recursive: true });
+  const owner = { pid: process.pid, started: Date.now() };
+  await writeFile(path.join(directory, "owner.json"), JSON.stringify(owner));
+  const controller = new AbortController();
+  await assert.rejects(f.run({ resource, signal: controller.signal, log: message => {
+    if (message.startsWith("waiting for another validation stage")) controller.abort();
+  } }), error => {
+    assert.equal(error.name, "AbortError");
+    assert.equal(error, controller.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+  await assert.rejects(f.count(), /ENOENT/);
+  assert.deepEqual(await readdir(path.join(f.root, "target/validation/locks")), []);
+  assert.deepEqual(JSON.parse(await readFile(path.join(directory, "owner.json"))), owner);
+});
+
+test("post-admission exceptions cannot acquire a verified no-work cancellation result", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  await assert.rejects(f.run({ signal: controller.signal, createLogStream: () => {
+    controller.abort(); throw controller.signal.reason;
+  } }), error => {
+    assert.equal(error, controller.signal.reason);
+    assert.equal(error.stageResult, undefined);
+    return true;
+  });
+  await assert.rejects(f.count(), /ENOENT/);
+});
+
+
+test("stage CLI persists owned pre-admission cancellation when cold identity consumes its unchanged 2s budget", { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const preload = path.join(f.root, "target/cold-identity.mjs");
+  await mkdir(path.dirname(preload), { recursive: true });
+  await writeFile(preload, `
+import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+const original = cp.spawnSync;
+let cold = true;
+cp.spawnSync = function(program, args, ...rest) {
+  if (cold && args?.length === 1 && args[0] === '--version') {
+    cold = false;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2100);
+  }
+  return original.call(this, program, args, ...rest);
+};
+syncBuiltinESMExports();
+`);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const resultFile = path.join(f.root, "target/cold-result.json");
+  const env = { ...process.env, CI: "1", NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${pathToFileURL(preload).href}` };
+  delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER;
+  const result = spawnSync(process.execPath, [cli, "cold-deadline", "--deadline", String(Date.now() + 2000), "--result", resultFile, "--", ...f.command], {
+    cwd: f.root, env, encoding: "utf8", timeout: 15000,
+  });
+  assert.equal(result.status, 130, result.stderr);
+  const record = JSON.parse(await readFile(resultFile, "utf8"));
+  assert.equal(record.code, 130);
+  assert.equal(record.launched, false);
+  assert.equal(record.cleanupUnverified, false);
+  assert.equal(record.executionMs, 0);
+  await assert.rejects(f.count(), /ENOENT/);
+});
+
+test("CLI diagnostic failures cannot impersonate an owner-proven pre-admission cancellation", async t => {
+  const f = await fixture(t);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const preload = path.join(f.root, "spoof-owner.mjs");
+  await writeFile(preload, "Error.prototype.stageResult = {code:130, launched:false, cleanupUnverified:false};");
+  const resultFile = path.join(f.root, "target/diagnostic-result.json");
+  const result = spawnSync(process.execPath, [cli, "invalid-profile", "--profile", "unknown", "--result", resultFile, "--", ...f.command], {
+    cwd: f.root, encoding: "utf8", timeout: 15000,
+    env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${pathToFileURL(preload).href}` },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Unknown validation environment profile/);
+  const record = JSON.parse(await readFile(resultFile, "utf8"));
+  assert.equal(record.code, 1);
+  assert.equal(record.launched, null);
+  assert.equal(record.cleanupUnverified, true);
+  await assert.rejects(f.count(), /ENOENT/);
+});
+
+// The leader publishes only its acknowledged child's complete identity. Stream
+// chunks never authorize cleanup: stdout may split even a single numeric write.
+const escapedPipeLeaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+const escapedPipeLeader = "const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{detached:true,stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{try{if(pid!==c.pid||!Number.isSafeInteger(pid)||pid<=1)throw Error('invalid child acknowledgment');const ready=process.argv[2];fs.writeFileSync(ready+'.pending',String(pid)+'\\n');fs.renameSync(ready+'.pending',ready);process.exit(0)}catch(error){const fail=()=>{console.error(error.message);process.exit(1)};if(c.exitCode!==null||c.signalCode!==null){fail();return;}c.once('exit',fail);c.kill('SIGKILL');}});";
+async function publishedEscapedPid(filename) {
+  const text = await readFile(filename, "utf8");
+  assert.match(text, /^[1-9]\d*\n$/, "cleanup requires a complete atomic PID record");
+  const pid = Number(text);
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, "cleanup requires a safe child PID");
+  return pid;
+}
+async function awaitEscapedPid(filename) {
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const deadline = Date.now() + 3000;
+  while (true) {
+    try { return await publishedEscapedPid(filename); }
+    catch (error) { if (error.code !== "ENOENT" || Date.now() >= deadline) throw error; }
+    await pause(20);
+  }
+}
+
+for (const cancel of [false, true, "after-drain"]) test(`escaped inherited output pipes fail closed after leader exit${cancel === "after-drain" ? " and cancellation during output finish" : cancel ? " and cancellation" : ""}`, { skip: process.platform === "win32", timeout: 15000 }, async () => {
+  const { execute } = await import("../validation/stage.mjs");
+  const { Writable } = await import("node:stream");
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const privateRoot = await mkdtemp(path.join(tmpdir(), "mesh-escaped-pipe-"));
+  const readyFile = path.join(privateRoot, "ready");
+  const controller = new AbortController();
+  let escaped;
+  let ownedGroup;
+  let cancelledDuringFinish = false;
+  let completion;
+  const bounded = async (promise, ms, description) => {
+    let timer;
+    try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(description)), ms); })]); }
+    finally { clearTimeout(timer); }
+  };
+  const running = () => {
+    if (!escaped) return false;
+    const state = spawnSync("ps", ["-o", "stat=", "-p", String(escaped)], { encoding: "utf8" }).stdout.trim();
+    return !!state && !state.startsWith("Z");
+  };
+  try {
+    completion = execute([process.execPath, "-e", escapedPipeLeader, escapedPipeLeaf, readyFile], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, signal: controller.signal,
+      ...(cancel === "after-drain" ? { logPath: "fixture-owned-output", createLogStream: () => new Writable({ write(_chunk, _encoding, done) { done(); }, final(done) {
+        // Output finish is entered only after the escaped read ends were closed.
+        cancelledDuringFinish = true;
+        controller.abort();
+        done();
+      } }) } : {}),
+      onSpawn: pid => { ownedGroup = pid; }, onOutput() {} });
+    escaped = await awaitEscapedPid(readyFile);
+    assert.ok(Number.isSafeInteger(escaped) && escaped > 1);
+    if (cancel === true) {
+      await bounded((async () => {
+        while (true) {
+          try { process.kill(-ownedGroup, 0); }
+          catch (error) { if (error.code === "ESRCH") return; throw error; }
+          await pause(20);
+        }
+      })(), 3000, "leader group did not exit after readiness");
+      // Exercise cancellation after natural exit has already armed pipe draining.
+      await pause(100);
+      controller.abort();
+    }
+    const result = await bounded(completion, 6500, "execute remained pending after leader exit and retirement");
+    assert.notEqual(result.code, 0, "escaped pipe holders cannot certify success");
+    assert.equal(result.cleanupUnverified, true);
+    assert.match(result.error, /output pipes.*retirement/i);
+    assert.equal(result.exitCode, 0, "pipe failure preserves the original leader status");
+    if (cancel) assert.equal(result.code, 130);
+    if (cancel === "after-drain") assert.equal(cancelledDuringFinish, true);
+    assert.equal(running(), true, "owner must not signal an unknown escaped group");
+  } finally {
+    // Recover the atomic record even when readiness or a semantic assertion fails.
+    if (!escaped) escaped = await awaitEscapedPid(readyFile);
+    if (escaped && running()) process.kill(escaped, "SIGKILL");
+    if (completion) await completion;
+    for (let attempt = 0; attempt < 50 && running(); attempt++) await pause(20);
+    assert.equal(running(), false, "fixture-owned escaped process must retire before completion");
+    await rm(privateRoot, { recursive: true, force: true });
+  }
+});
+
+test("escaped pipe failure records diagnostics and quarantines stage leases without a receipt", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { createHash } = await import("node:crypto");
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const f = await fixture(t);
+  const resource = "escaped-pipe-fixture";
+  const readyFile = path.join(f.root, "target/escaped-ready");
+  const versions = toolVersionFixture(f.root, { ...process.env });
+  let escaped;
+  let completion;
+  let timer;
+  const alive = () => {
+    if (!escaped) return false;
+    const state = spawnSync("ps", ["-o", "stat=", "-p", String(escaped)], { encoding: "utf8" }).stdout.trim();
+    return !!state && !state.startsWith("Z");
+  };
+  try {
+    completion = f.run({ name: "escaped-pipe", resource, env: versions.env, command: [process.execPath, "-e", escapedPipeLeader, escapedPipeLeaf, readyFile] });
+    const result = await Promise.race([completion, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("stage did not finalize escaped-pipe failure")), 9000); })]);
+    escaped = await publishedEscapedPid(readyFile);
+    assert.ok(Number.isSafeInteger(escaped) && escaped > 1);
+    assert.notEqual(result.code, 0);
+    assert.equal(result.cleanupUnverified, true);
+    assert.match(result.error, /output pipes.*retirement/i);
+    const owner = JSON.parse(await readFile(path.join(f.root, ".git/validation-resources", createHash("sha256").update(resource).digest("hex"), "owner.json"), "utf8"));
+    assert.match(owner.quarantined, /output pipes/i);
+    await assert.rejects(readFile(result.receipt), { code: "ENOENT" });
+    const attemptNames = await readdir(path.join(f.root, "target/validation/attempts"));
+    const attempt = JSON.parse(await readFile(path.join(f.root, "target/validation/attempts", attemptNames[0]), "utf8"));
+    assert.equal(attempt.cleanupUnverified, true);
+    assert.notEqual(attempt.code, 0);
+    assert.equal(alive(), true, "quarantine cannot claim the escaped process was killed");
+  } finally {
+    clearTimeout(timer);
+    if (!escaped) escaped = await awaitEscapedPid(readyFile);
+    if (Number.isSafeInteger(escaped) && escaped > 1 && alive()) process.kill(escaped, "SIGKILL");
+    if (completion) await completion;
+    for (let attempt = 0; attempt < 50 && alive(); attempt++) await pause(20);
+    assert.equal(alive(), false);
+  }
 });

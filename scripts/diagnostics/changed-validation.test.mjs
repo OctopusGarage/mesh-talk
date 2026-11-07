@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
   rmSync,
   renameSync,
   chmodSync,
@@ -18,6 +19,7 @@ import { execute } from "../validation/stage.mjs";
 import {
   discoverChanges,
   executePlan,
+  executeCheapChecks,
   parseOptions,
   prepareRust,
   validateFrontendReport,
@@ -551,7 +553,7 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
 
     // This POSIX-only fixture intentionally excludes the Windows adapter: its
     // native dependencies must load at the Windows execution boundary only.
-    for (const name of ["stage.mjs", "stage-inputs.mjs"])
+    for (const name of ["stage.mjs", "stage-inputs.mjs", "syntax.mjs"])
       f.write(`scripts/validation/${name}`, await readFile(new URL(`../validation/${name}`, import.meta.url), "utf8"));
     const manifest = "scripts/validation/validation.json";
     const data = JSON.parse(await readFile(path.join(f.root, manifest), "utf8"));
@@ -559,29 +561,34 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     f.write(manifest, JSON.stringify(data));
     if (managed) {
       f.write("scripts/build-retention.py", "import pathlib,subprocess,sys,time\npathlib.Path('target/managed-wrapper-entered').write_text('waiting')\nwhile not pathlib.Path('target/allow-managed').exists(): time.sleep(.05)\nsys.exit(subprocess.call(sys.argv[sys.argv.index('--')+1:]))\n");
-      // This is fixture infrastructure, not a retention implementation change.
-      // Keep it in the baseline so selection cannot add an unrelated Python
-      // test stage before the formatting marker this regression observes.
-      f.git(["add", "scripts/build-retention.py"]);
-      f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "configure managed wrapper"]);
     }
+    // Commit all runner infrastructure before selecting this fixture's source.
+    // Otherwise copying the real stage/syntax owners adds unrelated syntax
+    // checks to a test of formatting order, locking and source invalidation.
+    f.git(["add", "scripts/"]);
+    f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "configure static phase infrastructure"]);
+    f.write("scripts/fixture.test.mjs", "import test from 'node:test'; test('fixture', () => {});\n// Select the owning fixture contract.\n");
+    assert.deepEqual(discoverChanges(f.root, "HEAD").files, ["scripts/fixture.test.mjs"],
+      "infrastructure must not add unrelated changed-source checks");
     await mkdir(path.join(f.root, "target/bin"), { recursive: true });
     const cargo = path.join(f.root, "target/bin/cargo");
     f.write("target/bin/cargo", `#!/usr/bin/env node\nconst fs=require('node:fs'); if(process.argv[2]==='--version'){console.log('cargo fixture');}else if(process.argv[2]==='fmt'){fs.writeFileSync('target/fast-static-ran','yes');}else{fs.writeFileSync('target/heavy-command-ran','yes');process.exit(9);}`);
     chmodSync(cargo, 0o755);
-    // This is an ordering/input-invalidation fixture, not a benchmark of the
-    // host npm/rustc startup. Keep version probes deterministic while retaining
-    // the real stage locks, commands, source fingerprints and existing deadlines.
-    f.write("target/bin/rustc", "#!/usr/bin/env node\nconsole.log('rustc fixture');\n");
-    chmodSync(path.join(f.root, "target/bin/rustc"), 0o755);
-    const toolVersions = path.join(f.root, "target/tool-versions.cjs");
-    f.write("target/tool-versions.cjs", "const path=require('node:path');if(['npm','npm-cli.js'].includes(path.basename(process.argv[1]||''))&&process.argv[2]==='--version'){console.log('npm fixture');process.exit(0);}\n");
+    // Replace only tool-version probes, retaining the real formatting command,
+    // stage identities, resource locks and original lifecycle watchdog.
+    const toolVersions = toolVersionFixture(f.root, {
+      ...isolatedEnv, NODE_TEST_CONTEXT: undefined,
+      MESH_VALIDATION_AFFECTED_CHILD: undefined,
+      MESH_VALIDATION_AFFECTED_PHASE: undefined,
+      MESH_VALIDATION_AFFECTED_INPUTS: undefined,
+      PATH: `${path.dirname(cargo)}${path.delimiter}${process.env.PATH}`,
+    });
     lock = path.join(f.root, ".git/validation-resources", createHash("sha256").update("heavy").digest("hex"));
     await mkdir(lock, { recursive: true });
     writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid }));
     phase = "start CLI";
     completion = execute([process.execPath, cli, "--checks", "--run", "--report", "target/validation/feedback/queued.json", ...(managed ? ["--managed"] : []), "--owner", "fixture", "--reason", "phase fixture"], {
-      cwd: f.root, env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined, MESH_VALIDATION_AFFECTED_CHILD: undefined, MESH_VALIDATION_AFFECTED_PHASE: undefined, MESH_VALIDATION_AFFECTED_INPUTS: undefined, NODE_OPTIONS: `--require ${JSON.stringify(toolVersions)} ${process.env.NODE_OPTIONS || ""}`, PATH: `${path.dirname(cargo)}${path.delimiter}${process.env.PATH}` },
+      cwd: f.root, env: toolVersions.env,
       signal: controller.signal,
       onSpawn: ownedPid => { pid = ownedPid; },
       onOutput: chunk => { output = (output + chunk.toString()).slice(-65536); },
@@ -642,6 +649,8 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
       assert.notEqual(result.code, 0);
       assert.equal(result.cleanupUnverified, false, result.error);
     }
+    assert.deepEqual(new Set((await readFile(toolVersions.probes, "utf8")).trim().split("\n")),
+      new Set(["cargo", "rustc", "npm"]), "all canonical tool identities must still be queried");
     phase = "assertions complete";
   },
 );
@@ -947,4 +956,54 @@ test("structured inventory and execution never accept stderr-only or partial pro
   await assert.rejects(executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/stderr-only.test.mjs"] }, {
     run: async () => ({ code: 0, stdout: "", stderr: tap, output: tap, outputTruncated: false }), log() {},
   }), /zero.*Node/i);
+});
+
+
+test("cheap execution admits only catalog static checks and propagates their failure", async () => {
+  const selected = {
+    blockers: [], rust: [{ package: "core", filters: ["fixture::"] }],
+    node: ["must-not-run.test.mjs"], frontend: ["src/must-not-run.test.ts"],
+    checks: [
+      { name: "format", command: ["cargo", "fmt", "--check"], cwd: "." },
+      { name: "lint", command: ["npm", "run", "lint"], cwd: "frontend" },
+      { name: "type", command: ["npm", "run", "typecheck"], cwd: "frontend" },
+      { name: "regression", kind: "test", command: ["python3", "-m", "unittest"], cwd: "." },
+      { name: "build", resource: "heavy", command: ["cargo", "build"], cwd: "." },
+    ],
+  };
+  const calls = [];
+  await executeCheapChecks(selected, { log: () => {}, run: async (program, args) => {
+    calls.push([program, args]); return completed("");
+  } });
+  assert.deepEqual(calls.map(([, args]) => args[1]), ["format", "lint", "type"]);
+  for (const [program, args] of calls) {
+    assert.equal(program, process.execPath);
+    assert.equal(args[0], fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)));
+  }
+  let attempted = 0;
+  await assert.rejects(executeCheapChecks(selected, { log: () => {}, run: async () => {
+    attempted++; return { ...completed("lint failure"), code: 7 };
+  } }), /lint failure/);
+  assert.equal(attempted, 1);
+  await assert.rejects(executeCheapChecks({ ...selected, blockers: ["unowned source"] }, {
+    run: async () => { throw Error("must not execute"); },
+  }), /unowned source/);
+});
+
+test("cheap CLI runs actual syntax owner while keeping selected tests and heavy locks pending", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
+  configureCLI(f, "throw Error('must not execute the selected test');");
+  for (const name of ["stage.mjs", "stage-inputs.mjs", "syntax.mjs", "windows-process-owner.mjs", "windows-process-owner.ps1", "windows-process-owner.cs"])
+    f.write(`scripts/validation/${name}`, readFileSync(new URL(`../validation/${name}`, import.meta.url), "utf8"));
+  f.write("scripts/fixture.test.mjs", "throw Error('must not execute the selected test'); // changed");
+  mkdirSync(path.join(f.root, ".git/validation-resources/heavy"), { recursive: true });
+  f.write(".git/validation-resources/heavy/owner.json", JSON.stringify({ pid: process.pid }));
+  const passed = await f.runCLI(["--cheap", "--json"]);
+  assert.equal(passed.code, 0, passed.stderr);
+  assert(JSON.parse(passed.stdout).node.includes("scripts/fixture.test.mjs"));
+  assert.match(passed.stderr, /candidate acceptance remain pending/);
+  f.write("scripts/fixture.test.mjs", "export const = ;");
+  const failed = await f.runCLI(["--cheap", "--json"]);
+  assert.notEqual(failed.code, 0);
+  assert.match(failed.stderr, /rejected syntax/);
 });
