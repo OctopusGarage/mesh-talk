@@ -20,7 +20,7 @@ export async function digestFile(filename) {
   return hash.digest("hex");
 }
 
-export async function runCommand(program, args, { cwd, env = process.env, timeoutMs = 1_800_000, logPath, detached = process.platform !== "win32", maxOutputBytes = 128 * 1024 * 1024, outputLimitIsFailure = false, signal } = {}) {
+export async function runCommand(program, args, { cwd, env = process.env, timeoutMs = 1_800_000, logPath, detached = process.platform !== "win32", maxOutputBytes = 128 * 1024 * 1024, outputLimitIsFailure = false, signal, terminationGraceMs } = {}) {
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) throw Error("Output byte limit must be a positive safe integer");
   const started = Date.now();
   let output = "", bytes = 0, timedOut = false, failure, outputTruncated = false;
@@ -67,7 +67,7 @@ export async function runCommand(program, args, { cwd, env = process.env, timeou
       if (!npm) return { code: null, timedOut: false, output: "", ...channels(), error: "Cannot locate npm-cli.js beside the installed Node executable" };
       command = [process.execPath, npm, ...args];
     }
-    const result = await execute(command, { cwd, env, logPath, signal: controller.signal, detached, notifyOwnerOnAbort: true, onOutput(chunk, channel) {
+    const result = await execute(command, { cwd, env, logPath, signal: controller.signal, detached, notifyOwnerOnAbort: true, terminationGraceMs, onOutput(chunk, channel) {
       bytes += chunk.length;
       if (bytes > maxOutputBytes) outputTruncated = true;
       if (outputLimitIsFailure && bytes > maxOutputBytes) { failure ||= "Command output exceeded evidence limit"; stop(); return; }

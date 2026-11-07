@@ -186,6 +186,24 @@ fixtures do not establish that the full cohort fits its per-case, suite and job
 budgets. Preserve executed and unrun counts when fail-fast or a watchdog truncates
 that evidence.
 
+Budget a mutation chunk for the baseline obligation, every selected mutant's
+build and complete consumer suite, setup and report publication. Do not assume
+mutants fail early or reuse an old selected-count constant as the inventory grows.
+The planner must preserve the rotating sample's exact union while bounding each
+worker's work; a shorter chunk changes scheduling, not assurance coverage.
+A shared baseline may remove repeated execution only when workers validate the
+same run, source, tools, configuration, complete inventory and trusted producer
+attempt through the existing evidence owner. Preserve raw tool reports: an
+external baseline is separate verified evidence, never an invented tool outcome.
+Failed-only reruns may reuse the attested successful producer attempt from the
+same run; missing or mismatched evidence must fail before mutant execution.
+Keep compilation, individual-test, complete-suite and job limits distinct and
+reserve time for process retirement and evidence publication. Invoked tools may
+create independent process groups; retain the real tool's cancellation and build
+retirement controls, not only successful-run evidence. A closed supervisor pipe
+cannot replace the actual work owner's acknowledgment. See
+[actual work ownership](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
+
 Stop an already failed candidate before starting another expensive compilation
 partition. Linux/macOS native testing finishes all selected Host cases, then
 admits the remaining complete workspace only if Host passed. Both partitions

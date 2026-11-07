@@ -202,7 +202,8 @@ test("only auxiliary diagnostic transport is optional; acceptance artifacts stay
       if (prefix) seen.push(`${file}:${prefix}`);
     }
   }
-  assert.deepEqual(seen.sort(), Object.entries(optional).flatMap(([file, prefixes]) => prefixes.map(prefix => `${file}:${prefix}`)).sort());
+  // A declared diagnostic role may appear in both a baseline and its workers.
+  assert.deepEqual([...new Set(seen)].sort(), Object.entries(optional).flatMap(([file, prefixes]) => prefixes.map(prefix => `${file}:${prefix}`)).sort());
   const diagnostics = step(read("check-health.yml"), "Diagnostic and release gate regressions (all platforms)");
   assert.doesNotMatch(diagnostics, /continue-on-error/u);
   assert.match(diagnostics, /--result tmp\/health-diagnostics\.json/u);
@@ -234,14 +235,15 @@ test("heavy hosted Linux builds reclaim only unused image SDKs before cache expa
   const sources = [
     ["ci.yml", read("ci.yml")],
     ["hidden-contacts-native.yml", read("hidden-contacts-native.yml")],
-    ["mutants.yml", read("mutants.yml")],
+    ...["baseline", "mutants"].map(id => [`mutants.yml/${id}`, workflowJob(read("mutants.yml"), id)]),
     ["sanitizers.yml", read("sanitizers.yml").split("  cohort:\n")[1].split("  shards:\n")[0]],
     ["release.yml", read("release.yml").split("  build-release:\n")[1].split("  verify-release:\n")[0]],
   ];
   for (const [file, source] of sources) {
     const preparation = step(source, "Prepare hosted Linux build storage");
     assert.ok(preparation, `${file}: missing disk preparation`);
-    assert.match(preparation, /runner.os == 'Linux'/);
+    const fixedRunner = source.match(/^    runs-on: (.+)$/mu)?.[1];
+    if (!/^ubuntu-/u.test(fixedRunner ?? "")) assert.match(preparation, /runner.os == 'Linux'/);
     assert.match(preparation, /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/);
     assert.match(preparation, /scripts\/ci\/runner-storage\.mjs --prepare/);
     const index = source.indexOf("name: Prepare hosted Linux build storage");
@@ -257,7 +259,10 @@ test("heavy hosted Linux builds reclaim only unused image SDKs before cache expa
     assert.ok(source.indexOf("name: Preserve runner storage measurements") < cache);
 
   }
-  assert.match(step(read("mutants.yml"), "Prepare hosted Linux build storage"), /steps.selection.outputs.selected != '0'/);
+  for (const id of ["baseline", "mutants"]) {
+    assert.match(workflowJob(read("mutants.yml"), id), /^    if: .*needs\.plan\.outputs\.selected != '0'/mu,
+      `mutants.yml/${id}: the whole heavy job must reject an empty plan before setup`);
+  }
   assert.doesNotMatch(read("ui-shards.yml"), /runner-storage\.mjs/, "browser-only shards do not need native build reclamation");
 });
 

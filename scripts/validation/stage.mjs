@@ -185,9 +185,10 @@ function supervisorAncestor(owner) {
   }
   return false;
 }
-export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false, onSpawn, terminationSignal = "SIGTERM" }) {
+export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false, onSpawn, terminationSignal = "SIGTERM", terminationGraceMs = 2000 }) {
   signal?.throwIfAborted();
   if (!["SIGTERM", "SIGINT"].includes(terminationSignal)) throw Error("Unsupported command termination signal");
+  if (!Number.isSafeInteger(terminationGraceMs) || terminationGraceMs < 0 || terminationGraceMs > 30000) throw Error("Command termination grace must be an integer from 0 to 30000 ms");
   if (process.platform === "win32") {
     const { executeWindows } = await import("./windows-process-owner.mjs");
     return executeWindows(executableCommand(command, env), { cwd, env, logPath, signal, createLogStream, onOutput });
@@ -250,7 +251,7 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
           cleanupUnverified ||= groupUnverified;
           if (groupUnverified) error ||= "Process-group termination could not be verified";
           done();
-        }, 2000));
+        }, terminationGraceMs));
       }
     };
     child.once("spawn", () => {
