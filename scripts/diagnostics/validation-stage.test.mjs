@@ -990,8 +990,12 @@ for (const cancel of [false, true, "after-drain"]) test(`escaped inherited outpu
     if (cancel === true) {
       await bounded((async () => {
         while (true) {
-          try { process.kill(-ownedGroup, 0); }
-          catch (error) { if (error.code === "ESRCH") return; throw error; }
+          // Observe the fixture leader directly. Darwin may reject a group
+          // signal probe with EPERM after that leader has already exited.
+          const leader = spawnSync("ps", ["-o", "stat=", "-p", String(ownedGroup)], { encoding: "utf8" });
+          assert.ok(leader.status === 0 || leader.status === 1, leader.stderr);
+          const state = leader.stdout.trim();
+          if (!state || state.startsWith("Z")) return;
           await pause(20);
         }
       })(), 3000, "leader group did not exit after readiness");
