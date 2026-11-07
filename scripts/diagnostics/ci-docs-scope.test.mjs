@@ -5,8 +5,6 @@ import {
   mkdir,
   writeFile,
   rm,
-  chmod,
-  symlink,
   readFile,
   copyFile,
 } from "node:fs/promises";
@@ -72,6 +70,57 @@ async function fixture(
   };
   return { root, env, event, base, head, source };
 }
+// Git trees can contain names that the host filesystem cannot materialize.
+// Build both commits through the index, retaining the exact tested merge proof.
+async function gitEntryFixture(t, file, mode = "100644") {
+  const f = await fixture(t, async () => {});
+  // Match hosts that cannot observe executable bits or create native symlinks.
+  git(f.root, "config", "core.filemode", "false");
+  git(f.root, "config", "core.symlinks", "false");
+  // Windows also validates index paths. Only this disposable object fixture
+  // admits the deliberately invalid name; it never checks that entry out.
+  git(f.root, "config", "core.protectNTFS", "false");
+  const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+    cwd: f.root,
+    encoding: "utf8",
+    input: "changed",
+  }).trim();
+  function treeWithPath(commit) {
+    git(f.root, "read-tree", commit);
+    execFileSync("git", ["update-index", "-z", "--index-info"], {
+      cwd: f.root,
+      input: `${mode} ${blob}\t${file}\0`,
+    });
+    return git(f.root, "write-tree");
+  }
+  const head = git(
+    f.root,
+    "commit-tree",
+    treeWithPath(f.head),
+    "-p",
+    f.base,
+    "-m",
+    "raw path head",
+  );
+  const source = git(
+    f.root,
+    "commit-tree",
+    treeWithPath(f.source),
+    "-p",
+    f.event.pull_request.base.sha,
+    "-p",
+    head,
+    "-m",
+    "raw path merge",
+  );
+  git(f.root, "update-ref", "refs/heads/topic", head);
+  git(f.root, "update-ref", "HEAD", source);
+  f.head = head;
+  f.source = source;
+  f.env.GITHUB_SHA = source;
+  f.event.pull_request.head.sha = head;
+  return f;
+}
 async function resolve(options) {
   const { resolveScope } = await import("../ci/docs-scope.mjs");
   return resolveScope(options);
@@ -114,28 +163,67 @@ for (const file of [
   "docs/a\nb.md",
 ])
   test(`full for ${JSON.stringify(file)}`, async (t) => {
-    const f = await fixture(t, async (root) => {
-      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
-      await writeFile(path.join(root, file), "changed");
-    });
-    assert.equal((await resolve(f)).full, true);
+    const f = file.includes("\n")
+      ? await gitEntryFixture(t, file)
+      : await fixture(t, async (root) => {
+          await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+          await writeFile(path.join(root, file), "changed");
+        });
+    if (file.includes("\n"))
+      await assert.rejects(readFile(path.join(f.root, file)), {
+        code: "ENOENT",
+      });
+    const decision = await resolve(f);
+    assert.deepEqual(decision.files, [file]);
+    assert.equal(decision.full, true);
   });
 for (const mutation of ["delete", "rename", "empty", "executable", "symlink"])
   test(`full for ${mutation}`, async (t) => {
-    const f = await fixture(t, async (root) => {
-      const file = path.join(root, "docs/story.md");
-      if (mutation === "delete") await rm(file);
-      if (mutation === "rename") {
-        await rm(file);
-        await writeFile(path.join(root, "docs/renamed.md"), "old");
-      }
-      if (mutation === "executable") await chmod(file, 0o755);
-      if (mutation === "symlink") {
-        await rm(file);
-        await symlink("../README.md", file);
-      }
-    });
-    assert.equal((await resolve(f)).full, true);
+    const mode =
+      mutation === "executable"
+        ? "100755"
+        : mutation === "symlink"
+          ? "120000"
+          : null;
+    const f = mode
+      ? await gitEntryFixture(t, "docs/story.md", mode)
+      : await fixture(t, async (root) => {
+          const file = path.join(root, "docs/story.md");
+          if (mutation === "delete") await rm(file);
+          if (mutation === "rename") {
+            await rm(file);
+            await writeFile(path.join(root, "docs/renamed.md"), "old");
+          }
+        });
+    const decision = await resolve(f);
+    if (mode) {
+      const raw = git(
+        f.root,
+        "diff",
+        "--raw",
+        "--no-abbrev",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-z",
+        f.event.pull_request.base.sha,
+        f.source,
+        "--",
+      );
+      assert.match(
+        raw,
+        new RegExp(
+          `^:100644 ${mode} [a-f0-9]{40} [a-f0-9]{40} ${mode === "120000" ? "T" : "M"}\\0docs/story\\.md\\0$`,
+          "u",
+        ),
+      );
+      assert.deepEqual(decision.files, ["docs/story.md"]);
+      assert.equal(
+        decision.reason,
+        "non-prose or empty delta requires full verification",
+      );
+    }
+    assert.equal(decision.full, true);
   });
 for (const field of ["base", "head", "repository", "ref", "shallow"])
   test(`reject invalid ${field}`, async (t) => {

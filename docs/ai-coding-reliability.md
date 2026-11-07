@@ -430,6 +430,9 @@ Source-order contracts must assert that each required command exists before
 comparing its position. A missing substring returns a sentinel such as `-1` and
 can otherwise make an ordering assertion pass vacuously. Match the canonical
 command owner and keep actual execution controls for behavior beyond routing.
+Negative controls must prove their intended input reached that boundary. For Git
+scope tests, assert the real path and mode; a host that ignores executable bits
+can otherwise produce an empty delta whose rejection passes the wrong assertion.
 
 Browser fixtures must make hydrated backend settings agree with the intended
 frontend state before navigation; a later settings response must not silently

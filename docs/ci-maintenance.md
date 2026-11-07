@@ -234,6 +234,10 @@ failure, cancellation and receipt assertions and their existing watchdogs.
 Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
 run cannot qualify an unbounded environmental dependency for later main runs.
+Git-path and mode controls should construct Git objects when the host cannot
+represent the input faithfully. Assert the actual delta and mode before checking
+rejection; an empty change rejected for another reason is not a valid negative
+control. Keep these cases on every platform instead of skipping them.
 
 ## Reuse compatible work with verifiable inputs
 
