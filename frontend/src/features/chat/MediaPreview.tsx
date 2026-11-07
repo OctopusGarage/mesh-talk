@@ -210,7 +210,23 @@ export function MediaPreview({
   }, []);
   useLayoutEffect(() => {
     if (!lightbox) return;
+    closeRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
+      if (video && event.key === "Tab") {
+        const dialog = closeRef.current?.closest('[role="dialog"]');
+        const controls = dialog?.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), video[controls], a[href], input:not(:disabled)",
+        );
+        const first = controls?.[0],
+          last = controls?.[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
+      }
       if (event.key !== "Escape") return;
       if (document.querySelector('[data-image-actions][data-state="open"]'))
         return;
@@ -224,7 +240,7 @@ export function MediaPreview({
       // WebKit's recognized text belongs to this preview, including during exit.
       window.getSelection()?.removeAllRanges();
     };
-  }, [lightbox, closeLightbox]);
+  }, [lightbox, closeLightbox, video]);
   useEffect(() => {
     if (!lightbox || video) return;
     drag.current = null;
@@ -307,9 +323,11 @@ export function MediaPreview({
         setError(t("files.shareFailed"));
     }
   };
+  // Native video playback owns a composited surface. Keep it and its controls out
+  // of shared-element projection; the backdrop still supplies the entry/exit fade.
   const layoutId =
-    motionOK && (video || geometry) ? `media-${fileConv}` : undefined;
-  const layoutTransition = { duration: 0.22, ease };
+    motionOK && !video && geometry ? `media-${fileConv}` : undefined;
+  const layoutTransition = { duration: motionOK ? 0.22 : 0.08, ease };
   const backdropTransition = { duration: motionOK ? 0.16 : 0.08, ease };
   // An inline image whose codec the webview can't decode (e.g. HEIC outside Safari) fires
   // <img onError>; we then degrade to the same "can't preview — Save" card as video.
@@ -392,10 +410,12 @@ export function MediaPreview({
   // Capture a real (non-black) poster frame for the inline video. If the codec can't be
   // decoded (notably iPhone .mov / HEVC), the poster never arrives — treat that as
   // unsupported and show a hint instead of a dead black box.
-  const { poster, failed: videoFailed } = useVideoPoster(
-    video ? url : null,
-    fileConv,
-  );
+  const {
+    poster,
+    width: videoWidth,
+    height: videoHeight,
+    failed: videoFailed,
+  } = useVideoPoster(video ? url : null, fileConv);
 
   // Shared "can't preview inline" card: a hint plus a reachable Save button, so a file is
   // never a dead end (no empty bubble, no broken-image icon).
@@ -526,6 +546,7 @@ export function MediaPreview({
         <button
           type="button"
           onClick={() => setLightbox(true)}
+          ref={triggerRef}
           title={t("files.playVideo")}
           aria-label={t("files.playVideo")}
           className={`${frameClass} block`}
@@ -556,6 +577,7 @@ export function MediaPreview({
               <button
                 type="button"
                 aria-label={t("common.close")}
+                ref={closeRef}
                 className="absolute right-4 top-4 flex h-11 w-11 items-center justify-center rounded-full bg-background/80 text-foreground hover:bg-background"
               >
                 <X className="h-4 w-4" />
@@ -569,12 +591,23 @@ export function MediaPreview({
                 <video
                   ref={playerRef}
                   src={url}
+                  poster={poster ?? undefined}
+                  width={videoWidth}
+                  height={videoHeight}
+                  style={
+                    videoWidth && videoHeight
+                      ? {
+                          aspectRatio: `${videoWidth} / ${videoHeight}`,
+                          maxWidth: `min(100%, calc((100dvh - 3rem) * ${videoWidth / videoHeight}))`,
+                        }
+                      : undefined
+                  }
                   controls
                   autoPlay
                   playsInline
                   data-testid="file-video-player"
                   onClick={(e) => e.stopPropagation()}
-                  className="max-h-full max-w-full rounded-lg bg-black"
+                  className="pointer-events-auto max-h-full max-w-full rounded-lg bg-black"
                 />
               </motion.div>
               {detailBar}

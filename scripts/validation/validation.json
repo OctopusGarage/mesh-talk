@@ -136,6 +136,10 @@
         "guide": "docs/updates.md",
         "invariants": [
           {
+            "name": "macOS desktop and headless release producers discard local symbols during linking before native signing, bundling and updater/delta generation; both architectures retain runnable, verifiably signed executables.",
+            "reference": "docs/updates.md#release-binary-size"
+          },
+          {
             "name": "Linux x64 and ARM64 release builds retain the Ubuntu 22.04 glibc baseline; compiled Cargo caches are isolated by runner identity, and actual public AppImage launch remains required upgrade acceptance evidence.",
             "reference": "docs/updates.md#download-verification-and-installation"
           },

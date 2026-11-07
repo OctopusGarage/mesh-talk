@@ -47,7 +47,7 @@ jobs:
           workspaces: "fuzz -> target"
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-fuzz
 

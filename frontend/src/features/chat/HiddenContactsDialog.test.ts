@@ -54,6 +54,14 @@ let host: HTMLDivElement;
 const close = vi.fn();
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    },
+  );
   state.chat.myAccountId = "root-a";
   state.policy.change.mockReset().mockResolvedValue(true);
   state.setChat.mockReset();

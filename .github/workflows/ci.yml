@@ -106,7 +106,7 @@ jobs:
           node scripts/check-repository-hygiene.mjs
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
 

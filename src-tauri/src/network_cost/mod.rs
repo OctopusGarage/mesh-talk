@@ -62,18 +62,30 @@ mod tests {
         let node = runtime.handle();
         let weak = Arc::downgrade(&node);
         let (started, ready) = tokio::sync::oneshot::channel();
-        runtime.register_host_task(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let _ = started.send(());
             observe(node).await;
-        }));
+        });
+        let observer = task.abort_handle();
+        runtime.register_host_task(task);
         ready.await.unwrap();
         tokio::task::yield_now().await;
         tokio::time::timeout(std::time::Duration::from_secs(5), runtime.stop())
             .await
             .unwrap();
         assert!(
-            weak.upgrade().is_none(),
-            "native observers cannot retain a retired Node"
+            observer.is_finished(),
+            "native observer must be joined at retirement"
         );
+        // A blocking worker can release its retirement permit immediately before
+        // its captured Node is dropped. Observe final destruction separately from
+        // the native observer's synchronous cancellation/join boundary above.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("native observers cannot retain a retired Node");
     }
 }
