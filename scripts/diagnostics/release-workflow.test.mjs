@@ -81,13 +81,14 @@ test("native release inspection uses the shared pinned toolchain and a real NSIS
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const toolchain = health.split("      - name: Install pinned native inspection toolchain\n")[1]?.split("      - ")[0];
   assert.ok(toolchain, "all three portable platforms must execute the tool bootstrap before merge");
-  assert.doesNotMatch(toolchain, /if:/);
+  assert.match(toolchain, /if:.*steps\.scope\.outputs\.full == 'true'/);
   assert.match(toolchain, /python scripts\/release\/sevenzip\.py install/);
   const native = health.split("      - name: Native release inspection regression\n")[1]?.split("      - ")[0];
   assert.ok(native, "portable health must exercise a genuine plugin installer");
-  assert.match(native, /if: runner\.os == 'Linux'/);
+  assert.match(native, /if:.*steps\.scope\.outputs\.full == 'true'.*runner\.os == 'Linux'/);
   assert.match(native, /apt-get install[^\n]*\bnsis\b/);
   const smoke = health.split("      - name: Verify native NSIS payload equivalence\n")[1]?.split("      - ")[0];
+  assert.match(smoke || "", /if:.*steps\.scope\.outputs\.full == 'true'.*runner\.os == 'Linux'/);
   assert.match(smoke || "", /python scripts\/release\/test_native_nsis\.py -v/);
 });
 
@@ -212,7 +213,7 @@ test("Stable mutation commands cannot run after a newly unsuccessful source chec
     const fixture = join(temporary, "source-check.mjs");
     const source = new URL("../release/check-source-checks.mjs", import.meta.url).href;
     const policy = new URL("../ci/required-checks.mjs", import.meta.url).href;
-    writeFileSync(fixture, `import {requireSourceChecks} from ${JSON.stringify(source)};\nimport {releaseSourceChecks} from ${JSON.stringify(policy)};\nconst checks=releaseSourceChecks.map((name,id)=>({name,id,app:{slug:"github-actions"},status:"completed",conclusion:"success"}));\nif(process.env.NEW_CHECK_STATE!=="success") checks.push({...checks[0],id:999,...JSON.parse(process.env.NEW_CHECK_STATE)});\nrequireSourceChecks(checks,[]);\n`);
+    writeFileSync(fixture, `import {requireSourceChecks} from ${JSON.stringify(source)};\nimport {releaseSourceChecks,releaseSourceWorkflows} from ${JSON.stringify(policy)};\nconst paths=[...new Set(Object.values(releaseSourceWorkflows))];const provenance={repo:"owner/repo",sha:"a".repeat(40),runs:paths.map((path,i)=>({path,id:i+1,run_attempt:1,check_suite_id:i+1,repository:{full_name:"owner/repo"},head_repository:{full_name:"owner/repo"},head_sha:"a".repeat(40),head_branch:"main",event:"push",status:"completed",conclusion:"success"}))};const checks=releaseSourceChecks.map((name,id)=>({name,id,check_suite:{id:paths.indexOf(releaseSourceWorkflows[name])+1},app:{slug:"github-actions"},status:"completed",conclusion:"success"}));\nif(process.env.NEW_CHECK_STATE!=="success") checks.push({...checks[0],id:999,...JSON.parse(process.env.NEW_CHECK_STATE)});\nrequireSourceChecks(checks,[],provenance);\n`);
     const prelude = 'node() { if [ "$1" = scripts/release/check-source-checks.mjs ]; then "$REAL_NODE" "$CHECK_FIXTURE"; else printf "PUBLIC_MUTATION\\n"; fi; }\n';
     for (const script of [commands(image) + '\nprintf "PUBLIC_MUTATION\\n"', commands(publication)]) {
       const run = (script, state) => spawnSync("bash", ["-e", "-c", prelude + script], { encoding: "utf8", env: { ...process.env, REAL_NODE: process.execPath, CHECK_FIXTURE: fixture, NEW_CHECK_STATE: state, SOURCE_REPO: "fixture/repo", SOURCE_SHA: "a".repeat(40), RELEASE_TAG: "v1.2.3" } });

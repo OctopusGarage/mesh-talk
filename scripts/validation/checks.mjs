@@ -1,12 +1,14 @@
 import { syntaxKind } from "./syntax.mjs";
 export const ciPolicyTest = "scripts/diagnostics/ci-latency.test.mjs";
+export const ciDocsPolicyTest = "scripts/diagnostics/ci-docs-scope.test.mjs";
+const policyTests = new Map([["ci-policy", ciPolicyTest], ["ci-docs-policy", ciDocsPolicyTest]]);
 
-/** Policy checks already execute this file; test-only plans still select it. */
+/** Policy checks supply these same files; test-only plans retain their assertions. */
 export function pendingNodeTests(plan) {
-  const suppliedByPolicy = plan.checks?.some(check => check.kind === "policy" && check.resource !== "heavy" && check.cwd === "." &&
-    JSON.stringify(check.command) === JSON.stringify(["node", "--test", ciPolicyTest]));
-  return (plan.node ?? []).filter(file => file !== ciPolicyTest ||
-    !suppliedByPolicy);
+  const supplied = new Set([...policyTests.values()].filter(file =>
+    plan.checks?.some(check => check.kind === "policy" && check.resource !== "heavy" && check.cwd === "." &&
+      JSON.stringify(check.command) === JSON.stringify(["node", "--test", file]))));
+  return (plan.node ?? []).filter(file => !supplied.has(file));
 }
 /** Static obligations for a development plan; browser/native proof stays explicit. */
 export function buildStaticChecks(plan) {
@@ -15,12 +17,14 @@ export function buildStaticChecks(plan) {
   const packages = [...new Set(plan.rust.map(item => item.package))].sort();
   const syntax = plan.files.filter(file => !plan.deleted?.includes(file) && syntaxKind(file));
   if (syntax.length) add("changed-syntax", ["node", "scripts/validation/syntax.mjs", "--files", ...syntax]);
-  if (plan.files.some(file => /^\.github\/workflows\/.*\.ya?ml$/u.test(file) ||
-    [ciPolicyTest, "scripts/validation/checks.mjs"].includes(file))) {
+  if (plan.files.some(file => /^\.github\/(?:workflows|actions)\/.*\.ya?ml$/u.test(file) ||
+    [...policyTests.values(), "scripts/ci/docs-scope.mjs", "scripts/validation/checks.mjs"].includes(file))) {
     // Configuration assertions and runner inventory listing only: no suites,
     // compilers, browser processes, installs or heavy-resource admission.
-    add("ci-policy", ["node", "--test", ciPolicyTest]);
-    checks.at(-1).kind = "policy";
+    for (const [name, file] of policyTests) {
+      add(name, ["node", "--test", file]);
+      checks.at(-1).kind = "policy";
+    }
   }
   const shells = plan.files.filter(file => !plan.deleted?.includes(file) && /^(?:scripts\/.*\.sh|hooks\/[^/]+)$/u.test(file));
   if (shells.length) add("shell-lint", ["shellcheck", "--severity=warning", "--", ...shells]);

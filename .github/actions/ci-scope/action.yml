@@ -1,0 +1,26 @@
+name: Verify CI scope
+description: Revalidate documentation eligibility against the actual checked-out PR merge.
+inputs:
+  full:
+    description: Expected selection; true conservatively runs everything, false must be independently proved, auto selects.
+    default: 'true'
+  upstream_result:
+    description: The selector must have succeeded; missing or failed selection never permits skipped work.
+    default: success
+outputs:
+  full:
+    description: Whether this source requires full product verification.
+    value: ${{ steps.scope.outputs.full }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '22'
+    - id: scope
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        EXPECTED_FULL: ${{ inputs.full }}
+        UPSTREAM_RESULT: ${{ inputs.upstream_result }}
+      run: node scripts/ci/docs-scope.mjs --expected-full "$EXPECTED_FULL" --upstream-result "$UPSTREAM_RESULT"

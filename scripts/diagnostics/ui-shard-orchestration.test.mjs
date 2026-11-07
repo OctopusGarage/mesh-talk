@@ -16,7 +16,7 @@ function gate(name, env) {
 }
 
 test("Linux coverage requires Linux and Health without waiting for desktop shards", () => {
-  assert.match(job("coverage"), /needs: \[linux, health\]/);
+  assert.match(job("coverage"), /needs: \[linux, health, scope\]/);
   assert.doesNotMatch(job("coverage"), /needs:.*desktop/);
   for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
     assert.equal(gate("Require all browser shards", { BASELINE: linux, UNIT_COVERAGE: "success", DESKTOP: "failure" }) === 0, linux === "success");
@@ -25,7 +25,7 @@ test("Linux coverage requires Linux and Health without waiting for desktop shard
 
 test("portable acceptance and final UI gate reject every unsuccessful Linux or desktop result", () => {
   const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
-  for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop\]/);
+  for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop, scope\]/);
   assert.match(job("portable-evidence"), /node scripts\/evals\/chromium-evidence\.mjs collect-artifacts/);
   assert.match(job("ui-gate"), /needs: \[linux, desktop,/);
   for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
@@ -98,13 +98,13 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
 
 test("desktop browser burst waits for Health and WebKit with bounded admission while Linux starts independently", () => {
   const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /needs: \[health, portable\]/);
+  assert.match(job("desktop"), /needs: \[health, portable, scope\]/);
   assert.doesNotMatch(job("desktop"), /max_parallel:/, "desktop inherits the same four-slot owner without a Mac-specific Windows restriction");
   assert.match(reusable, /max_parallel:\n        type: number\n        default: 4/);
   assert.match(reusable, /max-parallel: \$\{\{ inputs.max_parallel \}\}/);
   assert.doesNotMatch(job("linux"), /max_parallel:/);
   assert.doesNotMatch(job("desktop"), /if: always\(\)/);
-  assert.doesNotMatch(job("linux"), /needs:/);
+  assert.match(job("linux"), /needs: \[scope\]/);
 });
 
 test("HTML reports require all platform-specific current-attempt shards", () => {
@@ -188,7 +188,7 @@ test("scheduled and manual fuzz executions remain separate without cancellation"
 
 test("Firefox core runs on ordinary candidates and the final gate requires its real success", () => {
   const firefox = job("firefox-extended");
-  assert.doesNotMatch(firefox, /^    if:/m, "core Firefox must not be scheduled-only");
+  assert.match(firefox, /^    if: needs.scope.outputs.full == 'true'$/m, "core Firefox runs on every full candidate");
   assert.match(firefox, /timeout-minutes: 20/);
   assert.match(firefox, /EVAL_TIER:.*'extended' \|\| 'core'/);
   assert.match(firefox, /browser-report\.mjs.*'extended' \|\| 'core'/);
@@ -265,7 +265,7 @@ test("the stable required WebKit check admits only both successful partitions", 
   assert.match(producer, /timeout-minutes: 20/);
   assert.match(producer, /ui-runner.mjs.*--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/2/);
   assert.match(collector, /name: Portable UI \(macos-26-intel, webkit\)/);
-  assert.match(collector, /needs: portable-shards/);
+  assert.match(collector, /needs: \[portable-shards, scope\]/);
   assert.match(collector, /portable-runner.mjs collect-partitions/);
   const block = root().split(/^      - /m).find(value => value.startsWith("name: Require both WebKit partitions\n"));
   const script = block.match(/        run: (.*)/)[1];

@@ -76,6 +76,14 @@ test("actionlint receives exact paths and propagates rejection through a POSIX e
   assert.equal(readFileSync(process.env.SYNTAX_ARGS, "utf8"), ".github/workflows/space name.yml\n");
   process.env.SYNTAX_EXIT = "1";
   assert.throws(() => checkSyntax({ root, staged: true }), /actionlint rejected/);
+  const localAction = ".github/actions/ci-scope/action.yml";
+  put(localAction, "name: Scope\nruns:\n  using: composite\n  steps: []\n");
+  git("add", localAction);
+  process.env.SYNTAX_EXIT = "0";
+  assert.deepEqual(checkSyntax({ root, files: [localAction] }), [localAction]);
+  assert.equal(readFileSync(process.env.SYNTAX_ARGS, "utf8"), "\n", "local metadata edits recheck callers with actionlint's local-action parser");
+  process.env.SYNTAX_EXIT = "1";
+  assert.throws(() => checkSyntax({ root, files: [localAction] }), /actionlint rejected/);
 });
 
 test("installing hooks does not launch the comprehensive health suite", t => {

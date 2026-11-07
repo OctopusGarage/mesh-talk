@@ -410,6 +410,22 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Keep unrelated tool-version startup outside process-lifecycle assertions. The
+[supervisor isolation regression](../scripts/diagnostics/windows-process-owner.test.mjs)
+uses the existing version fixture while retaining real stage and output-limit
+children, original watchdogs and verified completion receipts. Confirm the probes
+were used; do not replace the process behavior under test. Check nested budgets
+before treating an outer timeout as evidence that the inner operation hung.
+
+Check name, App identity and source SHA alone do not establish execution scope.
+A documentation eligibility decision is not product-test evidence, even when its
+required job succeeds. Consumers must also validate the event, trusted repository,
+branch and owning workflow/run. The release source owner binds checks to the
+latest successful main-push suite; its PR-only, wrong-owner and stale-success
+controls prevent a lightweight decision from authorizing publication.
+Provenance is an additional constraint: filtering to a trusted suite must not
+discard a newer failed or pending check that previously blocked acceptance.
+
 Process-lifecycle fixtures must distinguish leader exit from group signal
 permission. Observe the fixture-owned leader's process state when synchronizing
 post-exit cancellation; a Darwin `EPERM` from a group signal probe does not prove
@@ -422,6 +438,9 @@ Source-order contracts must assert that each required command exists before
 comparing its position. A missing substring returns a sentinel such as `-1` and
 can otherwise make an ordering assertion pass vacuously. Match the canonical
 command owner and keep actual execution controls for behavior beyond routing.
+Negative controls must prove their intended input reached that boundary. For Git
+scope tests, assert the real path and mode; a host that ignores executable bits
+can otherwise produce an empty delta whose rejection passes the wrong assertion.
 
 Browser fixtures must make hydrated backend settings agree with the intended
 frontend state before navigation; a later settings response must not silently
@@ -622,6 +641,12 @@ validation instead of only the synthetic command. The
 [process-owner fixture](../scripts/diagnostics/windows-process-owner.test.mjs)
 checks both the retained output-limit failure and successful enclosing supervisor
 through an actual nested execution.
+
+Executable process fixtures must copy their image and assert independent file
+identity; a hard link aliases the live harness outside the child process owner.
+The process-owner and release-reuse fixtures share bounded filesystem cleanup
+after verified retirement, with a Windows held-image control that still rejects
+a persistent lock and succeeds only after release.
 
 Treat a lock-order suspicion, a reproduced bug and a passing regression as
 different evidence. A stack sample or total suite duration alone does not prove

@@ -12,6 +12,87 @@ import { versions } from "../ci/windows-coverage.mjs";
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
 
+const workflowJob = (source, id) => source.split(`  ${id}:\n`)[1]?.split(/^  [a-z][\w-]*:\n/m)[0];
+
+test("documentation scope retains every required matrix identity and guards expensive steps", () => {
+  const required = {
+    "ci.yml": ["checks"],
+    "windows-workspace.yml": ["build", "tests"],
+    "check-health.yml": ["platform", "source"],
+    "e2e-backend.yml": ["backend-platform"],
+    "hidden-contacts-native.yml": ["native"],
+    "sanitizers.yml": ["asan"],
+    "e2e-ui.yml": ["coverage", "portable-evidence", "portable", "ui-gate"],
+  };
+  for (const [file, ids] of Object.entries(required)) {
+    const workflow = read(file);
+    assert.doesNotMatch(workflow, /paths-ignore:/u, `${file}: required workflows remain discoverable`);
+    for (const id of ids) {
+      const block = workflowJob(workflow, id);
+      assert.ok(block, `${file}/${id}`);
+      assert.match(block, /if: \$\{\{ !cancelled\(\)/u, `${file}/${id}: reject failed selection rather than disappear`);
+      const steps = block.split(/^      - /m).slice(1);
+      assert.match(steps[0], /uses: actions\/checkout@/u);
+      assert.match(steps[0], /fetch-depth: 2/u);
+      assert.match(steps[1], /id: scope/u);
+      assert.match(steps[1], /uses: \.\/\.github\/actions\/ci-scope/u);
+      assert.match(steps[1], /upstream_result:/u);
+      assert.doesNotMatch(steps[1], /continue-on-error/u);
+      for (const work of steps.slice(2)) {
+        const commonSource = file === "check-health.yml" && id === "source" && [
+          "Install Rust", "Rust formatting", "Install source scanners",
+          "Install pinned prebuilt workflow scanner", "Source and supply-chain policy",
+        ].some(name => work.startsWith(`name: ${name}\n`));
+        if (commonSource) {
+          assert.doesNotMatch(work, /^        if:/mu, "portable source/security checks remain applicable to documentation");
+          assert.doesNotMatch(work, /cargo (?:build|test|clippy)|npm run test|playwright/u);
+          continue;
+        }
+        assert.match(work, /if: .*steps\.scope\.outputs\.full == '(?:true|false)'/u,
+          `${file}/${id}: work after scope verification must explicitly select full or docs`);
+      }
+      if (/matrix\.os/u.test(block)) {
+        assert.match(block, /runs-on: \$\{\{ .* == 'true' && matrix\.os \|\| 'ubuntu-latest' \}\}/u,
+          `${file}/${id}: docs retain names without admitting native runners`);
+      }
+    }
+  }
+});
+
+test("docs eligibility is recomputed locally and never fabricates provider or test evidence", () => {
+  const selector = read("ci-scope.yml");
+  assert.match(selector, /full: auto/u);
+  const action = readFileSync(new URL("../../.github/actions/ci-scope/action.yml", import.meta.url), "utf8");
+  assert.match(action, /scripts\/ci\/docs-scope\.mjs --expected-full "\$EXPECTED_FULL" --upstream-result "\$UPSTREAM_RESULT"/u);
+  assert.match(action, /working-directory: \$\{\{ github.workspace \}\}/u);
+  assert.doesNotMatch(action, /continue-on-error|checks: write|statuses: write|npm ci|rust-cache/u);
+  const empty = step(read("ci.yml"), "Report documentation-only coverage through Codecov");
+  assert.match(empty, /steps\.scope\.outputs\.full == 'false' && matrix\.os == 'ubuntu-latest'/u);
+  assert.match(empty, /run_command: empty-upload/u);
+  assert.match(empty, /version: v11\.3\.2/u);
+  assert.match(empty, /fail_ci_if_error: true/u);
+  assert.doesNotMatch(empty, /force:|skip_validation:|handle_no_reports_found:|dry_run:|override_commit:/u);
+  const source = workflowJob(read("check-health.yml"), "source");
+  for (const command of ["node scripts/validation/standards.mjs", "node scripts/check-repository-hygiene.mjs", "typos"]) {
+    assert.ok(source.includes(command), `documentation validation retains ${command}`);
+  }
+  assert.match(read("codeql.yml"), /language: \[rust, javascript-typescript, actions\]/u);
+  assert.doesNotMatch(read("codeql.yml"), /docs-scope|ci-scope|paths-ignore/u);
+});
+
+test("Codecov action and downloaded CLI versions are pinned independently", () => {
+  let uploads = 0;
+  for (const file of ["ci.yml", "check-health.yml", "windows-workspace.yml", "e2e-ui.yml"]) {
+    for (const block of read(file).split(/^      - /m).filter(value => /uses: codecov\/codecov-action@/u.test(value))) {
+      assert.match(block, /uses: codecov\/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5/u);
+      assert.match(block, /^          version: v11\.3\.2$/mu, file);
+      assert.match(block, /^          fail_ci_if_error: true$/mu, file);
+      uploads++;
+    }
+  }
+  assert.equal(uploads, 5);
+});
+
 test("browser and native dependency installation use the same Linux-only preparation", async () => {
   const ui = await readFile(
     new URL("../../.github/workflows/e2e-ui.yml", import.meta.url),
@@ -212,22 +293,22 @@ test("one complete Linux frontend unit cohort owns coverage without duplicate OS
   const coverage = step(health, "Frontend unit tests and coverage");
   assert.ok(coverage, "the complete unit coverage cohort must exist");
   assert.equal(health.split(/^      - /m).filter(value => value.startsWith("name: Frontend unit tests")).length, 1);
-  assert.match(coverage, /^        if: runner.os == 'Linux'$/m);
+  assert.match(coverage, /^        if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(runner.os == 'Linux'\) \}\}$/m);
   assert.match(coverage, /^        run: npm run test:coverage$/m);
   assert.match(coverage, /^        working-directory: frontend$/m);
   assert.doesNotMatch(coverage, /continue-on-error|timeout|--exclude|--testNamePattern/);
   const { scripts } = JSON.parse(readFileSync(new URL("../../frontend/package.json", import.meta.url), "utf8"));
   assert.equal(scripts.test, "vitest run");
   assert.equal(scripts["test:coverage"], `${scripts.test} --coverage`);
-  assert.match(step(health, "Seal browser unit line map from this run"), /^        if: runner.os == 'Linux'$/m);
+  assert.match(step(health, "Seal browser unit line map from this run"), /^        if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(runner.os == 'Linux'\) \}\}$/m);
 });
 
 test("CI caches the workspace output and retains native lint and build coverage", () => {
   const ci = read("ci.yml");
   assert.match(ci, /workspaces: ['"]?\. -> target/);
-  assert.doesNotMatch(step(ci, "Clippy"), /if:/);
+  assert.match(step(ci, "Clippy"), /if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}/u);
   assert.match(step(ci, "Build workspace"), /cargo build --workspace --locked/);
-  assert.doesNotMatch(step(ci, "Build workspace"), /if:/);
+  assert.match(step(ci, "Build workspace"), /if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}/u);
 });
 
 test("health owns fast checks without repeating Rust or browser suites", () => {
@@ -260,11 +341,11 @@ test("the stable UI gate requires coverage merged from all Linux shards", () => 
   const ui = read("e2e-ui.yml");
   const coverage = ui.split("  coverage:\n")[1]?.split("  packs:\n")[0];
   assert.ok(coverage);
-  assert.match(coverage, /needs: \[linux, health\]/);
+  assert.match(coverage, /needs: \[linux, health, scope\]/);
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
-  assert.match(ui, /needs: \[linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended\]/);
+  assert.match(ui, /needs: \[linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope\]/);
   assert.match(ui, /COVERAGE: \$\{\{ needs.coverage.result \}\}/);
   assert.match(ui, /test "\$COVERAGE" = success/);
 });
@@ -308,7 +389,7 @@ test("the protected Full Linux UI regression name remains a fail-closed check", 
 test("UI coverage consumers share Health's same-run Linux unit coverage", () => {
   const ui = read("e2e-ui.yml"), health = read("check-health.yml");
   assert.equal((ui.match(/run: npm run test:coverage/g) || []).length, 0);
-  assert.match(ui, /health:\n    uses: \.\/\.github\/workflows\/check-health\.yml/);
+  assert.match(ui, /uses: \.\/\.github\/workflows\/check-health\.yml/);
   assert.match(health, /unit-coverage-artifact.mjs seal/);
   assert.match(health, /name: ui-unit-coverage-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   for (const job of ["coverage"]) {
@@ -325,13 +406,15 @@ test("full Chromium execution owns portable evidence while unique engines remain
   const portable = ui.split("  portable:\n")[1].split("  chromium-extended:\n")[0];
   assert.doesNotMatch(portable, /browser: chromium/);
   assert.match(portable, /name: Portable UI \(macos-26-intel, webkit\)/);
-  assert.match(portable, /needs: portable-shards/);
+  assert.match(portable, /needs: \[portable-shards, scope\]/);
   assert.match(ui, /name: Chromium portable evidence/);
   assert.match(read("ui-shards.yml"), /chromium-evidence.mjs extract/);
   assert.match(ui, /chromium-evidence.mjs collect/);
   assert.match(step(read("ui-shards.yml"), "Run UI E2E"), /--reporter=list,blob,json/);
   const reports = ui.split("  reports:\n")[1].split("  packs:\n")[0];
   assert.doesNotMatch(reports, /matrix:/);
+  assert.match(reports, /if: \$\{\{ !cancelled\(\) && needs.scope.outputs.full == 'true' \}\}/u,
+    "failed full-scope producers must still permit diagnostic report rendering");
   assert.match(reports, /chromium-evidence.mjs render-artifacts/);
   assert.match(ui, /chromium-extended:/);
   assert.match(ui, /firefox-extended:/);
@@ -345,7 +428,7 @@ test("CI runs release workflow diagnostics only through the shared glob", () => 
 
 test("Windows builds once then requires eight complete serial archive partitions", () => {
   assert.match(read("ci.yml"), /os: \[ubuntu-latest, macos-latest\]/);
-  assert.match(read("ci.yml"), /windows:\n    uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
+  assert.match(read("ci.yml"), /uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
   const windows = read("windows-workspace.yml");
   assert.match(windows, /needs: build/);
   assert.match(windows, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/);
@@ -364,7 +447,8 @@ test("optional pack job retains unique dist checks without repeating baseline br
   assert.match(packs, /name: Optional pack UI and asset check/);
   assert.match(packs, /npm run build && node .*check-variant-assets.mjs/);
   assert.match(packs, /npm run check:build-syntax/);
-  assert.doesNotMatch(packs, /needs:|playwright install|playwright test|coverage|codecov|download-artifact/);
+  assert.match(packs, /needs: \[scope\]/);
+  assert.doesNotMatch(packs, /playwright install|playwright test|coverage|codecov|download-artifact/);
 });
 
 
@@ -407,4 +491,45 @@ test("historical incident rigs are manual while required native acceptance remai
   const backend = read("e2e-backend.yml");
   assert.match(backend, /pull_request:/);
   assert.match(backend, /uses: \.\/\.github\/workflows\/hidden-contacts-native\.yml/);
+});
+
+test("Windows producer validates native Perl before every Cargo build boundary", () => {
+  const workflow = read("windows-workspace.yml");
+  const producer = workflow.split("\n  tests:")[0];
+  const bootstrap = producer.indexOf("node scripts/ci/windows-native-deps.mjs");
+  assert.ok(
+    bootstrap >= 0,
+    "vendored OpenSSL must not inherit bare Git/MSYS perl",
+  );
+  for (const boundary of [
+    "scripts/ci/backend-coverage.test.mjs",
+    "cargo clippy",
+    "cargo build",
+    "cargo test",
+    "cargo llvm-cov show-env",
+  ]) {
+    assert.ok(bootstrap < producer.indexOf(boundary), boundary);
+  }
+  assert.doesNotMatch(
+    producer,
+    /OPENSSL_NO_VENDOR:\s*['"]?1|continue-on-error:\s*true/u,
+  );
+});
+
+test("actual native Perl acceptance runs in the serial Windows producer after bootstrap", () => {
+  const workflow = read("windows-workspace.yml");
+  const producer = workflow.split("\n  tests:")[0];
+  const contract = producer.split(/^      - /m).find((step) =>
+    step.startsWith("name: Validate archive and coverage contracts\n"),
+  );
+  assert.ok(contract);
+  assert.match(contract, /run: node --test --test-concurrency=1 /u);
+  assert.ok(contract.includes("scripts/ci/windows-native-deps.test.mjs"));
+  assert.ok(
+    producer.indexOf("node scripts/ci/windows-native-deps.mjs") <
+      producer.indexOf("scripts/ci/windows-native-deps.test.mjs"),
+  );
+  const scopeGuard = /^        if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}\n/mu;
+  assert.match(contract, scopeGuard);
+  assert.doesNotMatch(contract.replace(scopeGuard, ""), /continue-on-error|\|\| true|\n\s*if:/u);
 });

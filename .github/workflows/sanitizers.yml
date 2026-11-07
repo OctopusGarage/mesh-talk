@@ -39,7 +39,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
   cohort:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
     name: Build ASan test archive
     runs-on: ubuntu-latest
     outputs:
@@ -111,8 +116,9 @@ jobs:
           retention-days: 1
 
   shards:
+    if: needs.scope.outputs.full == 'true'
     name: ASan core shard (${{ matrix.shard }}/8)
-    needs: cohort
+    needs: [cohort, scope]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -163,7 +169,7 @@ jobs:
 
   asan:
     name: ASan + LeakSanitizer (core)
-    needs: [cohort, shards]
+    needs: [cohort, shards, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
@@ -177,13 +183,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
       - name: Download this attempt's ASan evidence
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
           pattern: asan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-shard-*
           path: tmp/asan-union
       - name: Verify every actual shard and complete exact-source union
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/ci/asan.mjs verify tmp/asan-union

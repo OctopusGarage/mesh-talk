@@ -60,7 +60,7 @@ test("native workspace test passes collect and upload their own platform coverag
   const native = steps.find(value => value.startsWith("name: Test + coverage (macOS)\n"));
   const upload = steps.find(value => value.startsWith("name: Upload coverage to Codecov\n"));
   assert.ok(install && native && upload);
-  assert.doesNotMatch(install, /if:/, "every native test platform needs the coverage tool");
+  assert.match(install, /if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}/u, "every full native test platform needs the coverage tool");
   assert.ok(install.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
   for (const platform of ["macOS", "Linux"]) {
     const pass = steps.find(value => value.startsWith(`name: Test + coverage (${platform})\n`));
