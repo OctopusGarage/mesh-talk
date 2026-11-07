@@ -410,6 +410,13 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Keep unrelated tool-version startup outside process-lifecycle assertions. The
+[supervisor isolation regression](../scripts/diagnostics/windows-process-owner.test.mjs)
+uses the existing version fixture while retaining real stage and output-limit
+children, original watchdogs and verified completion receipts. Confirm the probes
+were used; do not replace the process behavior under test. Check nested budgets
+before treating an outer timeout as evidence that the inner operation hung.
+
 Check name, App identity and source SHA alone do not establish execution scope.
 A documentation eligibility decision is not product-test evidence, even when its
 required job succeeds. Consumers must also validate the event, trusted repository,

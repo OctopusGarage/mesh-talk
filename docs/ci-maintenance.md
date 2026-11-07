@@ -225,6 +225,16 @@ The real-runner control derives both configured watchdogs, accelerates only thei
 duration, requires actual parked-case failure and subsequent-case execution, and
 verifies descendant retirement before removing its fixture.
 
+Lifecycle regressions should exercise the real supervisor and child processes
+without making unrelated host tool startup part of their success condition.
+When tool identity is outside the assertion, reuse the existing
+[tool-version fixture](../scripts/diagnostics/test-fixtures/tool-versions.mjs)
+and verify that its probes were actually consumed. Keep the real command,
+failure, cancellation and receipt assertions and their existing watchdogs.
+Compare nested budgets before adding an outer subprocess timeout: several valid
+inner probes can exhaust it before the behavior under test starts. A passing PR
+run cannot qualify an unbounded environmental dependency for later main runs.
+
 ## Reuse compatible work with verifiable inputs
 
 Prefer one producer for an expensive output when consumers need the same inputs
