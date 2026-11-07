@@ -7,6 +7,11 @@ case "${1:-}" in
 esac
 if [ "$platform" = linux ]; then
     ulimit -c 262144
+else
+    # Hosted ARM has 3 CPUs/7 GiB. The complete four-job cohort accumulated
+    # substantial compression/swap; bound compilation independently of tests.
+    # Scope admission here, after cache restore; test workers stay at four.
+    export CARGO_BUILD_JOBS=2
 fi
 run_phase() {
     local phase="$1"

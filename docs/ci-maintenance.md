@@ -442,6 +442,12 @@ Retain fresh process/context isolation, owned temporary directories, dynamically
 allocated ports where supported, and deterministic cleanup. Keep compile jobs,
 test workers and network/rendering resource limits explicit. Do not multiply
 them independently and assume the machine can absorb the combined load.
+The macOS workspace coverage owner admits two compiler jobs on its small hosted
+ARM runner while retaining four test workers and every target. Keep this bound
+after Rust cache restoration so a scheduling experiment does not also invalidate
+the cache cohort. Compare complete compile/test/resource measurements before
+attributing a speedup to it; compression and swap observed across a phase do not
+identify which compiler or test caused the pressure.
 [Nextest archives](https://nexte.st/docs/ci-features/archiving/) can separate build
 and execution, while [Playwright sharding](https://playwright.dev/docs/test-sharding)
 distributes browser work. Archive consumers need the same source revision and
