@@ -83,6 +83,18 @@ if state.get("fail_target") == args[5]:
         self.assertIn("positive whole number", completed.stderr)
         self.assertFalse((self.directory / "injected").exists())
 
+    def test_validation_cli_needs_no_cargo_and_rejects_bad_duration(self):
+        for seconds, succeeds in [("120", True), ("0", False), ("1; echo injected", False)]:
+            completed = subprocess.run(
+                [sys.executable, "-B", str(ROOT / "scripts/ci/fuzz-targets.py"), "--validate"],
+                env={**os.environ, "PATH": "", "FUZZ_MAX_TOTAL_TIME": seconds},
+                capture_output=True, text=True, cwd=self.directory,
+            )
+            self.assertEqual(completed.returncode == 0, succeeds, completed.stderr)
+            if succeeds:
+                self.assertIn(f"Validated {len(self.expected)} fuzz targets", completed.stdout)
+        self.assertFalse(self.calls.exists())
+
     def test_manifest_must_have_unique_nonempty_safe_target_inventory(self):
         for content in ['[package]\nname="empty"\n', '[[bin]]\nname="a"\n[[bin]]\nname="a"\n', '[[bin]]\nname="--help"\n', '[[bin]]\npath="missing-name.rs"\n', 'not valid TOML']:
             manifest = self.directory / "Cargo.toml"

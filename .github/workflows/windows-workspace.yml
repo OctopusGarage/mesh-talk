@@ -29,6 +29,12 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Use runner-owned native temporary storage
+        shell: pwsh
+        run: |
+          Write-Host "Native temporary storage: $([IO.Path]::GetTempPath()) -> $env:RUNNER_TEMP"
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
@@ -103,6 +109,12 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Use runner-owned native temporary storage
+        shell: pwsh
+        run: |
+          Write-Host "Native temporary storage: $([IO.Path]::GetTempPath()) -> $env:RUNNER_TEMP"
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}

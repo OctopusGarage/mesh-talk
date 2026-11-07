@@ -22,10 +22,14 @@ def expected_targets(manifest):
     return names
 
 
-def run_fuzz(manifest, seconds, cargo=("cargo",)):
+def validate_inputs(manifest, seconds):
     if not isinstance(seconds, str) or not re.fullmatch(r"[1-9][0-9]*", seconds):
         raise ValueError("FUZZ_MAX_TOTAL_TIME must be a positive whole number of seconds")
-    expected = expected_targets(manifest)
+    return expected_targets(manifest)
+
+
+def run_fuzz(manifest, seconds, cargo=("cargo",)):
+    expected = validate_inputs(manifest, seconds)
     discovered = subprocess.run([*cargo, "+nightly", "fuzz", "list"], check=True, capture_output=True, text=True)
     # Keep discovery diagnostics visible even when discovery returned success.
     if discovered.stderr:
@@ -43,7 +47,15 @@ def run_fuzz(manifest, seconds, cargo=("cargo",)):
 
 if __name__ == "__main__":
     try:
-        run_fuzz(ROOT / "fuzz/Cargo.toml", os.environ.get("FUZZ_MAX_TOTAL_TIME", "120"))
+        manifest = ROOT / "fuzz/Cargo.toml"
+        seconds = os.environ.get("FUZZ_MAX_TOTAL_TIME", "120")
+        if sys.argv[1:] == ["--validate"]:
+            targets = validate_inputs(manifest, seconds)
+            print(f"Validated {len(targets)} fuzz targets and {seconds}s per target; no tool installation or execution")
+        elif sys.argv[1:]:
+            raise ValueError("Usage: fuzz-targets.py [--validate]")
+        else:
+            run_fuzz(manifest, seconds)
     except subprocess.CalledProcessError as error:
         if error.stderr:
             print(error.stderr, file=sys.stderr, end="")

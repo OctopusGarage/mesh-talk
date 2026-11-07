@@ -1074,6 +1074,29 @@ impl Node {
         // refreshes share one allowance instead of resetting it per channel.
         let mut control_budget = crate::eventlog::sync::network::PreparationBudget::default();
         loop {
+            #[cfg(test)]
+            let recovery_operation = store
+                .pending_transactions()
+                .first()
+                .and_then(|transaction| {
+                    transaction.group_operation().map(|reference| reference.id)
+                });
+            #[cfg(test)]
+            let recovery_trace = recovery_operation.and_then(|id| {
+                let enabled = self.account_client_test_hook.lock().unwrap().is_some();
+                enabled.then(|| (id, self.identity.public(), std::time::Instant::now()))
+            });
+            #[cfg(test)]
+            let recovery_phase = |phase: &str| {
+                if let Some((id, peer, clock)) = &recovery_trace {
+                    self.trace_account_client(peer, || {
+                        format!(
+                            "operation_owner recovery_phase={phase} id={id:?} elapsed_ms={}",
+                            clock.elapsed().as_millis()
+                        )
+                    });
+                }
+            };
             let notification =
                 store
                     .pending_transactions()
@@ -1225,6 +1248,8 @@ impl Node {
                         }
                         _ => None,
                     });
+            #[cfg(test)]
+            recovery_phase("guards_begin");
             let installed = {
                 let mut ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
                 let mut log = self.log.lock().expect("log lock not poisoned");
@@ -1246,13 +1271,20 @@ impl Node {
                      events: &[Event]| {
                         // Startup and running recovery use the same binding and
                         // durable sidecar rule before completing the original ID.
+                        #[cfg(test)]
+                        recovery_phase("completion_begin");
                         super::account_group::operations::persist_action_recall_completion(
                             operation,
                             recall.as_ref(),
                             &mut self.recalls.lock().expect("recalls lock"),
                         )?;
-                        self.complete_account_group_operation(operation, events)
+                        let result = self.complete_account_group_operation(operation, events);
+                        #[cfg(test)]
+                        recovery_phase("completion_returned");
+                        result
                     };
+                #[cfg(test)]
+                recovery_phase("replay_begin");
                 store.recover_next_with_group_operations(
                     &mut ratchet,
                     &mut log,
@@ -1263,6 +1295,8 @@ impl Node {
                     Some(&mut complete),
                 )
             };
+            #[cfg(test)]
+            recovery_phase("replay_returned");
             let removed = transaction_id.is_some_and(|id| {
                 store
                     .pending_transactions()
@@ -1294,10 +1328,14 @@ impl Node {
                 // A larger tail keeps its existing runtime ticket without
                 // turning an installed effect into failed durable recovery.
                 // Terminal status never permits reading a stale projection.
+                #[cfg(test)]
+                recovery_phase("projection_begin");
                 match self.prepare_channel_admission(channel, &mut control_budget) {
                     Ok(()) | Err(LogError::StaleCursor) => {}
                     Err(error) => return Err(error),
                 }
+                #[cfg(test)]
+                recovery_phase("projection_returned");
                 self.account_sync_notify.notify_one();
             }
             if removed && wake_local {

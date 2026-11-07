@@ -10,8 +10,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: health-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
+  group: health-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 permissions:
   contents: read
@@ -32,6 +32,8 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Reserve Health cleanup and diagnostic evidence time
+        run: echo "MESH_HEALTH_DEADLINE_MS=$(( $(date +%s) * 1000 + 23 * 60000 ))" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
         with:
@@ -72,11 +74,6 @@ jobs:
         working-directory: frontend
         run: npm run test:coverage
 
-      - name: Frontend unit tests (macOS and Windows)
-        if: runner.os != 'Linux'
-        working-directory: frontend
-        run: npm test
-
       - name: Seal browser unit line map from this run
         if: runner.os == 'Linux'
         run: node scripts/ci/unit-coverage-artifact.mjs seal frontend/coverage/lcov.info target/ui-unit-coverage
@@ -92,6 +89,7 @@ jobs:
 
       - name: Upload frontend coverage
         if: always() && matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: frontend-coverage-${{ github.run_attempt }}
@@ -121,7 +119,19 @@ jobs:
         shell: bash
         run: |
           node scripts/check-repository-hygiene.mjs
-          node --test scripts/diagnostics/*.test.mjs
+          node scripts/validation/stage.mjs diagnostics --profile shared --deadline "$MESH_HEALTH_DEADLINE_MS" --result tmp/health-diagnostics.json -- node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/diagnostics/node-test-progress.mjs --test-reporter-destination=target/validation/health-progress.jsonl scripts/diagnostics/*.test.mjs
+
+      - name: Preserve diagnostic execution evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: health-diagnostics-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            tmp/health-diagnostics.json
+            target/validation/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Build retention safeguards (all platforms)
         run: python3 -m unittest discover -s scripts -p test_build_retention.py -v
@@ -157,14 +167,18 @@ jobs:
         uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.25'
-          cache: false
-      - name: Install workflow scanner
+      - name: Install pinned prebuilt workflow scanner
+        shell: bash
         run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          scanner_dir="$RUNNER_TEMP/actionlint"
+          mkdir -p "$scanner_dir"
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$scanner_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $scanner_dir/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$scanner_dir/actionlint.tar.gz" -C "$scanner_dir" actionlint
+          "$scanner_dir/actionlint" -version
+          echo "$scanner_dir" >> "$GITHUB_PATH"
       - name: Source and supply-chain policy
         run: |
           typos

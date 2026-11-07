@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// Four independently compiled, serial ASan partitions with exact union evidence.
+// One compiled archive, eight serial ASan partitions and exact union evidence.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { command as runLogged, inventory, verifyPartition, verifyExecution, versions } from "./windows-coverage.mjs";
 
-const partitions = [1, 2, 3, 4];
+const partitions = [1, 2, 3, 4, 5, 6, 7, 8];
 const target = "x86_64-unknown-linux-gnu";
 const config = ".config/nextest-asan.toml";
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -30,11 +30,11 @@ export function nightlyFromManifest(text) {
 export function partitionArgs(mode, buildArgs, shard) {
   assert.ok(["list", "run"].includes(mode), "Invalid ASan command mode");
   assert.ok(shard === undefined || partitions.includes(shard), "Invalid ASan partition");
-  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard ? ["--partition", `hash:${shard}/4`] : []), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
+  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard ? ["--partition", `hash:${shard}/${partitions.length}`] : []), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
 }
 
 export function verifyAsanUnion(bundles, expected) {
-  assert.equal(bundles.length, 4, "Expected exactly four ASan partitions");
+  assert.equal(bundles.length, partitions.length, "Expected exactly eight ASan partitions");
   assert.deepEqual(bundles.map(bundle => bundle.receipt.shard).sort(), partitions, "Duplicate or missing ASan partition");
   const full = bundles[0].full;
   for (const bundle of bundles) {
@@ -54,17 +54,18 @@ export function verifyAsanUnion(bundles, expected) {
     assert.equal(receipt.executedTests, count, "ASan execution count mismatch");
     executedTests += count;
   }
-  return { totalTests: full.length, executedTests, ignoredTests: full.filter(row => row.ignored).length, shards: 4 };
+  return { totalTests: full.length, executedTests, ignoredTests: full.filter(row => row.ignored).length, shards: partitions.length };
 }
 
 // Exported for the real stable-toolchain protocol fixture. Hosted CLI callers use
-// the fixed ASan build args and verified runtime identity below, never test flags.
-export async function runPartition(shard, directory, { buildArgs, identity, cargoPrefix = [], env = process.env, afterExecution = async () => {} } = {}) {
+// the sealed producer archive and verified runtime identity below, never test flags.
+export async function runPartition(shard, directory, { buildArgs, identity, expectedInventory, cargoPrefix = [], env = process.env, afterExecution = async () => {} } = {}) {
   assert.ok(partitions.includes(shard), "Invalid ASan partition");
   mkdirSync(directory, { recursive: true });
   assert.ok(!existsSync(path.join(directory, "receipt.json")), "Prior ASan receipt cannot be reused");
   const run = (mode, index, phase) => runLogged([...cargoPrefix, ...partitionArgs(mode, buildArgs, index)], { env: { ...env, RUST_TEST_THREADS: "1", NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1" }, receipt: path.join(directory, phase), progress: path.join(directory, "progress.jsonl"), phase, liveStdout: mode === "run" });
   const full = inventory(JSON.parse(await run("list", undefined, "inventory-all")));
+  if (expectedInventory) assert.deepEqual(full, expectedInventory, "ASan archive inventory differs from producer");
   const selected = inventory(JSON.parse(await run("list", shard, "inventory-selected")));
   assert.ok(full.every(row => row.selected === !row.ignored), "ASan full inventory has hidden filters");
   assert.deepEqual(selected.map(({ selected: _selected, ...row }) => row), full.map(({ selected: _selected, ...row }) => row), "ASan partition inventory drift");
@@ -77,6 +78,70 @@ export async function runPartition(shard, directory, { buildArgs, identity, carg
   const receipt = { schema: 1, shard, identity, fullSha256: digest(full), selectedSha256: digest(selected), executionSha256: hash(execution), executedTests: selected.filter(row => row.selected).length };
   write(path.join(directory, "receipt.json"), receipt);
   return { receipt, full, selected, execution };
+}
+
+async function fileHash(file) {
+  const digest = createHash("sha256");
+  for await (const bytes of createReadStream(file)) digest.update(bytes);
+  return digest.digest("hex");
+}
+function buildIdentity(identity) {
+  const { archive: _archive, ...base } = identity;
+  return base;
+}
+async function extractArchive(archive, directory, { cargoPrefix = [], env = process.env } = {}) {
+  const extracted = path.join(directory, "extracted");
+  assert.ok(!existsSync(extracted), "ASan extraction directory already exists");
+  mkdirSync(extracted, { recursive: true });
+  const binaries = JSON.parse(await runLogged([...cargoPrefix, ...partitionArgs("list", ["--archive-file", archive, "--extract-to", extracted, "--workspace-remap", process.cwd()]), "--list-type", "binaries-only"], { env }));
+  const binaryFile = path.join(directory, "binaries.json");
+  write(binaryFile, binaries);
+  return ["--binaries-metadata", binaryFile, "--cargo-metadata", path.join(extracted, "target/nextest/cargo-metadata.json"), "--target-dir-remap", path.join(extracted, "target"), "--workspace-remap", process.cwd()];
+}
+
+// The existing ASan owner seals compilation once; consumers retain their own
+// instrumentation controls and complete serial execution receipts.
+export async function produceArchive(directory, { buildArgs, identity, cargoPrefix = [], env = process.env, afterBuild = async () => {} } = {}) {
+  const archive = path.join(directory, "core.tar.zst");
+  assert.ok(!existsSync(archive) && !existsSync(path.join(directory, "archive.json")), "Prior ASan archive cannot be reused");
+  mkdirSync(directory, { recursive: true });
+  await runLogged([...cargoPrefix, "nextest", "archive", ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", "--archive-file", archive], { env, liveStdout: true });
+  const probe = path.join(directory, "probe");
+  try {
+    const reuse = await extractArchive(archive, probe, { cargoPrefix, env });
+    const full = inventory(JSON.parse(await runLogged([...cargoPrefix, ...partitionArgs("list", reuse)], { env })));
+    assert.ok(full.some(row => row.selected), "Empty ASan producer inventory");
+    assert.ok(full.every(row => row.selected === !row.ignored), "ASan archive has hidden filters");
+    await afterBuild();
+    const manifest = { schema: 1, identity: buildIdentity(identity), archiveSha256: await fileHash(archive), fullSha256: digest(full), full };
+    write(path.join(directory, "archive.json"), manifest);
+    return { sha256: manifest.archiveSha256, manifestSha256: await fileHash(path.join(directory, "archive.json")) };
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+}
+
+export async function verifyArchive(directory, identity) {
+  assert.match(identity.archive?.sha256 ?? "", /^[a-f0-9]{64}$/u, "Missing trusted ASan archive digest");
+  assert.match(identity.archive?.manifestSha256 ?? "", /^[a-f0-9]{64}$/u, "Missing trusted ASan manifest digest");
+  const manifestBytes = readFileSync(path.join(directory, "archive.json"));
+  assert.equal(hash(manifestBytes), identity.archive.manifestSha256, "ASan archive manifest digest mismatch");
+  const manifest = JSON.parse(manifestBytes);
+  assert.equal(manifest.schema, 1, "Unsupported ASan archive manifest");
+  assert.deepEqual(manifest.identity, buildIdentity(identity), "ASan archive source/compiler/config identity mismatch");
+  assert.equal(manifest.archiveSha256, identity.archive.sha256, "ASan producer archive digest mismatch");
+  assert.equal(await fileHash(path.join(directory, "core.tar.zst")), identity.archive.sha256, "ASan archive digest mismatch");
+  assert.equal(digest(manifest.full), manifest.fullSha256, "ASan producer inventory digest mismatch");
+  assert.ok(manifest.full.some(row => row.selected) && manifest.full.every(row => row.selected === !row.ignored), "Invalid ASan producer inventory");
+  return manifest;
+}
+
+export async function reuseArchive(directory, outputDirectory, identity, options = {}) {
+  const manifest = await verifyArchive(directory, identity);
+  // Keep disposable compiled binaries beside the evidence uploaded by callers.
+  const runtimeDirectory = `${path.resolve(outputDirectory)}-archive-runtime`;
+  const buildArgs = await extractArchive(path.join(directory, "core.tar.zst"), runtimeDirectory, options);
+  return { buildArgs, expectedInventory: manifest.full };
 }
 
 async function output(binary, args) { return (await runLogged(args, { binary })).trim(); }
@@ -93,6 +158,8 @@ async function cohort() {
 }
 
 async function expectedIdentity() {
+  assert.equal(process.platform, "linux", "Hosted ASan requires Linux");
+  assert.equal(process.arch, "x64", "Hosted ASan requires x86-64");
   const { GITHUB_SHA: sourceSha, GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: runAttempt, MESH_ASAN_TOOLCHAIN: toolchain, MESH_ASAN_RUSTC: rustcSha256, MESH_ASAN_CARGO: cargoSha256 } = process.env;
   assert.match(sourceSha ?? "", /^[a-f0-9]{40}$/u, "ASan requires exact workflow source SHA");
   assert.match(runId ?? "", /^[1-9]\d*$/u, "ASan requires workflow run ID");
@@ -106,7 +173,9 @@ async function expectedIdentity() {
   for (const key of ["CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]) assert.ok(!process.env[key], `ASan ${key} may override instrumentation`);
   const inputs = ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", config, "scripts/ci/asan.mjs", "scripts/ci/windows-coverage.mjs", ".github/workflows/sanitizers.yml"].map(file => [file, hash(readFileSync(file))]);
   const profileEnvironment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("CARGO_PROFILE_")).sort(([a], [b]) => a.localeCompare(b)));
-  return { sourceSha, sourceTree, runId, runAttempt, toolchain, rustcSha256, cargoSha256, nextest: versions.nextest, inputsSha256: digest(inputs), target, rustflags: process.env.RUSTFLAGS, rustdocflags: process.env.RUSTDOCFLAGS, asanOptions: process.env.ASAN_OPTIONS, testThreads: process.env.RUST_TEST_THREADS, profileEnvironment };
+  const archive = process.env.MESH_ASAN_ARCHIVE_SHA256 || process.env.MESH_ASAN_MANIFEST_SHA256 ? { sha256: process.env.MESH_ASAN_ARCHIVE_SHA256, manifestSha256: process.env.MESH_ASAN_MANIFEST_SHA256 } : null;
+  if (archive) for (const value of Object.values(archive)) assert.match(value ?? "", /^[a-f0-9]{64}$/u, "Missing trusted ASan build output digest");
+  return { sourceSha, sourceTree, runId, runAttempt, platform: process.platform, architecture: process.arch, toolchain, rustcSha256, cargoSha256, nextest: versions.nextest, inputsSha256: digest(inputs), target, rustflags: process.env.RUSTFLAGS, rustdocflags: process.env.RUSTDOCFLAGS, asanOptions: process.env.ASAN_OPTIONS, testThreads: process.env.RUST_TEST_THREADS, profileEnvironment, archive };
 }
 
 async function verifyTools(identity) {
@@ -204,21 +273,35 @@ async function main([mode, first, second, ...extra]) {
   assert.equal(extra.length, 0, "Unexpected ASan arguments");
   if (mode === "cohort" && !first) return cohort();
   const identity = await expectedIdentity();
+  if (mode === "build" && first && !second) {
+    assert.equal(identity.archive, null, "Producer cannot inherit another ASan archive");
+    assert.ok(process.env.GITHUB_OUTPUT, "ASan producer requires GITHUB_OUTPUT");
+    await verifyTools(identity);
+    const archive = await produceArchive(path.resolve(first), { buildArgs: ["--locked", "-p", "mesh-talk-core", "--lib", "-Z", "build-std", "--target", target], identity, cargoPrefix: [`+${identity.toolchain}`], afterBuild: async () => { await verifyTools(identity); assert.deepEqual(await expectedIdentity(), identity, "ASan source changed during compilation"); } });
+    appendFileSync(process.env.GITHUB_OUTPUT, `archive_sha256=${archive.sha256}\nmanifest_sha256=${archive.manifestSha256}\n`);
+    return archive;
+  }
   if (mode === "smoke" && first && !second) return smoke(path.resolve(first), identity);
   if (mode === "shard" && first && second) {
     await verifyTools(identity);
     verifySmoke(second, identity);
-    const result = await runPartition(Number(first), second, { buildArgs: ["--locked", "-p", "mesh-talk-core", "--lib", "-Z", "build-std", "--target", target], identity, cargoPrefix: [`+${identity.toolchain}`], afterExecution: async () => assert.deepEqual(await expectedIdentity(), identity, "ASan identity changed during execution") });
+    const directory = path.resolve("tmp/asan-build");
+    const env = { ...process.env, CARGO_NET_OFFLINE: "true" };
+    const cargoPrefix = [`+${identity.toolchain}`];
+    const reuse = await reuseArchive(directory, path.resolve(second), identity, { cargoPrefix, env });
+    const result = await runPartition(Number(first), second, { ...reuse, identity, cargoPrefix, env, afterExecution: async () => { assert.deepEqual(await expectedIdentity(), identity, "ASan identity changed during execution"); await verifyArchive(directory, identity); } });
     assert.deepEqual(await expectedIdentity(), identity, "ASan identity changed during execution");
     return result;
   }
   if (mode === "verify" && first && !second) {
+    assert.equal(process.env.MESH_ASAN_BUILD_RESULT, "success", "ASan archive producer must succeed");
+    assert.ok(identity.archive, "ASan collector requires trusted archive digests");
     assert.equal(process.env.MESH_ASAN_SHARDS_RESULT, "success", "Every actual ASan shard must succeed");
     const root = path.resolve(first);
     const summary = collectAsan(root, identity);
-    console.log(`ASan full union verified: ${summary.executedTests} passed, ${summary.ignoredTests} default ignored, four exact-source partitions.`);
+    console.log(`ASan full union verified: ${summary.executedTests} passed, ${summary.ignoredTests} default ignored, ${summary.shards} exact-source partitions.`);
     return summary;
   }
-  throw Error("Usage: asan.mjs cohort | smoke OUTPUT | shard INDEX OUTPUT | verify ARTIFACT_ROOT");
+  throw Error("Usage: asan.mjs cohort | build OUTPUT | smoke OUTPUT | shard INDEX OUTPUT | verify ARTIFACT_ROOT");
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main(process.argv.slice(2)).catch(error => { console.error(error.stack); process.exitCode = 1; });

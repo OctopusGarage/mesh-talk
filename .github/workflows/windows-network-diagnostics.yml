@@ -2,18 +2,9 @@ name: Windows network console diagnostics
 
 on:
   workflow_dispatch:
-  push:
-    branches: [dev]
-    paths:
-      - .github/workflows/windows-network-diagnostics.yml
-      - scripts/diagnostics/network-console*.mjs
-      - scripts/diagnostics/windows-console-observer.ps1
-      - scripts/diagnostics/console-fixture.rs
-      - src-tauri/src/chat_commands/**
-      - src-tauri/src/main.rs
-      - src-tauri/build.rs
-      - src-tauri/windows.manifest
-      - frontend/src/features/chat/Sidebar.tsx
+
+# Incident-specific comparison rigs are opt-in; ordinary native acceptance is
+# owned by hidden-contacts-native.yml and its required backend caller.
 
 permissions:
   contents: read

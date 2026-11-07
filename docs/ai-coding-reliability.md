@@ -148,6 +148,27 @@ See the attachment preparation and document-scheduler regressions in
 
 ## R03: Actual work owns its lifetime
 
+Consume the canonical process owner's result contract rather than deriving a new
+verdict from a diagnostic flag. Windows atomically terminates its owned job even
+when empty, so verified `forcedRetirement` alone does not mean work leaked or a
+successful test failed. Preserve the actual exit status and error, cancellation,
+timeout and cleanup-verification results. The empty-job owner control and UI
+runner outcome controls exercise that distinction.
+
+POSIX process-group retirement proves only that group. A browser framework may
+launch its web server in another group; use the actual tool's teardown protocol
+and retain independent server-retirement controls in the UI command owner. Missing
+cooperative teardown evidence cannot become verified cleanup merely because the
+CLI exited or its group disappeared.
+Leader exit and output-pipe closure are separate lifecycle events. Bound draining
+after owned-group retirement: an escaped descendant can retain inherited pipes
+forever. Close only the owner's read ends, retain unverified cleanup and quarantine
+its lease; the real detached-pipe natural-exit and cancellation controls exercise
+this failure in the validation process owner.
+Cleanup uncertainty is monotonic across cancellation and draining: successfully
+retiring one group cannot clear an earlier unverified escaped-process boundary.
+Retain the first failure while still awaiting every known retirement owner.
+
 **Failure pattern:** cancelling an awaiter releases serialization or capacity while
 its blocking worker, process or native provider continues; retries overlap, old
 work writes into a new session, or shutdown waits for a worker while holding a
@@ -233,6 +254,12 @@ The [session pool](../crates/mesh-talk-core/src/node/session_pool.rs) owns this
 handoff: idle eligibility requests retirement, while the actual connection keeps
 its permits until destruction. Preserve startup, wake,
 shutdown and missed-notification recovery behavior.
+Delivery fixtures reuse the register-before-check durable-status observer in
+[delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs),
+not periodic polling that competes with protocol and persistence workers. Keep
+the exact message predicate and original deadline; the late exact-receipt
+regression rejects unrelated wakeups, and the oversized-message regression also
+retains pre-acceptance rejection and unchanged ratchet state.
 
 Keep independent reasons for continuing work separate. A worker can finish a
 history page and then fail an optional favorites exchange; reporting that error
@@ -383,6 +410,34 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Source-order contracts must assert that each required command exists before
+comparing its position. A missing substring returns a sentinel such as `-1` and
+can otherwise make an ordering assertion pass vacuously. Match the canonical
+command owner and keep actual execution controls for behavior beyond routing.
+
+Browser fixtures must make hydrated backend settings agree with the intended
+frontend state before navigation; a later settings response must not silently
+remove the capability under test. The call-readiness fixture owns that setup.
+For saved reading positions, exhausting bounded animation-frame polling does not
+prove geometry is ready: retain the conversation-owned target and resume on
+geometry changes, cancelling observers on cleanup and reader intent. The viewport
+unit regression supplies geometry only after the polling window.
+
+Raw storage injection in concurrency fixtures must publish through the normal
+owner notification before requiring a peer's unrelated scope to settle. Preserve
+the protected in-flight page, exact inventory assertions and original latency
+bounds; the same-source control fixture owns this preparation contract. Finish
+unrelated readiness preparation before dispatching a timed network read. A
+protected task can still reach its genuine idle deadline. Test barriers belong
+before I/O, inside the owned child, with cancellation releasing their futures;
+post-send hooks must not hide that deadline. Do not repeat long preparation waits
+inside the measured held-read window.
+
+Concurrent actual-tool fixtures must own output directories, not only source
+and temporary data. A second Playwright invocation can otherwise clean a running
+suite's traces. The browser command owner retains live logs and case progress,
+joins descendants before reporting and fails on timeout or uncertain retirement.
+
 Keep a test's observation scope equal to its named requirement. The
 growing-history fixture measures exact durable originals during continuation,
 then checks the full public
@@ -402,6 +457,17 @@ lose a natural read between setup notification and admission; removing that
 variant does not qualify a separate fresh empty-corpus timing boundary. Keep the
 retired-child observer and interrupted-preparation controls rather than adding
 sleep, suppressing publication or accepting a stale child to rescue setup.
+Its test-only dispatch gate must classify the actual owed parked pair credit,
+not the shared resumed trace label. Capture that one-shot child before waiting
+for its later projection; retain exact private-receipt evidence before release.
+The paid-pair classifier regression rejects foreground resumes and unprotected
+turns while the real Noise scenarios retain admission and recovery assertions.
+When inventory ordering selects a different continuation path, construct canonical
+signed fixture events with noncolliding deterministic identifiers and assert the
+actual persisted key ordering. Distinguish durable commit, completed publication
+and recipient installation in timing evidence; a publication-begin trace is not
+proof of completion. Preserve bounded owner-phase diagnostics through recovery
+without extending the measured deadline or warming away the required cold work.
 
 A progressing serial test partition can exhaust its job watchdog without a hung
 case. The Windows archive owner uses eight native serial execution partitions,
@@ -412,8 +478,12 @@ protection migration owner requires every successful current-head app-bound
 replacement before retiring oversized partition names; skipped or partial runs
 cannot qualify. Account for additional archive/setup cost and hosted variation.
 The shared union verifier takes the caller-owned partition count; Windows capacity
-changes must not alter the independent four-part ASan contract. Run both real-tool
-protocol fixtures and their missing/duplicate/failed-receipt controls.
+changes must not alter the independent eight-part ASan contract. Run both real-tool
+protocol fixtures and their missing/duplicate/failed-receipt controls. ASan
+compilation reuse must bind the source, platform, compiler and archive/manifest
+digests through trusted producer outputs. Reject changed bytes and inventories
+before running archived tests; fresh-consumer controls must prove execution
+without producer build outputs. Retain real instrumentation checks on each runner.
 
 A total functional browser-case watchdog is not a product performance SLA.
 Trace the failed interval: when several individually successful cold-load,
@@ -556,7 +626,12 @@ consumers after merging new callers or changing a shared helper. Static scans,
 passing unit tests and browser IPC mocks do not establish native OS behavior or
 the absence of every deadlock. Cancelled, interrupted, empty and unavailable runs
 remain distinct from passes. Completed individual commands do not turn a cancelled
-parent run into a passing full gate. Follow the
+parent run into a passing full gate. Verification collectors must release cancelled workflows while still rejecting
+upstream failures. An unconditional collector can retain a cancelled candidate
+and block its replacement in the concurrency group. The
+[CI maintenance guide](ci-maintenance.md) owns this scheduling rule;
+[merge-queue regressions](../scripts/diagnostics/merge-queue.test.mjs) exercise
+eligibility after failure and ineligibility after cancellation. Follow the
 [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
 and keep unresolved native, cross-platform and stress obligations explicit.
 

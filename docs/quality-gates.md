@@ -48,17 +48,20 @@ explicitly. `--fast` remains a clearly labeled partial local check.
 
 Health runs as a reusable workflow inside the UI orchestrator for every PR and
 merge candidate, and independently on its weekly/manual triggers. All three
-platform unit and diagnostic suites remain mandatory; source-only formatting,
-type/lint and dependency policy run once. The Linux unit coverage producer seals
+platform diagnostic suites remain mandatory. The complete frontend unit suite
+runs once with coverage on Linux; its platform branches use explicit mocks,
+while real browser/native behavior retains the platform matrices. Source-only
+formatting, type/lint and dependency policy run once. The Linux coverage producer seals
 its line map for same-run UI consumers; source, workflow, run, attempt and digest
-must all match. Superseded PR, merge and push candidate runs are cancelled automatically.
+must all match. Superseded PR and merge candidates are cancelled automatically. Every main push
+has its own verification group, preserving pending commits for release evidence.
 Health uses a distinct caller-workflow/event namespace, so independent manual or
 scheduled runs cannot cancel the UI caller or its same-run evidence producer.
 
 Branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
 release policy and replacement mapping. Source and all platform checks are
-individually required; Windows requires its build producer and both archive
+individually required; Windows requires its build producer and all archive
 consumers. Release acceptance uses the same direct names plus its main-only
 checks, including ASan and mutation-runner acceptance. A newer failed, pending or
 missing check still rejects the exact source. Stable repeats this strict check
