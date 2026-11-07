@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6V897RJJV3V5981M55BS8HY",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-07T14:58:31.377995Z",
+  "branch": "experiment/ci-linux-mutation-baseline",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".config/nextest.toml",
+    ".github/workflows/mutants.yml"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "25b7ce319d4b",
+  "checkpoint_transcript_start": 20991,
+  "transcript_lines_at_start": 20991,
+  "compact_transcript_start": 2312,
+  "token_usage": {
+    "input_tokens": 8896,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 484992,
+    "output_tokens": 1881,
+    "api_call_count": 9
+  },
+  "redaction": {
+    "replacements": 328,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 331,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 4
+  }
+}
