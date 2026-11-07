@@ -1,0 +1,24 @@
+好烦啊，老是不稳定失败，分析一下哪些写法不健壮的，多余的或者重复的之类的都修正优化或者删除干净吧，烦死了，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；
+
+---
+
+全部CI都看一下吧，分析哪些是多余的就删除干净吧，哪些地方比如语法之类的，或者啥简单逻辑，可以低成本提前在本地快速验证的，就不用到CI再跑了，注意CI要尽量保持轻量可靠专业优雅，核心的逻辑应该放在对应的脚本，避免把全部逻辑直接写在CI上，我说得不一定对，你仔细调研结合项目分析清楚吧，analyze , research, and optimise; analyze , research, and optimise;analyze , research, and optimise;analyze , research, and optimise;analyze , research, and optimise;analyze , research, and optimise;
+
+---
+
+通用后续可复用的规则记得更新补充到CI维护文档中，optimise；，optimise；，optimise；，optimise；
+
+---
+
+看看哪些可以本地轻量验证的，不要等到CI反馈，比如覆盖率要求等这种，创建pr之类的，应该可以本地验证完善完，而不是等到CI报错，同样也全部都分析一下，我只是举个例子，你应该举一反三，仔细分析，看看哪些可以低成本提前在创建PR前或者其他的常见提前低成本验证清楚，analyze and optimise; analyze and optimise;analyze and optimise;analyze and optimise;analyze and optimise;
+
+---
+
+通用后续可复用的规则记得更新补充到CI维护文档中，optimise；，optimise；，optimise；，optimise；而且要注意引导后续要求merge时，应该默认使用squash merge的形式，规则放在合适文档地方optimise；optimise；optimise；
+
+---
+
+把整体CI跑完的时间尽量降下来，没用的就删除，重复的合并之类的，然后整个CI要保持稳定，尽量不要依赖时间之类的这些不确定很不稳定的因素，保持健壮优雅，analyze and optimse; analyze
+  and optimse;analyze
+  and optimse;analyze
+  and optimse;
