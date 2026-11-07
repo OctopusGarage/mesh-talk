@@ -780,7 +780,9 @@
       "paths": [
         "src-tauri/src/contact_policy.rs",
         "src-tauri/src/contact_policy/",
-        "src-tauri/src/chat_commands/account.rs"
+        "src-tauri/src/chat_commands/account.rs",
+        "src-tauri/src/owner_commands/group_operations.rs",
+        "crates/mesh-talk-core/src/node/account_documents/personal.rs"
       ],
       "rust": [
         {
@@ -789,7 +791,8 @@
             "contact_policy::",
             "owner_commands::group_operations::tests::history_floor_identity_includes_writer_and_content_hash",
             "owner_commands::tests::registered_account_group_operation_reads_preserve_account_scope",
-            "owner_commands::tests::registered_account_group_operations_reject_queued_logout"
+            "owner_commands::tests::registered_account_group_operations_reject_queued_logout",
+            "owner_commands::tests::personal_state_enumeration_uses_controls_without_reading_unrelated_inventory"
           ]
         }
       ],
@@ -804,6 +807,10 @@
           {
             "name": "Account personal-state reads require exact runtime and account authority; local cleanup never removes network membership, verified identity, favorites or exports, and queued session retirement rejects destructive producers.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Personal-state enumeration selects authenticated control-index conversations without hydrating unrelated group inventory; deleted groups and reopened accounts retain exact current state.",
+            "reference": "docs/network-design-reference.md#personal-conversation-removal"
           }
         ]
       },

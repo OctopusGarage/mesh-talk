@@ -1384,7 +1384,10 @@ lifetime. Rejection, cancellation, an orphaned intent or a later invitation must
 not authorize deletion of another lifetime.
 
 The encrypted account-document store owns these private controls and monotone
-history floors. They reuse the mandatory certified-sibling control lane through
+history floors. Personal-state enumeration uses its authenticated in-memory control
+index, including removed groups and reopened accounts, rather than loading every
+group inventory. Each selected conversation still uses the existing current
+state/authority reducer; indexed membership is not deletion or access authority. They reuse the mandatory certified-sibling control lane through
 a separately negotiated version-7 document request. A nonce-bound capability
 echo on the ordinary version-5 control exchange authorizes this extension;
 transport failure alone is not evidence of unsupported capability. Version-5

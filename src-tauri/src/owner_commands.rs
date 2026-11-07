@@ -1284,6 +1284,109 @@ mod tests {
     }
 
     #[test]
+    fn personal_state_enumeration_uses_controls_without_reading_unrelated_inventory() {
+        use mesh_talk_core::node::DocumentConversation;
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let handle = fixture.node.0.blocking_read().as_ref().unwrap().handle();
+        let account = handle.account_id();
+        let peer = "ab".repeat(16);
+        handle
+            .delete_account_contact_if(&account, &peer, false, |commit| commit())
+            .unwrap();
+        let unrelated =
+            tauri::async_runtime::block_on(handle.create_channel("Unrelated inventory", vec![]))
+                .unwrap();
+        let deleted =
+            tauri::async_runtime::block_on(handle.create_channel("Deleted group", vec![])).unwrap();
+        tauri::async_runtime::block_on(handle.dissolve_channel(deleted)).unwrap();
+        handle
+            .delete_left_group_if(&account, deleted, |commit| commit())
+            .unwrap();
+        // Positive control: the real node publishes inventory through maintenance.
+        // Synchronous reads here and in with_runtime execute on this test thread;
+        // independently owned maintenance runs on the blocking pool.
+        let before = handle.test_group_inventory_body_read_count();
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    handle.list_channels().unwrap();
+                    if handle.test_group_inventory_body_read_count() > before {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("normal publication must produce readable inventory");
+        });
+        let read_states = || {
+            tauri::async_runtime::block_on(super::owner_personal_conversation_states(
+                "alice".into(),
+                account.clone(),
+                fixture.webview.state::<AppState>(),
+                fixture.webview.state::<NodeState>(),
+            ))
+            .unwrap()
+        };
+        for _ in 0..3 {
+            let reads = handle.test_group_inventory_body_read_count();
+            let states = serde_json::to_value(read_states()).unwrap();
+            assert_eq!(
+                handle.test_group_inventory_body_read_count(),
+                reads,
+                "personal-state enumeration must not hydrate unrelated inventory"
+            );
+            let rows = states.as_array().unwrap();
+            let find = |conversation: DocumentConversation| {
+                rows.iter()
+                    .find(|row| row["conversation"] == serde_json::to_value(&conversation).unwrap())
+            };
+            assert_eq!(
+                find(DocumentConversation::Account(peer.clone())).unwrap()["hidden"],
+                true
+            );
+            assert_eq!(
+                find(DocumentConversation::Channel(hex::encode(
+                    deleted.as_bytes()
+                )))
+                .unwrap()["hidden"],
+                true
+            );
+            assert!(
+                find(DocumentConversation::Channel(hex::encode(
+                    unrelated.as_bytes()
+                )))
+                .is_none()
+            );
+        }
+        handle
+            .reopen_account_conversation_if(&account, &peer, |commit| commit())
+            .unwrap();
+        let states = serde_json::to_value(read_states()).unwrap();
+        assert!(
+            states
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |row| row["conversation"] == serde_json::json!({"kind":"account", "id":peer})
+                        && row["hidden"] == false
+                )
+        );
+        let registered = fixture
+            .invoke(
+                "owner_personal_conversation_states",
+                serde_json::json!({"owner":"alice", "expectedAccount":account}),
+            )
+            .unwrap();
+        assert_eq!(
+            registered, states,
+            "registered owner adapter retains the same state projection"
+        );
+    }
+
+    #[test]
     fn registered_account_group_file_checks_account_before_reading_path() {
         let fixture = Fixture::new();
         let error = fixture
