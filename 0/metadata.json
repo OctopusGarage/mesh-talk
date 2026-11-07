@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6VFYRQ4SV9SN0AZV0CFKECN",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-07T17:12:36.426787Z",
+  "branch": "perf/ci-mutation-baseline-reuse",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "scripts/ci/native-host-coverage.test.mjs",
+    "scripts/diagnostics/ci-latency.test.mjs",
+    "scripts/diagnostics/mutants-workflow.test.mjs",
+    "scripts/diagnostics/test-fixtures/nextest.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "615a540eba31",
+  "checkpoint_transcript_start": 22991,
+  "transcript_lines_at_start": 22991,
+  "compact_transcript_start": 2541,
+  "token_usage": {
+    "input_tokens": 434661,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 12104576,
+    "output_tokens": 48711,
+    "api_call_count": 41
+  },
+  "redaction": {
+    "replacements": 360,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 363,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 5
+  }
+}
