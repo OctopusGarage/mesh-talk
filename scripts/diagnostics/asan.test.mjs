@@ -81,7 +81,7 @@ test("ASan workflow retains required name as strict full-union check with one ar
   assert.match(workflow, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/u);
   assert.match(workflow, /fail-fast: false/u);
   assert.equal(workflow.match(/name: ASan \+ LeakSanitizer \(core\)$/gmu)?.length, 1);
-  assert.match(workflow, /needs: \[cohort, shards\]/u);
+  assert.match(workflow, /needs: \[cohort, shards, scope\]/u);
   assert.match(workflow, /if: always\(\)/u);
   assert.match(workflow, /node scripts\/ci\/asan.mjs verify /u);
   assert.match(workflow, /node scripts\/ci\/asan.mjs smoke /u);

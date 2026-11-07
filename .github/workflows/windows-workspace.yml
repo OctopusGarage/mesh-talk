@@ -3,6 +3,12 @@ name: Windows workspace archive
 on:
   workflow_call:
     inputs:
+      full:
+        type: string
+        default: 'true'
+      upstream_result:
+        type: string
+        default: success
       diagnostic_timing:
         type: boolean
         default: false
@@ -20,8 +26,9 @@ env:
 
 jobs:
   build:
+    if: ${{ !cancelled() }}
     name: Windows workspace build
-    runs-on: windows-latest
+    runs-on: ${{ (inputs.full || 'true') == 'true' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: 60
     outputs:
       rust: ${{ steps.compiler.outputs.rust }}
@@ -29,29 +36,41 @@ jobs:
       run:
         shell: bash
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          ref: ${{ github.sha }}
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ (inputs.full || 'true') }}
+          upstream_result: ${{ inputs.upstream_result || 'success' }}
       - name: Use runner-owned native temporary storage
+        if: ${{ steps.scope.outputs.full == 'true' }}
         shell: pwsh
         run: |
           Write-Host "Native temporary storage: $([IO.Path]::GetTempPath()) -> $env:RUNNER_TEMP"
           "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
           "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Validate Windows native build dependencies
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/ci/windows-native-deps.mjs
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           components: clippy, rustfmt, llvm-tools-preview
       - name: Pin producer compiler for consumers
+        if: ${{ steps.scope.outputs.full == 'true' }}
         id: compiler
         run: rustc --version | awk '{print "rust=" $2}' >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.scope.outputs.full == 'true' }}
         env:
           CARGO_TERM_COLOR: always
           RUST_TEST_THREADS: ''
@@ -61,33 +80,42 @@ jobs:
           shared-key: workspace-checks-checks
           cache-on-failure: true
       - name: Frontend dependencies and structural checks
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: |
           npm ci --prefix frontend
           node scripts/validation/standards.mjs
           node scripts/check-repository-hygiene.mjs
       - uses: taiki-e/install-action@v2.87.31
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       - name: Validate archive and coverage contracts
+        if: ${{ steps.scope.outputs.full == 'true' }}
         # Native environment probes and real Cargo fixtures belong to this
         # serial owner, outside the parallel portable diagnostic suite.
         run: node --test --test-concurrency=1 scripts/ci/windows-native-deps.test.mjs scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
       - name: Build frontend
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: frontend
         run: |
           npm run build
           npm run check:build-syntax
       - name: Clippy
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build production workspace
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: cargo build --workspace --locked
       - name: Workspace doctests
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: cargo test --workspace --doc --locked
       - name: Build one instrumented workspace archive
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs produce "$RUNNER_TEMP/windows-workspace-archive"
       - name: Upload sealed workspace archive
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: windows-workspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -97,9 +125,10 @@ jobs:
           retention-days: 3
 
   tests:
+    if: ${{ !cancelled() && (inputs.full != 'true' || needs.build.result == 'success') }}
     name: Windows workspace tests (${{ matrix.shard }}/8)
     needs: build
-    runs-on: windows-latest
+    runs-on: ${{ (inputs.full || 'true') == 'true' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -109,31 +138,43 @@ jobs:
       run:
         shell: bash
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          ref: ${{ github.sha }}
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ (inputs.full || 'true') }}
+          upstream_result: ${{ inputs.upstream_result || 'success' }}
       - name: Use runner-owned native temporary storage
+        if: ${{ steps.scope.outputs.full == 'true' }}
         shell: pwsh
         run: |
           Write-Host "Native temporary storage: $([IO.Path]::GetTempPath()) -> $env:RUNNER_TEMP"
           "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
           "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           toolchain: ${{ needs.build.outputs.rust }}
           components: llvm-tools-preview
       - uses: taiki-e/install-action@v2.87.31
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       # No Cargo cache, dependency fetch, frontend rebuild or test compilation.
       - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           name: windows-workspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/windows-workspace-archive
       - name: Run validated serial shard and export partial coverage
+        if: ${{ steps.scope.outputs.full == 'true' }}
         env:
           CARGO_NET_OFFLINE: 'true'
           # Collect every selected case so one failure does not hide later defects.
@@ -142,7 +183,7 @@ jobs:
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs consume "${{ matrix.shard }}" "$RUNNER_TEMP/windows-workspace-archive" "$RUNNER_TEMP/windows-workspace-results"
       - name: Preserve inventory, execution receipt and coverage
-        if: always()
+        if: ${{ steps.scope.outputs.full == 'true' && (always()) }}
         uses: actions/upload-artifact@v7
         with:
           name: windows-workspace-results-${{ matrix.shard }}-${{ github.run_attempt }}
@@ -150,12 +191,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Upload validated partial coverage to Codecov
-        if: >-
-          !(github.event_name == 'pull_request' &&
-            github.base_ref == 'dev' &&
-            github.event.pull_request.user.login == 'dependabot[bot]')
+        if: ${{ steps.scope.outputs.full == 'true' && (!(github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.user.login == 'dependabot[bot]')) }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5
         with:
+          version: v11.3.2
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ runner.temp }}/windows-workspace-results/coverage.lcov
           name: workspace-windows-${{ matrix.shard }}-${{ github.run_attempt }}

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 const nativeWindowsChecks = [1, 2, 3, 4, 5, 6, 7, 8].map(shard => `windows / Windows workspace tests (${shard}/8)`);
 
-import { migrateRequiredChecks, requireSuccessfulChecks, releaseSourceChecks } from "../ci/required-checks.mjs";
+import { migrateRequiredChecks, requireSuccessfulChecks, releaseSourceChecks, releaseSourceWorkflows } from "../ci/required-checks.mjs";
 
 test("gate migration preserves strictness, app binding and unrelated protection", () => {
   const current = { strict: true, checks: [
@@ -78,12 +78,14 @@ test("Mac capacity allocation migrates Intel work while preserving ARM acceptanc
 test("release acceptance retains sanitizer and mutation checks required on main", async () => {
   const { requireSourceChecks } = await import("../release/check-source-checks.mjs");
   const names = ["ASan + LeakSanitizer (core)", "mutants"];
-  const complete = [...new Set([...releaseSourceChecks, ...names])].map((name, id) => ({ name, id: id + 1, app: { slug: "github-actions" }, status: "completed", conclusion: "success" }));
-  requireSourceChecks(complete, []);
+  const paths = [...new Set(Object.values(releaseSourceWorkflows))];
+  const provenance = { repo: "owner/repo", sha: "a".repeat(40), runs: paths.map((path, i) => ({ path, id: i + 1, run_attempt: 1, check_suite_id: i + 1, repository: { full_name: "owner/repo" }, head_repository: { full_name: "owner/repo" }, head_sha: "a".repeat(40), head_branch: "main", event: "push", status: "completed", conclusion: "success" })) };
+  const complete = [...new Set([...releaseSourceChecks, ...names])].map((name, id) => ({ name, id: id + 1, check_suite: { id: paths.indexOf(releaseSourceWorkflows[name]) + 1 }, app: { slug: "github-actions" }, status: "completed", conclusion: "success" }));
+  requireSourceChecks(complete, [], provenance);
   for (const name of names) {
-    assert.throws(() => requireSourceChecks(complete.filter(check => check.name !== name), []), /check/, `${name}: absent`);
+    assert.throws(() => requireSourceChecks(complete.filter(check => check.name !== name), [], provenance), /check/, `${name}: absent`);
     for (const change of [{ status: "queued", conclusion: null }, { status: "in_progress", conclusion: null }, { conclusion: "failure" }, { conclusion: "cancelled" }]) {
-      assert.throws(() => requireSourceChecks([...complete, { ...complete.find(check => check.name === name), id: 999, ...change }], []), /check/, `${name}: ${JSON.stringify(change)}`);
+      assert.throws(() => requireSourceChecks([...complete, { ...complete.find(check => check.name === name), id: 999, ...change }], [], provenance), /check/, `${name}: ${JSON.stringify(change)}`);
     }
   }
 });
@@ -116,4 +118,12 @@ test("four oversized Windows checks migrate only to eight directly app-bound nat
   const checks = next.checks.map((entry, id) => ({ name: entry.context, app: { id: entry.app_id }, id, status: "completed", conclusion: "success" }));
   requireProtectionEvidence(next, checks);
   for (const name of nativeWindowsChecks) assert.throws(() => requireProtectionEvidence(next, checks.filter(check => check.name !== name)), /successful current-source app-bound evidence/);
+});
+
+
+test("every unchanged release check has one authoritative top-level workflow owner", () => {
+  assert.deepEqual(Object.keys(releaseSourceWorkflows).sort(), [...releaseSourceChecks].sort());
+  assert.equal(releaseSourceWorkflows["windows / Windows workspace build"], ".github/workflows/ci.yml");
+  assert.equal(releaseSourceWorkflows["health / Portable checks (windows-latest)"], ".github/workflows/e2e-ui.yml");
+  assert.equal(releaseSourceWorkflows["native-core / Real native UI (windows-2022)"], ".github/workflows/e2e-backend.yml");
 });

@@ -410,6 +410,15 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Check name, App identity and source SHA alone do not establish execution scope.
+A documentation eligibility decision is not product-test evidence, even when its
+required job succeeds. Consumers must also validate the event, trusted repository,
+branch and owning workflow/run. The release source owner binds checks to the
+latest successful main-push suite; its PR-only, wrong-owner and stale-success
+controls prevent a lightweight decision from authorizing publication.
+Provenance is an additional constraint: filtering to a trusted suite must not
+discard a newer failed or pending check that previously blocked acceptance.
+
 Source-order contracts must assert that each required command exists before
 comparing its position. A missing substring returns a sentinel such as `-1` and
 can otherwise make an ordering assertion pass vacuously. Match the canonical

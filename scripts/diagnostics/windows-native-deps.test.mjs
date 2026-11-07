@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   perlProbe,
@@ -115,49 +114,4 @@ test("the runner image native installation is checked even when Bash omits it fr
     run: () => success,
   });
   assert.equal(found, native);
-});
-
-test("Windows producer validates native Perl before every Cargo build boundary", () => {
-  const workflow = readFileSync(
-    new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
-    "utf8",
-  );
-  const producer = workflow.split("\n  tests:")[0];
-  const bootstrap = producer.indexOf("node scripts/ci/windows-native-deps.mjs");
-  assert.ok(
-    bootstrap >= 0,
-    "vendored OpenSSL must not inherit bare Git/MSYS perl",
-  );
-  for (const boundary of [
-    "scripts/ci/backend-coverage.test.mjs",
-    "cargo clippy",
-    "cargo build",
-    "cargo test",
-    "cargo llvm-cov show-env",
-  ]) {
-    assert.ok(bootstrap < producer.indexOf(boundary), boundary);
-  }
-  assert.doesNotMatch(
-    producer,
-    /OPENSSL_NO_VENDOR:\s*['"]?1|continue-on-error:\s*true/u,
-  );
-});
-
-test("actual native Perl acceptance runs in the serial Windows producer after bootstrap", () => {
-  const workflow = readFileSync(
-    new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
-    "utf8",
-  );
-  const producer = workflow.split("\n  tests:")[0];
-  const contract = producer.split(/^      - /m).find((step) =>
-    step.startsWith("name: Validate archive and coverage contracts\n"),
-  );
-  assert.ok(contract);
-  assert.match(contract, /run: node --test --test-concurrency=1 /u);
-  assert.ok(contract.includes("scripts/ci/windows-native-deps.test.mjs"));
-  assert.ok(
-    producer.indexOf("node scripts/ci/windows-native-deps.mjs") <
-      producer.indexOf("scripts/ci/windows-native-deps.test.mjs"),
-  );
-  assert.doesNotMatch(contract, /continue-on-error|\|\| true|\n\s*if:/u);
 });

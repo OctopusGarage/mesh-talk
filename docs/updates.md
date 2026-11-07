@@ -323,6 +323,15 @@ verifiers. Stable and Nightly reuse the same platform matrix and verification ow
   hours on the selected source SHA, so CI finishing after the scheduled start can proceed
   automatically. Completed unsuccessful checks, open scanning alerts and API errors fail
   immediately; a timeout reports the checks still pending. Retry after resolving those failures.
+  Source evidence must come from the latest same-repository `push` run on `main` for each
+  owning workflow at that exact SHA. PR, merge-queue, tag, scheduled and manual runs cannot
+  substitute, even when their check names and SHA match. Each accepted check must belong
+  to its owning workflow's selected check suite, and the latest run attempt must complete
+  successfully; a newer pending or failed main run cannot fall back to older success.
+  Successful jobs retained by a successful failed-jobs-only rerun remain valid in that suite.
+  This provenance requirement is additive: a newer failed or pending required check from
+  the same GitHub Actions app at the source SHA still blocks release, including manual
+  or PR runs outside the selected main suite.
   Final publication rechecks immediately and never accepts pending checks. Required checks and
   bounded waiting are owned by `scripts/release/check-source-checks.mjs`.
 - CI generates `v<workspace-version>-nightly.<run-id>.<attempt>` and binds that technical tag to

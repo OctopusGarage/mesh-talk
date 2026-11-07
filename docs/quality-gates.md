@@ -46,7 +46,7 @@ Full health requires cargo-deny, cargo-machete, typos, Gitleaks, ShellCheck and
 actionlint; missing tools fail rather than being silently skipped. CI installs them
 explicitly. `--fast` remains a clearly labeled partial local check.
 
-Health runs as a reusable workflow inside the UI orchestrator for every PR and
+For full-scope candidates, Health runs inside the UI orchestrator for every PR and
 merge candidate, and independently on its weekly/manual triggers. All three
 platform diagnostic suites remain mandatory. The complete frontend unit suite
 runs once with coverage on Linux; its platform branches use explicit mocks,
@@ -57,6 +57,16 @@ must all match. Superseded PR and merge candidates are cancelled automatically. 
 has its own verification group, preserving pending commits for release evidence.
 Health uses a distinct caller-workflow/event namespace, so independent manual or
 scheduled runs cannot cancel the UI caller or its same-run evidence producer.
+
+Inert documentation PRs may omit unrelated product execution only after the
+[documentation scope owner](ci-maintenance.md#documentation-only-pr-scope)
+proves eligibility against the exact tested merge. Required check identities
+remain present and validate that decision; their success means the product work
+is not applicable, not that its tests ran. Applicable documentation and security
+checks still run. Failed selection, mixed changes and authority inputs cannot
+qualify. Main pushes, merge groups, schedules and manual runs retain complete
+execution. Release consumers require checks from the owning successful trusted
+main-push workflow suite, never PR-only scope decisions.
 
 Branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct

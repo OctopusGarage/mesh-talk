@@ -26,18 +26,29 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
   health:
+    if: ${{ !cancelled() }}
+    needs: [scope]
     uses: ./.github/workflows/check-health.yml
+    with:
+      full: ${{ needs.scope.outputs.full }}
+      upstream_result: ${{ needs.scope.result }}
     secrets: inherit
 
   linux:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
     uses: ./.github/workflows/ui-shards.yml
     with:
       operating_systems: '["ubuntu-24.04"]'
 
   desktop:
+    if: needs.scope.outputs.full == 'true'
     # Preserve native Mac admission; reuse the four-slot per-OS browser budget.
-    needs: [health, portable]
+    needs: [health, portable, scope]
     strategy:
       fail-fast: false
       matrix:
@@ -58,7 +69,7 @@ jobs:
     # This existing name is required by branch protection. It now certifies
     # successful shards plus their complete current-source coverage upload.
     name: Full Linux UI regression
-    needs: [linux, health]
+    needs: [linux, health, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -66,7 +77,16 @@ jobs:
       run:
         working-directory: frontend
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
       - name: Require all browser shards
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: .
         env:
           BASELINE: ${{ needs.linux.result }}
@@ -74,38 +94,42 @@ jobs:
         run: |
           test "$BASELINE" = success
           test "$UNIT_COVERAGE" = success
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+        if: ${{ steps.scope.outputs.full == 'true' }}
       - name: Download every Linux coverage shard
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
           pattern: ui-coverage-*-${{ github.run_attempt }}
           path: target/ui-coverage
       - name: Download this run's unit coverage
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
           name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/ui-unit-coverage
       - name: Validate unit coverage provenance and restore line map
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
       - name: Validate and collect all coverage parts
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node ../scripts/ci/collect-ui-coverage.mjs ../target/ui-coverage coverage/e2e-parts "$SOURCE_SHA" 4
         env:
           SOURCE_SHA: ${{ github.sha }}
       - name: Merge browser coverage
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/merge-e2e-coverage.mjs
       - name: Upload browser coverage
-        if: >-
-          !(github.event_name == 'pull_request' &&
-            github.base_ref == 'dev' &&
-            github.event.pull_request.user.login == 'dependabot[bot]')
+        if: ${{ steps.scope.outputs.full == 'true' && (!(github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.user.login == 'dependabot[bot]')) }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
+          version: v11.3.2
           files: frontend/coverage/e2e.lcov
           flags: ui-e2e
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -113,29 +137,41 @@ jobs:
 
   portable-evidence:
     name: Chromium portable evidence
-    needs: [linux, desktop]
+    needs: [linux, desktop, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
       - name: Require all full Chromium shards
+        if: ${{ steps.scope.outputs.full == 'true' }}
         env:
           LINUX: ${{ needs.linux.result }}
           DESKTOP: ${{ needs.desktop.result }}
         run: |
           test "$LINUX" = success
           test "$DESKTOP" = success
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
       - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           pattern: chromium-portable-*-${{ github.run_attempt }}
           path: target/chromium-portable
       - name: Validate every OS and the complete portable inventory
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/evals/chromium-evidence.mjs collect-artifacts target/chromium-portable target/chromium-collected
       - name: Preserve validated portable reports
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: chromium-portable-validated-${{ github.run_attempt }}
@@ -148,8 +184,8 @@ jobs:
   # remain mandatory artifacts on the test shards themselves.
   reports:
     name: Merged UI reports
-    needs: [linux, desktop]
-    if: ${{ !cancelled() }}
+    needs: [linux, desktop, scope]
+    if: ${{ !cancelled() && needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -182,6 +218,8 @@ jobs:
           retention-days: 7
 
   packs:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
     name: Optional pack UI and asset check
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -202,6 +240,8 @@ jobs:
         run: npm run check:build-syntax
 
   portable-shards:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
     name: WebKit portable partition (${{ matrix.shard }}/2)
     runs-on: macos-26-intel
     timeout-minutes: 20
@@ -259,7 +299,7 @@ jobs:
 
   portable:
     name: Portable UI (macos-26-intel, webkit)
-    needs: portable-shards
+    needs: [portable-shards, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -267,21 +307,33 @@ jobs:
       EVAL_SOURCE_SHA: ${{ github.sha }}
       EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
       - name: Require both WebKit partitions
+        if: ${{ steps.scope.outputs.full == 'true' }}
         env:
           PRODUCER: ${{ needs.portable-shards.result }}
         run: test "$PRODUCER" = success
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: "22"
       - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           pattern: webkit-partition-*-${{ github.run_attempt }}
           path: target/webkit-partitions
       - name: Validate complete WebKit evidence union
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/evals/portable-runner.mjs collect-partitions target/webkit-partitions
       - uses: actions/upload-artifact@v7
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           name: portable-ui-macos-26-intel-webkit-${{ github.run_attempt }}
           path: target/webkit-partitions/
@@ -344,6 +396,8 @@ jobs:
           retention-days: 14
 
   firefox-extended:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
     name: Firefox portable UI
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -384,11 +438,20 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended]
+    needs: [linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
       - name: Require complete selected UI matrices
+        if: ${{ steps.scope.outputs.full == 'true' }}
         env:
           LINUX: ${{ needs.linux.result }}
           DESKTOP: ${{ needs.desktop.result }}

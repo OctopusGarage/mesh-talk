@@ -8,7 +8,9 @@ PR. Commit the candidate and use `./scripts/create-pr.sh -- <gh pr create option
 for publication after cheap source/static checks, ownership planning, hygiene
 and applicable verified frontend patch-coverage checks. Use `make pr-check`
 first to run that cheap static phase without tests, builds or browser/native work.
-CI runs the comprehensive suites after publication; all required checks must pass
+CI runs the applicable protected scope after publication; full-scope candidates retain
+the comprehensive suites, while the [documentation scope](ci-maintenance.md#documentation-only-pr-scope)
+may omit unrelated product execution. All required checks must pass
 on the current PR head before merge. Creating a PR does not certify acceptance.
 For comprehensive local validation, pass `--full-preflight` before the `--`
 separator with affected selectors/specs, or run `./scripts/prepare-pr.sh`
@@ -1433,7 +1435,9 @@ independent checks run concurrently and heavy suites are not repeated by health.
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                                                                       |
 
 Health is called by the UI workflow for every PR base and merge candidate, with
-its own weekly/manual entry points. Direct source and platform checks are required
+its own weekly/manual entry points. Only proven inert documentation PRs use the
+[documentation scope](ci-maintenance.md#documentation-only-pr-scope); full-scope
+candidates retain every platform diagnostic and product obligation. Direct source and platform checks are required
 individually; no new VM is allocated merely to copy their aggregate result. The
 replacement policy and source-release consumers share
 `scripts/ci/required-checks.mjs`, including current-source ASan and mutation-runner

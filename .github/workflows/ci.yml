@@ -31,7 +31,12 @@ env:
   MESH_TALK_TEST_TIMING: ${{ inputs.diagnostic_timing && '1' || '0' }}
 
 jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
   checks:
+    if: ${{ !cancelled() }}
+    needs: [scope]
     strategy:
       fail-fast: false
       # Windows uses the reusable single-build archive workflow below. Linux
@@ -40,25 +45,40 @@ jobs:
       # admission separately waits for Health/WebKit and bounds its fan-out.
       matrix:
         os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ needs.scope.outputs.full == 'true' && matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
+      - name: Report documentation-only coverage through Codecov
+        if: steps.scope.outputs.full == 'false' && matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          version: v11.3.2
+          run_command: empty-upload
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Prepare hosted Linux build storage
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         id: runner_storage
-        if: runner.os == 'Linux'
         shell: bash
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
 
       - name: Preserve runner storage measurements
-        if: always() && steps.runner_storage.outcome == 'success'
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && steps.runner_storage.outcome == 'success') }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -68,13 +88,13 @@ jobs:
           retention-days: 14
 
       - name: Prepare Ubuntu archive source
-        if: runner.os == 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         shell: bash
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
 
       # Tauri v2 system libraries (Linux only).
       - name: Install Tauri system dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -86,11 +106,13 @@ jobs:
             gdb
 
       - name: Install Rust toolchain
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt, llvm-tools-preview
 
       - name: Cache Rust build
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -99,6 +121,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install frontend dependencies and check standards
+        if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         run: |
           npm ci --prefix frontend
@@ -106,17 +129,19 @@ jobs:
           node scripts/check-repository-hygiene.mjs
 
       - name: Install cargo-llvm-cov and cargo-nextest
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
 
       - name: Verify coverage accumulation with the actual tool
+        if: ${{ steps.scope.outputs.full == 'true' }}
         # These fixtures launch real Cargo/rustc processes and share this job's
         # package cache. Give each compiler contract exclusive execution.
         run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs
 
       - name: Prepare and verify Linux native crash evidence
-        if: runner.os == 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         shell: bash
         run: |
           set -e -o pipefail
@@ -126,19 +151,23 @@ jobs:
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: frontend
         run: npm run build
 
       - name: Check built JavaScript for macOS 12 WKWebView
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: frontend
         run: npm run check:build-syntax
 
       # Keep native lint, production builds and complete tests on every OS.
       - name: Clippy
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build workspace
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: src-tauri
         run: cargo build --workspace --locked
 
@@ -147,7 +176,7 @@ jobs:
       # every remaining workspace target normally, avoiding a duplicate costly
       # instrumented Core test build. No platform repeats its test suite.
       - name: Test + coverage (macOS)
-        if: matrix.os != 'ubuntu-latest'
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os != 'ubuntu-latest') }}
         working-directory: src-tauri
         shell: bash
         env:
@@ -160,17 +189,17 @@ jobs:
           cargo test --workspace --doc
 
       - name: Test + coverage (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
         working-directory: src-tauri
         shell: bash
         run: bash ../scripts/ci/workspace-coverage.sh linux
 
       - name: Workspace doctests (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
         run: cargo test --workspace --doc --locked
 
       - name: Multi-process core evidence and coverage (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
         shell: bash
         env:
           EVAL_SOURCE_SHA: ${{ github.sha }}
@@ -181,7 +210,7 @@ jobs:
           cargo llvm-cov --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
 
       - name: Large-folder enqueue regression (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
         shell: bash
         run: |
           set -o pipefail
@@ -193,7 +222,7 @@ jobs:
           cargo llvm-cov report --lcov --output-path src-tauri/e2e-lcov.info
 
       - name: Preserve Linux backend evaluation evidence
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && matrix.os == 'ubuntu-latest') }}
         uses: actions/upload-artifact@v7
         with:
           name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
@@ -202,11 +231,11 @@ jobs:
           retention-days: 14
 
       - name: Collect Linux native crash evidence and retire its storage
-        if: always() && runner.os == 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && runner.os == 'Linux') }}
         run: node scripts/ci/linux-crash-diagnostics.mjs collect
 
       - name: Preserve Linux native crash diagnostics
-        if: always() && runner.os == 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && runner.os == 'Linux') }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -216,7 +245,7 @@ jobs:
           retention-days: 14
 
       - name: Upload test timing diagnostics
-        if: always() && env.MESH_TALK_TEST_TIMING == '1'
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && env.MESH_TALK_TEST_TIMING == '1') }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -225,14 +254,12 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload coverage to Codecov
+        if: ${{ steps.scope.outputs.full == 'true' && (!(github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.user.login == 'dependabot[bot]')) }}
         # Dependabot PRs to dev cannot read the Actions CODECOV_TOKEN secret.
         # Their tests still run; only the unauthenticated upload is skipped.
-        if: >-
-          !(github.event_name == 'pull_request' &&
-            github.base_ref == 'dev' &&
-            github.event.pull_request.user.login == 'dependabot[bot]')
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
+          version: v11.3.2
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ matrix.os == 'ubuntu-latest' && 'src-tauri/lcov.info,src-tauri/e2e-lcov.info' || 'src-tauri/lcov.info' }}
           name: workspace-${{ matrix.os }}-${{ github.run_attempt }}
@@ -240,7 +267,11 @@ jobs:
           fail_ci_if_error: true
 
   windows:
+    if: ${{ !cancelled() }}
+    needs: [scope]
     uses: ./.github/workflows/windows-workspace.yml
     with:
+      full: ${{ needs.scope.outputs.full }}
+      upstream_result: ${{ needs.scope.result }}
       diagnostic_timing: ${{ inputs.diagnostic_timing || false }}
     secrets: inherit

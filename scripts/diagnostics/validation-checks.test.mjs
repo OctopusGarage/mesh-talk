@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildStaticChecks, ciPolicyTest, pendingNodeTests, phasePlan } from "../validation/checks.mjs";
+import { buildStaticChecks, ciPolicyTest, ciDocsPolicyTest, pendingNodeTests, phasePlan } from "../validation/checks.mjs";
 import { executeCheapChecks, executePlan, parseOptions } from "../validation/changed.mjs";
 
 const plan = overrides => ({ files: [], rust: [], frontend: [], node: [], blockers: [], ...overrides });
@@ -19,11 +19,12 @@ test("documentation-only checks do not start compilers or browsers", () => {
 test("workflow and shell edits add their existing static checks but removed scripts are not executed", () => {
   assert.deepEqual(buildStaticChecks(plan({ files: ["scripts/removed.sh"], deleted: ["scripts/removed.sh"] })), []);
   const checks = buildStaticChecks(plan({ files: [".github/workflows/ci.yml", "scripts/changed.sh"] }));
-  assert.deepEqual(checks.map(check => check.name), ["changed-syntax", "ci-policy", "shell-lint"]);
+  assert.deepEqual(checks.map(check => check.name), ["changed-syntax", "ci-policy", "ci-docs-policy", "shell-lint"]);
   assert.deepEqual(checks[0].command, ["node", "scripts/validation/syntax.mjs", "--files", ".github/workflows/ci.yml", "scripts/changed.sh"]);
   assert.deepEqual(checks[1].command, ["node", "--test", "scripts/diagnostics/ci-latency.test.mjs"]);
   assert.equal(checks[1].kind, "policy");
-  assert.deepEqual(checks[2].command, ["shellcheck", "--severity=warning", "--", "scripts/changed.sh"]);
+  assert.deepEqual(checks[2].command, ["node", "--test", ciDocsPolicyTest]);
+  assert.deepEqual(checks[3].command, ["shellcheck", "--severity=warning", "--", "scripts/changed.sh"]);
 });
 test("cheap workflow policy failures reject publication without admitting application suites", async () => {
   const selected = plan({ files: [".github/workflows/ci.yml"], node: ["never-run.test.mjs"] });
@@ -35,7 +36,7 @@ test("cheap workflow policy failures reject publication without admitting applic
   } }), /stale workflow policy/);
   assert.deepEqual(calls, ["changed-syntax", "ci-policy"]);
   const removed = buildStaticChecks(plan({ files: [".github/workflows/removed.yml"], deleted: [".github/workflows/removed.yml"] }));
-  assert.deepEqual(removed.map(check => check.name), ["ci-policy"]);
+  assert.deepEqual(removed.map(check => check.name), ["ci-policy", "ci-docs-policy"]);
 });
 test("policy checks execute once while test-only plans retain the same assertions", async () => {
   const selected = plan({ files: [".github/workflows/ci.yml"], node: [ciPolicyTest] });
@@ -55,7 +56,23 @@ test("policy checks execute once while test-only plans retain the same assertion
     calls.push(args);
     return { code: 0, output: "policy pass" };
   } });
-  assert.deepEqual(calls.map(args => args[1]), ["changed-syntax", "ci-policy"]);
+  assert.deepEqual(calls.map(args => args[1]), ["changed-syntax", "ci-policy", "ci-docs-policy"]);
+});
+test("scope source, composite actions and scope tests run policy locally exactly once", () => {
+  for (const file of ["scripts/ci/docs-scope.mjs", ciDocsPolicyTest, ".github/actions/ci-scope/action.yml"]) {
+    const selected = plan({ files: [file], node: [ciPolicyTest, ciDocsPolicyTest] });
+    selected.checks = buildStaticChecks(selected);
+    assert.ok(selected.checks.some(check => check.name === "ci-docs-policy"));
+    assert.deepEqual(pendingNodeTests(selected), []);
+    for (const altered of [
+      { name: "ci-docs-policy", kind: "policy", cwd: "frontend", command: ["node", "--test", ciDocsPolicyTest] },
+      { name: "ci-docs-policy", kind: "policy", cwd: ".", command: ["node", "--test", ciDocsPolicyTest, "--test-name-pattern=partial"] },
+      { name: "ci-docs-policy", cwd: ".", command: ["node", "--test", ciDocsPolicyTest] },
+    ]) {
+      const checks = selected.checks.map(check => check.name === "ci-docs-policy" ? altered : check);
+      assert.deepEqual(pendingNodeTests({ ...selected, checks }), [ciDocsPolicyTest]);
+    }
+  }
 });
 test("Rust static checks lint actual affected packages with CI target coverage", () => {
   const checks = buildStaticChecks(plan({ rust: [{ package: "mesh-talk-core" }] }));

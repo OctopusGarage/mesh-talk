@@ -16,6 +16,7 @@ export function syntaxKind(file) {
   if (/\.sh$/u.test(file) || /^hooks\/[^/]+$/u.test(file)) return "bash";
   if (/\.py$/u.test(file)) return "python";
   if (/^\.github\/workflows\/[^/]+\.ya?ml$/u.test(file)) return "workflow";
+  if (/^\.github\/actions\/.+\/action\.ya?ml$/u.test(file)) return "action";
   return undefined;
 }
 export function checkSyntax({ root = process.cwd(), files, staged = false, base } = {}) {
@@ -37,6 +38,9 @@ export function checkSyntax({ root = process.cwd(), files, staged = false, base 
     if (kind === "bash") command("bash", ["-n", "--", file], root);
     if (kind === "python") command(process.platform === "win32" ? "python" : "python3", ["-c", "import ast,sys; ast.parse(sys.stdin.buffer.read(), filename=sys.argv[1])", file], root, readFileSync(path.join(root, file)));
     if (kind === "workflow") command("actionlint", [file], root);
+    // Local action metadata is parsed through its workflow callers, not as a
+    // standalone workflow. Keep their input/output contracts checked together.
+    if (kind === "action") command("actionlint", [], root);
     checked.push(file);
   }
   return checked;

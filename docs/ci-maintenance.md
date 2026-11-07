@@ -373,6 +373,51 @@ starting, their missing reports remain incomplete evidence. The collector checks
 all platform-specific current-attempt shards (eight macOS, four Linux/Windows); fixing the upstream failure and rerunning
 the selected producers supplies that evidence, rather than omitting those OSes.
 
+## Documentation-only PR scope
+
+The [scope owner](../scripts/ci/docs-scope.mjs) permits a fast path only for
+same-repository PRs targeting `main` whose exact tested merge changes ordinary
+README or documentation prose. It reads the NUL-delimited Git delta, including
+file modes, and reuses the validation contracts to exclude owned inputs and
+authority references. Help, evaluation prompts, policy guides, executable or
+symlink changes, deletions, renames, mixed code changes and uncertain inputs do
+not qualify. Fork PRs retain full coverage because the coverage provider's empty
+upload does not have the ordinary tokenless fork authentication guarantee.
+
+Required matrix identities remain present. Their jobs independently verify the
+selection, use Ubuntu for the documentation path, and describe product tests as
+not applicable rather than executed. Nonrequired heavy producers can be skipped;
+full-scope collectors still require their original exhaustive, source-bound
+artifacts. Do not manufacture empty execution receipts or coverage files. A failed
+selector must fail required jobs even when dependency scheduling would otherwise
+skip them. Defaults for standalone, scheduled and manual callers require full work.
+
+The documentation path retains whitespace, structural ownership and hygiene
+checks through their existing owners. Ubuntu source formatting, spelling, workflow
+lint and supply-chain scans remain enabled. Real CodeQL, secret scanning,
+dependency review and lightweight mutation-runner contracts remain enabled.
+Codecov uses its native, unforced empty-upload operation; an accepted HTTP request
+does not prove a passing provider check. Verify the actual current-head App check.
+No broad coverage ignore rule or replacement provider status is needed.
+Pin the downloaded CLI independently of the Action commit: an Action pin can
+still resolve a moving `latest` tool. Keep ordinary and empty-upload clients
+aligned and retain the provider's integrity verification.
+
+Use a shallow checkout containing the merge and both parents; full ancestry is
+unnecessary for this exact base-to-merge comparison. Missing objects, mismatched
+source or failed output publication cannot authorize skipped work. The real Git
+fixtures retain positive depth-two and negative missing-history, mode, authority,
+fork and mixed-change controls. Run these and the workflow policy locally before
+publication, then qualify actual required names and skipped work in a real docs PR.
+
+Every main push, merge group, schedule and manual run retains full verification.
+Release acceptance binds checks to the latest successful trusted main-push run
+and its owning workflow suite; a successful PR scope decision is not release
+evidence, even at the same source SHA. Add this provenance requirement without
+removing the existing veto from newer failed or pending required checks.
+[Quality gates](quality-gates.md) owns
+acceptance and [updates](updates.md) owns publication requirements.
+
 ## Bound parallelism and preserve isolation
 
 Run independent checks in parallel, but inspect each `needs` edge before removing
@@ -411,6 +456,12 @@ artifact overhead as well as execution. More shards can increase queueing and
 runner minutes; more workers per machine can increase memory pressure, port
 exhaustion and test interference. Review the product of platform, architecture,
 browser, feature and shard dimensions before expanding a matrix.
+For a wall-time target, calculate both the dependency critical path and the
+aggregate runner work divided by the constrained pool's available slots.
+Scheduling alone cannot beat that capacity bound; added shard setup consumes
+more of it. Leave queueing margin in the execution budget and report full-suite
+and documentation-only observations separately. A shorter watchdog is not a
+performance improvement.
 
 macOS browser coverage uses `macos-26-intel` for WebKit and Chromium, including
 extended scenarios. Its contract is the macOS/browser behavior; the ARM workspace
@@ -453,6 +504,9 @@ and execution, while [Playwright sharding](https://playwright.dev/docs/test-shar
 distributes browser work. Archive consumers need the same source revision and
 required runtime assets; shard distribution does not guarantee equal durations.
 Both need compatible inputs and complete inventories, with isolation preserved.
+Archive reuse also requires the actual architecture/ABI and supported runtime
+binary lookup. An archive cannot rewrite executable paths embedded at compile
+time; validate a relocated fresh consumer before sharing builds across jobs.
 
 Cancel superseded verification for the same candidate when safe, with concurrency
 groups that separate caller workflows, event streams and branches. Reusable Health

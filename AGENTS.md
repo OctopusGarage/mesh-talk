@@ -171,8 +171,9 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   repository hygiene and applicable verified frontend patch coverage before publication.
   Use `make pr-check` for the same cheap static phase; missing current coverage
   evidence reports its explicit generation command and never starts suites implicitly.
-  Full cross-platform CI runs after publication; all required checks must pass on the
-  current PR head before merging. Creating a PR does not certify test acceptance.
+  CI runs after publication; full-scope candidates retain cross-platform execution.
+  Only the proven [documentation scope](docs/ci-maintenance.md#documentation-only-pr-scope)
+  may omit unrelated product tests. All required checks must pass on the current PR head before merging. Creating a PR does not certify test acceptance.
 - To run comprehensive checks locally before publication, use
   `./scripts/create-pr.sh --full-preflight <selectors/specs> -- <gh pr create options>`.
   This invokes `prepare-pr.sh` (platform preflight plus full health). For an existing
