@@ -505,6 +505,66 @@ fn references_from_rows(
 }
 
 impl Node {
+    /// Test-artifact observer for inventory payload reads on the caller thread.
+    #[doc(hidden)]
+    #[cfg(feature = "fast-test-kdf")]
+    pub fn test_group_inventory_body_read_count(&self) -> usize {
+        self.account_documents
+            .lock()
+            .expect("documents mutex")
+            .inventory_body_read_count()
+    }
+
+    /// Bodyless scheduling hint only; direct document integrity checks remain mandatory.
+    pub fn group_projection_revision(&self) -> Result<[u8; 32], LogError> {
+        use std::sync::atomic::Ordering;
+        let source = {
+            let log = self.log.lock().expect("log mutex");
+            let repository = log.repository()?;
+            (
+                repository.source_revision()?,
+                repository.destructive_policy_revision()?,
+            )
+        };
+        let profiles = self.profiles.lock().expect("profiles mutex").revision()?;
+        let avatars = self.account_profiles.revision()?;
+        let proofs = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy state mutex")
+            .as_ref()
+            .map(|state| state.proofs.revision());
+        let privacy = (
+            self.privacy.generation.load(Ordering::SeqCst),
+            self.privacy.projection_revision.load(Ordering::SeqCst),
+            proofs,
+        );
+        let policy = self.device_sync_policy_snapshot().1;
+        let documents = *self.account_document_updates.borrow();
+        let mut devices = self.linked_devices();
+        devices.sort_by_key(|device| device.public.user_id());
+        // Announce excludes last-seen timestamps and IP routes: an identical
+        // signed heartbeat is unchanged. Include live bindings too, as private
+        // owner-proof eligibility may consult them. Both roster sets are bounded.
+        let (mut historical, mut live) = {
+            let roster = self.roster.lock().expect("roster mutex");
+            (roster.historical_announcements(), roster.announcements())
+        };
+        historical.sort_by_key(|proof| proof.user_id.clone());
+        live.sort_by_key(|proof| proof.user_id.clone());
+        let roster = (historical, live);
+        let mut groups = self.channels.lock().expect("channels mutex").channel_ids();
+        groups.sort_by_key(|group| *group.as_bytes());
+        let identity = (self.account_id(), self.user_id());
+        let bytes = bincode::serialize(&(
+            identity, source, profiles, avatars, privacy, policy, documents, devices, roster,
+            groups,
+        ))
+        .map_err(|error| crate::eventlog::LogError::Serialization(error.to_string()))?;
+        Ok(Sha256::digest(bytes).into())
+    }
+
     fn project_inventory_bindings(&self, reference: &mut GroupInventoryReference) {
         if !reference.legacy_membership {
             return;

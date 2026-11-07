@@ -79,6 +79,104 @@ test("group header counts accepted people and each row has its own state", async
   ).toContainText("Offline");
 });
 
+test("unchanged groups reuse their projection while fresh people update the header", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    ({ bob, group }) => {
+      const host = window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+        __mockEmit: (event: string, payload: unknown) => void;
+        __presenceDelta: {
+          full: number;
+          omitted: number;
+          offline: boolean;
+          refresh: () => Promise<void>;
+        };
+      };
+      const original = host.__TAURI_INTERNALS__.invoke;
+      const revision = "a".repeat(64);
+      host.__presenceDelta = {
+        full: 0,
+        omitted: 0,
+        offline: false,
+        refresh: async () => {
+          const identity = (await original("owner_node_identity", {
+            owner: "u_self",
+          })) as Record<string, unknown>;
+          host.__mockEmit("node-state-changed", {
+            ...identity,
+            kind: "roster",
+          });
+        },
+      };
+      host.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        const result = await original(cmd, args);
+        if (cmd === "owner_node_identity")
+          return { ...(result as object), supports_push_state: true };
+        if (cmd !== "get_presence") return result;
+        const all = result as PresenceMap;
+        const { [group]: projection, ...people } = all;
+        if (host.__presenceDelta.offline)
+          people[bob] = {
+            online: false,
+            last_seen_secs: 0,
+            devices: [],
+            online_expires_in_secs: 0,
+            reconnect_expires_in_secs: 0,
+          };
+        if (args?.knownGroupRevision === revision) {
+          host.__presenceDelta.omitted++;
+          return { people, groups_revision: revision };
+        }
+        host.__presenceDelta.full++;
+        return {
+          people,
+          groups: { [group]: projection },
+          groups_revision: revision,
+        };
+      };
+    },
+    { bob: BOB, group: GROUP },
+  );
+  await enterChat(page);
+  await page.getByTestId(`conversation-row-${GROUP}`).click();
+  const header = page.getByTestId("conversation-header");
+  await expect(header).toContainText("3 members · 2 known online");
+  const counts = () =>
+    page.evaluate(() => {
+      const state = (
+        window as unknown as {
+          __presenceDelta: { full: number; omitted: number };
+        }
+      ).__presenceDelta;
+      return { full: state.full, omitted: state.omitted };
+    });
+  const before = await counts();
+  for (let i = 0; i < 3; i++) {
+    const previous = await counts();
+    await page.evaluate(async () => {
+      const state = (
+        window as unknown as {
+          __presenceDelta: { offline: boolean; refresh: () => Promise<void> };
+        }
+      ).__presenceDelta;
+      state.offline = true;
+      await state.refresh();
+    });
+    await expect
+      .poll(async () => (await counts()).omitted)
+      .toBeGreaterThan(previous.omitted);
+  }
+  await expect(header).toContainText("3 members · 1 known online");
+  expect((await counts()).full).toBe(before.full);
+});
+
 for (const variant of [
   { theme: "dark", width: 1280, height: 800 },
   { theme: "light", width: 760, height: 520 },

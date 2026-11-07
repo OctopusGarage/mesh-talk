@@ -193,6 +193,19 @@ current-device lease; it must not serialize a zero presentation expiry or inheri
 an older routed quality hint. This self observation ages normally if IPC stops. **Offline** means the bounded observation has expired
 here, not a global sign-out claim.
 
+Presence IPC separates fresh people from the group projection. Incremental callers
+send an opaque group revision: unchanged inputs omit groups, an explicit empty
+group map withdraws them, and the returned token acknowledges only the inputs
+captured before projection. The revision covers durable source/destructive state,
+profiles, privacy/proof and sync policy, account documents, device bindings and
+signed roster identity, without reading document bodies. It is a scheduling hint,
+not authority or integrity evidence. Foreground recovery and the sparse repair
+request a full projection; callers without a revision retain the legacy full map.
+The client validates the entire response before accepting the group token, orders
+people and groups independently, and recomputes group online counts from current
+person evidence. A failed, malformed, late or retired-owner reply cannot poison
+or roll back the acknowledged projection.
+
 Initial discovery displays Online immediately. After a loss, fresh observations
 must remain successful for five seconds and include a renewed origin before
 clearing recovery confirmation. Authoritative withdrawal or revoked account

@@ -236,7 +236,11 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["chat_commands::presence::tests::", "settings::tests::"]
+          "filters": [
+            "chat_commands::presence::tests::",
+            "settings::tests::",
+            "chat_commands::diagnostics::tests::diagnostics_expose_a_live_runtime_and_reject_invalid_manual_targets"
+          ]
         }
       ],
       "capability": {
@@ -250,6 +254,10 @@
           {
             "name": "Sharing belongs to the active participant and stale owners or missing legacy settings cannot enable it",
             "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Incremental presence refreshes people without group body reads for equal revisions; forced repair and changed inputs hydrate groups, while missing tokens preserve legacy maps.",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
       },

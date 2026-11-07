@@ -578,6 +578,10 @@
           {
             "name": "Failed refreshes do not freeze presence or establish peer sign-out",
             "reference": "docs/network-design-reference.md#person-presence-contract"
+          },
+          {
+            "name": "Validate delta replies atomically; independent people/group ordering preserves newer tokens, group withdrawal and fresh online counts. Saturated recovery retains one forced repair.",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
       },

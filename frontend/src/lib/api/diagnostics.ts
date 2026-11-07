@@ -4,6 +4,7 @@ import type {
   DiagPeerInfo,
   EnvInfo,
   PresenceMap,
+  PresenceDelta,
   UpdateCheck,
   UpdateInstallPhase,
   UpdateChannel,
@@ -22,7 +23,8 @@ export const diag = {
 
 export const presence = {
   /** Shared person/device observations and accepted-account group count summaries. */
-  get: () => invoke<PresenceMap>("get_presence"),
+  get: (knownGroupRevision?: string) =>
+    invoke<PresenceMap | PresenceDelta>("get_presence", { knownGroupRevision }),
 };
 
 /** Observability: logs + static environment facts for the Diagnostics dialog. */

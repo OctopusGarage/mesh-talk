@@ -155,6 +155,13 @@ struct IntrinsicCacheEntry {
     charge: usize,
 }
 
+// Native current-thread command tests measure the synchronous projection caller,
+// excluding LocalMaintenance's independently owned blocking-pool reads.
+#[cfg(feature = "fast-test-kdf")]
+thread_local! {
+    static INVENTORY_BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(in crate::node) struct AccountDocumentStore {
     // Account-scoped presentation facts only; never memoize live authorization.
     intrinsic_cache: BTreeMap<AccountDocumentKey, IntrinsicCacheEntry>,
@@ -928,6 +935,11 @@ impl AccountDocumentStore {
         self.body_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    #[cfg(feature = "fast-test-kdf")]
+    pub(super) fn inventory_body_read_count(&self) -> usize {
+        INVENTORY_BODY_READS.with(|reads| reads.get())
+    }
+
     pub(super) fn get(
         &self,
         key: &AccountDocumentKey,
@@ -964,6 +976,10 @@ impl AccountDocumentStore {
             #[cfg(test)]
             self.body_reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(feature = "fast-test-kdf")]
+            if matches!(key, AccountDocumentKey::GroupInventory { .. }) {
+                INVENTORY_BODY_READS.with(|reads| reads.set(reads.get() + 1));
+            }
             self.media
                 .copy_decrypted(ConversationId::new(meta.content_hash), &mut output)
                 .map_err(LogError::Io)?;

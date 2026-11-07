@@ -26,50 +26,7 @@ pub(super) struct LocalMaintenance {
 struct PublicationInput([u8; 32]);
 impl PublicationInput {
     fn capture(node: &Node) -> Result<Self, crate::eventlog::LogError> {
-        use std::sync::atomic::Ordering;
-        let source = {
-            let log = node.log.lock().expect("log mutex");
-            let repository = log.repository()?;
-            (
-                repository.source_revision()?,
-                repository.destructive_policy_revision()?,
-            )
-        };
-        let profiles = node.profiles.lock().expect("profiles mutex").revision()?;
-        let avatars = node.account_profiles.revision()?;
-        let proofs = node
-            .privacy
-            .state
-            .read()
-            .expect("privacy state mutex")
-            .as_ref()
-            .map(|state| state.proofs.revision());
-        let privacy = (
-            node.privacy.generation.load(Ordering::SeqCst),
-            node.privacy.projection_revision.load(Ordering::SeqCst),
-            proofs,
-        );
-        let policy = node.device_sync_policy_snapshot().1;
-        let documents = *node.account_document_updates.borrow();
-        let mut devices = node.linked_devices();
-        devices.sort_by_key(|device| device.public.user_id());
-        // Announce excludes last-seen timestamps and IP routes: an identical
-        // signed heartbeat is unchanged. Include live bindings too, as private
-        // owner-proof eligibility may consult them. Both roster sets are bounded.
-        let (mut historical, mut live) = {
-            let roster = node.roster.lock().expect("roster mutex");
-            (roster.historical_announcements(), roster.announcements())
-        };
-        historical.sort_by_key(|proof| proof.user_id.clone());
-        live.sort_by_key(|proof| proof.user_id.clone());
-        let roster = (historical, live);
-        let mut groups = node.channels.lock().expect("channels mutex").channel_ids();
-        groups.sort_by_key(|group| *group.as_bytes());
-        let bytes = bincode::serialize(&(
-            source, profiles, avatars, privacy, policy, documents, devices, roster, groups,
-        ))
-        .map_err(|error| crate::eventlog::LogError::Serialization(error.to_string()))?;
-        Ok(Self(Sha256::digest(bytes).into()))
+        node.group_projection_revision().map(Self)
     }
 }
 

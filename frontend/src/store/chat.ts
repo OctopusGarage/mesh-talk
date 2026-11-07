@@ -1394,6 +1394,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           e.device_id !== state.myId
         )
           return;
+        notifySyncInvalidation({ owner: e.owner, kind: "state" });
         void state.refreshChannels(e.channel_id);
         void refreshGroupOperationIntents(rawSet, get);
       },

@@ -60,6 +60,8 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    A memo that still hydrates its input on every wake is not an I/O optimization.
    Gate unchanged producers using complete input revisions; acknowledge the
    selected revisions, retain failed work and schedule sparse integrity repair.
+   Separate volatile evidence from stable projections: refresh presence without
+   rehydrating group history; validate a complete reply before caching its token.
 4. **Bound every retained layer.** Budget bytes/pixels as well as entry count,
    concurrency and queues. Virtualized DOM is not a bounded data store. Keep a
    small active window; evict inactive payloads and load originals only on demand.

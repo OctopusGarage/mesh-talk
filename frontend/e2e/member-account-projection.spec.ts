@@ -154,7 +154,13 @@ test("linked devices render as one member and native owner-account authority app
         if (command === "get_presence")
           return {
             ...(result as object),
-            [channel]: { online: true, member_count: 2, online_count: 2 },
+            [channel]: {
+              online: true,
+              last_seen_secs: null,
+              devices: [],
+              member_count: 2,
+              online_count: 2,
+            },
           };
         return result;
       };

@@ -630,3 +630,9 @@ export interface NodeStateChangedEvent {
   device_id: string;
   kind: "state" | "roster" | "delivery" | "files";
 }
+
+export interface PresenceDelta {
+  people: PresenceMap;
+  groups?: PresenceMap;
+  groups_revision: string;
+}
