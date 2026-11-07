@@ -67,6 +67,10 @@ jobs:
       id-token: write
       attestations: write
     env:
+      # Drop Mach-O local symbols during linking, before Tauri signs and bundles
+      # the desktop app. The same flags cover the headless release binary.
+      CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: "-C link-arg=-Wl,-x"
+      CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: "-C link-arg=-Wl,-x"
       ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
       # Free updater keys are available only to the existing trusted publication sources.
       MESH_TALK_UPDATER_PUBLIC_KEY: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && vars.MESH_TALK_UPDATER_PUBLIC_KEY || '' }}

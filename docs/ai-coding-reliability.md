@@ -426,6 +426,14 @@ controls prevent a lightweight decision from authorizing publication.
 Provenance is an additional constraint: filtering to a trusted suite must not
 discard a newer failed or pending check that previously blocked acceptance.
 
+Process-lifecycle fixtures must distinguish leader exit from group signal
+permission. Observe the fixture-owned leader's process state when synchronizing
+post-exit cancellation; a Darwin `EPERM` from a group signal probe does not prove
+that leader is still running. The escaped inherited-output-pipe cases in
+`scripts/diagnostics/validation-stage.test.mjs` own this regression and retain
+separate assertions for cancellation, unverified pipe cleanup and escaped-child
+retirement.
+
 Source-order contracts must assert that each required command exists before
 comparing its position. A missing substring returns a sentinel such as `-1` and
 can otherwise make an ordering assertion pass vacuously. Match the canonical

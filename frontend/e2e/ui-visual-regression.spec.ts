@@ -254,3 +254,37 @@ for (const theme of ["light", "dark"] as const) {
     });
   }
 }
+
+test("tab motion follows pointer input and respects keyboard and reduced motion", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/");
+  const tabs = page.getByRole("tablist");
+  await page.getByTestId("login-tab-register").click();
+  await expect(tabs).toHaveAttribute("data-pointer-motion", "true");
+  await expect(tabs.locator(".tab-indicator")).toBeVisible();
+  await page.getByTestId("login-tab-register").press("ArrowLeft");
+  await expect(page.getByTestId("login-tab-signin")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await expect(tabs).not.toHaveAttribute("data-pointer-motion");
+  await page.getByTestId("login-tab-signin").evaluate((tab) => {
+    tab.style.width = "120px";
+    tab.style.justifySelf = "start";
+  });
+  await expect
+    .poll(async () =>
+      tabs
+        .locator(".tab-indicator")
+        .evaluate((el) => el.getBoundingClientRect().width),
+    )
+    .toBe(120);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.getByTestId("login-tab-register").click();
+  await expect(tabs.locator(".tab-indicator")).toHaveCSS(
+    "transition-property",
+    "color, background-color, border-color, opacity",
+  );
+});
