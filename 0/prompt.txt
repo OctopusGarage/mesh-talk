@@ -1,0 +1,64 @@
+好烦啊，老是不稳定失败，分析一下哪些写法不健壮的，多余的或者重复的之类的都修正优化或者删除干净吧，烦死了，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；，analyze；
+
+---
+
+全部CI都看一下吧，分析哪些是多余的就删除干净吧，哪些地方比如语法之类的，或者啥简单逻辑，可以低成本提前在本地快速验证的，就不用到CI再跑了，注意CI要尽量保持轻量可靠专业优雅，核心的逻辑应该放在对应的脚本，避免把全部逻辑直接写在CI上，我说得不一定对，你仔细调研结合项目分析清楚吧，analyze , research, and optimise; analyze , research, and optimise;analyze , research, and optimise;analyze , research, and optimise;analyze , research, and optimise;analyze , research, and optimise;
+
+---
+
+通用后续可复用的规则记得更新补充到CI维护文档中，optimise；，optimise；，optimise；，optimise；
+
+---
+
+看看哪些可以本地轻量验证的，不要等到CI反馈，比如覆盖率要求等这种，创建pr之类的，应该可以本地验证完善完，而不是等到CI报错，同样也全部都分析一下，我只是举个例子，你应该举一反三，仔细分析，看看哪些可以低成本提前在创建PR前或者其他的常见提前低成本验证清楚，analyze and optimise; analyze and optimise;analyze and optimise;analyze and optimise;analyze and optimise;
+
+---
+
+通用后续可复用的规则记得更新补充到CI维护文档中，optimise；，optimise；，optimise；，optimise；而且要注意引导后续要求merge时，应该默认使用squash merge的形式，规则放在合适文档地方optimise；optimise；optimise；
+
+---
+
+把整体CI跑完的时间尽量降下来，没用的就删除，重复的合并之类的，然后整个CI要保持稳定，尽量不要依赖时间之类的这些不确定很不稳定的因素，保持健壮优雅，analyze and optimse; analyze
+  and optimse;analyze
+  and optimse;analyze
+  and optimse;
+
+---
+
+If not finish, why not continue ，if finish ， why not squash merge now
+
+---
+
+所以已经按照这个做完了吗：“Speed up this repo's GitHub Actions as much as possible without dropping any necessary tests or checks.
+尽可能加快此仓库的 GitHub Actions 速度，同时不删除任​​何必要的测试或检查。
+
+1. Start by using gh to pull the last 50 runs and split each job into three phases: queue, setup and the actual test run. Look for patterns. Often the slow part is setup, not the tests themselves.
+2. When a PR gets several pushes in a row, only run the latest one and cancel the older runs with cancel-in-progress. Don't do this on main, though: every commit on main needs a complete run before a release.
+3. Commits that only touch the README or docs shouldn't trigger CI, so filter them out with paths. Watch out: a required check that gets skipped stays pending and blocks the PR from merging, so plan for that up front.
+4. Prefer the built-in caching in setup actions: turn on cache in setup-node, setup-go has it on by default, and use Swatinem/rust-cache for Rust. Each repo only gets 10 GB of cache, so don't put anything in there you won't actually reuse.
+5. Build twice in a row locally. The second build should take almost no time. If something still takes time, something is set up wrong, like a Dockerfile that copies the whole repo before installing dependencies, or a build script watching a file that doesn't exist. Check for anything similar.
+6. Download prebuilt tools instead of compiling them on the spot with go install or cargo install, which eats a lot of time.
+7. Run jobs that don't depend on each other in parallel, remove needs edges that don't pass any data, and split your longest test suite across multiple machines.
+8. Free accounts can run at most 5 macOS jobs at once, shared across all workflows. Move anything that doesn't care about the OS, like formatting, linting and dependency audits, over to Ubuntu.
+9. Don't do the same work twice, and don't do work you don't need. If another job already ran a check, don't run it again, and a job that only builds the frontend doesn't need to pull the whole Rust cache.
+10. Once you're done, push and watch how the runs actually perform. Look at the timings, find the patterns, then do another pass to catch what you missed and get it as good as it can be. Finally, show me a before and after comparison.”
+
+---
+
+为啥不启用？？analyze??
+
+---
+
+那你继续全面分析清楚，优化修正一下吧，analyze and optimise; analyze and optimise;analyze and optimise;analyze and optimise;
+
+---
+
+顺便客观仔细专业分析一下，有没有可能尽量把整个CI的时间控制在30分钟以内，analyze；analyze；analyze；analyze；analyze；analyze；analyze；analyze；
+
+---
+
+分析一下之前的合并，合并到main之后，跑的CI为什么有报错没成功的？analyze；analyze；analyze；analyze；analyze；
+
+---
+
+继续持续监控验证直到完成啊，不要定下来啊，continue；continue；continue；continue；continue；continue；continue；continue；continue；
