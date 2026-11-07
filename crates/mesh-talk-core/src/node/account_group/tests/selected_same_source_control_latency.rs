@@ -1736,8 +1736,17 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     let reference = node(&dir.path().join("reference"), &account);
     let external = node(&dir.path().join("external"), &Account::generate());
     let other = other_selected.then(|| node(&dir.path().join("other"), &account));
-    let other_group = new_channel_id();
-    let group = new_channel_id();
+    // Keep the paid-boundary result below the existing A head in Control
+    // ordering. Random IDs could avoid the late lower-key comparison path.
+    // These IDs cannot collide with the separate legacy rows 1..=68.
+    let (other_group, group) = if paid_boundary {
+        (
+            ConversationId::new([0xd0; 32]),
+            ConversationId::new([0xe0; 32]),
+        )
+    } else {
+        (new_channel_id(), new_channel_id())
+    };
     let genesis = Event::new(
         &owner.identity,
         group,
@@ -3125,6 +3134,20 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 }
 
                 if paid_boundary {
+                    let actual_a_head = owner
+                        .account_document_meta(&crate::node::AccountDocumentKey::GroupOperation {
+                            channel: hex::encode(group.as_bytes()),
+                            source_device: owner.user_id(),
+                        })
+                        .expect("A's completed private receipt has a real signed source head");
+                    let b_result_key = crate::node::AccountDocumentKey::GroupOperation {
+                        channel: hex::encode(other_group.as_bytes()),
+                        source_device: other.user_id(),
+                    };
+                    assert!(
+                        b_result_key < actual_a_head.key,
+                        "the new B result must precede the actual already-published A Control head"
+                    );
                     executor_boundary = Some(
                         hold_original_pair_resume(
                             &owner,
@@ -3291,6 +3314,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         None
     };
     let b_critical_snapshot = other_receipt.as_ref().map(|result| {
+        if paid_boundary && (result.is_err()
+            || std::env::var("MESH_TALK_TEST_TIMING").is_ok_and(|value| value == "1"))
+        {
+            eprintln!("paid_boundary_storage profile_root={:?} native_temp={:?} TEMP={:?} TMP={:?} RUNNER_TEMP={:?}",
+                dir.path(), std::env::temp_dir(), std::env::var_os("TEMP"),
+                std::env::var_os("TMP"), std::env::var_os("RUNNER_TEMP"));
+        }
         let mut trace = b_critical.lock().unwrap();
         trace.record(
             b_clock,
@@ -3483,6 +3513,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     }
     if let Some(error) = executor_preparation_failure {
         std::panic::resume_unwind(error);
+    }
+    if paid_boundary && other_receipt.as_ref().is_some_and(Result::is_err) {
+        // Preserve the post-cutoff publication/transport evidence before the
+        // stricter RED guard diagnoses an unrelated failure. Owners have now
+        // retired, so this snapshot cannot race a still-writing fixture task.
+        let snapshot = b_critical.lock().unwrap().snapshot();
+        eprintln!("B_critical_after_recovery snapshot={snapshot:?}");
     }
     if let Some(evidence) = &paid_boundary_evidence {
         assert!(

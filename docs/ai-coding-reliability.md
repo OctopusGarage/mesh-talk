@@ -449,6 +449,12 @@ not the shared resumed trace label. Capture that one-shot child before waiting
 for its later projection; retain exact private-receipt evidence before release.
 The paid-pair classifier regression rejects foreground resumes and unprotected
 turns while the real Noise scenarios retain admission and recovery assertions.
+When inventory ordering selects a different continuation path, construct canonical
+signed fixture events with noncolliding deterministic identifiers and assert the
+actual persisted key ordering. Distinguish durable commit, completed publication
+and recipient installation in timing evidence; a publication-begin trace is not
+proof of completion. Preserve bounded owner-phase diagnostics through recovery
+without extending the measured deadline or warming away the required cold work.
 
 A progressing serial test partition can exhaust its job watchdog without a hung
 case. The Windows archive owner uses eight native serial execution partitions,

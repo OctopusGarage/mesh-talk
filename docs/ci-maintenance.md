@@ -88,6 +88,16 @@ This frontend unit precheck is conservative; Rust and browser-union coverage
 still need their owning evidence. Native execution, dependency resolution and
 published-asset verification cannot be replaced by parsing or stale build output.
 
+Use the existing package inventory's `frontendBuild` ownership when preparing
+Rust selectors. Core, integrations and MCP selections still require real target
+validation, but do not build frontend assets merely because Rust changed. Host
+selections must still prepare Tauri's `frontendDist` before selector discovery.
+
+Composed local gates must invoke shared stages through the same canonical command
+and full-mode environment. Normalize `FAST=0` in both full-preflight children so
+equivalent successful stages can reuse their verified receipts; do not weaken
+identity checks or mutate the caller's environment to manufacture a cache hit.
+
 Local feedback does not replace committed-candidate acceptance. Git documents
 that [hooks can be bypassed](https://git-scm.com/docs/githooks); web edits and other
 clients may not run them. Keep a compact authoritative remote check and necessary
@@ -309,6 +319,13 @@ Keep applicable documentation checks. Use workflow-level filters only when no
 required consumer will wait for their missing result. A lightweight selection or
 collector job must retain the required check identity and reject failed selection;
 it must not fabricate coverage or security results belonging to another app.
+Codecov provides a native [empty upload](https://github.com/codecov/codecov-cli#empty-upload)
+for diffs it classifies as ignored; never force it for an ineligible diff. Qualify
+the current-SHA provider result before relying on it. This does not replace real
+CodeQL analysis or establish that documentation cannot affect product inputs.
+GitHub evaluates [job conditions before matrix expansion](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idif):
+a skipped matrix job does not prove that every expanded required context exists.
+Inspect actual returned names and app IDs before narrowing protected work.
 Preserve complete main-commit verification required by release consumers even
 when a PR has a separately validated docs-only path.
 
@@ -327,6 +344,12 @@ formatting, source lint and dependency auditing on Ubuntu. Retain macOS/Windows
 execution when assertions exercise their native behavior. Count macOS jobs across
 all workflows against the account's actual concurrency allowance; moving one
 workflow's bottleneck into another workflow's queue is not an improvement.
+
+Use runner-owned scratch for native temporary files. Windows build/test jobs set
+`TEMP` and `TMP` from `RUNNER_TEMP` in an early step, matching the local preflight
+owner's explicit placement. Record old and selected paths; a different machine's
+faster result does not prove that disk placement caused a prior failure. Preserve
+durability, ordering and deadlines while qualifying the new hosted environment.
 
 Full Chromium uses eight macOS partitions and four each on Linux and Windows.
 Desktop browsers have independent per-OS admission limits of three; preserve
@@ -411,6 +434,12 @@ request identity, immutable control state and the lifetime of the actual task.
 Historical logs or a previously authenticated request do not prove that a live
 request has entered the required phase. Keep cancellation, task joining and
 cleanup correct on success, failure and panic.
+When key ordering determines the scenario, use deterministic noncolliding fixture
+identities and check actual signed keys or cursors; random IDs can exercise only
+the easier path. Preserve real signing, publication and receipt assertions.
+Keep commit, completed publication and recipient installation distinct. A
+post-timeout snapshot can block behind the publisher and cannot prove its state
+existed before the cutoff; record phases at the actual work owner.
 Use the owning register-before-check notification protocol for durable status;
 polling an in-memory flag can still compete with the work that must publish it.
 Match a fixture's executor to its requirement: preserve single-thread tests when
