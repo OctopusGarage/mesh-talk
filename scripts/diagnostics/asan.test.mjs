@@ -89,7 +89,13 @@ test("ASan workflow retains required name as strict full-union check with one ar
   assert.ok(workflow.includes(`cargo-nextest@${versions.nextest}`));
   assert.match(workflow, /name: asan-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}-shard-\$\{\{ matrix.shard \}\}/u);
   assert.match(workflow, /pattern: asan-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}-shard-\*/u);
-  assert.doesNotMatch(workflow, /continue-on-error|timeout-minutes|--exclude|--skip/u);
+  const storage = workflow.split(/^      - /mu).find(step => step.startsWith("name: Preserve runner storage measurements\n"));
+  assert.match(storage, /uses: actions\/upload-artifact@/u);
+  assert.match(storage, /name: runner-storage-/u);
+  // Only this auxiliary transport may fail; compilation, controls, execution,
+  // source-bound archives and the complete union remain mandatory.
+  const acceptance = workflow.replace(storage, storage.replace(/^        continue-on-error: true\n/mu, ""));
+  assert.doesNotMatch(acceptance, /continue-on-error|timeout-minutes|--exclude|--skip/u);
   const config = readFileSync(new URL("../../.config/nextest-asan.toml", import.meta.url), "utf8");
   assert.equal(config.match(/^nextest-version = "([^"]+)"$/mu)?.[1], versions.nextest);
   assert.match(config, /test-threads = 1/u); assert.match(config, /retries = 0/u);

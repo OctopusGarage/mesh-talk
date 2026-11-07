@@ -61,6 +61,7 @@ jobs:
       # A crash leaves a reproducer under fuzz/artifacts/<target>/ — keep it for triage.
       - name: Upload crash artifacts
         if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes

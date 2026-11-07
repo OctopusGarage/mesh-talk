@@ -59,6 +59,7 @@ jobs:
 
       - name: Preserve runner storage measurements
         if: always() && steps.runner_storage.outcome == 'success'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
@@ -206,6 +207,7 @@ jobs:
 
       - name: Preserve Linux native crash diagnostics
         if: always() && runner.os == 'Linux'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: native-crash-linux-${{ github.run_attempt }}
@@ -215,6 +217,7 @@ jobs:
 
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: test-timing-${{ matrix.os }}-${{ github.run_attempt }}

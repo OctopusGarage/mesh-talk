@@ -65,7 +65,11 @@ test("deep mutation samples use process-isolated tests with bounded execution", 
   assert.match(wrapper, /"--test-tool", "nextest"/);
   assert.match(wrapper, /"--cargo-test-arg=--profile=mutants"/);
   assert.match(wrapper, /"--", "--test-threads=4"/);
-  assert.doesNotMatch(workflow, /continue-on-error: true/);
+  const storage = workflow.split(/^      - /mu).find(step => step.startsWith("name: Preserve runner storage measurements\n"));
+  assert.match(storage, /uses: actions\/upload-artifact@/u);
+  assert.match(storage, /name: runner-storage-/u);
+  const acceptance = workflow.replace(storage, storage.replace(/^        continue-on-error: true\n/mu, ""));
+  assert.doesNotMatch(acceptance, /continue-on-error/u);
   assert.doesNotMatch(workflow, /cargo test --workspace/);
   assert.doesNotMatch(wrapper, /"--baseline", "skip"/);
   assert.match(workflow, /tool: cargo-mutants@27\.1\.0/);

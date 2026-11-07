@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,122 @@ import { versions } from "../ci/windows-coverage.mjs";
 
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
+
+test("browser and native dependency installation use the same Linux-only preparation", async () => {
+  const ui = await readFile(
+    new URL("../../.github/workflows/e2e-ui.yml", import.meta.url),
+    "utf8",
+  );
+  const native = await readFile(
+    new URL(
+      "../../.github/workflows/hidden-contacts-native.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const shards = await readFile(
+    new URL("../../.github/workflows/ui-shards.yml", import.meta.url),
+    "utf8",
+  );
+  let installers = 0;
+  for (const [name, workflow] of [
+    ["UI caller", ui],
+    ["reusable shards", shards],
+  ]) {
+    for (const section of workflow.split(/^  [a-z][\w-]*:\n/m).slice(1)) {
+      const install = section.indexOf("playwright install --with-deps");
+      if (install === -1) continue;
+      const fixedRunner = section.match(/^    runs-on: (.+)$/mu)?.[1].replace(/^['"]|['"]$/gu, "");
+      if (/^(?:macos|windows)-/u.test(fixedRunner ?? "")) {
+        assert.doesNotMatch(section, /name: Prepare Ubuntu archive source/u,
+          `${name}: a fixed non-Linux browser runner must not prepare APT`);
+        continue;
+      }
+      installers++;
+      const preparations = section.split(
+        /^      - name: Prepare Ubuntu archive source\n/m,
+      );
+      assert.equal(
+        preparations.length,
+        2,
+        `${name}: every browser installer needs exactly one guarded preparation`,
+      );
+      const step = preparations[1].split(/^      - /m)[0];
+      assert.match(step, /if: runner\.os == 'Linux'/);
+      assert.match(
+        step,
+        /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/,
+      );
+      assert.match(step, /\.\.\/scripts\/ci\/ubuntu-apt-source\.mjs/);
+      const prepare = section.indexOf("name: Prepare Ubuntu archive source");
+      const setupNode = section.indexOf("uses: actions/setup-node@");
+      assert.ok(
+        setupNode >= 0 && prepare > setupNode,
+        `${name}: establish Node before preparing APT`,
+      );
+      assert.ok(prepare < install, `${name}: prepare APT before the installer`);
+    }
+  }
+  assert.ok(installers > 0, "browser dependency installers must be discovered");
+  const nativePrepare = native.indexOf("name: Prepare Ubuntu archive source");
+  const nativeDependencies = native.indexOf("name: Linux native webview dependencies");
+  assert.ok(nativePrepare >= 0 && nativeDependencies >= 0 && nativePrepare < nativeDependencies);
+  assert.match(
+    native,
+    /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
+  );
+  for (const name of ["ci.yml", "mutants.yml"]) {
+    const workflow = await readFile(
+      new URL(`../../.github/workflows/${name}`, import.meta.url),
+      "utf8",
+    );
+    const prepare = workflow.indexOf("name: Prepare Ubuntu archive source");
+    const setupNode = workflow.indexOf("uses: actions/setup-node@");
+    const dependencies = workflow.indexOf("name: Install Tauri system dependencies");
+    assert.ok(
+      setupNode >= 0 && prepare > setupNode,
+      `${name} must establish the pinned Node before preparing APT`,
+    );
+    assert.ok(
+      dependencies >= 0 && prepare < dependencies,
+      `${name} must prepare APT before Linux dependency installation`,
+    );
+    assert.match(
+      workflow,
+      /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
+    );
+  }
+});
+
+test("only auxiliary diagnostic transport is optional; acceptance artifacts stay mandatory", () => {
+  const optional = {
+    "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
+    "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-"],
+    "sanitizers.yml": ["runner-storage-"],
+    "mutants.yml": ["runner-storage-"],
+    "hidden-contacts-native.yml": ["runner-storage-"],
+    "release.yml": ["runner-storage-"],
+    "e2e-ui.yml": ["merged-ui-", "webkit-diagnostics-"],
+    "ui-shards.yml": ["ui-failure-attachments-"],
+    "fuzz.yml": ["fuzz-crashes"],
+  };
+  const seen = [];
+  for (const file of readdirSync(new URL("../../.github/workflows/", import.meta.url)).filter(file => /\.ya?ml$/u.test(file))) {
+    for (const block of read(file).split(/^      - /m).filter(block => /uses: actions\/upload-artifact@/u.test(block))) {
+      const artifact = block.match(/^          name: (.+)$/mu)?.[1];
+      assert.ok(artifact, `${file}: upload must declare its artifact role`);
+      const prefix = optional[file]?.find(prefix => artifact.startsWith(prefix));
+      if (prefix) assert.match(block, /^        continue-on-error: true$/mu, `${file}: ${artifact}`);
+      else assert.doesNotMatch(block, /^        continue-on-error:/mu, `${file}: ${artifact} is mandatory`);
+      if (prefix) seen.push(`${file}:${prefix}`);
+    }
+  }
+  assert.deepEqual(seen.sort(), Object.entries(optional).flatMap(([file, prefixes]) => prefixes.map(prefix => `${file}:${prefix}`)).sort());
+  const diagnostics = step(read("check-health.yml"), "Diagnostic and release gate regressions (all platforms)");
+  assert.doesNotMatch(diagnostics, /continue-on-error/u);
+  assert.match(diagnostics, /--result tmp\/health-diagnostics\.json/u);
+  assert.doesNotMatch(step(read("ci.yml"), "Collect Linux native crash evidence and retire its storage"), /continue-on-error/u);
+});
 
 test("real compiler contracts do not compete for the native job's Cargo cache", () => {
   for (const [workflow, name, expected] of [
@@ -22,6 +139,14 @@ test("real compiler contracts do not compete for the native job's Cargo cache", 
     for (const fixture of expected) assert.ok(caller.includes(`scripts/ci/${fixture}.test.mjs`), `${workflow}: missing ${fixture}`);
     assert.doesNotMatch(caller, /continue-on-error|\|\| true|&\s*$/m);
   }
+});
+
+test("platform-exclusive probes stay in their native producer rather than universal local selection", () => {
+  const contracts = JSON.parse(readFileSync(new URL("../validation/validation.json", import.meta.url), "utf8")).contracts;
+  const ci = contracts.find(contract => contract.id === "ci-verification");
+  assert.ok(ci, "the CI decision owner must exist");
+  assert.ok(!ci.node.includes("scripts/ci/windows-native-deps.test.mjs"));
+  assert.match(step(read("windows-workspace.yml"), "Validate archive and coverage contracts"), /scripts\/ci\/windows-native-deps\.test\.mjs/u);
 });
 
 test("heavy hosted Linux builds reclaim only unused image SDKs before cache expansion", () => {

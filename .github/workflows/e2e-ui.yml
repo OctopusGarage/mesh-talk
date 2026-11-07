@@ -173,6 +173,7 @@ jobs:
           DESKTOP_RESULT: ${{ needs.desktop.result }}
         run: node ../scripts/evals/chromium-evidence.mjs render-artifacts ../target/ui-reports ../target/ui-report-blobs
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         if: always() && hashFiles('frontend/playwright-report/**') != ''
         with:
           name: merged-ui-${{ github.run_attempt }}
@@ -245,6 +246,7 @@ jobs:
           retention-days: 14
       - name: Preserve interrupted partition diagnostics
         if: failure() || cancelled()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: webkit-diagnostics-${{ matrix.shard }}-${{ github.run_attempt }}

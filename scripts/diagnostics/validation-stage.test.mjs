@@ -418,6 +418,22 @@ test("stage CLI publishes structured launch and reused results outside receipt i
   assert.deepEqual([...new Set((await readFile(probes, "utf8")).trim().split("\n"))].sort(), ["cargo", "npm", "rustc"]);
 });
 
+test("stage CLI rejects local result publication failure after a successful child", async t => {
+  const f = await fixture(t);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const { env } = toolVersionFixture(f.root, { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined });
+  // The child creates artifact as a file, so it cannot become a result directory.
+  // This is deterministic on every platform, unlike chmod-based permissions.
+  const result = spawnSync(process.execPath, [cli, "result-write-failure", "--result", path.join(f.root, "artifact/result.json"), "--", ...f.command], {
+    cwd: f.root, env, encoding: "utf8", timeout: 60_000,
+  });
+  assert.equal(result.error, undefined, result.stdout + result.stderr);
+  assert.notEqual(result.status, 0, "successful execution cannot hide failed local publication");
+  assert.equal(await f.count(), 1, "the actual child completed before result publication failed");
+  assert.equal(await readFile(path.join(f.root, "artifact"), "utf8"), "measured");
+  assert.match(result.stderr, /artifact/u);
+});
+
 test("successful command with changed source is invalidated rather than reported as a test failure", async t => {
   const f = await fixture(t);
   const result = await f.run({ command: [process.execPath, "-e", "require('node:fs').writeFileSync('source','changed while validating')"] });

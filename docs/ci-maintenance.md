@@ -284,6 +284,17 @@ unnecessary frontend rebuilds, and container layers that copy source before
 installing locked dependencies. A bundler may intentionally rebuild quickly;
 judge the observed cost instead of requiring it to behave like Cargo's no-op build.
 
+Auxiliary diagnostic transport must not decide test acceptance or skip later
+independent checks after an artifact-service outage. Keep test execution, local
+result publication and required cleanup fatal; only the reviewed upload step is
+best-effort. The CI policy owner enumerates these roles: Health logs and raw
+coverage copies, storage measurements, crash/timing diagnostics, optional HTML
+and failure attachments. Source-bound coverage maps, partition archives/unions,
+native/backend and release/security evidence stay mandatory. A missing automatic
+consumer alone does not make an artifact optional: authoritative human reports
+and manual diagnostic deliverables can still require it. Do not retry tests to
+repair transport, or suppress the original failed attempt.
+
 An artifact used as acceptance evidence has a stronger contract. Its consumer
 must validate the actual tested head or merge source, workflow/run/attempt, platform and architecture,
 relevant toolchain/features, expected inventory and content digests required by
@@ -606,6 +617,12 @@ removing duplicate OS executions. Retain real browser/native matrices and native
 diagnostic fixtures; mocked platform branches do not supply those contracts.
 Keep Node/filesystem portability requirements in their owning diagnostics rather
 than duplicating the entire frontend unit suite incidentally.
+
+Keep platform-exclusive probes in the required native producer that can execute
+them. Universal local selections must not include a file whose entire suite is
+skipped on other hosts; preserve the nonempty-test guard and explicit native
+escalation instead. Keep workflow wiring assertions in the cheap CI policy
+owner, separate from the underlying tool's filesystem/compiler regressions.
 
 After pushing, observe the actual hosted candidate until the relevant jobs finish.
 Compare before and after setup time, test time, required-check latency and runner

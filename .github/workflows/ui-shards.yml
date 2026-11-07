@@ -153,6 +153,7 @@ jobs:
       # Preserve partial attachments when interruption prevents a complete blob.
       - name: Preserve raw attachments after unsuccessful UI execution
         if: always() && steps.ui.outcome != 'success' && hashFiles('frontend/test-results/**') != ''
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ui-failure-attachments-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
