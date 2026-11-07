@@ -1424,14 +1424,19 @@ before mutations or plaintext release. Frontend linked coordinators project
 accepted records into the owning draft, reception, pack and avatar stores; they
 never own another network synchronization loop. Pack validation remains in
 `pack.ts`; pack storage is namespaced by local owner and cryptographic account.
-Pack storage's version-two sparse numeric pending index selects pending records
-before cloning archived/image payloads. Upgrade backfill and every subsequent
+Pack storage's sparse numeric pending index selects pending records before
+cloning archived/image payloads. Its version-three catalog sidecar contains only
+IDs, labels and appearance metadata; startup and compact summaries do not hydrate
+the complete library. Upgrade backfill and every subsequent
 row/index update share their transaction; a failed commit cannot acknowledge an
 edit. Public and legacy namespaces preserve their existing records. Migration
 may scan old rows once; quiet pending reads must not enumerate the full library.
 Receipt projections drain available pages in bounded batches and yield between
 batches; owner retirement cancels queued continuation without claiming mutation
-completion. Initial/full library loading still enumerates assets; indexed pending lookup does not.
+completion. Full payload reads are scoped point lookups; view owners retain only required
+payloads, and the selected theme has its own readiness owner. Sequential native
+sticker-source preparation uses transient reads and compact registration receipts,
+not a renderer-wide image cache. See [pack loading](CUSTOMIZATION_PACKS.md#runtime-loading).
 `settings/shared.rs` owns the allowlist mapping of portable settings onto existing
 per-key account preferences. Device paths, system permissions, autostart and
 local-agent grants stay outside the replicated allowlist.

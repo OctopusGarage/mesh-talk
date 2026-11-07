@@ -272,6 +272,13 @@ and stale-progress controls in the
 [mailbox owner](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
 qualify the actual selection identities, write commits and eventual completion.
 
+Pending work in one lane is not successful progress in another. A failed exchange
+must retain demand and a future retry deadline rather than inherit a continuation
+from unrelated favorites or documents. Ordinary notifications cannot bypass that
+deadline. The real, tick-disabled [account history failure regressions](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+combine favorites failure with authenticated EOF or negotiation timeout, then
+assert quiet backoff and eventual retained-work recovery.
+
 Review fairness across successive turns, not only the batch size. Use the existing
 cursor, coalescing and admission owners; distinguish independent lanes where
 needed. Failed publication must not indefinitely prevent later eligible work.
@@ -629,6 +636,11 @@ Keep the dialog/controller owner stable while scoped imports settle or fail; tes
 close, owner replacement, retry and eventual control focus. The [help reader](../frontend/src/features/help/HelpDialog.test.ts)
 and [settings page](../frontend/src/features/chat/settings/SettingsPage.test.ts)
 regressions exercise these lifetimes without weakening mutation ownership.
+A metadata catalog must exclude image/archive payloads, including snapshots held
+by long-lived subscriptions and registration receipts. Shared hydration qualifies
+each reader before queued disk admission, and a canceled observer cannot release
+an admitted worker slot. The [pack demand regressions](../frontend/src/lib/packDemand.test.ts)
+cover queued retirement, surviving shared demand and finite admission.
 
 A bounded work item can still be unnecessary work. Classify demand from the
 owning source before constructing a derived index; stale queue entries alone

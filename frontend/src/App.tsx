@@ -46,7 +46,7 @@ export default function App() {
   const runtimeRun = useChat((s) => s.runEpoch);
   const runtimeIdentity = useChat((s) => s.identityEpoch);
   const packScope = usePacks((s) => s.scope);
-  const packsLoaded = usePacks((s) => s.loaded);
+  const selectedTheme = usePacks((s) => s.selectedTheme);
   const preparedThemeId = usePacks((s) => s.preparedThemeId);
   const packs = usePacks((s) => s.packs);
   const theme = useTheme((s) => s.theme);
@@ -54,7 +54,7 @@ export default function App() {
   const wallpaperSelections = useTheme((s) => s.packWallpaperIds);
   const presentationAcknowledged = useRef(false);
   const selectedThemePrepared =
-    packsLoaded || preparedThemeId === theme || ALL_THEMES.includes(theme);
+    preparedThemeId === theme || ALL_THEMES.includes(theme);
   const appearanceReady = Boolean(
     owner &&
     !locked &&
@@ -80,8 +80,7 @@ export default function App() {
         (!user ||
           locked ||
           (usePacks.getState().scope === packScope &&
-            (usePacks.getState().loaded ||
-              usePacks.getState().preparedThemeId === theme ||
+            (usePacks.getState().preparedThemeId === theme ||
               ALL_THEMES.includes(theme)) &&
             usePacks.getState().packs === packs &&
             useChat.getState().runEpoch === runtimeRun &&
@@ -121,6 +120,7 @@ export default function App() {
     selectedThemePrepared,
     packScope,
     packs,
+    selectedTheme,
     theme,
     wallpaperEnabled,
     wallpaperSelections,

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { parsePack, type CustomizationPack } from "@/lib/pack";
+import { parsePack, type PackBase, type CustomizationPack } from "@/lib/pack";
 import { verifyPackImages } from "@/lib/packImages";
 import type { DocumentVersion } from "@/lib/api/accountDocuments";
 import { captureRuntimeOwner } from "./ownership";
@@ -7,6 +7,7 @@ import { captureRuntimeOwner } from "./ownership";
 const LEGACY_DB = "mesh-talk-customization";
 const PUBLIC_DB = "mesh-talk-customization-bundled-v2";
 const STORE = "packs";
+const CATALOG = "catalog";
 const PENDING_INDEX = "pendingSync";
 const BUNDLED_IDS = (import.meta.env.VITE_BUNDLED_PACK_IDS as string)
   .split(",")
@@ -31,7 +32,77 @@ export interface StoredPack {
   pending: boolean;
   version: DocumentVersion | null;
 }
+/** This catalog never owns image payloads or archives. */
+export type PackCatalogEntry = PackBase &
+  (
+    | {
+        kind: "avatar";
+        category: "personal" | "group";
+        fit: "cover" | "contain";
+        avatars: { label: string }[];
+      }
+    | {
+        kind: "sticker";
+        stickers: { id: string; label: string; fallback: string }[];
+      }
+    | {
+        kind: "theme";
+        base: "light" | "dark";
+        colors: Record<string, string>;
+        wallpapers?: { id: string; title: string }[];
+      }
+  );
+export function packMetadata(pack: CustomizationPack): PackCatalogEntry {
+  const base = {
+    format: pack.format,
+    id: pack.id,
+    version: pack.version,
+    name: pack.name,
+  };
+  if (pack.kind === "avatar")
+    return {
+      ...base,
+      kind: pack.kind,
+      category: pack.category,
+      fit: pack.fit,
+      avatars: pack.avatars.map(({ label }) => ({ label })),
+    };
+  if (pack.kind === "sticker")
+    return {
+      ...base,
+      kind: pack.kind,
+      stickers: pack.stickers.map(({ id, label, fallback }) => ({
+        id,
+        label,
+        fallback,
+      })),
+    };
+  return {
+    ...base,
+    kind: pack.kind,
+    base: pack.base,
+    colors: { ...pack.colors },
+    ...(pack.wallpapers
+      ? { wallpapers: pack.wallpapers.map(({ id, title }) => ({ id, title })) }
+      : {}),
+  };
+}
+export type PackCatalogRow = Omit<StoredPack, "archive" | "pack"> & {
+  pack: PackCatalogEntry | null;
+};
+function catalogRow(row: StoredPack): PackCatalogRow {
+  return {
+    id: row.id,
+    pack: row.pack ? packMetadata(row.pack) : null,
+    sequence: row.sequence,
+    pending: row.pending,
+    version: row.version,
+  };
+}
 export interface PackStorage {
+  publicCatalog?(): Promise<PackCatalogEntry[]>;
+  catalog?(scope: PackScope): Promise<PackCatalogRow[]>;
+  publicGet?(id: string): Promise<CustomizationPack | undefined>;
   publicPacks(): Promise<CustomizationPack[]>;
   legacyPacks(): Promise<CustomizationPack[]>;
   list(scope: PackScope): Promise<StoredPack[]>;
@@ -45,8 +116,16 @@ export interface PackStorage {
 }
 interface PacksState {
   scope: PackScope | null;
-  packs: CustomizationPack[];
+  packs: PackCatalogEntry[];
   loaded: boolean;
+  selectedTheme: CustomizationPack | undefined;
+  readPack(
+    id: string,
+    current?: () => boolean,
+  ): Promise<CustomizationPack | undefined>;
+  prepareTheme(id: string): Promise<boolean>;
+  linkedVersion(id: string): DocumentVersion | null;
+  contentToken(id: string): string;
   /** Selected point lookup settled for this exact scope, before full enumeration. */
   preparedThemeId: string | null;
   setScope(
@@ -61,6 +140,10 @@ interface PacksState {
   ): Promise<CustomizationPack>;
   remove(id: string): Promise<void>;
   pendingChanges(): Promise<StoredPack[]>;
+  forEachPending(
+    visit: (row: StoredPack) => Promise<void>,
+    current?: () => boolean,
+  ): Promise<void>;
   acknowledge(
     id: string,
     sequence: number,
@@ -74,7 +157,7 @@ interface PacksState {
   ): Promise<boolean>;
   legacyPacks(): Promise<CustomizationPack[]>;
 }
-function ordered(packs: CustomizationPack[]) {
+function ordered(packs: PackCatalogEntry[]) {
   return packs.sort(
     (a, b) =>
       (bundledOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
@@ -83,7 +166,7 @@ function ordered(packs: CustomizationPack[]) {
   );
 }
 function conflict(
-  previous: CustomizationPack | undefined | null,
+  previous: PackCatalogEntry | undefined | null,
   next: CustomizationPack,
 ) {
   return (
@@ -117,7 +200,7 @@ function database(
   existingOnly = false,
 ): Promise<IDBDatabase | null> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(name, existingOnly ? undefined : 2);
+    const request = indexedDB.open(name, existingOnly ? undefined : 3);
     let absent = false;
     request.onupgradeneeded = () => {
       if (existingOnly) {
@@ -127,6 +210,23 @@ function database(
         const store = request.result.objectStoreNames.contains(STORE)
           ? request.transaction!.objectStore(STORE)
           : request.result.createObjectStore(STORE, { keyPath: "id" });
+        if (!request.result.objectStoreNames.contains(CATALOG)) {
+          const catalog = request.result.createObjectStore(CATALOG, {
+            keyPath: "id",
+          });
+          const cursor = store.openCursor();
+          cursor.onsuccess = () => {
+            const row = cursor.result;
+            if (!row) return;
+            const value = row.value;
+            catalog.put(
+              name.startsWith("mesh-talk-customization-account:")
+                ? catalogRow(value)
+                : packMetadata(value),
+            );
+            row.continue();
+          };
+        }
         if (
           name.startsWith("mesh-talk-customization-account:") &&
           !store.indexNames.contains(PENDING_INDEX)
@@ -151,15 +251,19 @@ function database(
     request.onsuccess = () => resolve(request.result);
   });
 }
-async function all<T>(name: string, existingOnly = false): Promise<T[]> {
+async function all<T>(
+  name: string,
+  existingOnly = false,
+  storeName = STORE,
+): Promise<T[]> {
   const db = await database(name, existingOnly);
   if (!db) return [];
   try {
-    if (!db.objectStoreNames.contains(STORE)) return [];
+    if (!db.objectStoreNames.contains(storeName)) return [];
     return await new Promise<T[]>((resolve, reject) => {
       const request = db
-        .transaction(STORE, "readonly")
-        .objectStore(STORE)
+        .transaction(storeName, "readonly")
+        .objectStore(storeName)
         .getAll();
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -177,7 +281,7 @@ async function update<T extends { id: string }>(
   if (!db) throw new Error("Pack storage unavailable");
   try {
     return await new Promise<T | undefined>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readwrite");
+      const tx = db.transaction([STORE, CATALOG], "readwrite");
       const store = tx.objectStore(STORE);
       const request = store.get(id);
       let result: T | undefined;
@@ -195,6 +299,11 @@ async function update<T extends { id: string }>(
               else delete value.pendingSync;
             }
             store.put(value);
+            tx.objectStore(CATALOG).put(
+              name.startsWith("mesh-talk-customization-account:")
+                ? catalogRow(value as unknown as StoredPack)
+                : packMetadata(value as unknown as CustomizationPack),
+            );
           }
         } catch (error) {
           failure = error;
@@ -209,9 +318,24 @@ async function update<T extends { id: string }>(
     db.close();
   }
 }
-const storage: PackStorage = {
-  async publicPacks() {
-    const existing = await all<CustomizationPack>(PUBLIC_DB);
+async function point<T>(name: string, id: string): Promise<T | undefined> {
+  const db = await database(name);
+  if (!db) throw new Error("Pack storage unavailable");
+  try {
+    return await new Promise<T | undefined>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const request = tx.objectStore(STORE).get(id);
+      tx.oncomplete = () => resolve(request.result as T | undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+export const indexedPackStorage: PackStorage = {
+  async publicCatalog() {
+    const existing = await all<PackCatalogEntry>(PUBLIC_DB, false, CATALOG);
     const present = new Set(existing.map((pack) => pack.id));
     for (const id of BUNDLED_IDS) {
       if (present.has(id)) continue;
@@ -232,8 +356,11 @@ const storage: PackStorage = {
         console.warn(`Could not load bundled pack ${id}; will retry`, error);
       }
     }
-    return all<CustomizationPack>(PUBLIC_DB);
+    return all<PackCatalogEntry>(PUBLIC_DB, false, CATALOG);
   },
+  publicPacks: () => all<CustomizationPack>(PUBLIC_DB),
+  catalog: (scope) => all<PackCatalogRow>(dbName(scope), false, CATALOG),
+  publicGet: (id) => point<CustomizationPack>(PUBLIC_DB, id),
   async legacyPacks() {
     return (await all<CustomizationPack>(LEGACY_DB, true)).filter(
       (pack) => !isBundledPack(pack.id),
@@ -246,7 +373,7 @@ const storage: PackStorage = {
     try {
       return await new Promise<StoredPack[]>((resolve, reject) => {
         const tx = db.transaction(STORE, "readonly");
-        const request = tx.objectStore(STORE).index(PENDING_INDEX).getAll(1);
+        const request = tx.objectStore(STORE).index(PENDING_INDEX).getAll(1, 1);
         tx.oncomplete = () => resolve(request.result as StoredPack[]);
         tx.onerror = () => reject(tx.error);
         tx.onabort = () => reject(tx.error);
@@ -255,23 +382,7 @@ const storage: PackStorage = {
       db.close();
     }
   },
-  async get(scope, id) {
-    const db = await database(dbName(scope));
-    if (!db) return undefined;
-    try {
-      return await new Promise<StoredPack | undefined>((resolve, reject) => {
-        const request = db
-          .transaction(STORE, "readonly")
-          .objectStore(STORE)
-          .get(id);
-        request.onsuccess = () =>
-          resolve(request.result as StoredPack | undefined);
-        request.onerror = () => reject(request.error);
-      });
-    } finally {
-      db.close();
-    }
-  },
+  get: (scope, id) => point<StoredPack>(dbName(scope), id),
   update: (scope, id, mutate) => update<StoredPack>(dbName(scope), id, mutate),
 };
 
@@ -282,8 +393,38 @@ export function createPacksStore(
 ) {
   let epoch = 0;
   let loading: Promise<void> | undefined;
+  const reads = new Map<
+    string,
+    {
+      task: Promise<CustomizationPack | undefined>;
+      demands: Set<() => boolean>;
+    }
+  >();
+  // At most two full rows are cloned at once (24 MiB legal image budget each).
+  // Waiters share same-pack work, and retirement is checked before disk admission.
+  let reading = 0;
+  const waiting: Array<() => void> = [];
+  const admitted = async <T>(work: () => Promise<T>): Promise<T> => {
+    if (reading >= 2) {
+      if (waiting.length >= 64)
+        throw new Error(
+          "Pack read capacity reached; retry when pending reads finish",
+        );
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    } else reading++;
+    try {
+      return await work();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else reading--;
+    }
+  };
   const busy = new Map<string, symbol>();
-  let publicSnapshot: CustomizationPack[] = [];
+  const revisions = new Map<string, number>();
+  const invalidate = (id: string) =>
+    revisions.set(id, (revisions.get(id) ?? 0) + 1);
+  let publicSnapshot: PackCatalogEntry[] = [];
   return create<PacksState>((set, get) => {
     const capture = () => {
       const scope = get().scope;
@@ -296,62 +437,62 @@ export function createPacksStore(
       };
       return { scope, current, requireCurrent };
     };
+    let rowsSnapshot: PackCatalogRow[] = [];
+    let themeRequest = 0;
+    let desiredThemeId: string | undefined;
+    let themeLoading: { key: string; task: Promise<boolean> } | undefined;
+    let catalogRequest = 0;
+    let publicLoading: Promise<PackCatalogEntry[]> | undefined;
     const reload = async (selectedThemeId?: string) => {
       const lease = capture();
-      // Only an authenticated account scope can restore private appearance. Read
-      // its selected theme without cloning every unrelated gallery asset first.
-      const publicRead = io.publicPacks().then((bundled) => {
-        if (lease.current()) publicSnapshot = bundled;
-        return bundled;
-      });
-      const selected =
-        lease.scope && selectedThemeId && io.get
-          ? io
-              .get(lease.scope, selectedThemeId)
-              .then(async (row) => {
-                // An absent private row needs the public snapshot to establish
-                // a bundled selection or its known plain fallback. A private
-                // row (including a tombstone) settles without unrelated assets.
-                if (!row) await publicRead;
-                if (!lease.current() || get().loaded) return;
-                const bundled = publicSnapshot.filter(
-                  (pack) => pack.id !== row?.id,
-                );
-                set({
-                  packs: ordered([
-                    ...bundled,
-                    ...(row?.pack?.kind === "theme" ? [row.pack] : []),
-                  ]),
-                  preparedThemeId: selectedThemeId,
-                });
-              })
-              .catch((error) => {
-                console.warn(
-                  "Could not restore selected theme; loading library",
-                  error,
-                );
-              })
-          : Promise.resolve();
+      const request = ++catalogRequest;
+      const publicRead = io.publicCatalog
+        ? io.publicCatalog()
+        : io.publicPacks().then((packs) => packs.map(packMetadata));
+      publicLoading = publicRead;
+      const selectedRead = selectedThemeId
+        ? get().prepareTheme(selectedThemeId)
+        : Promise.resolve();
       const [bundled, rows] = await Promise.all([
         publicRead,
-        lease.scope ? io.list(lease.scope) : Promise.resolve([]),
-        selected,
+        lease.scope
+          ? io.catalog
+            ? io.catalog(lease.scope)
+            : io.list(lease.scope).then((rows) => rows.map(catalogRow))
+          : Promise.resolve([]),
+        selectedRead,
       ]);
-      if (!lease.current()) return;
+      if (!lease.current() || request !== catalogRequest) return;
+      const previous = new Map(
+        get().packs.map((pack) => [
+          pack.id,
+          { pack, token: get().contentToken(pack.id) },
+        ]),
+      );
       publicSnapshot = bundled;
+      rowsSnapshot = rows;
       const overrides = new Set(rows.map((row) => row.id));
       set({
-        packs: ordered([
-          ...bundled.filter((pack) => !overrides.has(pack.id)),
-          ...rows.flatMap((row) => (row.pack ? [row.pack] : [])),
-        ]),
+        packs: ordered(
+          [
+            ...publicSnapshot.filter((pack) => !overrides.has(pack.id)),
+            ...rows.flatMap((row) => (row.pack ? [row.pack] : [])),
+          ].map((pack) => {
+            const old = previous.get(pack.id);
+            return old?.token === get().contentToken(pack.id) ? old.pack : pack;
+          }),
+        ),
         loaded: true,
       });
+      const themeId = selectedThemeId ?? desiredThemeId;
+      if (!selectedThemeId && themeId) await get().prepareTheme(themeId);
+      await selectedRead;
     };
     return {
       scope: null,
       packs: [],
       loaded: false,
+      selectedTheme: undefined,
       preparedThemeId: null,
       setScope(owner, account, session) {
         const previous = get().scope;
@@ -365,22 +506,151 @@ export function createPacksStore(
         epoch++;
         loading = undefined;
         busy.clear();
+        rowsSnapshot = [];
+        revisions.clear();
+        desiredThemeId = undefined;
+        themeLoading = undefined;
+        themeRequest++;
         set({
           scope: owner && account ? { owner, account, session } : null,
           packs: ordered(publicSnapshot.slice()),
           loaded: false,
+          selectedTheme: undefined,
           preparedThemeId: null,
         });
       },
       async load(selectedThemeId) {
         if (loading) return loading;
-        if (get().loaded) return;
+        if (get().loaded) {
+          if (selectedThemeId && get().preparedThemeId !== selectedThemeId)
+            await get().prepareTheme(selectedThemeId);
+          return;
+        }
         const task = reload(selectedThemeId);
         loading = task;
         try {
           await task;
         } finally {
           if (loading === task) loading = undefined;
+        }
+      },
+      contentToken(id) {
+        const row = rowsSnapshot.find((row) => row.id === id);
+        return JSON.stringify(
+          row
+            ? [id, row.sequence, row.version, Boolean(row.pack)]
+            : [
+                id,
+                "public",
+                get().packs.find((pack) => pack.id === id)?.version,
+              ],
+        );
+      },
+      linkedVersion(id) {
+        const row = rowsSnapshot.find((row) => row.id === id);
+        return row && !row.pending ? row.version : null;
+      },
+      async readPack(id, current) {
+        const lease = capture();
+        const descriptor = get().packs.find((pack) => pack.id === id);
+        const revision = revisions.get(id);
+        const wasLoaded = get().loaded;
+        if (wasLoaded && !descriptor) return undefined;
+        // No inactive cache: callers own only the visible payload. Every read is
+        // fenced against deletion/replacement as well as account retirement.
+        const key = JSON.stringify([
+          epoch,
+          id,
+          revision,
+          get().contentToken(id),
+        ]);
+        const demand = () => lease.current() && (!current || current());
+        const existing = reads.get(key);
+        if (existing) {
+          if (existing.demands.size >= 64)
+            throw new Error(
+              "Pack reader capacity reached; retry when pending reads finish",
+            );
+          existing.demands.add(demand);
+          try {
+            const pack = await existing.task;
+            return demand() ? pack : undefined;
+          } finally {
+            existing.demands.delete(demand);
+          }
+        }
+        const demands = new Set([demand]);
+        const task = admitted(async () => {
+          if (
+            ![...demands].some((needed) => needed()) ||
+            !lease.current() ||
+            revisions.get(id) !== revision
+          )
+            return undefined;
+          const row = lease.scope
+            ? io.get
+              ? await io.get(lease.scope, id)
+              : (await io.list(lease.scope)).find((row) => row.id === id)
+            : undefined;
+          if (!row && publicLoading) await publicLoading;
+          const pack = row
+            ? (row.pack ?? undefined)
+            : io.publicGet
+              ? await io.publicGet(id)
+              : (await io.publicPacks()).find((pack) => pack.id === id);
+          return lease.current() &&
+            revisions.get(id) === revision &&
+            (!wasLoaded ||
+              get().packs.find((pack) => pack.id === id) === descriptor)
+            ? pack
+            : undefined;
+        });
+        const flight = { task, demands };
+        reads.set(key, flight);
+        try {
+          const pack = await task;
+          return demand() ? pack : undefined;
+        } finally {
+          demands.delete(demand);
+          if (reads.get(key) === flight) reads.delete(key);
+        }
+      },
+      async prepareTheme(id) {
+        const lease = capture();
+        desiredThemeId = id;
+        const revision = revisions.get(id);
+        const key = JSON.stringify([
+          epoch,
+          id,
+          revision,
+          get().contentToken(id),
+        ]);
+        if (themeLoading?.key === key) return themeLoading.task;
+        const request = ++themeRequest;
+        const task = (async () => {
+          const pack = ["dark", "light", "oled"].includes(id)
+            ? undefined
+            : await get().readPack(
+                id,
+                () => lease.current() && request === themeRequest,
+              );
+          if (
+            !lease.current() ||
+            request !== themeRequest ||
+            revisions.get(id) !== revision
+          )
+            return false;
+          set({
+            selectedTheme: pack?.kind === "theme" ? pack : undefined,
+            preparedThemeId: id,
+          });
+          return true;
+        })();
+        themeLoading = { key, task };
+        try {
+          return await task;
+        } finally {
+          if (themeLoading?.task === task) themeLoading = undefined;
         }
       },
       async install(bytes, requirePack) {
@@ -390,6 +660,7 @@ export function createPacksStore(
         requirePack?.(pack);
         const token = Symbol();
         busy.set(pack.id, token);
+        invalidate(pack.id);
         try {
           await get().load();
           lease.requireCurrent();
@@ -428,6 +699,7 @@ export function createPacksStore(
         if (!lease.scope) throw new Error("Account identity is not ready");
         const token = Symbol();
         busy.set(id, token);
+        invalidate(id);
         try {
           await io.update(lease.scope, id, (previous) => {
             lease.requireCurrent();
@@ -448,6 +720,24 @@ export function createPacksStore(
           if (busy.get(id) === token) busy.delete(id);
         }
       },
+      async forEachPending(visit, current = () => true) {
+        const lease = capture();
+        if (!lease.scope) return;
+        // Select only compact metadata first. A failed publication can be caught
+        // by its visitor so a failed first ID never pins later pending edits.
+        const entries = io.catalog
+          ? await io.catalog(lease.scope)
+          : (await io.list(lease.scope)).map(catalogRow);
+        for (const entry of entries) {
+          if (!lease.current() || !current()) return;
+          if (!entry.pending || busy.has(entry.id)) continue;
+          const row = io.get
+            ? await io.get(lease.scope, entry.id)
+            : (await io.list(lease.scope)).find((row) => row.id === entry.id);
+          if (!lease.current()) return;
+          if (current() && row?.pending && !busy.has(row.id)) await visit(row);
+        }
+      },
       async pendingChanges() {
         const lease = capture();
         if (!lease.scope) return [];
@@ -461,7 +751,7 @@ export function createPacksStore(
       async acknowledge(id, sequence, version) {
         const lease = capture();
         if (!lease.scope) return;
-        await io.update(lease.scope, id, (previous) => {
+        const result = await io.update(lease.scope, id, (previous) => {
           if (
             !lease.current() ||
             !previous ||
@@ -471,6 +761,10 @@ export function createPacksStore(
             return undefined;
           return { ...previous, pending: false, version };
         });
+        if (result && lease.current())
+          rowsSnapshot = rowsSnapshot.map((row) =>
+            row.id === id ? catalogRow(result) : row,
+          );
       },
       async applyLinked(id, bytes, version, current) {
         const lease = capture();
@@ -482,6 +776,7 @@ export function createPacksStore(
           throw new Error("Linked library ID mismatch");
         if (pack) await verifyPackImages(pack);
         if (!lease.current() || !current() || busy.has(id)) return false;
+        invalidate(id);
         let applied = false;
         let retained = false;
         await io.update(lease.scope, id, (previous) => {
@@ -519,10 +814,11 @@ export function createPacksStore(
   });
 }
 export const usePacks = createPacksStore(
-  storage,
+  indexedPackStorage,
   () => captureRuntimeOwner().current,
 );
 export function installedTheme(id: string) {
-  const pack = usePacks.getState().packs.find((item) => item.id === id);
+  const state = usePacks.getState();
+  const pack = state.selectedTheme?.id === id ? state.selectedTheme : undefined;
   return pack?.kind === "theme" ? pack : undefined;
 }

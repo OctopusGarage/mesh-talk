@@ -74,6 +74,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    small active window; evict inactive payloads and load originals only on demand.
    Closed feature imports must not eagerly load their data through another caller;
    defer the producer as well as its component, with scoped cancellation and retry.
+   Library catalogs and background registration receipts must not retain image
+   URLs or archives. Scope point reads to content revisions, bound concurrent
+   hydration and release inactive payloads; readiness belongs to the selected asset.
    Compressed file size is not decoded image memory. Avoid keeping archives,
    base64 strings, Blobs and decoded originals together without a measured need.
 5. **Write only durable changes.** No-op reads/heartbeats must not rewrite logs,

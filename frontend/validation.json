@@ -240,7 +240,9 @@
         "frontend/src/store/avatars.ts",
         "frontend/src/store/avatars.test.ts",
         "frontend/src/store/packs.ts",
-        "frontend/e2e/customization-pending-storage.spec.ts"
+        "frontend/e2e/customization-pending-storage.spec.ts",
+        "frontend/e2e/pack-storage.spec.ts",
+        "docs/CUSTOMIZATION_PACKS.md"
       ],
       "frontend": [
         "src/lib/linkedAvatarOverrides.test.ts",
@@ -267,6 +269,10 @@
           {
             "name": "Pending customization lookup selects indexed durable metadata before asset cloning; schema migration and row/index writes are atomic and failed acknowledgment cannot lose pending edits or tombstones.",
             "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Catalog and payload updates commit atomically; quiet catalog and unchanged linked-version reads do not hydrate archives, and pending publication streams one payload without losing failure fairness or exact-sequence acknowledgment.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#runtime-loading"
           }
         ]
       },
@@ -296,7 +302,10 @@
         "frontend/src/lib/initialPresentation.ts",
         "frontend/src/lib/initialPresentation.test.ts",
         "frontend/src/lib/api/window.ts",
-        "frontend/e2e/conversation-wallpaper.spec.ts"
+        "frontend/e2e/conversation-wallpaper.spec.ts",
+        "frontend/src/lib/usePack.ts",
+        "frontend/src/lib/usePack.test.ts",
+        "frontend/src/lib/packDemand.test.ts"
       ],
       "frontend": [
         "src/store/packs.test.ts",
@@ -305,7 +314,9 @@
         "src/lib/theme-linked.test.ts",
         "src/store/chat.test.ts",
         "src/lib/initialPresentation.test.ts",
-        "src/store/auth.test.ts"
+        "src/store/auth.test.ts",
+        "src/lib/usePack.test.ts",
+        "src/lib/packDemand.test.ts"
       ],
       "capability": {
         "summary": "Restore selected private appearance from a verified account scope before unrelated gallery loading and retain it through transient runtime readiness changes.",
@@ -318,6 +329,10 @@
           {
             "name": "Authenticated appearance starts before lazy chat; initial native acknowledgement waits for the matching selected-theme preparation, decoded selected image and committed safe surface. Unrelated gallery enumeration cannot block a prepared theme; locked or retired account assets cannot paint.",
             "reference": "docs/ARCHITECTURE.md#initial-native-presentation"
+          },
+          {
+            "name": "The image-free catalog is distinct from prepared assets. Shared reads have finite admission, retiring queued observers start no work without surviving demand, and local appearance edits remain publishable while remote assets hydrate.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#runtime-loading"
           }
         ]
       },
@@ -2637,12 +2652,17 @@
       "paths": [
         "frontend/e2e/packs.spec.ts",
         "frontend/src/store/packs.ts",
-        "frontend/e2e/customization-pending-storage.spec.ts"
+        "frontend/e2e/customization-pending-storage.spec.ts",
+        "frontend/e2e/pack-storage.spec.ts",
+        "frontend/src/lib/usePack.ts",
+        "frontend/src/lib/packDemand.test.ts"
       ],
       "browser": [
         "e2e/packs.spec.ts",
-        "e2e/customization-pending-storage.spec.ts"
-      ]
+        "e2e/customization-pending-storage.spec.ts",
+        "e2e/pack-storage.spec.ts"
+      ],
+      "native": ["host"]
     },
     {
       "id": "frontend-packs-empty-acceptance",
@@ -2661,7 +2681,9 @@
         "frontend/e2e/helpers/packs.ts",
         "frontend/e2e/helpers/session.ts",
         "frontend/src/store/packs.ts",
-        "frontend/src/lib/linkedAppearance.ts"
+        "frontend/src/lib/linkedAppearance.ts",
+        "frontend/src/lib/usePack.ts",
+        "frontend/src/lib/usePack.test.ts"
       ],
       "browser": [
         "e2e/theme-picker.spec.ts",

@@ -3659,6 +3659,11 @@ impl Node {
                                 Err(error) => {
                                     status.phase = SyncPhase::Error;
                                     status.error = Some(error.to_string().chars().take(160).collect());
+                                    // Favorites demand is not successful history progress.
+                                    // Retain this peer's cursors and refresh, but let the
+                                    // existing retry owner gate failures even across wakes.
+                                    state.history_retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+                                    continuation = false;
                                 }
                             }
                             if policy.attachments {

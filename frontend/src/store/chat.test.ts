@@ -5178,24 +5178,26 @@ it("revokes an old staged identity when a full reply races a newer pending start
 it("sends installed sticker bytes as media and retries that snapshot after pack removal", async () => {
   const { usePacks } = await import("./packs");
   const { decodeStickerMedia } = await import("@/lib/stickerMedia");
+  const fullPacks: import("@/lib/pack").CustomizationPack[] = [
+    {
+      kind: "sticker",
+      id: "cats",
+      name: "Cats",
+      format: 1,
+      version: "1",
+      stickers: [
+        {
+          id: "wave",
+          label: "Wave",
+          fallback: "👋",
+          url: "data:image/png;base64,AQID",
+        },
+      ],
+    },
+  ];
   usePacks.setState({
-    packs: [
-      {
-        kind: "sticker",
-        id: "cats",
-        name: "Cats",
-        format: 1,
-        version: "1",
-        stickers: [
-          {
-            id: "wave",
-            label: "Wave",
-            fallback: "👋",
-            url: "data:image/png;base64,AQID",
-          },
-        ],
-      },
-    ],
+    packs: fullPacks,
+    readPack: async (id) => fullPacks.find((pack) => pack.id === id),
   });
   let fail = true;
   invoke.mockImplementation((cmd: string) => {
@@ -5239,24 +5241,26 @@ it("sends installed sticker bytes as media and retries that snapshot after pack 
 });
 it("reports corrupt installed artwork without sending an id-only fallback", async () => {
   const { usePacks } = await import("./packs");
+  const fullPacks: import("@/lib/pack").CustomizationPack[] = [
+    {
+      kind: "sticker",
+      id: "cats",
+      name: "Cats",
+      format: 1,
+      version: "1",
+      stickers: [
+        {
+          id: "wave",
+          label: "Wave",
+          fallback: "👋",
+          url: "data:image/png;base64,",
+        },
+      ],
+    },
+  ];
   usePacks.setState({
-    packs: [
-      {
-        kind: "sticker",
-        id: "cats",
-        name: "Cats",
-        format: 1,
-        version: "1",
-        stickers: [
-          {
-            id: "wave",
-            label: "Wave",
-            fallback: "👋",
-            url: "data:image/png;base64,",
-          },
-        ],
-      },
-    ],
+    packs: fullPacks,
+    readPack: async (id) => fullPacks.find((pack) => pack.id === id),
   });
   useChat.setState({
     active: { kind: "account", id: "target", name: "Target" },
@@ -5268,24 +5272,26 @@ it("reports corrupt installed artwork without sending an id-only fallback", asyn
 });
 it("discards staged sticker bytes after the account owner changes", async () => {
   const { usePacks } = await import("./packs");
+  const fullPacks: import("@/lib/pack").CustomizationPack[] = [
+    {
+      kind: "sticker",
+      id: "cats",
+      format: 1,
+      version: "1",
+      name: "Cats",
+      stickers: [
+        {
+          id: "wave",
+          label: "Wave",
+          fallback: "👋",
+          url: "data:image/png;base64,AQID",
+        },
+      ],
+    },
+  ];
   usePacks.setState({
-    packs: [
-      {
-        kind: "sticker",
-        id: "cats",
-        format: 1,
-        version: "1",
-        name: "Cats",
-        stickers: [
-          {
-            id: "wave",
-            label: "Wave",
-            fallback: "👋",
-            url: "data:image/png;base64,AQID",
-          },
-        ],
-      },
-    ],
+    packs: fullPacks,
+    readPack: async (id) => fullPacks.find((pack) => pack.id === id),
   });
   let finish!: (path: string) => void;
   invoke.mockImplementation((cmd: string) =>
@@ -5299,6 +5305,7 @@ it("discards staged sticker bytes after the account owner changes", async () => 
     active: { kind: "account", id: "target", name: "Target" },
   });
   const sending = useChat.getState().sendSticker("pack:cats:wave", "👋");
+  await vi.waitFor(() => expect(finish).toBeDefined());
   useAuth.setState({ generation: 1 });
   finish("/tmp/stale-sticker.png");
   await sending;

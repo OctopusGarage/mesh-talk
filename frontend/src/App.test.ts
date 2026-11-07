@@ -103,6 +103,17 @@ beforeEach(async () => {
   usePacks.setState({
     scope: { owner: "alice", account: "account", session: "7:3" },
     loaded: true,
+    preparedThemeId: "fixture-theme",
+    selectedTheme: {
+      format: 1,
+      id: "fixture-theme",
+      version: "1.0.0",
+      name: "Fixture",
+      kind: "theme",
+      base: "light",
+      colors: {},
+      wallpaper: "fixture:wallpaper",
+    },
     packs: [
       {
         format: 1,
@@ -112,7 +123,6 @@ beforeEach(async () => {
         kind: "theme",
         base: "light",
         colors: {},
-        wallpaper: "fixture:wallpaper",
       },
       {
         format: 1,
@@ -122,7 +132,6 @@ beforeEach(async () => {
         kind: "theme",
         base: "dark",
         colors: {},
-        wallpaper: "fixture:replacement",
       },
     ],
   });
@@ -192,7 +201,22 @@ it.each(["decode", "commit"] as const)(
 );
 it("App replacement presentation can finish before the retired decode without adopting its acknowledgement", async () => {
   const old = probes.tasks[0];
-  await act(async () => useTheme.setState({ theme: "replacement-theme" }));
+  await act(async () => {
+    usePacks.setState({
+      preparedThemeId: "replacement-theme",
+      selectedTheme: {
+        format: 1,
+        id: "replacement-theme",
+        version: "1.0.0",
+        name: "Replacement",
+        kind: "theme",
+        base: "dark",
+        colors: {},
+        wallpaper: "fixture:replacement",
+      },
+    });
+    useTheme.setState({ theme: "replacement-theme" });
+  });
   expect(probes.tasks).toHaveLength(2);
   const replacement = probes.tasks[1];
   expect(replacement.wallpaper).toBe("fixture:replacement");

@@ -4355,6 +4355,14 @@ enum HistoryAfterFavorites {
     Wake,
     Continuation,
     Idle,
+    FailedHistory,
+    TimedOutHistory,
+}
+
+impl HistoryAfterFavorites {
+    fn fails_history(self) -> bool {
+        matches!(self, Self::FailedHistory | Self::TimedOutHistory)
+    }
 }
 
 async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail_favorites: bool) {
@@ -4362,11 +4370,20 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::TcpListener;
 
-    let (_dir, source, receiver) = sibling_nodes();
+    let (dir, source, receiver) = sibling_nodes();
     let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let wake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let wake_peer = sibling_peer(&source, &receiver, wake_listener.local_addr().unwrap());
-    sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
+    if case == HistoryAfterFavorites::TimedOutHistory {
+        reusable_sibling_peer(
+            dir.path(),
+            &receiver,
+            &source,
+            source_listener.local_addr().unwrap(),
+        );
+    } else {
+        sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
+    }
     let history_requests = Arc::new(AtomicUsize::new(0));
     let (favorite_started, favorite_waiting) = tokio::sync::oneshot::channel();
     let (release_favorite, favorite_released) = tokio::sync::oneshot::channel();
@@ -4378,8 +4395,51 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         let mut favorites = 0;
         let mut held = tokio::task::JoinSet::new();
         loop {
-            let (mut io, version, frame) =
-                accept_account_test_request(&source_listener, &serving).await;
+            let (mut io, version, frame) = if case == HistoryAfterFavorites::TimedOutHistory {
+                let (stream, _) = source_listener.accept().await.unwrap();
+                let mut io = serving.privacy_accept(stream).await.unwrap();
+                let bytes = io.recv().await.unwrap();
+                let (version, frame) = AccountHistoryFrame::decode_versioned(&bytes).unwrap();
+                let (request_id, frame) = match frame {
+                    AccountHistoryFrame::SessionRequest {
+                        request_id,
+                        request,
+                    } => (Some(request_id), request.into_frame()),
+                    frame => (None, frame),
+                };
+                if matches!(frame, AccountHistoryFrame::Request { .. })
+                    && requests.load(Ordering::SeqCst) == 2
+                {
+                    assert!(
+                        request_id.is_some(),
+                        "third history must own a negotiated request"
+                    );
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    // Own the actual stalled negotiation until the client's
+                    // five-second deadline retires its transport. Other lanes
+                    // remain served by the listener throughout the hold.
+                    held.spawn(async move {
+                        let closed = tokio::time::timeout(Duration::from_secs(8), io.recv()).await;
+                        assert!(
+                            matches!(closed, Ok(Err(_))),
+                            "timed-out negotiation must close its channel"
+                        );
+                    });
+                    continue;
+                }
+                if let Some(request_id) = request_id {
+                    send_frame(
+                        &mut io,
+                        version,
+                        &AccountHistoryFrame::SessionReady { request_id },
+                    )
+                    .await
+                    .unwrap();
+                }
+                (io, version, frame)
+            } else {
+                accept_account_test_request(&source_listener, &serving).await
+            };
             while let Some(result) = held.try_join_next() {
                 result.unwrap();
             }
@@ -4406,6 +4466,9 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
                         )
                         .await
                         .unwrap();
+                    } else if request == 3 && case == HistoryAfterFavorites::FailedHistory {
+                        // Real authenticated EOF after supported favorites failed.
+                        // The next request will recover through the same listener.
                     } else {
                         assert!(
                             serving
@@ -4461,6 +4524,9 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         }
     });
 
+    let (history_failed, history_failure) = tokio::sync::oneshot::channel();
+    let history_failed = std::sync::Mutex::new(Some(history_failed));
+    let failed_requests = history_requests.clone();
     let wake_seen = Arc::new(AtomicBool::new(false));
     let (refresh_observed, refresh_ready) = tokio::sync::oneshot::channel();
     let refresh_observed = Arc::new(std::sync::Mutex::new(Some(refresh_observed)));
@@ -4469,6 +4535,23 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
     *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
         if peer != expected_source {
             return;
+        }
+        if case.fails_history()
+            && phase.starts_with("history_end outcome=")
+            && phase != "history_end outcome=ok"
+            && failed_requests.load(Ordering::SeqCst) == 3
+            && let Some(failed) = history_failed.lock().unwrap().take()
+        {
+            let expected = if case == HistoryAfterFavorites::TimedOutHistory {
+                "history_end outcome=negotiation_timeout"
+            } else {
+                "history_end outcome=transport"
+            };
+            assert_eq!(
+                phase, expected,
+                "fixture must witness its exact remote failure"
+            );
+            let _ = failed.send(std::time::Instant::now());
         }
         if phase == "wake_received revision=9" {
             wake_seen.store(true, Ordering::SeqCst);
@@ -4535,7 +4618,7 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         receiver.account_sync_notify.notify_one();
         favorite_waiting.await.unwrap();
         assert_eq!(history_requests.load(Ordering::SeqCst), 2);
-        if case == HistoryAfterFavorites::Wake {
+        if case == HistoryAfterFavorites::Wake || case.fails_history() {
             source
                 .enqueue_to_account(
                     &source.account_id(),
@@ -4563,7 +4646,41 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
         Ok(expected_messages) => {
             release_favorite.send(()).unwrap();
             let progress = async {
-                if case == HistoryAfterFavorites::Idle {
+                if case.fails_history() {
+                    let failed_at = history_failure.await.expect("third history must fail");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    assert_eq!(
+                        history_requests.load(Ordering::SeqCst),
+                        3,
+                        "favorites demand must not immediately repeat failed history"
+                    );
+                    // Ordinary demand cannot convert an unchanged failed page
+                    // into immediate work. Periodic repair remains disabled.
+                    for _ in 0..5 {
+                        receiver.account_sync_notify.notify_one();
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                    }
+                    assert_eq!(
+                        history_requests.load(Ordering::SeqCst),
+                        3,
+                        "failed history must not self-retry or bypass backoff on notifications"
+                    );
+                    loop {
+                        if receiver
+                            .account_history(&receiver.account_id(), 100)
+                            .unwrap()
+                            .len()
+                            == expected_messages
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    assert!(
+                        failed_at.elapsed() >= Duration::from_millis(4900),
+                        "recovery must retain the failure deadline"
+                    );
+                } else if case == HistoryAfterFavorites::Idle {
                     loop {
                         if receiver.device_sync_status().iter().any(|status| {
                             status.device_id == source.user_id() && status.phase == SyncPhase::Error
@@ -4593,7 +4710,12 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
                     assert!(history_requests.load(Ordering::SeqCst) >= 3);
                 }
             };
-            tokio::time::timeout(RETRY_INTERVAL / 2, progress)
+            let progress_bound = if case.fails_history() {
+                RETRY_INTERVAL + Duration::from_secs(5)
+            } else {
+                RETRY_INTERVAL / 2
+            };
+            tokio::time::timeout(progress_bound, progress)
                 .await
                 .map_err(|_| "retained history work did not resume after favorites without periodic repair")
         }
@@ -4606,6 +4728,16 @@ async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail
     let _ = source_server.await;
     let _ = wake_server.await;
     outcome.expect("history/favorites progress contract");
+}
+
+#[tokio::test]
+async fn account_history_failure_after_favorites_failure_retains_backoff() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::FailedHistory, true).await;
+}
+
+#[tokio::test]
+async fn account_history_negotiation_timeout_after_favorites_failure_retains_backoff() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::TimedOutHistory, true).await;
 }
 
 #[tokio::test]

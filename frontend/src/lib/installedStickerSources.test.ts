@@ -8,6 +8,10 @@ const mocks = vi.hoisted(() => ({
     loaded: true,
     scope: { owner: "owner", account: "account" },
     packs: [] as CustomizationPack[],
+    contentToken: (_id: string) => JSON.stringify(mocks.state.packs),
+    readPack: vi.fn(async (id: string) =>
+      mocks.state.packs.find((pack) => pack.id === id),
+    ),
   },
   listeners: new Set<() => void>(),
 }));

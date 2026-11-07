@@ -49,7 +49,7 @@ import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp } from "@/lib/motion";
 import { EMOJIS, renderWithMentions } from "@/lib/mentions";
-import { stickerById } from "@/lib/stickerPacks";
+import { useStickerAsset } from "@/lib/usePack";
 import { usePacks } from "@/store/packs";
 import type { ReactionInfo } from "@/lib/types";
 import {
@@ -417,10 +417,9 @@ export function MessageBubble({
   const stickerDescription = presentation
     ? stickerSummary(presentation, t("message.sticker"))
     : t("message.sticker");
-  const sticker =
-    !mediaSticker && m.sticker
-      ? stickerById(m.sticker, installedPacks)
-      : undefined;
+  const sticker = useStickerAsset(
+    presentation && !mediaSticker ? (m.sticker ?? undefined) : undefined,
+  );
   const isSticker = !!presentation;
   const [pickerOpen, setPickerOpen] = useState(false);
   // Copy the message text to the clipboard. File messages have no text → no-op.

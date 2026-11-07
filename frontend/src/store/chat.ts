@@ -16,7 +16,7 @@ import {
 import type { PersonalConversationState } from "@/lib/types";
 import { useDrafts } from "./drafts";
 import { usePacks } from "./packs";
-import { stickerById } from "@/lib/stickerPacks";
+import { stickerPackId, stickerById } from "@/lib/stickerPacks";
 import { snapshotSticker } from "@/lib/stickerMedia";
 import { mentionsName } from "@/lib/mentions";
 import { useAuth } from "./auth";
@@ -2027,7 +2027,41 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    const installed = stickerById(stickerId, usePacks.getState().packs);
+    const catalog = usePacks.getState().packs;
+    const packScope = usePacks.getState().scope;
+    const packId = stickerPackId(stickerId, catalog);
+    const entry = catalog.find((pack) => pack.id === packId);
+    let installed;
+    try {
+      const pack =
+        entry && packId
+          ? await usePacks
+              .getState()
+              .readPack(
+                packId,
+                () =>
+                  lease.current() &&
+                  usePacks.getState().scope === packScope &&
+                  Boolean(get().active) &&
+                  convKey(get().active!) === convKey(c),
+              )
+          : undefined;
+      if (
+        !lease.current() ||
+        usePacks.getState().scope !== packScope ||
+        usePacks.getState().packs.find((pack) => pack.id === packId) !==
+          entry ||
+        !get().active ||
+        convKey(get().active!) !== convKey(c)
+      )
+        return;
+      installed = pack ? stickerById(stickerId, [pack]) : undefined;
+      if (entry && !installed)
+        throw new Error("Installed sticker artwork is unavailable");
+    } catch (error) {
+      set({ error: `Couldn't send sticker: ${errorMessage(error)}` });
+      return;
+    }
     if (installed) {
       let stagedPath: string | undefined;
       let transferred = false;

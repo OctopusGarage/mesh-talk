@@ -128,6 +128,10 @@ test("theme previews match the canvas, signal, and rail colors they apply", asyn
       (element) => getComputedStyle(element).backgroundColor,
     );
     await page.getByTestId(`theme-${id}`).click();
+    await expect(page.getByTestId(`theme-${id}`)).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     const applied = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);
       const sample = document.createElement("div");
@@ -333,6 +337,10 @@ test("a replacement theme uses its declared base for omitted colors", async ({
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-barcelona").click();
+  await expect(page.getByTestId("theme-barcelona")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await page
     .getByTestId("pack-manager-theme")
     .locator('input[type="file"]')

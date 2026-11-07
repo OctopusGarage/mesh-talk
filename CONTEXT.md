@@ -198,6 +198,15 @@ _Avoid_: device clone, device revocation, live synchronization.
 
 ## Networking and availability
 
+**Customization library catalog**:
+A local presentation index of installed pack IDs, labels, kinds and appearance
+choices. Private entries retain local-user/account scope; bundled metadata is
+public. The index excludes image URLs, decoded artwork and archives.
+Catalog availability does not prove that a selected asset has been hydrated or
+that a native transfer source remains available. See the
+[loading contract](docs/CUSTOMIZATION_PACKS.md#runtime-loading).
+_Avoid_: loaded artwork, retained media or source availability as synonyms.
+
 **Sticker media**:
 A single encrypted image attachment with a source identity and text fallback.
 Its exact content is bound by the attachment checksum. Receiving and retaining

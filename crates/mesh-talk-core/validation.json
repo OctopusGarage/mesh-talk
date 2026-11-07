@@ -692,7 +692,9 @@
             "node::account_sync::selection_tests::",
             "node::account_sync_wire::",
             "account_sync_attachment_preparation_releases_commit_guards_and_rechecks_changes",
-            "account_sync_attachment_selection_does_not_park_document_scheduler"
+            "account_sync_attachment_selection_does_not_park_document_scheduler",
+            "account_history_failure_after_favorites_failure_retains_backoff",
+            "account_history_negotiation_timeout_after_favorites_failure_retains_backoff"
           ]
         }
       ],
@@ -1412,7 +1414,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {

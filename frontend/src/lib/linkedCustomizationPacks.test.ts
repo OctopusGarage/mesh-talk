@@ -310,3 +310,66 @@ it("reports a local library storage failure after canonical source publication",
   );
   expect(mocks.documents.has("test.library")).toBe(true);
 });
+
+it("compares persisted versions before reading canonical archives after coordinator restart", async () => {
+  mocks.documents.set("test.library", {
+    meta: record("test.library", 8),
+    bytes: archive(),
+  });
+  const first = startLinkedCustomizationPacks("owner");
+  await vi.waitFor(() =>
+    expect(usePacks.getState().packs[0]?.id).toBe("test.library"),
+  );
+  first();
+  mocks.read.mockClear();
+  mocks.list.mockClear();
+  const second = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+    expect(mocks.read).not.toHaveBeenCalled();
+  } finally {
+    second();
+  }
+});
+
+it("does not replay the startup theme after a later user selection wakes reconciliation", async () => {
+  mocks.documents.set("test.library", {
+    meta: record("test.library", 8),
+    bytes: archive(),
+  });
+  const stop = startLinkedCustomizationPacks("owner", "dark");
+  try {
+    await vi.waitFor(() =>
+      expect(usePacks.getState().packs[0]?.id).toBe("test.library"),
+    );
+    await usePacks.getState().prepareTheme("test.library");
+    for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+    expect(usePacks.getState().selectedTheme?.id).toBe("test.library");
+    expect(usePacks.getState().preparedThemeId).toBe("test.library");
+  } finally {
+    stop();
+  }
+});
+
+it("continues later pending library publication when the first ID fails", async () => {
+  const store = usePacks.getState();
+  store.setScope("owner", "crypto-account");
+  await store.install(archive("first.library"));
+  await store.install(archive("later.library"));
+  mocks.put.mockRejectedValueOnce(new Error("first temporarily unavailable"));
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const stop = startLinkedCustomizationPacks("owner");
+  try {
+    await vi.waitFor(() =>
+      expect(mocks.documents.has("later.library")).toBe(true),
+    );
+    const ids = mocks.put.mock.calls.map((call) => call[2].pack_id);
+    expect(ids.indexOf("later.library")).toBeGreaterThan(
+      ids.indexOf("first.library"),
+    );
+  } finally {
+    stop();
+    warning.mockRestore();
+  }
+});

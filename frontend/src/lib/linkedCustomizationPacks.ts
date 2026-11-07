@@ -80,10 +80,10 @@ export async function publishCustomizationPacksBeforeLink(
   store.setScope(owner, scope.account, scope.session);
   await store.load();
   scope.requireCurrent();
-  for (const change of await store.pendingChanges()) {
+  await store.forEachPending(async (change) => {
     scope.requireCurrent();
     await publish(owner, scope.account, change, scope.current);
-  }
+  }, scope.current);
   for (const pack of await store.legacyPacks()) {
     scope.requireCurrent();
     const key = keyFor(pack.id);
@@ -128,6 +128,7 @@ export function startLinkedCustomizationPacks(
   let active = true;
   let running = false;
   let dirty = false;
+  let initialized = false;
   const current = () => active && scope.current();
   const seen = new Map<string, DocumentVersion>();
   const store = usePacks.getState();
@@ -142,20 +143,21 @@ export function startLinkedCustomizationPacks(
     }
     running = true;
     try {
-      await store.load(selectedThemeId);
+      await store.load(initialized ? undefined : selectedThemeId);
+      if (current()) initialized = true;
       if (!current()) return;
       const policy = await readWithDeadline(() =>
         chat.getDeviceSyncPolicy(owner),
       );
       if (!current() || !policy.appearance) return;
-      for (const change of await store.pendingChanges()) {
+      await store.forEachPending(async (change) => {
         if (!current()) return;
         try {
           await publish(owner, scope.account, change, current);
         } catch (error) {
           console.warn("Could not publish linked library; will retry", error);
         }
-      }
+      }, current);
       let after: AccountDocumentKey | null = null;
       for (let page = 0; page < 64; page++) {
         const result = await readWithDeadline(() =>
@@ -171,7 +173,11 @@ export function startLinkedCustomizationPacks(
           if (meta.key.kind !== "customization_pack") continue;
           const id = meta.key.pack_id;
           const version = documentVersion(meta);
-          if (seen.has(id) && sameDocumentVersion(seen.get(id)!, version))
+          const persisted = usePacks.getState().linkedVersion(id);
+          if (
+            (persisted && sameDocumentVersion(persisted, version)) ||
+            (seen.has(id) && sameDocumentVersion(seen.get(id)!, version))
+          )
             continue;
           const bytes = meta.tombstone
             ? null

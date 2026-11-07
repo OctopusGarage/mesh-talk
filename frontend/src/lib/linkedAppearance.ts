@@ -131,10 +131,17 @@ export function startLinkedAppearance(owner: string): () => void {
     previous = next;
   });
   let installedPacks = usePacks.getState().packs;
+  let selectedPack = usePacks.getState().selectedTheme;
   const unsubscribePacks = usePacks.subscribe((state) => {
-    if (state.packs === installedPacks) return;
+    if (state.packs === installedPacks && state.selectedTheme === selectedPack)
+      return;
     installedPacks = state.packs;
-    if (!current()) return;
+    selectedPack = state.selectedTheme;
+    if (
+      !current() ||
+      ["dark", "light", "oled"].includes(useTheme.getState().theme)
+    )
+      return;
     applying = true;
     try {
       // A matching theme can arrive after its small preference record. Missing
@@ -168,28 +175,49 @@ export function startLinkedAppearance(owner: string): () => void {
       }
       publisher.setEnabled(policy.appearance);
       if (policy.appearance) {
-        applying = true;
-        try {
-          for (const record of records) {
-            if (
-              publisher.shouldApply(
-                record.key,
-                record.revision,
-                record.device_id,
-              )
-            ) {
-              if (record.key === "language") applyAccountLanguage(record.value);
-              else applyLinkedAppearance(record.key, record.value);
-              publisher.markApplied(
-                record.key,
-                record.revision,
-                record.device_id,
-              );
-            }
+        for (const record of records) {
+          if (
+            !publisher.shouldApply(
+              record.key,
+              record.revision,
+              record.device_id,
+            )
+          )
+            continue;
+          if (
+            record.key === "theme" &&
+            record.value &&
+            !["dark", "light", "oled"].includes(record.value)
+          ) {
+            // Hydration observes remote state; local edits retain publication
+            // authority throughout this await and can invalidate this revision.
+            const prepared = await usePacks
+              .getState()
+              .prepareTheme(record.value);
+            if (!prepared) continue;
           }
-        } finally {
-          applying = false;
-          previous = appearanceValues();
+          if (!current()) return;
+          if (
+            !publisher.shouldApply(
+              record.key,
+              record.revision,
+              record.device_id,
+            )
+          )
+            continue;
+          applying = true;
+          try {
+            if (record.key === "language") applyAccountLanguage(record.value);
+            else applyLinkedAppearance(record.key, record.value);
+            publisher.markApplied(
+              record.key,
+              record.revision,
+              record.device_id,
+            );
+          } finally {
+            applying = false;
+            previous = appearanceValues();
+          }
         }
       }
     } catch (error) {

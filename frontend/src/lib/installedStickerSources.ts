@@ -15,7 +15,10 @@ export function startInstalledStickerSources(owner: string): () => void {
   let active = true;
   let running = false;
   let dirty = false;
-  const registered = new Map<string, string>();
+  const registered = new Map<
+    string,
+    { token: string; completed: Set<string> }
+  >();
   const current = () =>
     active &&
     lease.owner === owner &&
@@ -37,29 +40,60 @@ export function startInstalledStickerSources(owner: string): () => void {
       return;
     running = true;
     try {
-      const stickers = installedStickers(state.packs);
-      const installed = new Set(
-        stickers.map((sticker) => `${sticker.id}\n${sticker.emoji}`),
-      );
-      for (const identity of registered.keys())
-        if (!installed.has(identity)) registered.delete(identity);
-      for (const sticker of stickers) {
+      const libraries = state.packs.filter((pack) => pack.kind === "sticker");
+      const installed = new Set(libraries.map((pack) => pack.id));
+      for (const id of registered.keys())
+        if (!installed.has(id)) registered.delete(id);
+      // Only one transient pack is held at a time. The UI catalog and successful
+      // receipts never own artwork; native reuse retains its existing 128/32 MiB cap.
+      for (const library of libraries) {
         if (!current()) return;
-        const identity = `${sticker.id}\n${sticker.emoji}`;
-        if (registered.get(identity) === sticker.url) continue;
+        const token = state.contentToken(library.id);
+        let receipt = registered.get(library.id);
+        if (receipt?.token !== token) {
+          receipt = { token, completed: new Set() };
+          registered.set(library.id, receipt);
+        }
+        if (
+          library.kind !== "sticker" ||
+          receipt.completed.size === library.stickers.length
+        )
+          continue;
         try {
-          const snapshot = snapshotSticker(sticker, sticker.emoji);
-          await chat.registerStickerSource(
-            owner,
-            account!,
-            snapshot.name,
-            Array.from(snapshot.bytes),
-          );
-          if (!current()) return;
-          registered.set(identity, sticker.url);
+          const pack = await state.readPack(library.id, current);
+          if (
+            !current() ||
+            usePacks.getState().contentToken(library.id) !== token ||
+            !pack
+          )
+            continue;
+          for (const sticker of installedStickers([pack])) {
+            if (
+              !current() ||
+              usePacks.getState().contentToken(library.id) !== token
+            )
+              break;
+            if (receipt.completed.has(sticker.id)) continue;
+            try {
+              const snapshot = snapshotSticker(sticker, sticker.emoji);
+              await chat.registerStickerSource(
+                owner,
+                account!,
+                snapshot.name,
+                Array.from(snapshot.bytes),
+              );
+              if (
+                !current() ||
+                usePacks.getState().contentToken(library.id) !== token
+              )
+                break;
+              receipt.completed.add(sticker.id);
+            } catch {
+              /* Failed candidates retry on the existing recovery wake. */
+            }
+          }
         } catch {
-          // This optional local cache never blocks pack installation or normal transfer.
-          // Transient startup/lock failures are retried while this runtime remains current.
+          /* Transient storage reads remain retryable. */
         }
       }
     } finally {
