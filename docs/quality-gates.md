@@ -61,7 +61,7 @@ scheduled runs cannot cancel the UI caller or its same-run evidence producer.
 Branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
 release policy and replacement mapping. Source and all platform checks are
-individually required; Windows requires its build producer and both archive
+individually required; Windows requires its build producer and all archive
 consumers. Release acceptance uses the same direct names plus its main-only
 checks, including ASan and mutation-runner acceptance. A newer failed, pending or
 missing check still rejects the exact source. Stable repeats this strict check

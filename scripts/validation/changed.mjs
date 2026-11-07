@@ -11,7 +11,7 @@ import { buildFrontendGraph } from "./frontend-graph.mjs";
 import { loadContracts } from "./contracts.mjs";
 import { runStage } from "./stage.mjs";
 import { runCommand, rustTestCount, requireCommandStdout } from "../pr-platform/guest.mjs";
-import { buildStaticChecks, phasePlan } from "./checks.mjs";
+import { buildStaticChecks, pendingNodeTests, phasePlan } from "./checks.mjs";
 import { frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 import { loadRequirements, selectRequirements } from "./pr-scenarios.mjs";
 import { createFeedback, completePhase, finishFeedback, observeCommands, writeFeedback } from "./feedback.mjs";
@@ -272,7 +272,7 @@ export function validateFrontendReport(report, files, directory) {
   }
   return count;
 }
-/** Reuse the static catalog without admitting test, build or heavy resource work. */
+/** Reuse static/policy checks without application suites, builds or heavy work. */
 export async function executeCheapChecks(plan, options) {
   const selected = phasePlan(plan, "static");
   selected.checks = selected.checks.filter(check => check.kind !== "test");
@@ -303,7 +303,7 @@ export async function executePlan(
     log(`Test execution: ${((Date.now() - started) / 1000).toFixed(1)}s`);
     return result;
   }
-  for (const file of plan.node) {
+  for (const file of pendingNodeTests(plan)) {
     const result = await execute(
       process.execPath,
       ["--test", "--test-reporter=tap", file],

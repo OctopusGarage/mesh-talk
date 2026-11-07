@@ -71,8 +71,12 @@ PR creation runs `make pr-check`'s cheap-check owner against its actual comparis
 base, rejects ownership blockers and checks applicable frontend patch coverage
 before publication. Version projections, contract references and hygiene already
 belong to structural standards; reuse that owner rather than adding duplicate
-gates. Do not install dependencies, compile Rust, launch browsers or run suites
+gates. Do not install dependencies, compile Rust, launch browsers or run application suites
 implicitly in the cheap mode. Source changes during checking invalidate it.
+Workflow edits also run the existing fast CI policy owner locally. Configuration
+assertions and runner inventory discovery belong here; application execution and
+native compiler fixtures do not. Update the existing policy assertion when its
+requirement changes instead of adding a second overlapping test in another file.
 For entry-point changes, also run the affected contract tests selected by the
 existing validation plan before publication. A syntax pass or a hand-picked
 filename sample cannot detect stale semantic routing expectations; cheap PR

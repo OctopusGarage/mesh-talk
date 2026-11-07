@@ -35,7 +35,7 @@ test-plan:
 test-changed:
 	$(MANAGED_BUILD) node scripts/validation/changed.mjs --run $(VALIDATION_ARGS)
 
-# Cheap PR preparation: no tests, builds or browser/native execution.
+# Cheap PR preparation: static/policy checks, no application suites or builds.
 pr-check:
 	node scripts/validation/changed.mjs --cheap --base origin/main $(VALIDATION_ARGS)
 

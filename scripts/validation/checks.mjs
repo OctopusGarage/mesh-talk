@@ -1,4 +1,13 @@
 import { syntaxKind } from "./syntax.mjs";
+export const ciPolicyTest = "scripts/diagnostics/ci-latency.test.mjs";
+
+/** Policy checks already execute this file; test-only plans still select it. */
+export function pendingNodeTests(plan) {
+  const suppliedByPolicy = plan.checks?.some(check => check.kind === "policy" && check.resource !== "heavy" && check.cwd === "." &&
+    JSON.stringify(check.command) === JSON.stringify(["node", "--test", ciPolicyTest]));
+  return (plan.node ?? []).filter(file => file !== ciPolicyTest ||
+    !suppliedByPolicy);
+}
 /** Static obligations for a development plan; browser/native proof stays explicit. */
 export function buildStaticChecks(plan) {
   const checks = [];
@@ -6,6 +15,13 @@ export function buildStaticChecks(plan) {
   const packages = [...new Set(plan.rust.map(item => item.package))].sort();
   const syntax = plan.files.filter(file => !plan.deleted?.includes(file) && syntaxKind(file));
   if (syntax.length) add("changed-syntax", ["node", "scripts/validation/syntax.mjs", "--files", ...syntax]);
+  if (plan.files.some(file => /^\.github\/workflows\/.*\.ya?ml$/u.test(file) ||
+    [ciPolicyTest, "scripts/validation/checks.mjs"].includes(file))) {
+    // Configuration assertions and runner inventory listing only: no suites,
+    // compilers, browser processes, installs or heavy-resource admission.
+    add("ci-policy", ["node", "--test", ciPolicyTest]);
+    checks.at(-1).kind = "policy";
+  }
   const shells = plan.files.filter(file => !plan.deleted?.includes(file) && /^(?:scripts\/.*\.sh|hooks\/[^/]+)$/u.test(file));
   if (shells.length) add("shell-lint", ["shellcheck", "--severity=warning", "--", ...shells]);
   if (plan.files.some(file => ["scripts/build-retention.py", "scripts/test_build_retention.py"].includes(file))) {
@@ -37,5 +53,5 @@ export function buildStaticChecks(plan) {
 export function phasePlan(plan, phase) {
   if (!["static", "tests"].includes(phase)) throw Error(`Unknown validation phase: ${phase}`);
   const checks = (plan.checks ?? []).filter(check => (check.resource === "heavy") === (phase === "tests"));
-  return phase === "static" ? { ...plan, checks, rust: [], node: [], frontend: [] } : { ...plan, checks };
+  return phase === "static" ? { ...plan, checks, rust: [], node: [], frontend: [] } : { ...plan, checks, node: pendingNodeTests(plan) };
 }
