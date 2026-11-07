@@ -11,7 +11,7 @@ fi
 run_phase() {
     local phase="$1"
     shift
-    if [ "${MESH_TALK_TEST_TIMING:-0}" = 1 ] && [ "$platform" = macos ] && [ "$(uname -s)" = Darwin ]; then
+    if [ "$platform" = macos ] && [ "$(uname -s)" = Darwin ]; then
         # Diagnostic snapshots are not acceptance gates. time retains the actual
         # command's exit status and reports CPU time and maximum child RSS;
         # that RSS is not the peak aggregate memory of concurrent compilers.

@@ -42,6 +42,12 @@ test("health runs for every PR and retains independent platform results", () => 
   assert.match(caller, /uses: \.\/\.github\/workflows\/check-health\.yml/);
   assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}$/m);
   assert.match(workflow, /^      fail-fast: false$/m);
+  const unitSteps = workflow.split(/^      - /m).filter(step => step.startsWith("name: Frontend unit tests"));
+  assert.equal(unitSteps.length, 1, "one complete Linux coverage cohort owns the OS-independent frontend units");
+  assert.match(unitSteps[0], /if: runner\.os == 'Linux'/);
+  assert.match(unitSteps[0], /run: npm run test:coverage/);
+  const scripts = JSON.parse(readFileSync(new URL("../../frontend/package.json", import.meta.url), "utf8")).scripts;
+  assert.equal(scripts["test:coverage"], `${scripts.test} --coverage`, "coverage must retain the normal complete unit selection");
 });
 
 test("Codecov receives the frontend and Rust coverage produced by CI", () => {

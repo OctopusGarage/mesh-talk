@@ -347,11 +347,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
           `${failedPartition.error ?? ""}\n${failedPartition.stdout}\n${failedPartition.stderr}`,
         );
         const diagnostic = failedPartition.stdout + failedPartition.stderr;
-        if (
-          process.platform === "darwin" &&
-          block === blockMac &&
-          timing === "1"
-        ) {
+        if (process.platform === "darwin" && block === blockMac) {
           assert.match(diagnostic, /native-resource phase=host/u);
           assert.match(diagnostic, /maximum resident set size/u);
           assert.match(diagnostic, /hw\.memsize:/u);

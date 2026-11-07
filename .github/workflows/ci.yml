@@ -32,9 +32,6 @@ env:
 
 jobs:
   checks:
-    env:
-      # Keep measurements for the native critical path without another run.
-      MESH_TALK_TEST_TIMING: ${{ (matrix.os == 'macos-latest' || inputs.diagnostic_timing) && '1' || '0' }}
     strategy:
       fail-fast: false
       # Windows uses the reusable single-build archive workflow below. Linux

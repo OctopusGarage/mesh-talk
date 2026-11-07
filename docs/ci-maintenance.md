@@ -134,11 +134,13 @@ waits; they do not by themselves measure runner queue time.
 
 For unexplained native-runner variation, retain comparable complete observations
 and collect resource evidence before changing concurrency or compile profiles.
-The existing native diagnostic timing mode records macOS CPU count, physical
-memory, swap/VM snapshots and per-partition real/user/system time plus maximum
+The existing native macOS coverage owner records CPU count, physical memory,
+swap/VM snapshots and per-partition real/user/system time plus maximum
 child RSS. A snapshot cannot prove peak memory pressure; maximum child RSS is
 not concurrent compilers' aggregate peak. Preserve the original command status
 and failure precedence, and keep diagnostics outside ordinary acceptance gates.
+Keep detailed product tracing opt-in; routine resource measurements must not
+enable per-operation traces merely to observe compiler behavior.
 
 Use the existing [timing reports](testing-feedback-loop.md#measure-feedback-before-tuning-capacity).
 Distinguish time to actionable feedback, time until required checks complete,
@@ -592,6 +594,14 @@ Workflow, runner and tool upgrades can change CLI semantics, report formats,
 selectors and archive compatibility. Validate affected real tool invocations and
 failure paths through the existing diagnostic owners; YAML parsing or unit mocks
 alone do not establish the behavior of the installed tool.
+
+Consolidate frontend unit execution through the complete Linux coverage owner
+when the ordinary and coverage commands select the same inventory and platform
+branches use explicit mocks. Verify that inventory with the actual runner before
+removing duplicate OS executions. Retain real browser/native matrices and native
+diagnostic fixtures; mocked platform branches do not supply those contracts.
+Keep Node/filesystem portability requirements in their owning diagnostics rather
+than duplicating the entire frontend unit suite incidentally.
 
 After pushing, observe the actual hosted candidate until the relevant jobs finish.
 Compare before and after setup time, test time, required-check latency and runner

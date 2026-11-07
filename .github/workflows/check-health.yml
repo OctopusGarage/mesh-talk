@@ -74,11 +74,6 @@ jobs:
         working-directory: frontend
         run: npm run test:coverage
 
-      - name: Frontend unit tests (macOS and Windows)
-        if: runner.os != 'Linux'
-        working-directory: frontend
-        run: npm test
-
       - name: Seal browser unit line map from this run
         if: runner.os == 'Linux'
         run: node scripts/ci/unit-coverage-artifact.mjs seal frontend/coverage/lcov.info target/ui-unit-coverage
