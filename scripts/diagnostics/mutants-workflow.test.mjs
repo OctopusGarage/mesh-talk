@@ -1,3 +1,4 @@
+import { nextestProfileSection } from "./test-fixtures/nextest.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -63,9 +64,9 @@ test("phase and job bounds cover every planned mutant without relying on average
   const minutes = source => Number(source.match(/timeout-minutes: (\d+)/u)[1]);
   assert.ok(minutes(worker) * 60 > mutationBudgets.maxMutants * (mutationBudgets.compileSeconds + mutationBudgets.testSeconds) + 900 + 120);
   assert.ok(minutes(producer) * 60 > mutationBudgets.compileSeconds + mutationBudgets.testSeconds + 900 + 120);
-  const config = readFileSync(new URL("../../.config/nextest.toml", import.meta.url), "utf8").split("[profile.mutants]\n")[1];
-  assert.match(config, /global-timeout = "1800s"/u);
-  assert.match(config, /period = "60s", terminate-after = 15, grace-period = "5s"/u);
+  const config = readFileSync(new URL("../../.config/nextest.toml", import.meta.url), "utf8");
+  assert.match(nextestProfileSection(config, "mutants"), /global-timeout = "1800s"/u);
+  assert.match(nextestProfileSection(config, "mutants"), /period = "60s", terminate-after = 15, grace-period = "5s"/u);
   assert.match(helper, /runCommand/u);
   assert.match(helper, /timeoutMs: seconds \* 1000/u);
   assert.match(helper, /--baseline", "skip/u);

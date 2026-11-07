@@ -426,6 +426,12 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Scope fixture transformations and assertions to the owning configuration table,
+not globally unique text. Test the same valid value in an unrelated profile and
+verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnostics/test-fixtures/nextest.mjs)
+and [cheap CI policy regressions](../scripts/diagnostics/ci-latency.test.mjs)
+protect this boundary; actual compiler fixtures still exercise native behavior.
+
 Keep unrelated tool-version startup outside process-lifecycle assertions. The
 [supervisor isolation regression](../scripts/diagnostics/windows-process-owner.test.mjs)
 uses the existing version fixture while retaining real stage and output-limit

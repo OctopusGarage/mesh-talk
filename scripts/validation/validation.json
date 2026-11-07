@@ -434,6 +434,7 @@
         "scripts/ci/backend-coverage.test.mjs",
         "scripts/ci/workspace-coverage.sh",
         "scripts/ci/native-host-coverage.test.mjs",
+        "scripts/diagnostics/test-fixtures/nextest.mjs",
         "scripts/ci/linux-crash-diagnostics.mjs",
         "scripts/ci/linux-crash-diagnostics.test.mjs",
         ".github/workflows/windows-workspace.yml",

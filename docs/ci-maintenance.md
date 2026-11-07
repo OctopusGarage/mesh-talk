@@ -75,7 +75,9 @@ gates. Do not install dependencies, compile Rust, launch browsers or run applica
 implicitly in the cheap mode. Source changes during checking invalidate it.
 Workflow edits also run the existing fast CI policy owner locally. Configuration
 assertions and runner inventory discovery belong here; application execution and
-native compiler fixtures do not. Update the existing policy assertion when its
+native compiler fixtures do not. Keep static policy assertions independently runnable
+without native tool setup. Scope fixture configuration changes to their owning
+table or profile; repeated valid values elsewhere must remain unchanged. Update the existing policy assertion when its
 requirement changes instead of adding a second overlapping test in another file.
 For entry-point changes, also run the affected contract tests selected by the
 existing validation plan before publication. A syntax pass or a hand-picked
