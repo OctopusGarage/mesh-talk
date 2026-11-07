@@ -132,6 +132,14 @@ Where a step mixes compilation and tests, use its logs or Cargo timings and mark
 any unresolved split as unknown. API dispatch timestamps can include `needs`
 waits; they do not by themselves measure runner queue time.
 
+For unexplained native-runner variation, retain comparable complete observations
+and collect resource evidence before changing concurrency or compile profiles.
+The existing native diagnostic timing mode records macOS CPU count, physical
+memory, swap/VM snapshots and per-partition real/user/system time plus maximum
+child RSS. A snapshot cannot prove peak memory pressure; maximum child RSS is
+not concurrent compilers' aggregate peak. Preserve the original command status
+and failure precedence, and keep diagnostics outside ordinary acceptance gates.
+
 Use the existing [timing reports](testing-feedback-loop.md#measure-feedback-before-tuning-capacity).
 Distinguish time to actionable feedback, time until required checks complete,
 runner execution minutes and failure/rerun frequency. A change can improve one
@@ -245,6 +253,15 @@ job free of Cargo cache restoration, and do not cache installed outputs that are
 cheaper to recreate than transfer. A cache key must describe compatible inputs,
 not merely create more apparent hits. Avoid publishing identical archives from
 every shard; preserve trusted write policy and existing producer ownership.
+
+An exact cache hit is immutable: it cannot acquire newly needed dependency
+feature/profile variants after a workflow changes its compilation cohorts.
+Review that transition explicitly; rotate only the affected platform's cache
+epoch when needed, preserving trusted writes. A new prefix has a real initial
+cold-build cost and competes with the old entry for the repository allowance.
+Do not enable workspace-crate caching or add per-commit keys merely to hide a
+slow build. Distinguish dependency reuse from the workspace source that must
+still compile; a cache repair does not explain unrelated runner variability.
 
 Download pinned prebuilt development tools through the existing installer where
 available. Verify support in the repository-pinned installer version; an unknown
