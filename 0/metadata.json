@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6V875M7QX9WKXKT258AYS96",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-07T14:57:24.524498Z",
+  "branch": "perf/ci-docs-fast-path",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "scripts/diagnostics/release-reuse.test.mjs",
+    "scripts/diagnostics/test-fixtures/cli.mjs",
+    "scripts/diagnostics/windows-process-owner.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "25b7ce319d4b",
+  "checkpoint_transcript_start": 20578,
+  "transcript_lines_at_start": 20578,
+  "compact_transcript_start": 2274,
+  "token_usage": {
+    "input_tokens": 68360,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 11710080,
+    "output_tokens": 47834,
+    "api_call_count": 39,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 328,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 331,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 4
+  }
+}
