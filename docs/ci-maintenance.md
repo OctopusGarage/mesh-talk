@@ -561,6 +561,14 @@ infrastructure retry is justified, keep its limit, original failure and outcomes
 visible, and ensure repeating the operation is safe. Test retries still obey the
 owning suite policy.
 
+Keep each observation inside a polling assertion nonwaiting when the assertion
+already owns readiness. A locator operation can wait for a virtualized row and
+consume the entire outer budget without producing one geometry sample. Inspect
+the trace to distinguish missing samples from unequal values; use one browser-side
+DOM snapshot for transient geometry, treating an absent row as pending. Preserve
+exact geometry and cache assertions, and exercise the absent-row control rather
+than extending the deadline. The media-scroll remount regression owns this case.
+
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the
 intended case actually ran. Preserve existing coverage while investigating; any

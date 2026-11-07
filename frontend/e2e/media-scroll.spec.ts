@@ -82,6 +82,19 @@ async function releaseImages(page: import("@playwright/test").Page) {
   });
 }
 
+// A virtualized row may be absent between renders. Sample its geometry in one
+// browser task rather than nesting locator attachment waits inside expect.poll.
+async function readRowHeight(
+  page: import("@playwright/test").Page,
+  messageId: string,
+) {
+  return page.evaluate((id) => {
+    const rows = document.querySelectorAll(`[data-message-id="${id}"]`);
+    if (rows.length > 1) throw new Error(`Duplicate message row: ${id}`);
+    return rows[0]?.getBoundingClientRect().height;
+  }, messageId);
+}
+
 test("image rows reserve their final geometry before bytes load", async ({
   page,
 }) => {
@@ -155,9 +168,8 @@ test("scrolling away and returning to latest reuses media without changing row h
       ),
     )
     .toBeLessThanOrEqual(1);
-  const initialHeight = await row.evaluate(
-    (element) => element.getBoundingClientRect().height,
-  );
+  const initialHeight = await readRowHeight(page, "scroll-message-59");
+  expect(initialHeight).toBeGreaterThan(0);
   const readsBefore = await page.evaluate(
     () =>
       (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],
@@ -181,12 +193,13 @@ test("scrolling away and returning to latest reuses media without changing row h
   await log.press("Home");
   await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBe(0);
   await expect(row).toHaveCount(0);
+  expect(await readRowHeight(page, "scroll-message-59")).toBeUndefined();
   await page.getByTestId("jump-to-latest").click();
   await expect(row.getByTestId("file-image")).toBeVisible();
   // The virtualizer can replace this row after visibility but before geometry
   // is read. A missing box is pending, never a successful height measurement.
   await expect
-    .poll(async () => (await row.boundingBox())?.height)
+    .poll(() => readRowHeight(page, "scroll-message-59"))
     .toBe(initialHeight);
   const readsAfter = await page.evaluate(
     () =>
