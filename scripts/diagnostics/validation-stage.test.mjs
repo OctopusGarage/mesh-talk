@@ -917,3 +917,111 @@ test("CLI diagnostic failures cannot impersonate an owner-proven pre-admission c
   assert.equal(record.cleanupUnverified, true);
   await assert.rejects(f.count(), /ENOENT/);
 });
+
+for (const cancel of [false, true, "after-drain"]) test(`escaped inherited output pipes fail closed after leader exit${cancel === "after-drain" ? " and cancellation during output finish" : cancel ? " and cancellation" : ""}`, { skip: process.platform === "win32", timeout: 15000 }, async () => {
+  const { execute } = await import("../validation/stage.mjs");
+  const { Writable } = await import("node:stream");
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const controller = new AbortController();
+  let escaped;
+  let ownedGroup;
+  let ready;
+  const acknowledged = new Promise(resolve => { ready = resolve; });
+  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+  const leader = "const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{detached:true,stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{console.log('ESCAPED_READY='+pid);process.exit(0)});";
+  let cancelledDuringFinish = false;
+  let completion;
+  const bounded = async (promise, ms, description) => {
+    let timer;
+    try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(description)), ms); })]); }
+    finally { clearTimeout(timer); }
+  };
+  const running = () => {
+    if (!escaped) return false;
+    const state = spawnSync("ps", ["-o", "stat=", "-p", String(escaped)], { encoding: "utf8" }).stdout.trim();
+    return !!state && !state.startsWith("Z");
+  };
+  try {
+    completion = execute([process.execPath, "-e", leader, leaf], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, signal: controller.signal,
+      ...(cancel === "after-drain" ? { logPath: "fixture-owned-output", createLogStream: () => new Writable({ write(_chunk, _encoding, done) { done(); }, final(done) {
+        // Output finish is entered only after the escaped read ends were closed.
+        cancelledDuringFinish = true;
+        controller.abort();
+        done();
+      } }) } : {}),
+      onSpawn: pid => { ownedGroup = pid; }, onOutput(chunk) {
+      const match = chunk.toString().match(/ESCAPED_READY=(\d+)/);
+      if (match) { escaped = Number(match[1]); ready(); }
+    } });
+    await bounded(acknowledged, 3000, "escaped worker did not acknowledge readiness");
+    assert.ok(Number.isSafeInteger(escaped) && escaped > 1);
+    if (cancel === true) {
+      await bounded((async () => {
+        while (true) {
+          try { process.kill(-ownedGroup, 0); }
+          catch (error) { if (error.code === "ESRCH") return; throw error; }
+          await pause(20);
+        }
+      })(), 3000, "leader group did not exit after readiness");
+      // Exercise cancellation after natural exit has already armed pipe draining.
+      await pause(100);
+      controller.abort();
+    }
+    const result = await bounded(completion, 6500, "execute remained pending after leader exit and retirement");
+    assert.notEqual(result.code, 0, "escaped pipe holders cannot certify success");
+    assert.equal(result.cleanupUnverified, true);
+    assert.match(result.error, /output pipes.*retirement/i);
+    assert.equal(result.exitCode, 0, "pipe failure preserves the original leader status");
+    if (cancel) assert.equal(result.code, 130);
+    if (cancel === "after-drain") assert.equal(cancelledDuringFinish, true);
+    assert.equal(running(), true, "owner must not signal an unknown escaped group");
+  } finally {
+    if (escaped && running()) process.kill(escaped, "SIGKILL");
+    if (completion) await completion;
+    for (let attempt = 0; attempt < 50 && running(); attempt++) await pause(20);
+    assert.equal(running(), false, "fixture-owned escaped process must retire before completion");
+  }
+});
+
+test("escaped pipe failure records diagnostics and quarantines stage leases without a receipt", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { createHash } = await import("node:crypto");
+  const { setTimeout: pause } = await import("node:timers/promises");
+  const f = await fixture(t);
+  const resource = "escaped-pipe-fixture";
+  const readyFile = path.join(f.root, "target/escaped-ready");
+  const versions = toolVersionFixture(f.root, { ...process.env });
+  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+  const leader = "const fs=require('node:fs');const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1]],{detached:true,stdio:['ignore',1,2,'ipc']});c.once('message',pid=>{fs.writeFileSync(process.argv[2],String(pid));process.exit(0)});";
+  let escaped;
+  let completion;
+  let timer;
+  const alive = () => {
+    if (!escaped) return false;
+    const state = spawnSync("ps", ["-o", "stat=", "-p", String(escaped)], { encoding: "utf8" }).stdout.trim();
+    return !!state && !state.startsWith("Z");
+  };
+  try {
+    completion = f.run({ name: "escaped-pipe", resource, env: versions.env, command: [process.execPath, "-e", leader, leaf, readyFile] });
+    const result = await Promise.race([completion, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("stage did not finalize escaped-pipe failure")), 9000); })]);
+    escaped = Number(await readFile(readyFile, "utf8"));
+    assert.ok(Number.isSafeInteger(escaped) && escaped > 1);
+    assert.notEqual(result.code, 0);
+    assert.equal(result.cleanupUnverified, true);
+    assert.match(result.error, /output pipes.*retirement/i);
+    const owner = JSON.parse(await readFile(path.join(f.root, ".git/validation-resources", createHash("sha256").update(resource).digest("hex"), "owner.json"), "utf8"));
+    assert.match(owner.quarantined, /output pipes/i);
+    await assert.rejects(readFile(result.receipt), { code: "ENOENT" });
+    const attemptNames = await readdir(path.join(f.root, "target/validation/attempts"));
+    const attempt = JSON.parse(await readFile(path.join(f.root, "target/validation/attempts", attemptNames[0]), "utf8"));
+    assert.equal(attempt.cleanupUnverified, true);
+    assert.notEqual(attempt.code, 0);
+    assert.equal(alive(), true, "quarantine cannot claim the escaped process was killed");
+  } finally {
+    clearTimeout(timer);
+    if (!escaped) { try { escaped = Number(await readFile(readyFile, "utf8")); } catch {} }
+    if (Number.isSafeInteger(escaped) && escaped > 1 && alive()) process.kill(escaped, "SIGKILL");
+    if (completion) await completion;
+    for (let attempt = 0; attempt < 50 && alive(); attempt++) await pause(20);
+    assert.equal(alive(), false);
+  }
+});

@@ -277,6 +277,10 @@
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           },
           {
+            "name": "POSIX leader exit and output closure are independent: bound draining after owned-group retirement, fail with unverified cleanup and quarantine leases when escaped descendants retain pipes, preserve first failure and original exit status, and never clear uncertainty during later cancellation or signal unknown groups.",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          },
+          {
             "name": "POSIX signal fixtures atomically publish complete PID readiness after installing handlers, accept only positive safe integer PIDs and retain owned cleanup while a deterministic real write is held before publication",
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           },

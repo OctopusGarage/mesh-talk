@@ -79,6 +79,10 @@ its descendants retired. Shared runners use the validation stage's process owner
 rather than creating an independent nested process group. On POSIX, the outer
 owner retains termination escalation and resource leases through verified group
 retirement, including ignored-stdio descendants and ordinary leader exit.
+Leader exit and pipe closure are independent: bound output draining after group
+retirement, fail closed on escaped inherited-pipe holders and quarantine leases
+without publishing success. Later cancellation must not clear that uncertainty
+when the known group retires; preserve the first failure and original exit status.
 Nested cancellation notifies that owner. Windows commands join a private native
 job at process creation, before the first target instruction, with no breakaway
 or inherited job handle. The owning adapter preserves argv, environment, working

@@ -492,6 +492,12 @@ On POSIX, verify the framework's independently grouped web server as well as the
 CLI group. Use its supported graceful interruption protocol; a missing teardown
 acknowledgment means cleanup remains unverified. Bind lifecycle markers to the
 current invocation so old evidence cannot prove a later process stopped.
+Do not await output-pipe closure indefinitely after the command leader exits.
+The existing process owner bounds draining after group retirement; a separately
+grouped descendant retaining stdout or stderr must yield a failed structured
+result with unverified cleanup and a quarantined lease. Closing owned read ends
+does not prove the escaped process stopped. Keep real natural-exit, cancellation
+and no-success-receipt controls rather than signalling unknown process groups.
 Actual CLI regression fixtures need private output directories as well as private
 source directories; parallel Playwright commands otherwise delete one another's
 traces and manufacture failures. Missing hosted logs do not identify a slow case.

@@ -160,6 +160,14 @@ launch its web server in another group; use the actual tool's teardown protocol
 and retain independent server-retirement controls in the UI command owner. Missing
 cooperative teardown evidence cannot become verified cleanup merely because the
 CLI exited or its group disappeared.
+Leader exit and output-pipe closure are separate lifecycle events. Bound draining
+after owned-group retirement: an escaped descendant can retain inherited pipes
+forever. Close only the owner's read ends, retain unverified cleanup and quarantine
+its lease; the real detached-pipe natural-exit and cancellation controls exercise
+this failure in the validation process owner.
+Cleanup uncertainty is monotonic across cancellation and draining: successfully
+retiring one group cannot clear an earlier unverified escaped-process boundary.
+Retain the first failure while still awaiting every known retirement owner.
 
 **Failure pattern:** cancelling an awaiter releases serialization or capacity while
 its blocking worker, process or native provider continues; retries overlap, old

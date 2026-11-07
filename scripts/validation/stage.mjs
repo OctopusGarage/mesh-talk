@@ -246,8 +246,9 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
         // Keep the group escalation and resource lease until cleanup completes.
         cleanup = new Promise(done => setTimeout(async () => {
           try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ }
-          cleanupUnverified = !await waitForProcessGroup(child.pid);
-          if (cleanupUnverified) error = "Process-group termination could not be verified";
+          const groupUnverified = !await waitForProcessGroup(child.pid);
+          cleanupUnverified ||= groupUnverified;
+          if (groupUnverified) error ||= "Process-group termination could not be verified";
           done();
         }, 2000));
       }
@@ -280,10 +281,33 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
         }
       }
     };
-    // Exit, not stdio close, ends the leader's work. A descendant retaining a
-    // pipe must not postpone retirement until the command watchdog expires.
-    child.once("exit", retireAfterExit);
+    let closed = false;
+    let drainTimer;
+    // Owned group retirement does not close pipes inherited by a process that
+    // created another group. Bound only our read ends; unknown groups are never
+    // signal targets and an undrained pipe cannot certify descendant cleanup.
+    child.once("exit", () => {
+      retireAfterExit();
+      if (!nestedGroup && detached && child.pid) {
+        void (async () => {
+          await publication;
+          await cleanup;
+          if (!closed) drainTimer = setTimeout(async () => {
+            // Cancellation may have begun retirement after this drain was armed.
+            await cleanup;
+            if (closed) return;
+            cleanupUnverified = true;
+            error ||= "Command output pipes did not close after owned process-group retirement";
+            failureKind ||= "failed";
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+          }, 2000);
+        })();
+      }
+    });
     child.on("close", async (code, childSignal) => {
+      closed = true;
+      clearTimeout(drainTimer);
       await publication;
       retireAfterExit();
       await new Promise(done => output.end(failure => {
