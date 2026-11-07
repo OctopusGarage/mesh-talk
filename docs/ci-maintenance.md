@@ -106,6 +106,9 @@ and full-mode environment. Normalize `FAST=0` in both full-preflight children so
 equivalent successful stages can reuse their verified receipts; do not weaken
 identity checks or mutate the caller's environment to manufacture a cache hit.
 
+Select local toolchain versions by prepending to the existing `PATH`; preserve
+installed tools required by the repository's enabled Git hooks.
+
 Local feedback does not replace committed-candidate acceptance. Git documents
 that [hooks can be bypassed](https://git-scm.com/docs/githooks); web edits and other
 clients may not run them. Keep a compact authoritative remote check and necessary
@@ -177,6 +180,12 @@ purpose of each gate. A job timeout is a safety bound, not a performance target.
 Record material budget changes and their rationale in the owning configuration
 and review, rather than inventing universal minute limits in this guide.
 
+Measure the complete unmutated baseline under its actual execution profile when
+inventory or resource policy changes. Selected cases and tiny tool-contract
+fixtures do not establish that the full cohort fits its per-case, suite and job
+budgets. Preserve executed and unrun counts when fail-fast or a watchdog truncates
+that evidence.
+
 Stop an already failed candidate before starting another expensive compilation
 partition. Linux/macOS native testing finishes all selected Host cases, then
 admits the remaining complete workspace only if Host passed. Both partitions
@@ -225,19 +234,6 @@ The real-runner control derives both configured watchdogs, accelerates only thei
 duration, requires actual parked-case failure and subsequent-case execution, and
 verifies descendant retirement before removing its fixture.
 
-Lifecycle regressions should exercise the real supervisor and child processes
-without making unrelated host tool startup part of their success condition.
-When tool identity is outside the assertion, reuse the existing
-[tool-version fixture](../scripts/diagnostics/test-fixtures/tool-versions.mjs)
-and verify that its probes were actually consumed. Keep the real command,
-failure, cancellation and receipt assertions and their existing watchdogs.
-Compare nested budgets before adding an outer subprocess timeout: several valid
-inner probes can exhaust it before the behavior under test starts. A passing PR
-run cannot qualify an unbounded environmental dependency for later main runs.
-Git-path and mode controls should construct Git objects when the host cannot
-represent the input faithfully. Assert the actual delta and mode before checking
-rejection; an empty change rejected for another reason is not a valid negative
-control. Keep these cases on every platform instead of skipping them.
 
 ## Reuse compatible work with verifiable inputs
 
@@ -586,9 +582,21 @@ measured operation. Never batch away the transaction boundaries under test.
 Commit CLI fixture infrastructure to its private baseline before introducing the
 intended source change; unrelated copied tools must not inflate changed-file
 validation or consume the assertion's watchdog.
-When host tool startup is unrelated to the assertion, reuse the existing scoped
-version-probe fixture rather than spawning extra version processes. Keep actual
-commands and identity queries observable; do not replace the work under test.
+
+Lifecycle regressions should exercise the real supervisor and child processes
+without making unrelated host tool startup part of their success condition.
+When tool identity is outside the assertion, reuse the existing
+[tool-version fixture](../scripts/diagnostics/test-fixtures/tool-versions.mjs)
+and verify that its probes were actually consumed. Keep the real command,
+failure, cancellation and receipt assertions and their existing watchdogs.
+Compare nested budgets before adding an outer subprocess timeout: several valid
+inner probes can exhaust it before the behavior under test starts. A passing PR
+run cannot qualify an unbounded environmental dependency for later main runs.
+
+Git-path and mode controls should construct Git objects when the host cannot
+represent the input faithfully. Assert the actual delta and mode before checking
+rejection; an empty change rejected for another reason is not a valid negative
+control. Keep these cases on every platform instead of skipping them.
 
 Browser commands use the existing process owner with a deadline inside the total
 job budget, reserving time for joined cleanup and evidence upload. Keep streamed
