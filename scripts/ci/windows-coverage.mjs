@@ -8,8 +8,8 @@ import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, ope
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const versions = Object.freeze({ nextest: "0.9.148", llvmCov: "0.8.7" });
-export const windowsPartitions = Object.freeze([1, 2, 3, 4]);
+export const versions = Object.freeze({ nextest: "0.9.150", llvmCov: "0.8.7" });
+export const windowsPartitions = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
 const buildArgs = ["--workspace", "--locked"];
 const nextestArgs = ["--profile", "default", "--user-config-file", "none"];
 const canonical = value => JSON.stringify(value);
@@ -136,8 +136,9 @@ export function inventory(listing) {
   return rows;
 }
 
-export function verifyPartition(all, shards) {
-  assert.equal(shards.length, windowsPartitions.length, "Expected four partitions");
+export function verifyPartition(all, shards, expectedPartitions = windowsPartitions.length) {
+  assert.ok(Number.isSafeInteger(expectedPartitions) && expectedPartitions > 0, "Invalid expected partition count");
+  assert.equal(shards.length, expectedPartitions, "Unexpected number of partitions");
   assert.ok(all.length && all.some(row => !row.ignored), "Empty full partition inventory");
   assert.ok(all.every(row => row.selected === !row.ignored), "Full partition has hidden filters or changed ignored behavior");
   const stable = rows => rows.map(({ selected: _selected, ...rest }) => rest);
@@ -234,8 +235,10 @@ async function identity(evidence = () => undefined) {
   assert.match(process.env.GITHUB_RUN_ATTEMPT ?? "", /^[1-9]\d*$/u);
   const nextest = await command(["nextest", "--version"], evidence("identity-nextest"));
   const llvmCov = await command(["llvm-cov", "--version"], evidence("identity-llvm-cov"));
-  assert.match(nextest, /^cargo-nextest 0\.9\.148(?:\s|$)/u);
-  assert.equal(llvmCov.trim(), "cargo-llvm-cov 0.8.7");
+  const [nextestName, nextestVersion] = nextest.trim().split(/\s+/u);
+  assert.equal(nextestName, "cargo-nextest");
+  assert.equal(nextestVersion, versions.nextest);
+  assert.equal(llvmCov.trim(), `cargo-llvm-cov ${versions.llvmCov}`);
   assert.equal(process.env.CARGO_LLVM_COV_SHOW_ENV, "1", "Source cargo llvm-cov show-env --sh before running this command");
   assert.equal(path.resolve(process.env.CARGO_LLVM_COV_TARGET_DIR ?? ""), path.join(root, "target"), "Coverage target must be workspace/target");
   return {
@@ -289,14 +292,21 @@ export async function produce(directory) {
   }
   const featureResolutionSha256 = digest(canonical(metadata.resolve));
   verifyIdentity(before, await identity());
-  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256: await fileHash(archive), inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
+  const archiveSha256 = await fileHash(archive);
+  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256, inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
   rmSync(probe, { recursive: true });
   rmSync(binaryFile);
   console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);
 }
 
+export function consumerFailurePolicy(env = process.env) {
+  const value = env.MESH_WINDOWS_FAIL_FAST;
+  assert.ok(value === undefined || value === "0" || value === "1", "MESH_WINDOWS_FAIL_FAST must be 0 or 1");
+  return value === "1" ? "--fail-fast" : "--no-fail-fast";
+}
+
 export async function consume(shard, directory, output) {
-  assert.ok(windowsPartitions.includes(shard), "shard must be an integer from 1 through 4");
+  assert.ok(windowsPartitions.includes(shard), "shard must be an integer from 1 through 8");
   mkdirSync(output, { recursive: true });
   const progress = path.join(output, "progress.jsonl");
   assert.ok(!existsSync(progress) && !existsSync(path.join(output, "receipt.json")), "Consumer output already contains a prior attempt");
@@ -334,7 +344,7 @@ export async function consume(shard, directory, output) {
   assert.deepEqual(observed, expected, "Consumer partition differs from producer inventory");
   writeJson(path.join(output, "selected-inventory.json"), observed[shard]);
   const started = performance.now();
-  const events = await command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`, "--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
+  const events = await command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`, "--test-threads", "1", "--retries", "0", consumerFailurePolicy(), "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
     env: { ...process.env, CARGO_NET_OFFLINE: "true", RUST_TEST_THREADS: "1", NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1" },
     ...evidence("execution"), liveStdout: true,
   });

@@ -700,11 +700,17 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
-  A background channel recovery tick also reconciles one joined channel with up to
+  Background channel recovery admits at most two group jobs, each selecting up to
   three known member routes. It rotates channels and peers, so a member that missed
   the original push can obtain signed events from another member even without a
-  post office or the original author online. Each peer attempt is time-bounded;
-  normal sync membership projection and event validation still apply.
+  post office or the original author online. Selected peer rounds own separately
+  scheduled tasks, admitted to the participant retirement barrier before spawn.
+  Finite synchronous preparation for one peer cannot prevent another selected
+  peer from being polled on an available host worker. First applied progress
+  cancels the remaining rounds and joins their actual retirement before releasing
+  the group lane. Parent cancellation aborts its children; their tracked permits
+  retain captures until the participant drain observes actual retirement. Each
+  peer keeps its existing deadline, membership projection and event validation.
   Discovery of a new or relocated peer wakes a bounded recovery batch immediately;
   an adaptive jittered three-to-sixty-second recovery fallback repairs missed
   announcements and old routes; custody checks retain their independent tick.
@@ -1392,6 +1398,14 @@ queries. SQLCipher passphrases are domain-separated so user input cannot select
 the raw-key syntax. Production key derivation retains a 600,000-iteration
 password work factor; only existing test configurations reduce it.
 
+A ready transcript generation certifies the exact requested selector ranks, not
+just a cached row count. Nonempty reads from retired or unfinished generations return a stale-cursor
+error. A missing rank or derived-candidate join in a ready range is a typed
+corruption error; it must not produce an empty successful page, silently omit a
+requested message or leave a synchronous query spinning without progress.
+Authoritative signed events and plaintext sidecars remain untouched by this
+derived-index failure boundary.
+
 Event repository schema v2 admits the signed `ChannelMetadata` event added by
 channel protocol v5. The only v1 schema change relaxes the event-kind constraint
 from 18 to 19. Upgrade validates the exact owned v1 tables and indexes, then
@@ -1875,7 +1889,6 @@ forever. Only complete observations are cached and signed. The existing account
 sync wake continues progress; no separate worker is created. Wire IDs remain
 limited to 512, while explicit final local receipts preserve their existing
 131,072-ID bound and are admitted by byte cost before materialization.
-
 
 Transcript lookups return owned, fallible results. Chronological, reverse and
 insertion-order pages select keys and aggregate sender/body bytes before fetching

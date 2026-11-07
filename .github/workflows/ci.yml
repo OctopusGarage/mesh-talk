@@ -16,8 +16,8 @@ on:
         default: false
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 # Read-only: every job just checks out and runs tooling — nothing writes back.
 permissions:
@@ -35,7 +35,9 @@ jobs:
     strategy:
       fail-fast: false
       # Windows uses the reusable single-build archive workflow below. Linux
-      # and macOS retain their complete linked workspace and coverage passes.
+      # and macOS retain complete workspace tests; macOS instruments Host only.
+      # Keep compute-heavy protocol tests on Apple Silicon. Desktop browser
+      # admission separately waits for Health/WebKit and bounds its fan-out.
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -48,6 +50,22 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - name: Prepare hosted Linux build storage
+        id: runner_storage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
+
+      - name: Preserve runner storage measurements
+        if: always() && steps.runner_storage.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-storage.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Prepare Ubuntu archive source
         if: runner.os == 'Linux'
@@ -64,7 +82,8 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            gdb
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -89,10 +108,21 @@ jobs:
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@v2.88.1
         with:
-          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.148
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
 
       - name: Verify coverage accumulation with the actual tool
-        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs
+        # These fixtures launch real Cargo/rustc processes and share this job's
+        # package cache. Give each compiler contract exclusive execution.
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs
+
+      - name: Prepare and verify Linux native crash evidence
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e -o pipefail
+          ulimit -c 262144
+          node scripts/ci/linux-crash-diagnostics.mjs setup
+          node scripts/ci/linux-crash-diagnostics.mjs selftest
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
@@ -103,7 +133,7 @@ jobs:
         working-directory: frontend
         run: npm run check:build-syntax
 
-      # Keep native lint, production builds and instrumented tests on every OS.
+      # Keep native lint, production builds and complete tests on every OS.
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -112,10 +142,10 @@ jobs:
         working-directory: src-tauri
         run: cargo build --workspace --locked
 
-      # Collect each OS's workspace coverage without repeating its test suite.
-      # Every platform collects coverage in its existing test pass: native-only
-      # updater policy cannot be represented by Linux's AppImage-only branch.
-      # --workspace covers the protocol, integrations, MCP adapter and desktop app.
+      # Linux/Windows own complete instrumented workspace coverage. macOS keeps
+      # desktop-specific Host coverage (including native updater policy) and runs
+      # every remaining workspace target normally, avoiding a duplicate costly
+      # instrumented Core test build. No platform repeats its test suite.
       - name: Test + coverage (macOS)
         if: matrix.os != 'ubuntu-latest'
         working-directory: src-tauri
@@ -124,39 +154,16 @@ jobs:
           RUST_TEST_THREADS: 4
           NEXTEST_TEST_THREADS: 4
         run: |
-          set -e -o pipefail
-          run_coverage() {
-            cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate
-            # Preserve each failure even if another test prevents suite completion.
-            cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
-            cargo llvm-cov report --lcov --output-path lcov.info
-          }
-          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            run_coverage 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
-          else
-            run_coverage
-          fi
-          # llvm-cov runs unit/integration tests; stable Rust doctests keep their
-          # original separate check without executing those suites twice.
+          bash ../scripts/ci/workspace-coverage.sh macos
+          # llvm-cov runs Host; Nextest runs the remaining default targets.
+          # Stable Rust doctests retain their original separate check.
           cargo test --workspace --doc
 
       - name: Test + coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         shell: bash
-        run: |
-          set -e -o pipefail
-          run_coverage() {
-            cargo llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate
-            # Preserve each failure even if another test prevents suite completion.
-            cargo llvm-cov --no-report --locked --workspace --exclude mesh-talk -- --nocapture
-            cargo llvm-cov report --lcov --output-path lcov.info
-          }
-          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            run_coverage 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
-          else
-            run_coverage
-          fi
+        run: bash ../scripts/ci/workspace-coverage.sh linux
 
       - name: Workspace doctests (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -168,7 +175,7 @@ jobs:
         env:
           EVAL_SOURCE_SHA: ${{ github.sha }}
           EVAL_OUTPUT_DIR: ${{ runner.temp }}/backend-eval-results
-          EVAL_COVERAGE: '1'
+          EVAL_COVERAGE: "1"
         run: |
           node scripts/evals/backend-runner.mjs
           cargo llvm-cov --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
@@ -191,11 +198,26 @@ jobs:
         with:
           name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
           path: ${{ runner.temp }}/backend-eval-results/
-          if-no-files-found: error
+          if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
+          retention-days: 14
+
+      - name: Collect Linux native crash evidence and retire its storage
+        if: always() && runner.os == 'Linux'
+        run: node scripts/ci/linux-crash-diagnostics.mjs collect
+
+      - name: Preserve Linux native crash diagnostics
+        if: always() && runner.os == 'Linux'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-crash-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-crash-diagnostics/reports/
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: test-timing-${{ matrix.os }}-${{ github.run_attempt }}

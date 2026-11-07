@@ -30,7 +30,9 @@ export function requiredBrowserPaths(tier) {
   paths.push(
     ["automatic-delivery.spec.ts", "delivery recovery survives its receipt and returns focus safely, then retires on logout"],
     ["automatic-delivery.spec.ts", "delivery details close on navigation and app lock, including a late status response"],
-    ["automatic-delivery.spec.ts", "text, sticker and file card stay Awaiting until explicit authoritative mock projection"],
+    ["automatic-delivery.spec.ts", "text stays Awaiting until explicit authoritative mock projection"],
+    ["automatic-delivery.spec.ts", "sticker stays Awaiting until explicit authoritative mock projection"],
+    ["automatic-delivery.spec.ts", "file card stays Awaiting until explicit authoritative mock projection"],
     ["automatic-delivery.spec.ts", "a native picker completed after conversation navigation cannot send to the new conversation"],
     ["automatic-delivery.spec.ts", "a pending local text acceptance moves the submitted text out of the composer"],
     ["automatic-delivery.spec.ts", "a scoped native delivery invalidation refreshes status without a polling response"],
@@ -85,6 +87,7 @@ export function requiredBrowserPaths(tier) {
     ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
     ["unread-badge.spec.ts", "one logical DM remains one unread badge across duplicate live events and history scanning"],
     ["unread-badge.spec.ts", "channel mention indicator survives later traffic and clears when the mention is viewed"],
+    ["unread-badge.spec.ts", "channel mention indicator survives later traffic and clears when the mention is viewed after deferred initial presentation"],
     ["unread-badge.spec.ts", "unread review clears undiscovered senders and hidden channels without hiding later arrivals"],
     ["unread-badge.spec.ts", "unread review exposes failed badge updates and retries the current cleared count"],
   );

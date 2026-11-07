@@ -11,7 +11,7 @@ import { buildFrontendGraph } from "./frontend-graph.mjs";
 import { loadContracts } from "./contracts.mjs";
 import { runStage } from "./stage.mjs";
 import { runCommand, rustTestCount, requireCommandStdout } from "../pr-platform/guest.mjs";
-import { buildStaticChecks, phasePlan } from "./checks.mjs";
+import { buildStaticChecks, pendingNodeTests, phasePlan } from "./checks.mjs";
 import { frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 import { loadRequirements, selectRequirements } from "./pr-scenarios.mjs";
 import { createFeedback, completePhase, finishFeedback, observeCommands, writeFeedback } from "./feedback.mjs";
@@ -59,6 +59,7 @@ export function parseOptions(args) {
     owners: [],
     reason: "",
     checks: false,
+    cheap: false,
     managed: false,
     browser: [],
     native: [],
@@ -66,7 +67,7 @@ export function parseOptions(args) {
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (["--run", "--json", "--checks", "--managed"].includes(arg)) {
+    if (["--run", "--json", "--checks", "--managed", "--cheap"].includes(arg)) {
       options[arg.slice(2)] = true;
       continue;
     }
@@ -81,6 +82,10 @@ export function parseOptions(args) {
   }
   if ((options.owners.length || options.browser.length || options.native.length) && !options.reason.trim())
     throw Error("Explicit owners/browser/native evidence requires --reason");
+  if (options.cheap) {
+    if (options.run || options.managed || options.report) throw Error("--cheap runs static checks directly; do not combine it with --run, --managed or --report");
+    options.checks = true;
+  }
   if (options.report && !options.run) throw Error("--report requires --run; previews are read-only");
   return options;
 }
@@ -267,6 +272,13 @@ export function validateFrontendReport(report, files, directory) {
   }
   return count;
 }
+/** Reuse static/policy checks without application suites, builds or heavy work. */
+export async function executeCheapChecks(plan, options) {
+  const selected = phasePlan(plan, "static");
+  selected.checks = selected.checks.filter(check => check.kind !== "test");
+  await executePlan(selected, options);
+}
+
 export async function executePlan(
   plan,
   { cwd = process.cwd(), run = runCommand, log = console.log, resultPrefix } = {},
@@ -291,7 +303,7 @@ export async function executePlan(
     log(`Test execution: ${((Date.now() - started) / 1000).toFixed(1)}s`);
     return result;
   }
-  for (const file of plan.node) {
+  for (const file of pendingNodeTests(plan)) {
     const result = await execute(
       process.execPath,
       ["--test", "--test-reporter=tap", file],
@@ -465,6 +477,14 @@ async function main(args) {
     }).fail(Object.assign(Error("Validation plan became blocked; preview the changed inputs."), { kind: "invalidated" }));
     if (reportFile) await terminalFeedback(reportFile, plan, options, invocationStarted);
     process.exitCode = 2;
+    return;
+  }
+  if (options.cheap) {
+    const before = await executionFingerprint(root, plan);
+    await executeCheapChecks(plan, { cwd: root, log: options.json ? console.error : console.log });
+    if (await executionFingerprint(root, await createPlan(root, options)) !== before)
+      throw Error("Validation inputs changed during cheap checks; rerun them for the current candidate");
+    console.error("Cheap static checks passed. Tests, builds, browser/native evidence and candidate acceptance remain pending.");
     return;
   }
   const expectedResource = process.env.MESH_VALIDATION_AFFECTED_CHILD;

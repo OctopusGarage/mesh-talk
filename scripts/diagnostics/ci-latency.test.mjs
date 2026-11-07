@@ -1,10 +1,184 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { versions } from "../ci/windows-coverage.mjs";
+
+// Also runs in cheap PR validation. Keep this owner limited to configuration
+// assertions and test-inventory discovery; no suites, compilation or installs.
 
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
+
+test("browser and native dependency installation use the same Linux-only preparation", async () => {
+  const ui = await readFile(
+    new URL("../../.github/workflows/e2e-ui.yml", import.meta.url),
+    "utf8",
+  );
+  const native = await readFile(
+    new URL(
+      "../../.github/workflows/hidden-contacts-native.yml",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const shards = await readFile(
+    new URL("../../.github/workflows/ui-shards.yml", import.meta.url),
+    "utf8",
+  );
+  let installers = 0;
+  for (const [name, workflow] of [
+    ["UI caller", ui],
+    ["reusable shards", shards],
+  ]) {
+    for (const section of workflow.split(/^  [a-z][\w-]*:\n/m).slice(1)) {
+      const install = section.indexOf("playwright install --with-deps");
+      if (install === -1) continue;
+      const fixedRunner = section.match(/^    runs-on: (.+)$/mu)?.[1].replace(/^['"]|['"]$/gu, "");
+      if (/^(?:macos|windows)-/u.test(fixedRunner ?? "")) {
+        assert.doesNotMatch(section, /name: Prepare Ubuntu archive source/u,
+          `${name}: a fixed non-Linux browser runner must not prepare APT`);
+        continue;
+      }
+      installers++;
+      const preparations = section.split(
+        /^      - name: Prepare Ubuntu archive source\n/m,
+      );
+      assert.equal(
+        preparations.length,
+        2,
+        `${name}: every browser installer needs exactly one guarded preparation`,
+      );
+      const step = preparations[1].split(/^      - /m)[0];
+      assert.match(step, /if: runner\.os == 'Linux'/);
+      assert.match(
+        step,
+        /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/,
+      );
+      assert.match(step, /\.\.\/scripts\/ci\/ubuntu-apt-source\.mjs/);
+      const prepare = section.indexOf("name: Prepare Ubuntu archive source");
+      const setupNode = section.indexOf("uses: actions/setup-node@");
+      assert.ok(
+        setupNode >= 0 && prepare > setupNode,
+        `${name}: establish Node before preparing APT`,
+      );
+      assert.ok(prepare < install, `${name}: prepare APT before the installer`);
+    }
+  }
+  assert.ok(installers > 0, "browser dependency installers must be discovered");
+  const nativePrepare = native.indexOf("name: Prepare Ubuntu archive source");
+  const nativeDependencies = native.indexOf("name: Linux native webview dependencies");
+  assert.ok(nativePrepare >= 0 && nativeDependencies >= 0 && nativePrepare < nativeDependencies);
+  assert.match(
+    native,
+    /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
+  );
+  for (const name of ["ci.yml", "mutants.yml"]) {
+    const workflow = await readFile(
+      new URL(`../../.github/workflows/${name}`, import.meta.url),
+      "utf8",
+    );
+    const prepare = workflow.indexOf("name: Prepare Ubuntu archive source");
+    const setupNode = workflow.indexOf("uses: actions/setup-node@");
+    const dependencies = workflow.indexOf("name: Install Tauri system dependencies");
+    assert.ok(
+      setupNode >= 0 && prepare > setupNode,
+      `${name} must establish the pinned Node before preparing APT`,
+    );
+    assert.ok(
+      dependencies >= 0 && prepare < dependencies,
+      `${name} must prepare APT before Linux dependency installation`,
+    );
+    assert.match(
+      workflow,
+      /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
+    );
+  }
+});
+
+test("only auxiliary diagnostic transport is optional; acceptance artifacts stay mandatory", () => {
+  const optional = {
+    "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
+    "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-"],
+    "sanitizers.yml": ["runner-storage-"],
+    "mutants.yml": ["runner-storage-"],
+    "hidden-contacts-native.yml": ["runner-storage-"],
+    "release.yml": ["runner-storage-"],
+    "e2e-ui.yml": ["merged-ui-", "webkit-diagnostics-"],
+    "ui-shards.yml": ["ui-failure-attachments-"],
+    "fuzz.yml": ["fuzz-crashes"],
+  };
+  const seen = [];
+  for (const file of readdirSync(new URL("../../.github/workflows/", import.meta.url)).filter(file => /\.ya?ml$/u.test(file))) {
+    for (const block of read(file).split(/^      - /m).filter(block => /uses: actions\/upload-artifact@/u.test(block))) {
+      const artifact = block.match(/^          name: (.+)$/mu)?.[1];
+      assert.ok(artifact, `${file}: upload must declare its artifact role`);
+      const prefix = optional[file]?.find(prefix => artifact.startsWith(prefix));
+      if (prefix) assert.match(block, /^        continue-on-error: true$/mu, `${file}: ${artifact}`);
+      else assert.doesNotMatch(block, /^        continue-on-error:/mu, `${file}: ${artifact} is mandatory`);
+      if (prefix) seen.push(`${file}:${prefix}`);
+    }
+  }
+  assert.deepEqual(seen.sort(), Object.entries(optional).flatMap(([file, prefixes]) => prefixes.map(prefix => `${file}:${prefix}`)).sort());
+  const diagnostics = step(read("check-health.yml"), "Diagnostic and release gate regressions (all platforms)");
+  assert.doesNotMatch(diagnostics, /continue-on-error/u);
+  assert.match(diagnostics, /--result tmp\/health-diagnostics\.json/u);
+  assert.doesNotMatch(step(read("ci.yml"), "Collect Linux native crash evidence and retire its storage"), /continue-on-error/u);
+});
+
+test("real compiler contracts do not compete for the native job's Cargo cache", () => {
+  for (const [workflow, name, expected] of [
+    ["ci.yml", "Verify coverage accumulation with the actual tool", ["backend-coverage", "native-host-coverage", "rust-profile"]],
+    ["windows-workspace.yml", "Validate archive and coverage contracts", ["windows-native-deps", "backend-coverage", "rust-profile", "windows-coverage-cli"]],
+  ]) {
+    const caller = step(read(workflow), name);
+    assert.ok(caller, `${workflow}: compiler contract step is missing`);
+    assert.match(caller, /run: node --test --test-concurrency=1 /, `${workflow}: real compiler contracts share Cargo's package-cache lock`);
+    for (const fixture of expected) assert.ok(caller.includes(`scripts/ci/${fixture}.test.mjs`), `${workflow}: missing ${fixture}`);
+    assert.doesNotMatch(caller, /continue-on-error|\|\| true|&\s*$/m);
+  }
+});
+
+test("platform-exclusive probes stay in their native producer rather than universal local selection", () => {
+  const contracts = JSON.parse(readFileSync(new URL("../validation/validation.json", import.meta.url), "utf8")).contracts;
+  const ci = contracts.find(contract => contract.id === "ci-verification");
+  assert.ok(ci, "the CI decision owner must exist");
+  assert.ok(!ci.node.includes("scripts/ci/windows-native-deps.test.mjs"));
+  assert.match(step(read("windows-workspace.yml"), "Validate archive and coverage contracts"), /scripts\/ci\/windows-native-deps\.test\.mjs/u);
+});
+
+test("heavy hosted Linux builds reclaim only unused image SDKs before cache expansion", () => {
+  const sources = [
+    ["ci.yml", read("ci.yml")],
+    ["hidden-contacts-native.yml", read("hidden-contacts-native.yml")],
+    ["mutants.yml", read("mutants.yml")],
+    ["sanitizers.yml", read("sanitizers.yml").split("  cohort:\n")[1].split("  shards:\n")[0]],
+    ["release.yml", read("release.yml").split("  build-release:\n")[1].split("  verify-release:\n")[0]],
+  ];
+  for (const [file, source] of sources) {
+    const preparation = step(source, "Prepare hosted Linux build storage");
+    assert.ok(preparation, `${file}: missing disk preparation`);
+    assert.match(preparation, /runner.os == 'Linux'/);
+    assert.match(preparation, /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/);
+    assert.match(preparation, /scripts\/ci\/runner-storage\.mjs --prepare/);
+    const index = source.indexOf("name: Prepare hosted Linux build storage");
+    const cache = source.search(/uses: (?:Swatinem\/rust-cache|actions\/cache)@/);
+    assert.ok(index >= 0 && cache > index, `${file}: restore must follow measured image reclamation`);
+    assert.doesNotMatch(preparation, /cargo clean|rm -rf|hostedtoolcache|target\//);
+    assert.match(preparation, /id: runner_storage/);
+    assert.match(preparation, /tee "\$RUNNER_TEMP\/runner-storage\.json"/);
+    const measurements = step(source, "Preserve runner storage measurements");
+    assert.ok(measurements, `${file}: measurements must survive a later full-disk failure`);
+    assert.match(measurements, /steps.runner_storage.outcome == 'success'/);
+    assert.match(measurements, /name: runner-storage-/);
+    assert.ok(source.indexOf("name: Preserve runner storage measurements") < cache);
+
+  }
+  assert.match(step(read("mutants.yml"), "Prepare hosted Linux build storage"), /steps.selection.outputs.selected != '0'/);
+  assert.doesNotMatch(read("ui-shards.yml"), /runner-storage\.mjs/, "browser-only shards do not need native build reclamation");
+});
 
 test("verification Rust caches restore on PRs and publish reusable main caches", () => {
   for (const file of ["ci.yml", "windows-workspace.yml", "e2e-backend.yml", "hidden-contacts-native.yml", "sanitizers.yml", "mutants.yml"]) {
@@ -18,13 +192,13 @@ test("verification Rust caches restore on PRs and publish reusable main caches",
 test("portable diagnostics declare the Rust toolchain needed by their real Cargo fixture", () => {
   const platform = read("check-health.yml").split("  platform:\n")[1].split("  source:\n")[0];
   const toolchain = platform.indexOf("uses: dtolnay/rust-toolchain@stable");
-  assert.ok(toolchain >= 0 && toolchain < platform.indexOf("node --test scripts/diagnostics/*.test.mjs"));
+  assert.ok(toolchain >= 0 && toolchain < platform.indexOf("node --test --test-reporter=spec"));
 });
 
 test("portable validation runs beside native compilation using existing health runners", () => {
   const ci = read("ci.yml");
   const health = read("check-health.yml");
-  for (const command of ["npm run test:coverage", "node --test scripts/diagnostics/*.test.mjs", "python3 -m unittest discover", "node --test tools/help/*.test.mjs"]) {
+  for (const command of ["npm run test:coverage", "node --test --test-reporter=spec", "python3 -m unittest discover", "node --test tools/help/*.test.mjs"]) {
     assert.ok(health.includes(command), `Health must retain ${command}`);
     assert.ok(!ci.includes(command), `native compilation must not wait for ${command}`);
   }
@@ -33,19 +207,15 @@ test("portable validation runs beside native compilation using existing health r
   assert.match(health, /files: frontend\/coverage\/lcov.info/);
 });
 
-test("all platforms run the complete frontend suite while Linux owns its coverage", () => {
+test("one complete Linux frontend unit cohort owns coverage without duplicate OS execution", () => {
   const health = read("check-health.yml");
   const coverage = step(health, "Frontend unit tests and coverage");
-  const plain = step(health, "Frontend unit tests (macOS and Windows)");
-  assert.ok(coverage && plain, "both execution modes must exist");
+  assert.ok(coverage, "the complete unit coverage cohort must exist");
+  assert.equal(health.split(/^      - /m).filter(value => value.startsWith("name: Frontend unit tests")).length, 1);
   assert.match(coverage, /^        if: runner.os == 'Linux'$/m);
-  assert.match(plain, /^        if: runner.os != 'Linux'$/m);
   assert.match(coverage, /^        run: npm run test:coverage$/m);
-  assert.match(plain, /^        run: npm test$/m);
-  for (const selected of [coverage, plain]) {
-    assert.match(selected, /^        working-directory: frontend$/m);
-    assert.doesNotMatch(selected, /continue-on-error|timeout|--exclude|--testNamePattern/);
-  }
+  assert.match(coverage, /^        working-directory: frontend$/m);
+  assert.doesNotMatch(coverage, /continue-on-error|timeout|--exclude|--testNamePattern/);
   const { scripts } = JSON.parse(readFileSync(new URL("../../frontend/package.json", import.meta.url), "utf8"));
   assert.equal(scripts.test, "vitest run");
   assert.equal(scripts["test:coverage"], `${scripts.test} --coverage`);
@@ -75,11 +245,12 @@ test("full browser coverage remains on every desktop OS with bounded shards", ()
   const shardWorkflow = read("ui-shards.yml");
   const baseline = shardWorkflow.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(ui, /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(ui, /operating_systems: '\["macos-latest","windows-latest"\]'/);
+  assert.match(ui, /- os: macos-26-intel/);
+  assert.match(ui, /- os: windows-latest/);
   assert.match(baseline, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
-  assert.match(baseline, /shard: \[1, 2, 3, 4\]/);
+  assert.match(baseline, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
   assert.match(baseline, /fail-fast: false/);
-  assert.match(step(shardWorkflow, "Run UI E2E"), /--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4/);
+  assert.match(step(shardWorkflow, "Run UI E2E"), /--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\}/);
   assert.match(baseline, /name: playwright-ui-\$\{\{ matrix.os \}\}-\$\{\{ matrix.shard \}\}-\$\{\{ github.run_attempt \}\}/);
   assert.match(baseline, /if-no-files-found: error/);
   assert.doesNotMatch(baseline, /test:coverage|codecov/);
@@ -127,7 +298,7 @@ test("the final UI gate rejects failed, cancelled or missing required jobs", () 
 test("the protected Full Linux UI regression name remains a fail-closed check", () => {
   const coverage = read("e2e-ui.yml").split("  coverage:\n")[1]?.split("  reports:\n")[0];
   assert.match(coverage, /name: Full Linux UI regression/);
-  assert.match(coverage, /if: always\(\)/);
+  assert.match(coverage, /if: \$\{\{ !cancelled\(\) \}\}/);
   for (const result of ["success", "failure", "cancelled", "skipped"]) {
     assert.equal(runGate("e2e-ui.yml", "Require all browser shards", { BASELINE: result, UNIT_COVERAGE: "success" }).status === 0, result === "success");
   }
@@ -140,7 +311,7 @@ test("UI coverage consumers share Health's same-run Linux unit coverage", () => 
   assert.match(ui, /health:\n    uses: \.\/\.github\/workflows\/check-health\.yml/);
   assert.match(health, /unit-coverage-artifact.mjs seal/);
   assert.match(health, /name: ui-unit-coverage-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
-  for (const job of ["coverage", "packs"]) {
+  for (const job of ["coverage"]) {
     const consumer = ui.split(`  ${job}:\n`)[1].split(/^  [a-z][\w-]*:\n/m)[0];
     assert.match(consumer, /needs:.*health/);
     assert.match(consumer, /unit-coverage-artifact.mjs restore/);
@@ -153,34 +324,87 @@ test("full Chromium execution owns portable evidence while unique engines remain
   const ui = read("e2e-ui.yml");
   const portable = ui.split("  portable:\n")[1].split("  chromium-extended:\n")[0];
   assert.doesNotMatch(portable, /browser: chromium/);
-  assert.match(portable, /os: macos-latest, browser: webkit/);
+  assert.match(portable, /name: Portable UI \(macos-26-intel, webkit\)/);
+  assert.match(portable, /needs: portable-shards/);
   assert.match(ui, /name: Chromium portable evidence/);
   assert.match(read("ui-shards.yml"), /chromium-evidence.mjs extract/);
   assert.match(ui, /chromium-evidence.mjs collect/);
   assert.match(step(read("ui-shards.yml"), "Run UI E2E"), /--reporter=list,blob,json/);
   const reports = ui.split("  reports:\n")[1].split("  packs:\n")[0];
   assert.doesNotMatch(reports, /matrix:/);
-  assert.match(reports, /for os in ubuntu-24.04 macos-latest windows-latest/);
+  assert.match(reports, /chromium-evidence.mjs render-artifacts/);
   assert.match(ui, /chromium-extended:/);
   assert.match(ui, /firefox-extended:/);
 });
 
 test("CI runs release workflow diagnostics only through the shared glob", () => {
   const ci = read("check-health.yml");
-  assert.match(ci, /node --test scripts\/diagnostics\/\*.test.mjs/);
+  assert.match(ci, /scripts\/diagnostics\/\*.test.mjs/);
   assert.doesNotMatch(ci, /node --test scripts\/diagnostics\/release-workflow.test.mjs/);
 });
 
-test("Windows builds once then requires four complete serial archive partitions", () => {
+test("Windows builds once then requires eight complete serial archive partitions", () => {
   assert.match(read("ci.yml"), /os: \[ubuntu-latest, macos-latest\]/);
   assert.match(read("ci.yml"), /windows:\n    uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
   const windows = read("windows-workspace.yml");
   assert.match(windows, /needs: build/);
-  assert.match(windows, /shard: \[1, 2, 3, 4\]/);
+  assert.match(windows, /shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/);
+  assert.match(windows, /name: Windows workspace tests \(\$\{\{ matrix.shard \}\}\/8\)/);
   assert.match(windows, /ref: \$\{\{ github.sha \}\}/);
   assert.match(windows, /toolchain: \$\{\{ needs.build.outputs.rust \}\}/);
   assert.match(windows, /RUST_TEST_THREADS: '1'/);
-  assert.match(windows, /cargo-nextest@0\.9\.148,cargo-llvm-cov@0\.8\.7/);
+  assert.ok(windows.includes(`cargo-nextest@${versions.nextest},cargo-llvm-cov@${versions.llvmCov}`));
   assert.match(windows, /if-no-files-found: error/);
   assert.doesNotMatch(windows.split("  tests:\n")[1], /Swatinem\/rust-cache|cargo build|npm ci/);
+});
+
+test("optional pack job retains unique dist checks without repeating baseline browsers", () => {
+  const ui = read("e2e-ui.yml");
+  const packs = ui.split("  packs:\n")[1].split("  portable-shards:\n")[0];
+  assert.match(packs, /name: Optional pack UI and asset check/);
+  assert.match(packs, /npm run build && node .*check-variant-assets.mjs/);
+  assert.match(packs, /npm run check:build-syntax/);
+  assert.doesNotMatch(packs, /needs:|playwright install|playwright test|coverage|codecov|download-artifact/);
+});
+
+
+test("ASan protocol fixture has one authoritative producer before compilation", () => {
+  const sanitizer = read("sanitizers.yml");
+  assert.equal((sanitizer.match(/node --test scripts\/ci\/asan-cli.test.mjs/g) ?? []).length, 1);
+  assert.doesNotMatch(read("ci.yml"), /node --test[^\n]*asan-cli.test.mjs/);
+  assert.ok(sanitizer.indexOf("asan-cli.test.mjs") < sanitizer.indexOf("asan.mjs build"));
+});
+
+
+test("removed pack browser selection remains entirely in the authoritative full Chromium inventory", () => {
+  const cli = fileURLToPath(new URL("../../frontend/node_modules/@playwright/test/cli.js", import.meta.url));
+  function list(args) {
+    const result = spawnSync(process.execPath, [cli, "test", ...args, "--list", "--reporter=json"], { cwd: new URL("../../frontend/", import.meta.url), encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const paths = [];
+    function visit(suite) {
+      for (const spec of suite.specs ?? []) for (const item of spec.tests) {
+        if (args.length) assert.equal(item.expectedStatus, "passed");
+        paths.push(JSON.stringify([spec.file, spec.title, item.projectName]));
+      }
+      for (const child of suite.suites ?? []) visit(child);
+    }
+    visit(JSON.parse(result.stdout));
+    return paths;
+  }
+  const baseline = list([]);
+  const removed = list(["e2e/stickers.spec.ts", "e2e/packs-empty.spec.ts", "--grep", "starts without"]);
+  assert.equal(removed.length, 2);
+  for (const path of removed) assert.equal(baseline.filter(candidate => candidate === path).length, 1);
+});
+
+test("historical incident rigs are manual while required native acceptance remains automatic", () => {
+  for (const file of ["linux-renderer-diagnostics.yml", "linux-tray-diagnostics.yml", "native-window-diagnostics.yml", "windows-network-diagnostics.yml"]) {
+    const source = read(file);
+    assert.match(source, /workflow_dispatch:/);
+    assert.doesNotMatch(source, /^  (?:push|pull_request|schedule):/m);
+  }
+  const backend = read("e2e-backend.yml");
+  assert.match(backend, /pull_request:/);
+  assert.match(backend, /uses: \.\/\.github\/workflows\/hidden-contacts-native\.yml/);
 });

@@ -16,8 +16,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: mutants-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
+  group: mutants-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
           node-version: 22
       - uses: taiki-e/install-action@v2.88.1
         with:
-          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
       - name: Verify pinned mutation runner behavior
         run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs
 
@@ -71,12 +71,28 @@ jobs:
       - name: Install mutation test tools
         uses: taiki-e/install-action@v2.88.1
         with:
-          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
 
       - name: Select mutation sample
         id: selection
         working-directory: src-tauri
         run: node ../scripts/release/run-mutants.mjs --list-only
+
+      - name: Prepare hosted Linux build storage
+        id: runner_storage
+        if: steps.selection.outputs.selected != '0' && runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
+
+      - name: Preserve runner storage measurements
+        if: always() && steps.runner_storage.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-storage.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Prepare Ubuntu archive source
         if: steps.selection.outputs.selected != '0'
@@ -125,7 +141,7 @@ jobs:
   mutation-gate:
     name: mutants
     needs: [runner-contract, mutants]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

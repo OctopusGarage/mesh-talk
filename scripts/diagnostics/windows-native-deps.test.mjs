@@ -117,19 +117,6 @@ test("the runner image native installation is checked even when Bash omits it fr
   assert.equal(found, native);
 });
 
-test(
-  "the actual Windows runner provides a complete native Perl installation",
-  {
-    skip:
-      process.platform === "win32"
-        ? false
-        : "Requires the native Windows interpreter",
-  },
-  () => {
-    assert.match(selectNativePerl(), /[\\/]perl\.exe$/iu);
-  },
-);
-
 test("Windows producer validates native Perl before every Cargo build boundary", () => {
   const workflow = readFileSync(
     new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
@@ -154,4 +141,23 @@ test("Windows producer validates native Perl before every Cargo build boundary",
     producer,
     /OPENSSL_NO_VENDOR:\s*['"]?1|continue-on-error:\s*true/u,
   );
+});
+
+test("actual native Perl acceptance runs in the serial Windows producer after bootstrap", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/windows-workspace.yml", import.meta.url),
+    "utf8",
+  );
+  const producer = workflow.split("\n  tests:")[0];
+  const contract = producer.split(/^      - /m).find((step) =>
+    step.startsWith("name: Validate archive and coverage contracts\n"),
+  );
+  assert.ok(contract);
+  assert.match(contract, /run: node --test --test-concurrency=1 /u);
+  assert.ok(contract.includes("scripts/ci/windows-native-deps.test.mjs"));
+  assert.ok(
+    producer.indexOf("node scripts/ci/windows-native-deps.mjs") <
+      producer.indexOf("scripts/ci/windows-native-deps.test.mjs"),
+  );
+  assert.doesNotMatch(contract, /continue-on-error|\|\| true|\n\s*if:/u);
 });

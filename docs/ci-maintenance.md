@@ -43,7 +43,108 @@ while developing, then complete the applicable boundary and candidate gates.
 New tests still need independent assertions; matching the implementation or
 increasing a test count does not establish useful coverage.
 
+## Keep workflow policy thin and reject cheap failures locally
+
+Workflows own triggers, permissions, runners, matrices, dependencies and artifact
+transport. Scripts own inventory validation, artifact roles, packaging, report
+collection and execution policy. Reuse the same CLI locally and in Actions;
+extract substantial conditionals and loops into the existing feature owner rather
+than copying YAML fragments or introducing another generic orchestration layer.
+When moving execution into a script, update every caller and smoke check. Keep
+launcher behavior in its owning regression instead of requiring obsolete command
+text in YAML. Cross-platform filesystem paths use `fileURLToPath` rather than
+`.pathname`; ESM module arguments retain a file URL or relative module specifier
+instead of a native Windows absolute path. Exercise each boundary on its platform.
+Keep live source/release checks immediately before each publication boundary;
+those protect against changed state and are not redundant setup checks.
+
+The [syntax owner](../scripts/validation/syntax.mjs) parses changed Node, Bash and
+Python sources without executing them or writing Python caches, and invokes
+`actionlint` for changed workflows. Pre-commit selects staged paths but checks
+worktree bytes, matching the existing structural checks. Affected validation also
+checks new nonignored sources; PR creation checks the clean committed comparison.
+Use Node 22, Bash and Python; install actionlint before changing workflows. No
+checker installs tools or contacts the network. Hook installation configures hooks
+without launching comprehensive health; request that gate explicitly.
+
+PR creation runs `make pr-check`'s cheap-check owner against its actual comparison
+base, rejects ownership blockers and checks applicable frontend patch coverage
+before publication. Version projections, contract references and hygiene already
+belong to structural standards; reuse that owner rather than adding duplicate
+gates. Do not install dependencies, compile Rust, launch browsers or run application suites
+implicitly in the cheap mode. Source changes during checking invalidate it.
+Workflow edits also run the existing fast CI policy owner locally. Configuration
+assertions and runner inventory discovery belong here; application execution and
+native compiler fixtures do not. Update the existing policy assertion when its
+requirement changes instead of adding a second overlapping test in another file.
+For entry-point changes, also run the affected contract tests selected by the
+existing validation plan before publication. A syntax pass or a hand-picked
+filename sample cannot detect stale semantic routing expectations; cheap PR
+checks do not certify those tests passed.
+
+The frontend precheck reads the target from `codecov.yml`, includes partially
+covered branches in the uncovered denominator and rejects omitted changed files.
+Exercise report readers against actual producer output as well as small fixtures;
+negative V8 branch counts remain uncovered rather than invalidating the report.
+It verifies an existing clean-candidate `frontend-coverage` receipt through the
+canonical stage owner and rechecks LCOV bytes, rather than trusting a timestamp or
+raw report. Generate missing evidence explicitly with the reported command. A
+verification-only miss never starts coverage, waits for a heavy lock or claims a
+pass; a no-work verification lease must not imply admitted child work. Keep
+verified scope termination diagnostics separate from the actual test result.
+This frontend unit precheck is conservative; Rust and browser-union coverage
+still need their owning evidence. Native execution, dependency resolution and
+published-asset verification cannot be replaced by parsing or stale build output.
+
+Use the existing package inventory's `frontendBuild` ownership when preparing
+Rust selectors. Core, integrations and MCP selections still require real target
+validation, but do not build frontend assets merely because Rust changed. Host
+selections must still prepare Tauri's `frontendDist` before selector discovery.
+
+Composed local gates must invoke shared stages through the same canonical command
+and full-mode environment. Normalize `FAST=0` in both full-preflight children so
+equivalent successful stages can reuse their verified receipts; do not weaken
+identity checks or mutate the caller's environment to manufacture a cache hit.
+
+Local feedback does not replace committed-candidate acceptance. Git documents
+that [hooks can be bypassed](https://git-scm.com/docs/githooks); web edits and other
+clients may not run them. Keep a compact authoritative remote check and necessary
+runtime/native evidence. Delete duplicate execution only after comparing source,
+configuration, platform, assertion and consumers, with an inventory/equivalence
+control in the retained owner. The two optional-pack browser cases execute once
+in full Linux Chromium; their separate job retains only its unique built-asset
+and syntax checks. The non-instrumented ASan archive protocol executes once before
+the required sanitizer producer, while actual instrumentation controls remain on
+every consumer. Pure syntax does not establish either runtime contract.
+
+Historical renderer, tray, window and network incident comparisons are manual
+workflows. Their former development-branch bootstrap triggers do not provide
+ordinary candidate acceptance. Keep their diagnostic tools available; normal
+cross-platform native acceptance remains in the required backend caller. Review
+all workflows, including scheduled, manual, reusable and publication roles, before
+calling a job redundant merely because it is not a PR check.
+
 ## Measure the bottleneck before choosing the optimization
+
+For a CI optimization task, use `gh` to collect the last 50 workflow runs and
+their paginated, attempt-specific job and step records before editing workflows.
+Keep successful, failed, cancelled and incomplete observations distinguishable.
+For each job, separate dispatch/wait time, runner setup (checkout, tools,
+dependencies, cache transfer and compilation) and test/check execution. Preserve
+artifact/reporting overhead in the accounting rather than silently dropping it.
+Where a step mixes compilation and tests, use its logs or Cargo timings and mark
+any unresolved split as unknown. API dispatch timestamps can include `needs`
+waits; they do not by themselves measure runner queue time.
+
+For unexplained native-runner variation, retain comparable complete observations
+and collect resource evidence before changing concurrency or compile profiles.
+The existing native macOS coverage owner records CPU count, physical memory,
+swap/VM snapshots and per-partition real/user/system time plus maximum
+child RSS. A snapshot cannot prove peak memory pressure; maximum child RSS is
+not concurrent compilers' aggregate peak. Preserve the original command status
+and failure precedence, and keep diagnostics outside ordinary acceptance gates.
+Keep detailed product tracing opt-in; routine resource measurements must not
+enable per-operation traces merely to observe compiler behavior.
 
 Use the existing [timing reports](testing-feedback-loop.md#measure-feedback-before-tuning-capacity).
 Distinguish time to actionable feedback, time until required checks complete,
@@ -76,6 +177,54 @@ purpose of each gate. A job timeout is a safety bound, not a performance target.
 Record material budget changes and their rationale in the owning configuration
 and review, rather than inventing universal minute limits in this guide.
 
+Stop an already failed candidate before starting another expensive compilation
+partition. Linux/macOS native testing finishes all selected Host cases, then
+admits the remaining complete workspace only if Host passed. Both partitions
+still have to pass before reporting coverage; per-partition terminal result
+collection, independent matrix jobs, default targets and zero retries remain
+unchanged. The existing actual-tool coverage regression checks Host rejection,
+remaining-partition rejection, successful coverage accumulation, timing pipelines
+and report errors. Preserve partial backend evidence after a failure, while
+requiring evidence on passing jobs; a producer skipped by an upstream failure
+must not create a second missing-artifact error.
+
+The [workspace coverage owner](../scripts/ci/workspace-coverage.sh) owns native
+partition commands, timing pipelines and report generation; workflow steps pass
+only the platform. Actual-tool failure controls verify both platform branches.
+
+Keep complete tests distinct from duplicate instrumentation. macOS instruments
+Host for its native desktop/updater branches, then runs every remaining default
+workspace target with pinned Nextest without coverage instrumentation. Linux and
+Windows retain full instrumented workspace coverage. This removes the separate
+instrumented Core test build on Apple Silicon; it does not claim full macOS Core
+line coverage. The actual-tool regression executes both workflow blocks, requires
+all default targets and the Core execution marker, proves a clean macOS report
+retains Host hits without a Core test cohort, and keeps both partition failures,
+report failures, timing pipelines and process termination controls. All platform
+assertions, doctests, zero retries and direct required checks remain unchanged.
+
+A progressing serial test partition can exhaust its job watchdog without a hung
+case. Windows reuses one sealed instrumented workspace archive across eight
+independent serial consumers; every selected case still executes once with full
+coverage, default targets, existing watchdogs and zero retries. Acceptance uses
+those actual native checks directly. Do not add a second qualification workflow
+or extend a job timeout to compensate for oversized units. Four extra setup and
+archive transfers are a material cost; measure them alongside execution and runner
+variation. The existing required-check owner retires old partition names only
+after every current-source replacement passes with its bound app. Preserve strict
+protection, unrelated checks and exact-source release acceptance together.
+
+Treat a browser's total functional-case watchdog separately from its action,
+assertion and product deadlines. A cold page, several successful state checks and
+real interactions can cumulatively exhaust a short total bound without any one
+operation failing. Full Chromium uses its existing Windows/coverage safety margin
+on all hosts; portable execution retains its existing Windows allowance. Keep
+state-based readiness, all assertions, explicit latency limits, zero retries and
+first-failure traces. Do not erase a failed assertion by increasing its timeout.
+The real-runner control derives both configured watchdogs, accelerates only their
+duration, requires actual parked-case failure and subsequent-case execution, and
+verifies descendant retirement before removing its fixture.
+
 ## Reuse compatible work with verifiable inputs
 
 Prefer one producer for an expensive output when consumers need the same inputs
@@ -85,11 +234,66 @@ from test execution: each required consumer still supplies its own assertions.
 Keep production, coverage, sanitizer and mutation configurations distinct unless
 their compatibility has been established.
 
+Hosted Ubuntu Rust jobs prepare disk capacity before restoring Cargo outputs.
+The [runner storage owner](../scripts/ci/runner-storage.mjs) reclaims only three
+fixed unused SDK directories from disposable image contents and reports actual
+free bytes before and after. Each heavy job uploads that small measurement before
+cache expansion, so a later exhausted runner does not erase the preparation evidence.
+It preserves the workspace, build caches and tools
+used by compilation and analysis; local/self-hosted contexts and redirected paths
+are not cleanup targets. Its real filesystem controls cover preservation and
+idempotence. Inspect those measurements and cache expansion before responding
+to disk exhaustion; a failed runner may be unable to upload its own logs.
+
 A cache is an optional accelerator. A cold or evicted cache must still allow
 correct execution. Measure restored bytes, restore/save time, useful hits and
 eviction; a reported hit alone does not prove a faster build. Preserve the
 existing trust boundaries and write policy. GitHub documents cache matching,
 branch access and eviction in its [dependency caching reference](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+Prefer setup actions' built-in dependency caching: configure `setup-node` for
+npm and the actual lockfiles; `setup-go` normally enables its cache by default;
+use `Swatinem/rust-cache` for compatible Rust outputs. Check the repository's
+current cache allowance and usage before adding archives. Keep a frontend-only
+job free of Cargo cache restoration, and do not cache installed outputs that are
+cheaper to recreate than transfer. A cache key must describe compatible inputs,
+not merely create more apparent hits. Avoid publishing identical archives from
+every shard; preserve trusted write policy and existing producer ownership.
+
+An exact cache hit is immutable: it cannot acquire newly needed dependency
+feature/profile variants after a workflow changes its compilation cohorts.
+Review that transition explicitly; rotate only the affected platform's cache
+epoch when needed, preserving trusted writes. A new prefix has a real initial
+cold-build cost and competes with the old entry for the repository allowance.
+Do not enable workspace-crate caching or add per-commit keys merely to hide a
+slow build. Distinguish dependency reuse from the workspace source that must
+still compile; a cache repair does not explain unrelated runner variability.
+
+Download pinned prebuilt development tools through the existing installer where
+available. Verify support in the repository-pinned installer version; an unknown
+tool can select an unintended source-build or registry fallback. Bind direct
+release downloads to a reviewed digest and execute the installed version check.
+Compiling tools with `go install` or `cargo install` is recurring setup
+work; retain source installation only when the required tool has no suitable
+trusted binary or the test explicitly validates its build.
+
+Build twice consecutively with identical source, profile, features and environment.
+Inspect unexpected second-build work before enlarging caches or runner counts:
+missing `rerun-if-changed` inputs, generated files that change every invocation,
+unnecessary frontend rebuilds, and container layers that copy source before
+installing locked dependencies. A bundler may intentionally rebuild quickly;
+judge the observed cost instead of requiring it to behave like Cargo's no-op build.
+
+Auxiliary diagnostic transport must not decide test acceptance or skip later
+independent checks after an artifact-service outage. Keep test execution, local
+result publication and required cleanup fatal; only the reviewed upload step is
+best-effort. The CI policy owner enumerates these roles: Health logs and raw
+coverage copies, storage measurements, crash/timing diagnostics, optional HTML
+and failure attachments. Source-bound coverage maps, partition archives/unions,
+native/backend and release/security evidence stay mandatory. A missing automatic
+consumer alone does not make an artifact optional: authoritative human reports
+and manual diagnostic deliverables can still require it. Do not retry tests to
+repair transport, or suppress the original failed attempt.
 
 An artifact used as acceptance evidence has a stronger contract. Its consumer
 must validate the actual tested head or merge source, workflow/run/attempt, platform and architecture,
@@ -138,16 +342,69 @@ Workflow path filters and job conditions have different required-check behavior.
 GitHub warns that a workflow skipped by path or branch filtering can leave its
 required check pending; a skipped job can report success. A collector must still
 run when a dependency fails and explicitly reject failed, cancelled, missing or
-unexpectedly skipped required work. An `always()` condition schedules a collector;
-it does not validate its dependencies. See [required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+unexpectedly skipped required work. Use `!cancelled()` for verification collector jobs: it permits explicit rejection
+after upstream failure, but releases superseded workflows on cancellation. An
+unconditional `always()` collector can remain queued after its producers are
+cancelled and hold the concurrency group needed by the latest candidate. Keep
+necessary resource cleanup independent. The scheduling condition does not
+validate dependencies; the collector must still inspect every required result. See [required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+
+Before adding docs-only path filters, inspect actual branch protection and the
+app-bound checks it requires, including external coverage and security checks.
+Define which documentation is inert: generated help, executable examples, eval
+prompts, fixtures and policy inputs can change product or acceptance behavior.
+Keep applicable documentation checks. Use workflow-level filters only when no
+required consumer will wait for their missing result. A lightweight selection or
+collector job must retain the required check identity and reject failed selection;
+it must not fabricate coverage or security results belonging to another app.
+Codecov provides a native [empty upload](https://github.com/codecov/codecov-cli#empty-upload)
+for diffs it classifies as ignored; never force it for an ineligible diff. Qualify
+the current-SHA provider result before relying on it. This does not replace real
+CodeQL analysis or establish that documentation cannot affect product inputs.
+GitHub evaluates [job conditions before matrix expansion](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idif):
+a skipped matrix job does not prove that every expanded required context exists.
+Inspect actual returned names and app IDs before narrowing protected work.
+Preserve complete main-commit verification required by release consumers even
+when a PR has a separately validated docs-only path.
 
 The UI HTML collector follows the mandatory full-shard producers, independently
 of the optional extended-browser jobs. If Health prevents desktop shards from
 starting, their missing reports remain incomplete evidence. The collector checks
-all four current-attempt shards per OS; fixing the upstream failure and rerunning
+all platform-specific current-attempt shards (eight macOS, four Linux/Windows); fixing the upstream failure and rerunning
 the selected producers supplies that evidence, rather than omitting those OSes.
 
 ## Bound parallelism and preserve isolation
+
+Run independent checks in parallel, but inspect each `needs` edge before removing
+it: artifact availability, coverage provenance and deliberate runner admission
+are real dependencies even when no explicit job output is passed. Put portable
+formatting, source lint and dependency auditing on Ubuntu. Retain macOS/Windows
+execution when assertions exercise their native behavior. Count macOS jobs across
+all workflows against the account's actual concurrency allowance; moving one
+workflow's bottleneck into another workflow's queue is not an improvement.
+
+Use runner-owned scratch for native temporary files. Windows build/test jobs set
+`TEMP` and `TMP` from `RUNNER_TEMP` in an early step, matching the local preflight
+owner's explicit placement. Record old and selected paths; a different machine's
+faster result does not prove that disk placement caused a prior failure. Preserve
+durability, ordering and deadlines while qualifying the new hosted environment.
+
+Full Chromium uses eight macOS partitions and four each on Linux and Windows.
+Desktop browsers inherit the reusable workflow's four-slot per-OS limit; preserve
+Health and WebKit admission before that burst and the existing job watchdog.
+Scope limits to the actual resource pool rather than applying a macOS restriction
+to Windows. Inspect late queued work after other native jobs finish; an overly
+small limit can leave capacity unused. Four macOS browser jobs leave nominal room
+under the five-job account limit, but do not reserve global capacity or bypass
+other workflows' queues. Qualify changes on hosted runners.
+Strict collectors require the platform-specific complete layout, including the
+last partition, and reject layout discovery failures.
+
+WebKit partitions retain their existing stable required-check name through a
+full-union collector. Bind every producer to its actual platform, source, run and
+attempt; reject missing, duplicate or stale partitions and validate the complete
+scenario inventory after rebasing copied evidence. A continuously progressing
+suite that exhausts its budget needs measured partitioning, not a larger timeout.
 
 Choose shards from observed work and available runner capacity. Count setup and
 artifact overhead as well as execution. More shards can increase queueing and
@@ -155,10 +412,42 @@ runner minutes; more workers per machine can increase memory pressure, port
 exhaustion and test interference. Review the product of platform, architecture,
 browser, feature and shard dimensions before expanding a matrix.
 
+macOS browser coverage uses `macos-26-intel` for WebKit and Chromium, including
+extended scenarios. Its contract is the macOS/browser behavior; the ARM workspace
+and real native app/CLI checks retain `macos-latest`. Keep artifact labels and
+per-OS collectors aligned with the actual selected image. Avoid coupling browser
+admission to scarce ARM capacity needed by native builds. A job that never obtains
+a runner has no test result; preserve its infrastructure failure separately.
+UI coverage and reports require one complete attempt, so recover that workflow
+as a whole when an unallocated producer prevents its current-attempt evidence.
+
+ASan compiles its core library once into an official Nextest archive, then runs
+eight serial partitions. The producer seals the complete default inventory and
+source/compiler/config/platform identity. Trusted job outputs bind both the
+manifest and archive digests; consumers reject mismatches before extraction and
+compare the extracted inventory before execution. Each runner retains the same
+case budgets, instrumented standard library and real clean/error controls. The
+required collector checks producer success, the exhaustive disjoint inventory
+and every current-attempt execution receipt. Consumer jobs do not restore the
+full Rust cache or repeat the large core compilation. Keep the already compressed
+archive transient and transfer it without another compression pass. Compare
+producer compilation, artifact transfer, consumer preparation and queue time
+alongside test execution; more shards alone can duplicate the dominant setup.
+Keep extracted runtimes outside uploaded evidence. Collect receipts, inventories
+and logs; do not upload another compiled binary copy from every consumer.
+Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
+when recovering a failed attempt; do not mix a previous producer with new shards.
+
 Retain fresh process/context isolation, owned temporary directories, dynamically
 allocated ports where supported, and deterministic cleanup. Keep compile jobs,
 test workers and network/rendering resource limits explicit. Do not multiply
 them independently and assume the machine can absorb the combined load.
+The macOS workspace coverage owner admits two compiler jobs on its small hosted
+ARM runner while retaining four test workers and every target. Keep this bound
+after Rust cache restoration so a scheduling experiment does not also invalidate
+the cache cohort. Compare complete compile/test/resource measurements before
+attributing a speedup to it; compression and swap observed across a phase do not
+identify which compiler or test caused the pressure.
 [Nextest archives](https://nexte.st/docs/ci-features/archiving/) can separate build
 and execution, while [Playwright sharding](https://playwright.dev/docs/test-sharding)
 distributes browser work. Archive consumers need the same source revision and
@@ -168,7 +457,10 @@ Both need compatible inputs and complete inventories, with isolation preserved.
 Cancel superseded verification for the same candidate when safe, with concurrency
 groups that separate caller workflows, event streams and branches. Reusable Health
 keeps a distinct prefix because GitHub exposes the caller workflow in its context;
-PR/merge/push candidates cancel their superseded source, while scheduled and manual
+PR/merge candidates cancel their superseded source. Push verification uses a unique
+run ID in its concurrency group: disabling cancellation alone still permits a
+newer pending run to replace an older pending run. Every main commit must retain
+its complete verification for release consumers, while scheduled and manual
 evidence streams remain isolated. Preserve
 publication and release ordering. Inspect the configured queue mode and
 cancellation semantics; do not assume workflow dispatch order is execution order.
@@ -191,12 +483,78 @@ request identity, immutable control state and the lifetime of the actual task.
 Historical logs or a previously authenticated request do not prove that a live
 request has entered the required phase. Keep cancellation, task joining and
 cleanup correct on success, failure and panic.
+When key ordering determines the scenario, use deterministic noncolliding fixture
+identities and check actual signed keys or cursors; random IDs can exercise only
+the easier path. Preserve real signing, publication and receipt assertions.
+Keep commit, completed publication and recipient installation distinct. A
+post-timeout snapshot can block behind the publisher and cannot prove its state
+existed before the cutoff; record phases at the actual work owner.
+Use the owning register-before-check notification protocol for durable status;
+polling an in-memory flag can still compete with the work that must publish it.
+Match a fixture's executor to its requirement: preserve single-thread tests when
+responsiveness is the subject, and keep independent protocol/persistence workers
+for other production-runtime scenarios. Join admitted work before deleting data.
+Classify fixture gates from the current decision owner's state, not a trace flag
+that also describes another phase. Do not sample a later observer projection to
+decide whether to capture a one-shot event; observe that evidence before releasing
+the captured task and retain its exact operation and child identity.
 
 Separate expensive fixture preparation from the operation's measured window when
 preparation is outside the requirement. Continue using the real signing,
 persistence, transport or UI owner when it is part of the assertion. Preserve
 production deadlines and real lifecycle coverage where those are the subject of
 the test; changing the clock or injecting state cannot silently remove them.
+A held real socket still consumes its production timeout while a fixture waits.
+Finish unrelated cold preparation before dispatching that read, using a scoped
+owned barrier before I/O where necessary. Do not pause a post-send hook to conceal
+the network timeout. Consolidate repeated readiness polls into that preparation
+owner; retain exact live-task and measured-operation assertions at admission.
+
+Batch unobserved durable fixture construction through an existing validated
+transaction seam when individual commit boundaries are outside the requirement.
+Retain every signed event, per-event validation and index update, a completed
+durable commit before observation, exact corpus assertions and the original
+measured operation. Never batch away the transaction boundaries under test.
+Commit CLI fixture infrastructure to its private baseline before introducing the
+intended source change; unrelated copied tools must not inflate changed-file
+validation or consume the assertion's watchdog.
+When host tool startup is unrelated to the assertion, reuse the existing scoped
+version-probe fixture rather than spawning extra version processes. Keep actual
+commands and identity queries observable; do not replace the work under test.
+
+Browser commands use the existing process owner with a deadline inside the total
+job budget, reserving time for joined cleanup and evidence upload. Keep streamed
+logs and append-only active/completed-case progress when final reports cannot be
+written. Timeout or uncertain cleanup remains a failure. Preserve verified closure of owned work as a diagnostic separately from the
+actual child outcome: Windows
+intentionally terminates even an empty job to close descendant admission.
+On POSIX, verify the framework's independently grouped web server as well as the
+CLI group. Use its supported graceful interruption protocol; a missing teardown
+acknowledgment means cleanup remains unverified. Bind lifecycle markers to the
+current invocation so old evidence cannot prove a later process stopped.
+Do not await output-pipe closure indefinitely after the command leader exits.
+The existing process owner bounds draining after group retirement; a separately
+grouped descendant retaining stdout or stderr must yield a failed structured
+result with unverified cleanup and a quarantined lease. Closing owned read ends
+does not prove the escaped process stopped. Keep real natural-exit, cancellation
+and no-success-receipt controls rather than signalling unknown process groups.
+Authorize PID cleanup only from a complete private acknowledgment, not a numeric
+prefix in a stdout chunk. Stream reads do not preserve message boundaries; a
+failed readiness publication must retire the child through its creation owner.
+Actual CLI regression fixtures need private output directories as well as private
+source directories; parallel Playwright commands otherwise delete one another's
+traces and manufacture failures. Missing hosted logs do not identify a slow case.
+Local-only evidence fixtures must explicitly isolate and restore inherited CI
+flags, and separately assert that real CI cannot reuse local acceptance evidence.
+Health captures its absolute budget before setup and uses the existing stage
+owner to stop diagnostics before the job watchdog. Preserve its structured result,
+execution log and bounded Node lifecycle records, including the active file/case,
+through the always-upload path. Prove interruption and joined cleanup with a real
+parked command. Missing hosted logs require better evidence, not a guessed fix.
+Cancellation during preparation still needs a failed structured result. Only the
+command owner can attest that admission never happened; failures after that
+boundary must retain uncertain cleanup rather than manufacture a no-work result.
+
 The [fixture timing guidance](testing-feedback-loop.md#cold-fixture-preparation-versus-measured-progress)
 owns concrete examples and permitted boundaries.
 
@@ -208,6 +566,14 @@ they are not default repairs for an unexplained failure. If a narrowly scoped
 infrastructure retry is justified, keep its limit, original failure and outcomes
 visible, and ensure repeating the operation is safe. Test retries still obey the
 owning suite policy.
+
+Keep each observation inside a polling assertion nonwaiting when the assertion
+already owns readiness. A locator operation can wait for a virtualized row and
+consume the entire outer budget without producing one geometry sample. Inspect
+the trace to distinguish missing samples from unequal values; use one browser-side
+DOM snapshot for transient geometry, treating an absent row as pending. Preserve
+exact geometry and cache assertions, and exercise the absent-row control rather
+than extending the deadline. The media-scroll remount regression owns this case.
 
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the
@@ -257,6 +623,29 @@ Workflow, runner and tool upgrades can change CLI semantics, report formats,
 selectors and archive compatibility. Validate affected real tool invocations and
 failure paths through the existing diagnostic owners; YAML parsing or unit mocks
 alone do not establish the behavior of the installed tool.
+
+Consolidate frontend unit execution through the complete Linux coverage owner
+when the ordinary and coverage commands select the same inventory and platform
+branches use explicit mocks. Verify that inventory with the actual runner before
+removing duplicate OS executions. Retain real browser/native matrices and native
+diagnostic fixtures; mocked platform branches do not supply those contracts.
+Keep Node/filesystem portability requirements in their owning diagnostics rather
+than duplicating the entire frontend unit suite incidentally.
+
+Keep platform-exclusive probes in the required native producer that can execute
+them. Universal local selections must not include a file whose entire suite is
+skipped on other hosts; preserve the nonempty-test guard and explicit native
+escalation instead. Keep workflow wiring assertions in the cheap CI policy
+owner, separate from the underlying tool's filesystem/compiler regressions.
+
+After pushing, observe the actual hosted candidate until the relevant jobs finish.
+Compare before and after setup time, test time, required-check latency and runner
+minutes with sample sizes and cache conditions. Inspect first failures and queue
+changes, then make another measured pass when evidence identifies remaining waste.
+A pushed branch, a local green subset, or a faster isolated step does not establish
+an end-to-end speedup. Keep the candidate reviewable and continue in a clean
+worktree when unrelated local edits prevent publication; do not discard those
+edits or treat them as a reason to stop the optimization.
 
 Revisit timing and failure evidence when a gate becomes slower, starts rerunning,
 gains another platform/dependency, or repeatedly exceeds its expected budget.

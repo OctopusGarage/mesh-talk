@@ -939,8 +939,10 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
     assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target() {
+    use super::test_support::IndependentPeerRuntime;
+
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let cd = tempfile::tempdir().unwrap();
@@ -953,10 +955,14 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let other = DeviceIdentity::generate();
     let ca = Account::from_secret_bytes(aa.secret_bytes());
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bob's application stays offline while its unavailable endpoint actively
+    // closes TCP attempts. A merely bound socket can leave an old Dial pending
+    // across the online cut for longer than the target-confirmation budget.
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_address = bob_listener.local_addr().unwrap();
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bob_address.port());
     let cp = Announce::new_with_account(&other, &ca, "Own copy", cl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     a.roster
@@ -1000,61 +1006,196 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
         .event
         .id;
     assert_ne!(actual, id);
-    let at = tokio::spawn(a.clone().run_accept_loop(al));
-    let ct = tokio::spawn(c.clone().run_accept_loop(cl));
-    let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while c.file_progress(file).unwrap().is_none() || c.read_file(file).is_err() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    assert!(own_received.is_ok());
-    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
-    c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
-    let final_chunk = a
-        .delivery
-        .lock()
-        .unwrap()
-        .file_card(id)
-        .unwrap()
-        .final_chunk
-        .unwrap();
-    assert!(
-        c.historical_file_completion(file, final_chunk, &ap.public())
-            .unwrap()
-    );
-    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
-    let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while a.delivery_status(id) != Some(DeliveryStatus::Delivered)
-            || a.delivery
+    use futures_util::FutureExt;
+    let mut at = None;
+    let mut bt = None;
+    let mut ct = None;
+    let mut bob_rejector = None;
+    let mut stop_rejector = None;
+    // Retain release senders outside catch_unwind so failure releases blocked
+    // fixture workers before the runtime owner joins them.
+    let mut own_copy_releases = Vec::new();
+    let mut own_copy_holds = Vec::new();
+    let held_workers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut phase = "own_copy";
+    let mut confirmed_status = None;
+    let mut pending_destination = None;
+    let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        stop_rejector = Some(stop);
+        bob_rejector = Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut stopped => break,
+                    accepted = bob_listener.accept() => {
+                        let (mut stream, _) = accepted.unwrap();
+                        let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+                    }
+                }
+            }
+            bob_listener
+        }));
+        // Qualify application unavailability by an actual accepted-and-closed
+        // connection, not platform-specific behavior of a merely bound socket.
+        let unavailable = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut probe = tokio::net::TcpStream::connect(bob_address).await.unwrap();
+            let mut byte = [0];
+            assert_eq!(tokio::io::AsyncReadExt::read(&mut probe, &mut byte).await.unwrap(), 0);
+        }).await;
+        assert!(unavailable.is_ok(), "offline endpoint must close actual connections");
+        // Each simulated application keeps its own protocol workers and I/O
+        // reactor. Synchronous durable work on another device must not consume
+        // this host's workers or the observer's confirmation window.
+        let mut source = IndependentPeerRuntime::start_multithreaded(a.clone(), al).await;
+        let mut own_copy = IndependentPeerRuntime::start_multithreaded(c.clone(), cl).await;
+        source.launch();
+        own_copy.launch();
+        at = Some(source);
+        ct = Some(own_copy);
+        let mut own_copy_pending = true;
+        let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                own_copy_pending = a.delivery.lock().unwrap().contains_file_destination(
+                    id,
+                    id,
+                    &cp.public(),
+                    &cp.account_id(),
+                );
+                if c.file_progress(file).unwrap().is_some()
+                    && c.read_file(file).is_ok()
+                    && !own_copy_pending
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+            assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
+            // Saving reclaims chunk events. Wait for the source's final custody
+            // acknowledgement first, so this phase does not interrupt its Chunks
+            // exchange and introduce a separate reclamation-recovery scenario.
+            c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
+            let final_chunk = a
+                .delivery
                 .lock()
                 .unwrap()
-                .next_file_destination(None)
-                .is_some()
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                .file_card(id)
+                .unwrap()
+                .final_chunk
+                .unwrap();
+            assert!(
+                c.historical_file_completion(file, final_chunk, &ap.public())
+                    .unwrap()
+            );
+            assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        })
+        .await;
+        assert!(
+            own_received.is_ok(),
+            "own-copy confirmation failed: phase={phase} pending_destination={own_copy_pending}"
+        );
+        // Once its copy is durable, the sibling may become unresponsive. Hold
+        // both of its actual host workers: target delivery must still progress.
+        // The real-time cutoff only retires a broken negative-control fixture;
+        // successful delivery must observe both workers still held.
+        for _ in 0..2 {
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            own_copy_releases.push(release);
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let held = held_workers.clone();
+            own_copy_holds.push(ct.as_ref().unwrap().runtime_handle().spawn(async move {
+                held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = entered.send(());
+                let _ = released.recv_timeout(super::delivery_runtime::FILE_EXCHANGE_TIMEOUT);
+                held.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+            ready.await.unwrap();
         }
-    })
-    .await;
-    at.abort();
-    bt.abort();
-    ct.abort();
-    let _ = at.await;
-    let _ = bt.await;
-    let _ = ct.await;
-    assert!(confirmed.is_ok());
-    let history = a.account_history(&b.account_id(), 10).unwrap();
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].id, id);
-    assert_eq!(
-        b.account_history(&a.account_id(), 10).unwrap()[0].id,
-        actual
+        phase = "target_confirmation";
+        stop_rejector.take().unwrap().send(()).unwrap();
+        let bl = bob_rejector.take().unwrap().await.unwrap();
+        assert_eq!(bl.local_addr().unwrap(), bob_address);
+        let mut target = IndependentPeerRuntime::start_multithreaded(b.clone(), bl).await;
+        target.launch();
+        bt = Some(target);
+        let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while {
+                confirmed_status = a.delivery_status(id);
+                pending_destination = None;
+                confirmed_status != Some(DeliveryStatus::Delivered) || {
+                    let pending = a.delivery.lock().unwrap().next_file_destination(None).is_some();
+                    pending_destination = Some(pending);
+                    pending
+                }
+            } {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if confirmed.is_err() {
+            eprintln!("target file state: recipient_progress={:?} consent={:?}",
+                b.file_progress(file), a.outgoing_file_consent_status(id, actual));
+        }
+        assert!(confirmed.is_ok(),
+            "target confirmation failed: phase={phase} status={confirmed_status:?} pending_destination={pending_destination:?}");
+        assert_eq!(held_workers.load(std::sync::atomic::Ordering::SeqCst), 2,
+            "target confirmation must not depend on the sibling resuming");
+        let history = a.account_history(&b.account_id(), 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+        assert_eq!(
+            b.account_history(&a.account_id(), 10).unwrap()[0].id,
+            actual
+        );
+        assert_eq!(a.delivery_status(actual), None);
+        assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
+    }).catch_unwind()).await;
+    drop(own_copy_releases);
+    for hold in own_copy_holds {
+        hold.await.unwrap();
+    }
+    for current in [&a, &b, &c] {
+        current.runtime_work.close();
+    }
+    let mut server_failed = false;
+    if let Some(task) = bob_rejector {
+        task.abort();
+        if let Err(error) = task.await {
+            server_failed |= !error.is_cancelled();
+        }
+    }
+    for server in [at, bt, ct].into_iter().flatten() {
+        server_failed |= std::panic::AssertUnwindSafe(server.stop())
+            .catch_unwind()
+            .await
+            .is_err();
+    }
+    let mut retired = true;
+    for current in [&a, &b, &c] {
+        current.sessions.clear();
+        retired &= tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            current.runtime_work.drain(),
+        )
+        .await
+        .is_ok();
+    }
+    if !retired {
+        let _ = (ad.keep(), bd.keep(), cd.keep());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        panic!("own-copy fixture work did not retire; profiles retained");
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        !server_failed,
+        "own-copy fixture server failed unexpectedly"
     );
-    assert_eq!(a.delivery_status(actual), None);
-    assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
-    drop(a);
+    a.close_profile().unwrap();
     let (a, _) = node(
         ad.path(),
         DeviceIdentity::from_secret_bytes(source_secret.0, source_secret.1),
@@ -2650,7 +2791,9 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
     }
 }
 
-#[tokio::test]
+// Delivery and ACK persistence share the production multithreaded host. Keep
+// their protocol workers independent of this fixture's observation future.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let dir = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -2694,18 +2837,39 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     let received = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await;
-    let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        observe_durable_delivery(&a, id),
+    )
     .await;
+    let status_at_cutoff = a.delivery_status(id);
+    a.runtime_work.close();
+    b.runtime_work.close();
     at.abort();
     bt.abort();
     let _ = at.await;
     let _ = bt.await;
+    let mut retired = true;
+    for current in [&a, &b] {
+        current.sessions.clear();
+        retired &= tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            current.runtime_work.drain(),
+        )
+        .await
+        .is_ok();
+    }
+    if !retired {
+        let profiles = (dir.keep(), bd.keep());
+        panic!(
+            "valid-message fixture work did not retire; profiles retained at {profiles:?}; status_at_cutoff={status_at_cutoff:?}"
+        );
+    }
     assert_eq!(received.unwrap().unwrap().text, b"small after rejection");
-    assert!(delivered.is_ok());
+    assert!(
+        delivered.is_ok(),
+        "authenticated valid-message ACK must be durably installed within 3s; status_at_cutoff={status_at_cutoff:?}"
+    );
 }
 
 #[tokio::test]
@@ -4226,19 +4390,24 @@ async fn sync_delivery_test_stage(
     timing.finish();
 }
 
+async fn observe_durable_delivery(node: &Node, id: EventId) {
+    loop {
+        let notified = node.delivery_status_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
+            return;
+        }
+        notified.await;
+    }
+}
+
 async fn wait_for_durable_delivery(node: &Node, id: EventId) {
     let mut timing = super::delivery_runtime::TestTiming::new("receipt-durable-wait-3s");
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let notified = node.delivery_status_notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
-                break;
-            }
-            notified.await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        observe_durable_delivery(node, id),
+    )
     .await
     .expect("authenticated receipt durably installed within 3s");
     timing.finish();

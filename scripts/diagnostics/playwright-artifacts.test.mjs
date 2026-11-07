@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { execute } from "../validation/stage.mjs";
 
 test("UI shards retain raw attachments on failure without duplicating successful blob evidence", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
@@ -70,4 +71,50 @@ for (const fail of [false, true]) test(fail ? 'failed evidence' : 'passed eviden
   }
   const digests = readdirSync(path.join(root, "html-report/data")).map(name => createHash("sha256").update(readFileSync(path.join(root, "html-report/data", name))).digest("hex"));
   for (const bytes of [png, binary]) assert.ok(digests.includes(createHash("sha256").update(bytes).digest("hex")), "HTML report lost an attachment");
+});
+
+
+test("configured browser watchdog terminates a parked case and collects the next case", { timeout: 60000 }, async t => {
+  const root = mkdtempSync(path.join(tmpdir(), "mesh-browser-watchdog-"));
+  let retired = true;
+  t.after(() => {
+    if (retired) rmSync(root, { recursive: true, force: true });
+    else console.error(`Browser watchdog child retirement unverified; retaining ${root}`);
+  });
+  const cli = fileURLToPath(new URL("../../frontend/node_modules/playwright/cli.js", import.meta.url));
+  const runner = fileURLToPath(new URL("../../frontend/node_modules/@playwright/test/index.js", import.meta.url));
+  for (const name of ["playwright.config.ts", "playwright.portable.config.ts"]) {
+    const source = fileURLToPath(new URL(`../../frontend/${name}`, import.meta.url));
+    const directory = path.join(root, name); mkdirSync(directory);
+    const marker = path.join(directory, "later-case");
+    const report = path.join(directory, "report.json");
+    const config = path.join(directory, "fixture.config.cjs");
+    // Playwright's config loader applies its normal TypeScript transformation.
+    // Accelerate only the actual source's watchdog, keeping its execution rule.
+    writeFileSync(config, `const base = require(${JSON.stringify(source)}).default;
+module.exports = { ...base, testDir: __dirname, testMatch: 'watchdog.spec.js', fullyParallel: false,
+  webServer: undefined, projects: [{ name: 'watchdog' }], retries: 0, workers: 1,
+  timeout: base.timeout / 360, metadata: { sourceWatchdog: base.timeout } };\n`);
+    writeFileSync(path.join(directory, "watchdog.spec.js"), `const { test } = require(${JSON.stringify(runner)});
+const { writeFileSync } = require('node:fs');
+test('parked', async () => { await new Promise(() => {}); });
+test('later', async () => { writeFileSync(${JSON.stringify(marker)}, 'executed after timeout'); });\n`);
+    retired = false;
+    const result = await execute([process.execPath, cli, "test", "--config", config, "--reporter=json"], {
+      cwd: directory, env: { ...process.env, EVAL_BROWSER: "chromium", EVAL_TIER: "core", PLAYWRIGHT_JSON_OUTPUT_NAME: report },
+      logPath: path.join(directory, "execution.log"), signal: AbortSignal.timeout(45000), notifyOwnerOnAbort: true,
+    });
+    retired = result.cleanupUnverified === false;
+    assert.equal(retired, true, "the actual runner and descendants must retire");
+    assert.equal(result.code, 1, "a parked case must fail the command");
+    const evidence = JSON.parse(readFileSync(report, "utf8"));
+    assert(Number.isFinite(evidence.config.metadata.sourceWatchdog) && evidence.config.metadata.sourceWatchdog > 0 && evidence.config.metadata.sourceWatchdog <= 120000);
+    assert.equal(evidence.stats.unexpected, 1);
+    assert.equal(evidence.stats.expected, 1);
+    assert.equal(evidence.stats.skipped, 0);
+    assert.equal(evidence.stats.flaky, 0);
+    const results = evidence.suites.flatMap(suite => suite.specs.flatMap(spec => spec.tests.flatMap(row => row.results)));
+    assert.equal(results.filter(row => row.status === "timedOut").length, 1);
+    assert.equal(readFileSync(marker, "utf8"), "executed after timeout");
+  }
 });

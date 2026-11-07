@@ -68,3 +68,39 @@ test("browser wrapper exposes timeout diagnostics and never writes success evide
     assert.equal(existsSync(path.join(root, "target/validation/browser-full.json")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("local selector admission builds frontend only for selected Host consumers", { skip: process.platform === "win32" }, async () => {
+  const { buildPlan, parseFlags } = await import("../pr-platform/plan.mjs");
+  const controller = readFileSync(new URL("../pr-preflight.sh", import.meta.url), "utf8");
+  const start = controller.indexOf("# The validated selected-package owner");
+  const end = controller.indexOf('\nif printf', start);
+  assert.ok(start > 0 && end > start);
+  const commands = controller.slice(start, end);
+  const root = mkdtempSync(path.join(tmpdir(), "mesh-selector-admission-"));
+  try {
+    const trace = path.join(root, "trace.jsonl");
+    const stage = path.join(root, "stage.mjs");
+    writeFileSync(stage, 'import {appendFileSync} from "node:fs";appendFileSync(process.env.TRACE,JSON.stringify(process.argv.slice(2))+"\\n");');
+    for (const [flags, expected] of [
+      [["--core-filter", "core_case"], ["rust-selectors"]],
+      [["--integration-filter", "integration_case"], ["rust-selectors"]],
+      [["--mcp-filter", "mcp_case"], ["rust-selectors"]],
+      [["--host-filter", "host_case"], ["frontend-build", "rust-selectors"]],
+      [["--core-filter", "core_case", "--host-filter", "host_case"], ["frontend-build", "rust-selectors"]],
+    ]) {
+      const plan = { ...buildPlan(parseFlags(flags), []), sourceSha: "a".repeat(40) };
+      rmSync(trace, { force: true });
+      const result = spawnSync("bash", ["-eu", "-c", commands], { cwd: new URL("../../", import.meta.url), env: { ...process.env, scenario_plan: JSON.stringify(plan), stage, TRACE: trace }, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const calls = readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse);
+      assert.deepEqual(calls.map(args => args[0]), expected, flags.join(" "));
+      assert.ok(calls.at(-1).includes("scripts/validation/selectors.mjs"), "all selected packages retain real selector validation");
+    }
+    for (const invalid of ["{bad JSON", JSON.stringify({ ...buildPlan(parseFlags(["--host-filter", "host_case"]), []), sourceSha: "a".repeat(40), hostFilters: ["--unknown-selector"] })]) {
+      rmSync(trace, { force: true });
+      const result = spawnSync("bash", ["-eu", "-c", commands], { cwd: new URL("../../", import.meta.url), env: { ...process.env, scenario_plan: invalid, stage, TRACE: trace }, encoding: "utf8" });
+      assert.notEqual(result.status, 0);
+      assert.equal(existsSync(trace), false, "invalid selections must reject before frontend or Rust execution");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

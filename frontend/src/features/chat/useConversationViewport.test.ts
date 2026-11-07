@@ -806,3 +806,77 @@ it("does not apply a resize correction before pending user scroll input is consu
   await nextAnimationFrame();
   expect(scroller.scrollTop).toBe(100);
 });
+
+it("retains a reading target when row geometry arrives after the frame budget", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  let height = 1000;
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: () => height },
+    clientHeight: { value: 300 },
+  });
+  scroller.scrollTop = 120;
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  await render("account:bob");
+  height = 300;
+  scroller.scrollTop = 0;
+  await render("account:alice");
+  for (let i = 0; i < 35; i++) await nextAnimationFrame();
+  expect(frames.size).toBe(0);
+  height = 1000;
+  await act(async () => {
+    scroller.appendChild(document.createElement("div"));
+  });
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(120);
+});
+
+it("lets reader intent cancel a queued geometry restoration", async () => {
+  const callbacks: ResizeObserverCallback[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  let height = 1000;
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: () => height },
+    clientHeight: { value: 300 },
+  });
+  scroller.scrollTop = 120;
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  await render("account:bob");
+  height = 300;
+  scroller.scrollTop = 0;
+  const previousObservers = callbacks.length;
+  await render("account:alice");
+  for (let i = 0; i < 35; i++) await nextAnimationFrame();
+  expect(frames.size).toBe(0);
+  height = 1000;
+  // Notify both viewport measurement and restoration observers as a browser does.
+  await act(async () => {
+    for (const callback of callbacks.slice(previousObservers))
+      callback([], {} as ResizeObserver);
+  });
+  viewport.stopRestoring();
+  scroller.scrollTop = 40;
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(40);
+});

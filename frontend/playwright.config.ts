@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 
 const worktreePort =
   5200 +
-  (parseInt(createHash("sha256").update(process.cwd()).digest("hex").slice(0, 4), 16) %
+  (parseInt(
+    createHash("sha256").update(process.cwd()).digest("hex").slice(0, 4),
+    16,
+  ) %
     1000);
 const port = Number(
   process.env.MESH_TALK_E2E_PORT ?? (process.env.CI ? 5173 : worktreePort),
@@ -15,12 +18,10 @@ const url = `http://127.0.0.1:${port}`;
 // headless Chromium with a mocked Tauri IPC layer (see e2e/tauri-mock.ts).
 export default defineConfig({
   testDir: "./e2e",
-  // Cold Windows transforms and browser coverage instrumentation can consume
-  // the 30s default before a multi-step scenario completes.
-  timeout:
-    process.platform === "win32" || process.env.MESH_TALK_E2E_COVERAGE === "1"
-      ? 90_000
-      : 30_000,
+  // A functional journey includes cold transforms, rendering and several
+  // successful state assertions. Use the existing Windows/coverage watchdog
+  // across platforms; individual assertion and product deadlines stay separate.
+  timeout: 90_000,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

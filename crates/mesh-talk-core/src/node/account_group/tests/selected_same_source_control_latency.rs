@@ -1126,35 +1126,60 @@ impl Drop for ReleaseReadOnDrop {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn selected_source_receipt_overtakes_its_own_preoperation_background_control_read() {
-    run_same_source_receipt(SameSourceScenario::Fresh).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_source_lower_key_receipt_preserves_both_partial_control_comparisons() {
-    run_same_source_receipt(SameSourceScenario::Partial).await;
+    Box::pin(run_same_source_receipt(SameSourceScenario::Partial)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_selected_executor_overtakes_a_completed_operations_paired_background_page() {
-    run_same_source_receipt(SameSourceScenario::OtherSelected).await;
+    Box::pin(run_same_source_receipt(SameSourceScenario::OtherSelected)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn incoming_operation_wake_runs_after_paid_pair_pages_before_unrelated_continuation() {
-    run_same_source_receipt(SameSourceScenario::PaidBoundary).await;
+    Box::pin(run_same_source_receipt(SameSourceScenario::PaidBoundary)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn same_source_cold_preparation_replaces_a_retired_partial_candidate() {
-    run_same_source_receipt(SameSourceScenario::InterruptedPreparation).await;
+    Box::pin(run_same_source_receipt(
+        SameSourceScenario::InterruptedPreparation,
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_executor_preparation_waits_for_real_a_inputs_and_pair_retirement() {
+    Box::pin(run_same_source_receipt(
+        SameSourceScenario::OtherSelectedPreparation,
+    ))
+    .await;
+}
+
+fn executor_has_processed_current_inputs(
+    executor: &Node,
+    publishers: [&Node; 2],
+    group: ConversationId,
+    scope: &Mutex<ColdControlScope>,
+) -> bool {
+    let inputs = publishers.iter().all(|publisher| {
+        let key = crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: publisher.user_id(),
+        };
+        publisher.account_document_meta(&key).is_some_and(|meta| {
+            executor.account_document_meta(&key).as_ref() == Some(&meta)
+                && executor.operation_input_consumed_for_test(&meta)
+        })
+    });
+    inputs && !scope.lock().unwrap().paired
 }
 
 #[derive(Clone, Copy)]
 enum SameSourceScenario {
-    Fresh,
     Partial,
     OtherSelected,
+    OtherSelectedPreparation,
     PaidBoundary,
     InterruptedPreparation,
 }
@@ -1649,13 +1674,61 @@ async fn hold_original_pair_resume(
     gates
 }
 
+async fn retire_same_source_workers(
+    devices: &[(&str, Arc<Node>)],
+    servers: &mut tokio::task::JoinSet<()>,
+) -> bool {
+    for (_, node) in devices {
+        node.runtime_work.close();
+    }
+    servers.shutdown().await;
+    let mut drained = true;
+    for (_, node) in devices {
+        drained &= tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+            .await
+            .is_ok();
+    }
+    drained
+}
+
+fn exact_private_receipt(
+    requester_node: &Node,
+    source_node: &Node,
+    group: ConversationId,
+    id: AccountGroupOperationId,
+    requester: &crate::node::account_group::operations::AccountGroupOperationStatus,
+    source: &crate::node::account_group::operations::AccountGroupOperationStatus,
+) -> bool {
+    requester.phase == AccountGroupOperationPhase::Committed
+        && source.phase == AccountGroupOperationPhase::Committed
+        && requester.committed_events == source.committed_events
+        && requester_node
+            .account_group_operation_inputs()
+            .into_iter()
+            .any(|(_, _, frame)| {
+                frame.group == group
+                    && frame.proof.public() == source_node.identity.public()
+                    && frame.projection.results.iter().any(|result| {
+                        result.reference.id == id
+                            && result.reference.origin.public() == requester_node.identity.public()
+                            && result.reference.executor.device == source_node.identity.public()
+                            && result.status.phase == AccountGroupOperationPhase::Committed
+                            && result.status.committed_events == requester.committed_events
+                    })
+            })
+}
+
 async fn run_same_source_receipt(scenario: SameSourceScenario) {
-    let partial = !matches!(scenario, SameSourceScenario::Fresh);
+    use futures_util::FutureExt;
     let other_selected = matches!(
         scenario,
-        SameSourceScenario::OtherSelected | SameSourceScenario::PaidBoundary
+        SameSourceScenario::OtherSelected
+            | SameSourceScenario::OtherSelectedPreparation
+            | SameSourceScenario::PaidBoundary
     );
     let paid_boundary = matches!(scenario, SameSourceScenario::PaidBoundary);
+    let held_executor_preparation =
+        matches!(scenario, SameSourceScenario::OtherSelectedPreparation);
     let preparation_wake = matches!(scenario, SameSourceScenario::InterruptedPreparation);
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -1663,8 +1736,17 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     let reference = node(&dir.path().join("reference"), &account);
     let external = node(&dir.path().join("external"), &Account::generate());
     let other = other_selected.then(|| node(&dir.path().join("other"), &account));
-    let other_group = new_channel_id();
-    let group = new_channel_id();
+    // Keep the paid-boundary result below the existing A head in Control
+    // ordering. Random IDs could avoid the late lower-key comparison path.
+    // These IDs cannot collide with the separate legacy rows 1..=68.
+    let (other_group, group) = if paid_boundary {
+        (
+            ConversationId::new([0xd0; 32]),
+            ConversationId::new([0xe0; 32]),
+        )
+    } else {
+        (new_channel_id(), new_channel_id())
+    };
     let genesis = Event::new(
         &owner.identity,
         group,
@@ -1758,15 +1840,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     // arming a held request. Only row 66 is introduced at the natural snapshot;
     // the operation budgets must not include cold replication of rows 1..65.
     let partial_keys = Arc::new(Mutex::new(Vec::new()));
-    if partial {
-        for value in 1..=65u8 {
-            partial_keys.lock().unwrap().push(
-                crate::node::account_documents::sync::seed_legacy_control_page_for_test(
-                    &owner,
-                    crate::eventlog::ConversationId::new([value; 32]),
-                ),
-            );
-        }
+    for value in 1..=65u8 {
+        partial_keys.lock().unwrap().push(
+            crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                &owner,
+                crate::eventlog::ConversationId::new([value; 32]),
+            ),
+        );
     }
     let prefix_metadata = Arc::new(
         partial_keys
@@ -1974,23 +2054,27 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     );
     assert!(reference.channel_members(group).is_empty());
     assert!(reference.pending_account_operation_sources().is_empty());
-    if partial {
-        let last = crate::node::AccountDocumentKey::GroupLegacyOperation {
-            channel: hex::encode([66; 32]),
-            source_device: owner.user_id(),
-        };
-        assert!(
-            siblings
-                .iter()
-                .all(|node| node.account_document_meta(&last).is_none()),
-            "the controlled tail must remain absent until the natural snapshot"
-        );
-    }
+    let last = crate::node::AccountDocumentKey::GroupLegacyOperation {
+        channel: hex::encode([66; 32]),
+        source_device: owner.user_id(),
+    };
+    assert!(
+        siblings
+            .iter()
+            .all(|node| node.account_document_meta(&last).is_none()),
+        "the controlled tail must remain absent until the natural snapshot"
+    );
 
     let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let b_critical = Arc::new(Mutex::new(CriticalControlTrace::default()));
     let b_clock = std::time::Instant::now();
     let b_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let b_requester_scope = cold_scopes
+        .iter()
+        .find(|(target, peer, _, _, _)| *target == 2 && *peer == 1)
+        .map(|(_, _, _, _, scope)| scope.clone())
+        .unwrap_or_default();
+    let b_requester_pages = Arc::new(Mutex::new(ControlTestPages::default()));
     if let Some(other) = &other {
         let previous = other.account_client_test_hook.lock().unwrap().clone();
         *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
@@ -1999,11 +2083,15 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let requester = reference.identity.public();
             let source_a = owner.identity.public();
             let own = other.identity.public();
+            let scope = b_requester_scope.clone();
+            let pages = b_requester_pages.clone();
             move |peer, phase| {
                 if let Some(previous) = &previous {
                     previous(peer.clone(), phase.clone());
                 }
                 let side = if peer == requester {
+                    scope.lock().unwrap().observe(&phase, false);
+                    pages.lock().unwrap().observe(&phase);
                     "B_to_requester"
                 } else if peer == source_a {
                     "B_to_A"
@@ -2018,6 +2106,80 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     &phase,
                     active.load(std::sync::atomic::Ordering::Acquire),
                 );
+            }
+        }));
+    }
+    let executor_natural = Arc::new(Semaphore::new(0));
+    let executor_paired = Arc::new(Semaphore::new(0));
+    let _executor_preparation_release = ReleaseReadOnDrop(executor_natural.clone());
+    let _executor_pair_release = ReleaseReadOnDrop(executor_paired.clone());
+    let executor_fault_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let executor_natural_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let executor_paired_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let executor_paired_task = Arc::new(Mutex::new(None));
+    if held_executor_preparation {
+        let exact = other.as_ref().unwrap().identity.public();
+        *reference.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let pages = b_requester_pages.clone();
+            let armed = executor_fault_armed.clone();
+            let natural = executor_natural.clone();
+            let paired = executor_paired.clone();
+            let natural_seen = executor_natural_seen.clone();
+            let paired_seen = executor_paired_seen.clone();
+            let paired_task = executor_paired_task.clone();
+            move |peer, frame| {
+                let pages = pages.clone();
+                let armed = armed.clone();
+                let natural = natural.clone();
+                let paired = paired.clone();
+                let natural_seen = natural_seen.clone();
+                let paired_seen = paired_seen.clone();
+                let paired_task = paired_task.clone();
+                let exact = exact.clone();
+                Box::pin(async move {
+                    if peer != exact || !armed.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                        return;
+                    };
+                    let Some(request) =
+                        crate::node::account_documents::wire::DocumentRequest::decode(&body)
+                    else {
+                        return;
+                    };
+                    if request.domain != AccountDocumentDomain::GroupControl {
+                        return;
+                    }
+                    let page = pages.lock().unwrap().live_request(&request);
+                    let Some(page) = page else {
+                        return;
+                    };
+                    let Some(dispatch) = page.dispatch() else {
+                        return;
+                    };
+                    if dispatch.unpaired_background()
+                        && !natural_seen.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        let _ = natural.acquire().await;
+                    } else if dispatch.paired
+                        && natural_seen.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        let hold = {
+                            let mut captured = paired_task.lock().unwrap();
+                            if captured.is_none() {
+                                *captured = Some(page.task);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if hold {
+                            paired_seen.store(true, std::sync::atomic::Ordering::Release);
+                            let _ = paired.acquire().await;
+                        }
+                    }
+                })
             }
         }));
     }
@@ -2218,7 +2380,9 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             }
         }
     }));
+    let previous_reference_session = reference.account_session_test_hook.lock().unwrap().clone();
     *reference.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let previous = previous_reference_session;
         let trace = abort_trace.clone();
         let peer = owner.identity.public();
         let writer = owner.user_id();
@@ -2226,6 +2390,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let trace = trace.clone();
             let peer = peer.clone();
             let writer = writer.clone();
+            let previous = previous.clone();
             Box::pin(async move {
                 if observed == peer {
                     record_control_frame(
@@ -2237,13 +2402,18 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                         &writer,
                     );
                 }
+                if let Some(previous) = previous {
+                    previous(observed, frame).await;
+                }
             })
         }
     }));
+    let authorized_paid_dispatch = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let checkpoints = Arc::new(Mutex::new(Vec::new()));
     let tail_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let rejected = Arc::new(Mutex::new([0usize; 6]));
     *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let authorized_paid_dispatch = authorized_paid_dispatch.clone();
         let release = release.clone();
         let checkpoints = checkpoints.clone();
         let exact_reference = reference.identity.public();
@@ -2276,6 +2446,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let abort_trace = abort_trace.clone();
             let abort_window = abort_window.clone();
             let held_pages = held_pages.clone();
+            let authorized_paid_dispatch = authorized_paid_dispatch.clone();
             let release = release.clone();
             let arrived = arrived.clone();
             let checkpoints = checkpoints.clone();
@@ -2358,8 +2529,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                         }
                     }
                 }
-                if partial
-                    && effective_after.is_none()
+                if effective_after.is_none()
                     && dispatch.unpaired_background()
                     && arrived.lock().unwrap().is_some()
                 {
@@ -2410,7 +2580,12 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                             .store(true, std::sync::atomic::Ordering::Release);
                     }
                 }
-                if partial && !matches!(&effective_after, Some(crate::node::account_documents::AccountDocumentKey::GroupLegacyOperation { .. })) {
+                if !matches!(
+                    &effective_after,
+                    Some(
+                        crate::node::account_documents::AccountDocumentKey::GroupLegacyOperation { .. }
+                    )
+                ) {
                     rejected.lock().unwrap()[5] += 1;
                     return;
                 }
@@ -2424,29 +2599,22 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 if let Some(signal) = signal {
                     // This is a completed SessionReady and an authenticated
                     // read, not an accepted operation or mutation transaction.
-                    if partial {
-                        assert!(
-                            tail_revision.load(std::sync::atomic::Ordering::Acquire) > 0
-                                && partial_keys.lock().unwrap().len() == 66,
-                            "the held tail must follow the prepared prefix and its one new row"
-                        );
-                        let operation_key =
-                            crate::node::account_documents::AccountDocumentKey::GroupOperation {
-                                channel: hex::encode(group.as_bytes()),
-                                source_device: owner_id.clone(),
-                            };
-                        assert!(
-                            effective_after
-                                .as_ref()
-                                .is_some_and(|after| operation_key < *after),
-                            "the new terminal result must sort before the preserved partial checkpoint"
-                        );
-                    } else {
-                        assert!(
-                            request.after.is_none(),
-                            "the original case captures a fresh background comparison"
-                        );
-                    }
+                    assert!(
+                        tail_revision.load(std::sync::atomic::Ordering::Acquire) > 0
+                            && partial_keys.lock().unwrap().len() == 66,
+                        "the held tail must follow the prepared prefix and its one new row"
+                    );
+                    let operation_key =
+                        crate::node::account_documents::AccountDocumentKey::GroupOperation {
+                            channel: hex::encode(group.as_bytes()),
+                            source_device: owner_id.clone(),
+                        };
+                    assert!(
+                        effective_after
+                            .as_ref()
+                            .is_some_and(|after| operation_key < *after),
+                        "the new terminal result must sort before the preserved partial checkpoint"
+                    );
                     let task = page.task;
                     held_pages.lock().unwrap().push((task, 0));
                     abort_window.store(true, std::sync::atomic::Ordering::Release);
@@ -2459,6 +2627,9 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     let _ = signal.send(());
                     let _ = release.acquire().await;
                 } else if other_selected
+                    && (!matches!(scenario, SameSourceScenario::OtherSelected)
+                        || *authorized_paid_dispatch.lock().unwrap() == Some(page.task))
+                    && !held_executor_preparation
                     && admitted.is_some_and(|id| {
                         requester.upgrade().is_some_and(|requester| {
                             requester.account_group_operation_inputs().into_iter().any(
@@ -2502,6 +2673,44 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             })
         }
     }));
+    let (paid_dispatch_arrived, paid_dispatch_wait) = oneshot::channel();
+    let paid_dispatch_arrived = Arc::new(Mutex::new(Some(paid_dispatch_arrived)));
+    let paid_dispatch_release = Arc::new(Semaphore::new(0));
+    let _paid_dispatch_cleanup = ReleaseReadOnDrop(paid_dispatch_release.clone());
+    if matches!(scenario, SameSourceScenario::OtherSelected) {
+        *reference.account_control_dispatch_test_hook.lock().unwrap() = Some(Arc::new({
+            let exact = owner.identity.public();
+            let signal = paid_dispatch_arrived.clone();
+            let release = paid_dispatch_release.clone();
+            let authorized = authorized_paid_dispatch.clone();
+            let operation = active_operation.clone();
+            move |peer, paid_resume| {
+                let signal = signal.clone();
+                let release = release.clone();
+                let authorized = authorized.clone();
+                let operation = operation.clone();
+                let exact = exact.clone();
+                Box::pin(async move {
+                    if !paid_resume || peer != exact {
+                        return;
+                    }
+                    let Some(id) = *operation.lock().unwrap() else {
+                        return;
+                    };
+                    // This is the pair's owed parked turn, after the real
+                    // foreground prefix. The main task observes the unchanged
+                    // full private receipt before it may release this gate.
+                    let captured = signal.lock().unwrap().take();
+                    if let Some(signal) = captured {
+                        *authorized.lock().unwrap() = Some(tokio::task::id());
+                        let _ = signal.send(id);
+                        let _ = release.acquire().await;
+                    }
+                })
+            }
+        }));
+    }
+    let mut executor_preparation_failure = None;
     reference.account_sync_notify.notify_one();
     super::cold_account_setup(async {
         held.await?;
@@ -2577,29 +2786,43 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         format!("A_admission_prefix_consumed={admission_prefix_consumed:?}"),
     );
     record_b_trace(&abort_trace, b_clock, "fixture", "A_admission_begin".into());
-    reference
-        .submit_account_group_operation_if(
-            &account.account_id(),
-            id,
-            group,
-            AccountGroupOperation::Rename {
-                name: "After same-source hold".into(),
-            },
-            |commit| {
-                let task = held_pages
-                    .lock()
-                    .unwrap()
-                    .first()
-                    .expect("the exact natural page is held")
-                    .0;
-                assert!(
-                    control_pages.lock().unwrap().is_active(task),
-                    "the exact held natural task must be live at admission"
-                );
-                commit()
-            },
-        )
-        .unwrap();
+    let a_admission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reference
+            .submit_account_group_operation_if(
+                &account.account_id(),
+                id,
+                group,
+                AccountGroupOperation::Rename {
+                    name: "After same-source hold".into(),
+                },
+                |commit| {
+                    let task = held_pages
+                        .lock()
+                        .unwrap()
+                        .first()
+                        .expect("the exact natural page is held")
+                        .0;
+                    let live = control_pages.lock().unwrap().is_active(task);
+                    assert!(
+                        live,
+                        "the exact held natural task must be live at admission"
+                    );
+                    commit()
+                },
+            )
+            .unwrap();
+    }));
+    if let Err(error) = a_admission {
+        release.close();
+        resumed_release.close();
+        executor_natural.close();
+        executor_paired.close();
+        if !retire_same_source_workers(&devices, &mut servers).await {
+            let retained = dir.keep();
+            eprintln!("A admission did not retire; retaining private store at {retained:?}");
+        }
+        std::panic::resume_unwind(error);
+    }
     record_b_trace(&abort_trace, b_clock, "fixture", "A_admitted".into());
     let receipt = tokio::time::timeout(Duration::from_secs(8), async {
         let mut observed_committed = false;
@@ -2624,24 +2847,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 );
             }
             if let (Some(requester), Some(source)) = (requester, source)
-                && requester.phase == AccountGroupOperationPhase::Committed
-                && source.phase == AccountGroupOperationPhase::Committed
-                && requester.committed_events == source.committed_events
-                && reference
-                    .account_group_operation_inputs()
-                    .into_iter()
-                    .any(|(_, _, frame)| {
-                        frame.group == group
-                            && frame.proof.public() == owner.identity.public()
-                            && frame.projection.results.iter().any(|result| {
-                                result.reference.id == id
-                                    && result.reference.origin.public()
-                                        == reference.identity.public()
-                                    && result.reference.executor.device == owner.identity.public()
-                                    && result.status.phase == AccountGroupOperationPhase::Committed
-                                    && result.status.committed_events == requester.committed_events
-                            })
-                    })
+                && exact_private_receipt(&reference, &owner, group, id, &requester, &source)
             {
                 break (requester, source);
             }
@@ -2674,27 +2880,14 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     let mut second_id = None;
     let mut executor_boundary = None;
     let other_receipt = if let Some(other) = &other {
-        if receipt.is_ok() {
-            tokio::time::timeout(Duration::from_secs(8), resumed_wait)
-                .await
-                .expect("completed operation must yield a paired background page")
-                .unwrap();
-            assert!(
-                !reference.pending_account_operation_sources().contains(&(
-                    owner.identity.public().ed25519_pub,
-                    owner.identity.public().x25519_pub
-                )),
-                "A is terminal before B is admitted"
-            );
-            let held_before_b_setup = if matches!(scenario, SameSourceScenario::OtherSelected) {
+        if receipt.is_ok() && executor_preparation_failure.is_none() {
+            let needs_independent_scope = matches!(scenario, SameSourceScenario::OtherSelected);
+            if needs_independent_scope {
                 // This variant measures the requester's selected-B preemption.
                 // Let B's existing worker finish its unrelated A scope, including
-                // the exact newly introduced tail, while that requester resume
-                // remains held. PaidBoundary separately faults B's incoming lane.
+                // the exact newly introduced tail, before the requester opens
+                // its paid resume socket. PaidBoundary faults B's incoming lane.
                 assert!(second_id.is_none());
-                let held = held_pages.lock().unwrap().last().unwrap().0;
-                let checkpoint = checkpoints.lock().unwrap().last().unwrap().clone();
-                assert!(control_pages.lock().unwrap().is_active(held));
                 let keys = partial_keys.lock().unwrap().clone();
                 assert_eq!(keys.len(), 66);
                 let tail = owner.account_document_meta(keys.last().unwrap()).unwrap();
@@ -2709,22 +2902,60 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     })
                     .unwrap()
                     .4;
+                // The controlled tail was seeded directly into storage while
+                // preparing A's read. Advertise that fixture publication only
+                // after A's receipt, before opening the protected paid page.
+                owner.note_account_local_change();
                 super::cold_account_setup(async {
+                    assert_eq!(paid_dispatch_wait.await.expect("A paid resume reaches preparation"), id);
+                    assert_eq!(held_pages.lock().unwrap().len(), 1, "B preparation precedes the second wire hold");
                     while !scope.lock().unwrap().ready_for(expected)
                         || other.account_document_meta(&tail.key).as_ref() != Some(&tail)
+                        || !executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
                     {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 })
                 .await
-                .expect("B's exact unrelated Control scope must settle before B admission");
+                .unwrap_or_else(|error| {
+                    let scope = scope.lock().unwrap();
+                    panic!(
+                        "B's exact unrelated Control scope must settle before B admission: {error:?}; settled={} paired={} corpus_matches={} tail_matches={} dispatch_released={}",
+                        scope.settled,
+                        scope.paired,
+                        scope.settled_corpus == Some(expected),
+                        other.account_document_meta(&tail.key).as_ref() == Some(&tail),
+                        paid_dispatch_release.is_closed(),
+                    );
+                });
                 assert!(owner.account_document_meta(&tail.key).as_ref() == Some(&tail));
                 assert!(!resumed_release.is_closed());
+                assert_eq!(
+                    held_pages.lock().unwrap().len(),
+                    1,
+                    "B preparation must not issue the paid resume wire read"
+                );
+                paid_dispatch_release.close();
+            }
+            if !held_executor_preparation {
+                tokio::time::timeout(Duration::from_secs(8), resumed_wait)
+                    .await
+                    .expect("completed operation must yield a paired background page")
+                    .unwrap();
+            }
+
+            assert!(
+                !reference.pending_account_operation_sources().contains(&(
+                    owner.identity.public().ed25519_pub,
+                    owner.identity.public().x25519_pub
+                )),
+                "A is terminal before B is admitted"
+            );
+            let held_before_b_setup = needs_independent_scope.then(|| {
+                let held = held_pages.lock().unwrap().last().unwrap().0;
                 assert!(control_pages.lock().unwrap().is_active(held));
-                Some((held, checkpoint))
-            } else {
-                None
-            };
+                (held, checkpoints.lock().unwrap().last().unwrap().clone())
+            });
             if paid_boundary {
                 // This variant faults B's unrelated incoming-hint scheduler,
                 // not the parent's selected-B-vs-held-A boundary. Finish that
@@ -2750,135 +2981,235 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                     "parent_pair_retired_before_new_fault".into(),
                 );
             }
-            let second = reference
-                .new_account_group_operation_id(&account.account_id())
-                .unwrap();
-            second_id = Some(second);
-            b_active.store(true, std::sync::atomic::Ordering::Relaxed);
-            b_critical
-                .lock()
-                .unwrap()
-                .record(b_clock, "fixture", "B_admission_begin".into());
-            record_b_trace(&b_trace, b_clock, "fixture", "B_admission_begin".into());
-            record_b_trace(&abort_trace, b_clock, "fixture", "B_admission_begin".into());
-            let previous_b_client = other.account_client_test_hook.lock().unwrap().clone();
-            *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
-                let previous = previous_b_client;
-                let trace = b_trace.clone();
-                let requester = reference.identity.public();
-                let own = other.identity.public();
-                move |peer, phase| {
-                    if let Some(previous) = &previous {
-                        previous(peer.clone(), phase.clone());
-                    }
-                    if peer == requester || peer == own {
-                        record_b_trace(&trace, b_clock, "B_client", phase);
-                    }
+            let independent_preparation = std::panic::AssertUnwindSafe(async {
+            if !paid_boundary {
+                let b_key = crate::node::AccountDocumentKey::GroupOperation {
+                    channel: hex::encode(other_group.as_bytes()),
+                    source_device: reference.user_id(),
+                };
+                assert!(
+                    reference.account_document_meta(&b_key).is_none(),
+                    "B intent is absent before preparation"
+                );
+                if held_executor_preparation {
+                    // This control owns the pair-debt conjunct. Complete A and
+                    // all its input preparation before arming any timed B read.
+                    release.close();
+                    resumed_release.close();
+                    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+                        executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
+                    })).await.expect("the real A inputs and previous B pair must finish before the debt control is armed");
+                    executor_fault_armed.store(true, std::sync::atomic::Ordering::Release);
+                    reference.set_device_hostname(Some("Executor natural read control")).unwrap();
+                    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+                        executor_natural_seen.load(std::sync::atomic::Ordering::Acquire)
+                    })).await.expect("a real publication must start the executor's natural read");
+                    // No unrelated preparation is performed under this hold:
+                    // the next real revision creates the same-source pair.
+                    reference.set_device_hostname(Some("Executor paired read control")).unwrap();
+                    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+                        executor_paired_seen.load(std::sync::atomic::Ordering::Acquire)
+                            && executor_paired_task.lock().unwrap().is_some()
+                    }))
+                    .await
+                    .expect("the newer real publication must create the held executor pair");
+                    let task = executor_paired_task
+                        .lock()
+                        .unwrap()
+                        .expect("the actual paired request was captured");
+                    let live = b_requester_pages.lock().unwrap().is_active(task);
+                    assert!(
+                        live,
+                        "the original executor ingestion child remains genuinely held"
+                    );
+                    assert!(
+                        receipt.is_ok(),
+                        "the former A-terminal-only readiness already accepts"
+                    );
+                    let paired = b_requester_scope.lock().unwrap().paired;
+                    assert!(paired, "the authenticated held child must still own real comparison debt");
+                    assert!(
+                        !executor_has_processed_current_inputs(
+                            other,
+                            [&owner, &reference],
+                            group,
+                            &b_requester_scope
+                        ),
+                        "a genuinely held old pair must reject independent-executor preparation"
+                    );
+                    executor_natural.close();
+                    executor_paired.close();
                 }
-            }));
-            for (side, target, expected) in [
-                ("B_server", other, reference.identity.public()),
-                ("requester_server", &reference, other.identity.public()),
-                ("A_server_for_B", &owner, other.identity.public()),
-            ] {
-                let previous = target.account_session_test_hook.lock().unwrap().clone();
-                *target.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+                if matches!(scenario, SameSourceScenario::OtherSelected) {
+                    assert!(executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope),
+                        "B's prepared signed inputs and retired ingestion pair remain current at admission");
+                } else {
+                    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+                        executor_has_processed_current_inputs(other, [&owner, &reference], group, &b_requester_scope)
+                    })).await.expect("B must process A's actual current signed inputs and retire its ingestion pair before admission");
+                }
+                assert!(
+                    reference.account_document_meta(&b_key).is_none(),
+                    "preparation must not admit or preload B intent"
+                );
+                if !held_executor_preparation {
+                    let task = held_pages.lock().unwrap().last().expect("the exact requester A resume remains held").0;
+                    let live = control_pages.lock().unwrap().is_active(task);
+                    assert!(live, "the exact requester A resume must survive executor preparation");
+                }
+            }
+            }).catch_unwind().await;
+            if let Err(error) = independent_preparation {
+                executor_preparation_failure = Some(error);
+                executor_natural.close();
+                executor_paired.close();
+                None
+            } else if held_executor_preparation {
+                None
+            } else {
+                let second = reference
+                    .new_account_group_operation_id(&account.account_id())
+                    .unwrap();
+                second_id = Some(second);
+                b_active.store(true, std::sync::atomic::Ordering::Relaxed);
+                b_critical
+                    .lock()
+                    .unwrap()
+                    .record(b_clock, "fixture", "B_admission_begin".into());
+                record_b_trace(&b_trace, b_clock, "fixture", "B_admission_begin".into());
+                record_b_trace(&abort_trace, b_clock, "fixture", "B_admission_begin".into());
+                let previous_b_client = other.account_client_test_hook.lock().unwrap().clone();
+                *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+                    let previous = previous_b_client;
                     let trace = b_trace.clone();
-                    let critical = b_critical.clone();
-                    move |peer, frame| {
-                        let trace = trace.clone();
-                        let critical = critical.clone();
-                        let expected = expected.clone();
-                        let previous = previous.clone();
-                        Box::pin(async move {
-                            if peer != expected {
-                                if let Some(previous) = previous {
-                                    previous(peer, frame).await;
+                    let requester = reference.identity.public();
+                    let own = other.identity.public();
+                    move |peer, phase| {
+                        if let Some(previous) = &previous {
+                            previous(peer.clone(), phase.clone());
+                        }
+                        if peer == requester || peer == own {
+                            record_b_trace(&trace, b_clock, "B_client", phase);
+                        }
+                    }
+                }));
+                for (side, target, expected) in [
+                    ("B_server", other, reference.identity.public()),
+                    ("requester_server", &reference, other.identity.public()),
+                    ("A_server_for_B", &owner, other.identity.public()),
+                ] {
+                    let previous = target.account_session_test_hook.lock().unwrap().clone();
+                    *target.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+                        let trace = b_trace.clone();
+                        let critical = b_critical.clone();
+                        move |peer, frame| {
+                            let trace = trace.clone();
+                            let critical = critical.clone();
+                            let expected = expected.clone();
+                            let previous = previous.clone();
+                            Box::pin(async move {
+                                if peer != expected {
+                                    if let Some(previous) = previous {
+                                        previous(peer, frame).await;
+                                    }
+                                    return;
                                 }
-                                return;
-                            }
-                            critical.lock().unwrap().frame(b_clock, side, &frame);
-                            use crate::node::account_documents::wire::DocumentRequest;
-                            let phase = match &frame {
+                                critical.lock().unwrap().frame(b_clock, side, &frame);
+                                use crate::node::account_documents::wire::DocumentRequest;
+                                let phase = match &frame {
                             AccountHistoryFrame::DocumentsRequest{body} => DocumentRequest::decode(body).filter(|request|request.domain==AccountDocumentDomain::GroupControl).map(|request| format!("Control_request version={} partial={} nonce={:?}",request.version,request.after.is_some() || request.operation.as_ref().is_some_and(|probe|probe.after.is_some()),request.operation.as_ref().map(|probe|hex::encode(&probe.nonce[..4])))),
                             AccountHistoryFrame::DocumentHeader{body} => serde_json::from_slice::<crate::node::AccountDocumentMeta>(body).ok().filter(|meta|matches!(&meta.key,crate::node::AccountDocumentKey::GroupOperation{channel,..} if *channel==hex::encode(other_group.as_bytes()))).map(|meta|format!("B_operation_header revision={} hash={}",meta.revision,hex::encode(&meta.content_hash[..4]))),
                             AccountHistoryFrame::DocumentsComplete{body} => serde_json::from_slice::<serde_json::Value>(body).ok().filter(|value|value.get("domain").and_then(|v|v.as_str())==Some("group_control")).map(|value|format!("Control_complete next={} enabled={}",!value["next"].is_null(),value["enabled"])),
                             _ => None,
                         };
-                            if let Some(phase) = phase {
-                                record_b_trace(&trace, b_clock, side, phase);
-                            }
-                            if let Some(previous) = previous {
-                                previous(peer, frame).await;
-                            }
-                        })
-                    }
-                }));
-            }
-
-            if paid_boundary {
-                executor_boundary = Some(
-                    hold_original_pair_resume(
-                        &owner,
-                        other,
-                        &reference,
-                        &partial_keys,
-                        &b_trace,
-                        b_clock,
-                    )
-                    .await,
-                );
-            }
-            let request_wake_before_submit = reference.account_wake_token_for_test().1;
-            b_critical.lock().unwrap().begin_budget(b_clock);
-            reference
-                .submit_account_group_operation_if(
-                    &account.account_id(),
-                    second,
-                    other_group,
-                    AccountGroupOperation::Rename {
-                        name: "Other executor overtook background".into(),
-                    },
-                    |commit| {
-                        if let Some(boundary) = &executor_boundary {
-                            let task = boundary
-                                .evidence
-                                .lock()
-                                .unwrap()
-                                .resume_page
-                                .expect("the exact executor resume is held");
-                            assert!(
-                                boundary.pages.lock().unwrap().is_active(task),
-                                "the exact executor resume must be live at B admission"
-                            );
-                        } else {
-                            let task = held_pages
-                                .lock()
-                                .unwrap()
-                                .last()
-                                .expect("the exact paired resume is held")
-                                .0;
-                            if let Some((held, checkpoint)) = &held_before_b_setup {
-                                assert_eq!(task, *held);
-                                assert!(checkpoints.lock().unwrap().last() == Some(checkpoint));
-                                assert!(!resumed_release.is_closed());
-                            }
-                            assert!(
-                                control_pages.lock().unwrap().is_active(task),
-                                "the exact paired resume must be live at B admission"
-                            );
+                                if let Some(phase) = phase {
+                                    record_b_trace(&trace, b_clock, side, phase);
+                                }
+                                if let Some(previous) = previous {
+                                    previous(peer, frame).await;
+                                }
+                            })
                         }
-                        commit()
-                    },
-                )
-                .unwrap();
-            record_b_trace(&b_trace, b_clock, "fixture", "B_admitted".into());
-            b_critical
-                .lock()
-                .unwrap()
-                .record(b_clock, "fixture", "B_admitted".into());
-            record_b_trace(&abort_trace, b_clock, "fixture", "B_admitted".into());
-            Some(
+                    }));
+                }
+
+                if paid_boundary {
+                    let actual_a_head = owner
+                        .account_document_meta(&crate::node::AccountDocumentKey::GroupOperation {
+                            channel: hex::encode(group.as_bytes()),
+                            source_device: owner.user_id(),
+                        })
+                        .expect("A's completed private receipt has a real signed source head");
+                    let b_result_key = crate::node::AccountDocumentKey::GroupOperation {
+                        channel: hex::encode(other_group.as_bytes()),
+                        source_device: other.user_id(),
+                    };
+                    assert!(
+                        b_result_key < actual_a_head.key,
+                        "the new B result must precede the actual already-published A Control head"
+                    );
+                    executor_boundary = Some(
+                        hold_original_pair_resume(
+                            &owner,
+                            other,
+                            &reference,
+                            &partial_keys,
+                            &b_trace,
+                            b_clock,
+                        )
+                        .await,
+                    );
+                }
+                let request_wake_before_submit = reference.account_wake_token_for_test().1;
+                b_critical.lock().unwrap().begin_budget(b_clock);
+                reference
+                    .submit_account_group_operation_if(
+                        &account.account_id(),
+                        second,
+                        other_group,
+                        AccountGroupOperation::Rename {
+                            name: "Other executor overtook background".into(),
+                        },
+                        |commit| {
+                            if let Some(boundary) = &executor_boundary {
+                                let task = boundary
+                                    .evidence
+                                    .lock()
+                                    .unwrap()
+                                    .resume_page
+                                    .expect("the exact executor resume is held");
+                                assert!(
+                                    boundary.pages.lock().unwrap().is_active(task),
+                                    "the exact executor resume must be live at B admission"
+                                );
+                            } else {
+                                let task = held_pages
+                                    .lock()
+                                    .unwrap()
+                                    .last()
+                                    .expect("the exact paired resume is held")
+                                    .0;
+                                if let Some((held, checkpoint)) = &held_before_b_setup {
+                                    assert_eq!(task, *held);
+                                    assert!(checkpoints.lock().unwrap().last() == Some(checkpoint));
+                                    assert!(!resumed_release.is_closed());
+                                }
+                                assert!(
+                                    control_pages.lock().unwrap().is_active(task),
+                                    "the exact paired resume must be live at B admission"
+                                );
+                            }
+                            commit()
+                        },
+                    )
+                    .unwrap();
+                record_b_trace(&b_trace, b_clock, "fixture", "B_admitted".into());
+                b_critical
+                    .lock()
+                    .unwrap()
+                    .record(b_clock, "fixture", "B_admitted".into());
+                record_b_trace(&abort_trace, b_clock, "fixture", "B_admitted".into());
+                Some(
                 tokio::time::timeout(Duration::from_secs(8), async {
                     let mut executor_committed_observed = false;
                     let mut requester_committed_observed = false;
@@ -2975,6 +3306,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                 })
                 .await,
             )
+            }
         } else {
             None
         }
@@ -2982,6 +3314,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         None
     };
     let b_critical_snapshot = other_receipt.as_ref().map(|result| {
+        if paid_boundary && (result.is_err()
+            || std::env::var("MESH_TALK_TEST_TIMING").is_ok_and(|value| value == "1"))
+        {
+            eprintln!("paid_boundary_storage profile_root={:?} native_temp={:?} TEMP={:?} TMP={:?} RUNNER_TEMP={:?}",
+                dir.path(), std::env::temp_dir(), std::env::var_os("TEMP"),
+                std::env::var_os("TMP"), std::env::var_os("RUNNER_TEMP"));
+        }
         let mut trace = b_critical.lock().unwrap();
         trace.record(
             b_clock,
@@ -3053,8 +3392,11 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
         .collect::<Vec<_>>();
+    paid_dispatch_release.close();
     release.close();
     resumed_release.close();
+    executor_natural.close();
+    executor_paired.close();
     let paid_boundary_evidence = executor_boundary
         .as_ref()
         .map(|boundary| boundary.evidence.lock().unwrap().clone());
@@ -3103,9 +3445,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             if checkpoints.lock().unwrap().len() >= 2
                 && partial_complete
                 && b_receipt_recovered
-                && (!partial
-                    || private_failed
-                    || retired.load(std::sync::atomic::Ordering::Relaxed))
+                && (private_failed || retired.load(std::sync::atomic::Ordering::Relaxed))
                 && public
                 && receipt
                     .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
@@ -3150,6 +3490,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     *owner.account_session_test_hook.lock().unwrap() = None;
     *owner.account_client_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;
+    *reference.account_control_dispatch_test_hook.lock().unwrap() = None;
     *reference.account_session_test_hook.lock().unwrap() = None;
     if let Some(other) = &other {
         *other.account_client_test_hook.lock().unwrap() = None;
@@ -3159,14 +3500,26 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         let rows = checkpoints.lock().unwrap();
         rows.len() >= 2 && rows[0] == rows[1]
     };
-    for (_, node) in &devices {
-        node.runtime_work.close();
+    let drained = retire_same_source_workers(&devices, &mut servers).await;
+    if !drained {
+        let retained = dir.keep();
+        eprintln!(
+            "same-source work did not retire; retaining private fixture store at {retained:?}"
+        );
+        if let Some(error) = executor_preparation_failure {
+            std::panic::resume_unwind(error);
+        }
+        panic!("all original fixture owners must drain");
     }
-    servers.shutdown().await;
-    for (_, node) in &devices {
-        tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
-            .await
-            .expect("all original fixture owners must drain");
+    if let Some(error) = executor_preparation_failure {
+        std::panic::resume_unwind(error);
+    }
+    if paid_boundary && other_receipt.as_ref().is_some_and(Result::is_err) {
+        // Preserve the post-cutoff publication/transport evidence before the
+        // stricter RED guard diagnoses an unrelated failure. Owners have now
+        // retired, so this snapshot cannot race a still-writing fixture task.
+        let snapshot = b_critical.lock().unwrap().snapshot();
+        eprintln!("B_critical_after_recovery snapshot={snapshot:?}");
     }
     if let Some(evidence) = &paid_boundary_evidence {
         assert!(
@@ -3215,7 +3568,14 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         abort_trace.lock().unwrap()
     );
     let (requester, source) = receipt.unwrap_or_else(|_| panic!("same-source pre-operation background read blocked its new private receipt: requester={:?} source={:?} abort_trace={:?}", before_release_requester.map(|status| status.phase), before_release_source.map(|status| status.phase), abort_trace.lock().unwrap()));
-    assert_eq!(held_abort_counts.len(), if other_selected { 2 } else { 1 });
+    assert_eq!(
+        held_abort_counts.len(),
+        if other_selected && !held_executor_preparation {
+            2
+        } else {
+            1
+        }
+    );
     assert!(
         if paid_boundary {
             held_abort_counts.iter().map(|(_, count)| *count).eq([1, 0])
@@ -3227,7 +3587,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     );
     assert_eq!(
         aborts_before_release,
-        if other_selected && !paid_boundary {
+        if other_selected && !paid_boundary && !held_executor_preparation {
             2
         } else {
             1
@@ -3239,7 +3599,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         preserved,
         "the authenticated comparison checkpoint must not be reset or skipped"
     );
-    if other_selected {
+    if other_selected && !held_executor_preparation {
         let events = other_receipt.expect("the second real operation was admitted after A committed")
             .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; held_tasks={held_abort_counts:?}"));
         assert_eq!(events.len(), 1);

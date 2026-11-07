@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
   rmSync,
   renameSync,
   chmodSync,
@@ -11,11 +12,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { spawn, spawnSync } from "node:child_process";
+import { execute } from "../validation/stage.mjs";
 import {
   discoverChanges,
   executePlan,
+  executeCheapChecks,
   parseOptions,
   prepareRust,
   validateFrontendReport,
@@ -24,9 +28,9 @@ import {
 
 const isolatedEnv = { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined };
 
-function repository(t) {
+function repository(t, { automaticCleanup = true } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "mesh-affected-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  if (automaticCleanup) t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (args) => {
     const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
@@ -442,21 +446,114 @@ function configureCLI(f, body) {
     "configure CLI",
   ]);
 }
+
 const cli = fileURLToPath(
   new URL("../validation/changed.mjs", import.meta.url),
 );
+
+// Functional CLI assertions observe report state and natural process closure.
+// Their watchdog is only a deadlock bound, not a host-startup latency contract.
+const FUNCTIONAL_CLI_WATCHDOG_MS = 60_000;
+
+function commandFixture(t) {
+  const f = repository(t, { automaticCleanup: false });
+  const controller = new AbortController();
+  const completions = [];
+  let retirement;
+  const retire = () => retirement ??= (async () => {
+    controller.abort();
+    const results = await Promise.allSettled(completions);
+    const verified = results.every(result => result.status === "fulfilled"
+      && result.value.cleanupUnverified === false);
+    t.signal.removeEventListener("abort", cancelled);
+    if (verified) rmSync(f.root, { recursive: true, force: true });
+    else t.diagnostic(`Unverified CLI fixture retirement; retained ${f.root}`);
+    assert(verified, "CLI fixture owners must retire before directory cleanup");
+  })();
+  const cancelled = () => {
+    void retire().catch(error => t.diagnostic(`CLI fixture retirement failed: ${error.message}`));
+  };
+  t.signal.addEventListener("abort", cancelled, { once: true });
+  t.after(retire);
+  return { ...f, async runCLI(args, { env = isolatedEnv } = {}) {
+    t.signal.throwIfAborted();
+    controller.signal.throwIfAborted();
+    const chunks = { stdout: [], stderr: [] };
+    let bytes = 0;
+    let outputTruncated = false;
+    const completion = execute([process.execPath, cli, ...args], {
+      cwd: f.root, env,
+      signal: AbortSignal.any([t.signal, controller.signal]),
+      onOutput(chunk, channel) {
+        bytes += chunk.length;
+        if (bytes > 64 * 1024) {
+          outputTruncated = true;
+          controller.abort();
+          return;
+        }
+        chunks[channel].push(Buffer.from(chunk));
+      },
+    }).then(result => ({ ...result, status: result.code, outputTruncated,
+      stdout: Buffer.concat(chunks.stdout).toString(),
+      stderr: Buffer.concat(chunks.stderr).toString() }));
+    completions.push(completion);
+    const result = await completion;
+    assert.equal(result.cleanupUnverified, false, result.error);
+    assert.equal(result.outputTruncated, false, "CLI evidence must remain complete");
+    assert.equal(result.error, undefined);
+    assert(Number.isInteger(result.code) && result.code >= 0,
+      "CLI evidence must contain the actual command exit status");
+    return result;
+  } };
+}
 
 for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWhileQueued: true }, { editWhileQueued: true, managed: true }]) test(
   `cheap static checks run before a busy ${managed ? "managed" : "heavy"} lock${editWhileQueued ? " and edits invalidate their proof" : ""}`,
   { timeout: 20000, skip: process.platform === "win32" ? "POSIX executable fixture; phase partitioning is platform-independent" : false },
   async t => {
-    const f = repository(t);
+    const f = repository(t, { automaticCleanup: false });
     configureCLI(f, "import test from 'node:test'; test('fixture', () => {});");
     const { readFile, mkdir, rm, access } = await import("node:fs/promises");
     const { createHash } = await import("node:crypto");
+    const { execute } = await import("../validation/stage.mjs");
+    const controller = new AbortController();
+    let phase = "configure fixture";
+    let output = "";
+    let pid;
+    let lock;
+    let completion;
+    let finished;
+    let cleanup;
+    const retire = () => cleanup ??= (async () => {
+      let verified = false;
+      try {
+        // Release fixture-owned waits before asking the real process owner to stop.
+        if (managed) f.write("target/allow-managed", "cleanup release");
+        if (lock) await rm(lock, { recursive: true, force: true });
+        controller.abort();
+        if (completion) {
+          const result = await completion;
+          assert.equal(result.cleanupUnverified, false, result.error);
+        }
+        verified = true;
+      } finally {
+        t.signal.removeEventListener("abort", cancelled);
+        if (verified) rmSync(f.root, { recursive: true, force: true });
+        else t.diagnostic(`Unverified fixture retirement; retained ${f.root}`);
+      }
+    })();
+    const cancelled = () => {
+      void retire().catch(error => t.diagnostic(`Fixture retirement failed: ${error.message}`));
+    };
+    t.signal.addEventListener("abort", cancelled, { once: true });
+    t.after(async () => {
+      if (phase !== "assertions complete") t.diagnostic(JSON.stringify({ phase, pid, outputTail: output.slice(-4000) }));
+      await retire();
+    });
+
     // This POSIX-only fixture intentionally excludes the Windows adapter: its
     // native dependencies must load at the Windows execution boundary only.
-    for (const name of ["stage.mjs", "stage-inputs.mjs"])
+    for (const name of ["stage.mjs", "stage-inputs.mjs", "syntax.mjs"])
       f.write(`scripts/validation/${name}`, await readFile(new URL(`../validation/${name}`, import.meta.url), "utf8"));
     const manifest = "scripts/validation/validation.json";
     const data = JSON.parse(await readFile(path.join(f.root, manifest), "utf8"));
@@ -464,46 +561,48 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     f.write(manifest, JSON.stringify(data));
     if (managed) {
       f.write("scripts/build-retention.py", "import pathlib,subprocess,sys,time\npathlib.Path('target/managed-wrapper-entered').write_text('waiting')\nwhile not pathlib.Path('target/allow-managed').exists(): time.sleep(.05)\nsys.exit(subprocess.call(sys.argv[sys.argv.index('--')+1:]))\n");
-      // This is fixture infrastructure, not a retention implementation change.
-      // Keep it in the baseline so selection cannot add an unrelated Python
-      // test stage before the formatting marker this regression observes.
-      f.git(["add", "scripts/build-retention.py"]);
-      f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "configure managed wrapper"]);
     }
+    // Commit all runner infrastructure before selecting this fixture's source.
+    // Otherwise copying the real stage/syntax owners adds unrelated syntax
+    // checks to a test of formatting order, locking and source invalidation.
+    f.git(["add", "scripts/"]);
+    f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "configure static phase infrastructure"]);
+    f.write("scripts/fixture.test.mjs", "import test from 'node:test'; test('fixture', () => {});\n// Select the owning fixture contract.\n");
+    assert.deepEqual(discoverChanges(f.root, "HEAD").files, ["scripts/fixture.test.mjs"],
+      "infrastructure must not add unrelated changed-source checks");
     await mkdir(path.join(f.root, "target/bin"), { recursive: true });
     const cargo = path.join(f.root, "target/bin/cargo");
     f.write("target/bin/cargo", `#!/usr/bin/env node\nconst fs=require('node:fs'); if(process.argv[2]==='--version'){console.log('cargo fixture');}else if(process.argv[2]==='fmt'){fs.writeFileSync('target/fast-static-ran','yes');}else{fs.writeFileSync('target/heavy-command-ran','yes');process.exit(9);}`);
     chmodSync(cargo, 0o755);
-    // This is an ordering/input-invalidation fixture, not a benchmark of the
-    // host npm/rustc startup. Keep version probes deterministic while retaining
-    // the real stage locks, commands, source fingerprints and existing deadlines.
-    f.write("target/bin/rustc", "#!/usr/bin/env node\nconsole.log('rustc fixture');\n");
-    chmodSync(path.join(f.root, "target/bin/rustc"), 0o755);
-    const toolVersions = path.join(f.root, "target/tool-versions.cjs");
-    f.write("target/tool-versions.cjs", "const path=require('node:path');if(['npm','npm-cli.js'].includes(path.basename(process.argv[1]||''))&&process.argv[2]==='--version'){console.log('npm fixture');process.exit(0);}\n");
-    const lock = path.join(f.root, ".git/validation-resources", createHash("sha256").update("heavy").digest("hex"));
+    // Replace only tool-version probes, retaining the real formatting command,
+    // stage identities, resource locks and original lifecycle watchdog.
+    const toolVersions = toolVersionFixture(f.root, {
+      ...isolatedEnv, NODE_TEST_CONTEXT: undefined,
+      MESH_VALIDATION_AFFECTED_CHILD: undefined,
+      MESH_VALIDATION_AFFECTED_PHASE: undefined,
+      MESH_VALIDATION_AFFECTED_INPUTS: undefined,
+      PATH: `${path.dirname(cargo)}${path.delimiter}${process.env.PATH}`,
+    });
+    lock = path.join(f.root, ".git/validation-resources", createHash("sha256").update("heavy").digest("hex"));
     await mkdir(lock, { recursive: true });
     writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid }));
-    const child = spawn(process.execPath, [cli, "--checks", "--run", "--report", "target/validation/feedback/queued.json", ...(managed ? ["--managed"] : []), "--owner", "fixture", "--reason", "phase fixture"], {
-      cwd: f.root, env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined, MESH_VALIDATION_AFFECTED_CHILD: undefined, MESH_VALIDATION_AFFECTED_PHASE: undefined, MESH_VALIDATION_AFFECTED_INPUTS: undefined, NODE_OPTIONS: `--require ${JSON.stringify(toolVersions)} ${process.env.NODE_OPTIONS || ""}`, PATH: `${path.dirname(cargo)}${path.delimiter}${process.env.PATH}` },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let output = "";
-    child.stdout.on("data", chunk => output += chunk);
-    child.stderr.on("data", chunk => output += chunk);
-    const exited = new Promise(resolve => child.once("exit", code => resolve(code)));
-    t.after(() => child.kill("SIGKILL"));
+    phase = "start CLI";
+    completion = execute([process.execPath, cli, "--checks", "--run", "--report", "target/validation/feedback/queued.json", ...(managed ? ["--managed"] : []), "--owner", "fixture", "--reason", "phase fixture"], {
+      cwd: f.root, env: toolVersions.env,
+      signal: controller.signal,
+      onSpawn: ownedPid => { pid = ownedPid; },
+      onOutput: chunk => { output = (output + chunk.toString()).slice(-65536); },
+    }).then(result => { finished = result; return result; });
     // Readiness is an ordering condition, not a startup benchmark. The test's
     // existing 20s watchdog bounds every wait; a dead child cannot become ready.
     const waitUntil = async (condition, description) => {
       while (true) {
         t.signal.throwIfAborted();
-        assert(child.exitCode === null && child.signalCode === null,
-          `${description}: child exited before readiness: ${output}`);
+        assert(!finished, `${description}: CLI closed before readiness: ${output}`);
         if (await condition()) return;
         const result = await Promise.race([
           delay(50, undefined, { signal: t.signal }).then(() => null),
-          exited.then(code => ({ code })),
+          completion.then(result => ({ code: result.code })),
         ]);
         assert.equal(result, null,
           `${description}: child exited before readiness: ${output}`);
@@ -513,9 +612,11 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
       try { await access(path.join(f.root, "target", name)); return true; }
       catch (error) { if (error.code === "ENOENT") return false; throw error; }
     };
+    phase = "wait for cheap static command";
     await waitUntil(() => markerExists("fast-static-ran"),
       "cheap formatting waited for the heavy lock");
     // Wait until the complete fast phase passed, so this tests the queued handoff.
+    phase = managed ? "wait for managed handoff" : "wait for heavy lock";
     if (managed) {
       await waitUntil(() => markerExists("managed-wrapper-entered"),
         "managed wrapper did not enter the queued handoff");
@@ -526,10 +627,14 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     }
     await assert.rejects(access(path.join(f.root, "target/heavy-command-ran")));
     if (editWhileQueued) {
+      phase = "edit queued source and release holds";
       f.write("scripts/fixture.test.mjs", "import test from 'node:test'; test('changed fixture', () => {});");
       if (managed) f.write("target/allow-managed", "release");
       await rm(lock, { recursive: true });
-      assert.notEqual(await exited, 0);
+      phase = "wait for invalidated CLI close";
+      const result = await completion;
+      assert.notEqual(result.code, 0);
+      assert.equal(result.cleanupUnverified, false, result.error);
       assert.match(output, /inputs changed|plan changed/i);
       const feedback = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/queued.json"), "utf8"));
       assert.equal(feedback.status, "invalidated");
@@ -537,9 +642,16 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
       assert.equal(feedback.phases[1].status, "invalidated");
       await assert.rejects(access(path.join(f.root, "target/heavy-command-ran")));
     } else {
-      child.kill("SIGTERM");
-      assert.notEqual(await exited, 0);
+      phase = "cancel queued CLI and verify retirement";
+      await rm(lock, { recursive: true, force: true });
+      controller.abort();
+      const result = await completion;
+      assert.notEqual(result.code, 0);
+      assert.equal(result.cleanupUnverified, false, result.error);
     }
+    assert.deepEqual(new Set((await readFile(toolVersions.probes, "utf8")).trim().split("\n")),
+      new Set(["cargo", "rustc", "npm"]), "all canonical tool identities must still be queried");
+    phase = "assertions complete";
   },
 );
 
@@ -583,8 +695,11 @@ test(
     const f = repository(t);
     configureCLI(
       f,
-      "import test from 'node:test'; import {writeFileSync} from 'node:fs'; test('wait for cancellation', async () => { writeFileSync('target/fixture-pid', String(process.pid)); await new Promise(resolve => setTimeout(resolve, 30000)); });",
+      "import test from 'node:test'; import {writeFileSync, renameSync} from 'node:fs'; test('wait for cancellation', async () => { writeFileSync('target/fixture-pid.tmp', String(process.pid)); renameSync('target/fixture-pid.tmp', 'target/fixture-pid'); await new Promise(resolve => setTimeout(resolve, 30000)); });",
     );
+    // File existence alone is not a completed PID publication. Exercise the
+    // empty-file state that previously ended the readiness wait with PID zero.
+    f.write("target/fixture-pid", "");
     const child = spawn(
       process.execPath,
       [cli, "--run", "--owner", "fixture", "--reason", "cancellation fixture", "--report", "target/validation/feedback/cancelled.json"],
@@ -616,13 +731,17 @@ test(
     const { readFile, readdir } = await import("node:fs/promises");
     for (let attempts = 0; attempts < 150; attempts++) {
       try {
-        descendant = Number(
+        const candidate = Number(
           await readFile(path.join(f.root, "target/fixture-pid"), "utf8"),
         );
-        break;
-      } catch {
-        await delay(50);
+        if (Number.isSafeInteger(candidate) && candidate > 1) {
+          descendant = candidate;
+          break;
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
       }
+      await delay(50);
     }
     assert.ok(descendant, output);
     child.kill("SIGTERM");
@@ -673,11 +792,11 @@ test(
     );
     const child = spawn(process.execPath, [cli, "--run"], {
       cwd: f.root,
-      env: {
+      env: toolVersionFixture(f.root, {
         ...isolatedEnv,
         NODE_TEST_CONTEXT: undefined,
         MESH_VALIDATION_AFFECTED_CHILD: undefined,
-      },
+      }).env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -687,13 +806,16 @@ test(
       child.once("exit", (code) => resolve(code)),
     );
     t.after(() => child.kill("SIGKILL"));
-    for (
-      let attempts = 0;
-      attempts < 150 &&
-      !output.includes("waiting for another validation stage");
-      attempts++
-    )
-      await delay(50);
+    // Observe the actual queued owner under this test's existing watchdog.
+    while (!output.includes("waiting for another validation stage")) {
+      t.signal.throwIfAborted();
+      await Promise.race([
+        delay(50, undefined, { signal: t.signal }),
+        exited.then(code => { throw Error(`validation exited before queue readiness (${code}): ${output}`); }),
+      ]);
+    }
+    assert.equal(child.exitCode, null, output);
+    assert.equal(child.signalCode, null, output);
     assert.match(output, /waiting for another validation stage/);
     const manifest = "scripts/validation/validation.json";
     const { readFile } = await import("node:fs/promises");
@@ -737,13 +859,15 @@ test("real preview unions mandatory boundary evidence with semantic additions wi
   assert.match(missing.stderr, /missing.*browser/i);
 });
 
-for (const failing of [false, true]) test(`real run reports ${failing ? "failing" : "passing"} development tests while candidate acceptance remains pending`, async t => {
-  const f = repository(t);
+for (const failing of [false, true]) test(`real run reports ${failing ? "failing" : "passing"} development tests while candidate acceptance remains pending`, { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, `import test from 'node:test'; test('observed assertion', () => { ${failing ? "console.log('private output sentinel'); throw Error('assertion failed');" : ""} });`);
+  const fixture = toolVersionFixture(f.root, { ...isolatedEnv, NODE_TEST_CONTEXT: undefined });
   const reportPath = path.join(f.root, "target/validation/feedback/result.json");
-  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "report fixture", "--report", reportPath], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
-  assert.equal(result.status, failing ? 1 : 0, result.stdout + result.stderr);
+  const result = await f.runCLI(["--run", "--owner", "fixture", "--reason", "report fixture", "--report", reportPath], { env: fixture.env });
+  assert.equal(result.status, failing ? 1 : 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   const { readFile } = await import("node:fs/promises");
+  assert.deepEqual([...new Set((await readFile(fixture.probes, "utf8")).trim().split("\n"))].sort(), ["cargo", "npm", "rustc"]);
   const report = JSON.parse(await readFile(reportPath, "utf8"));
   assert.equal(report.status, failing ? "failed" : "passed");
   assert.equal(report.timingOrigin, "invocation");
@@ -756,11 +880,11 @@ for (const failing of [false, true]) test(`real run reports ${failing ? "failing
   assert(report.next.some(item => item.kind === "candidate" && item.status === "not-run"));
 });
 
-for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"} run produces a report without claiming tests passed`, async t => {
-  const f = repository(t);
+for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"} run produces a report without claiming tests passed`, { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "throw Error('unselected test must not execute');");
   f.write(blocked ? "unmapped.rs" : "docs/example.md", "changed");
-  const result = spawnSync(process.execPath, [cli, "--run", "--report", "target/validation/feedback/terminal.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 10000 });
+  const result = await f.runCLI(["--run", "--report", "target/validation/feedback/terminal.json"], { env: isolatedEnv });
   assert.equal(result.status, blocked ? 2 : 0, result.stdout + result.stderr);
   const { readFile } = await import("node:fs/promises");
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/terminal.json"), "utf8"));
@@ -768,13 +892,14 @@ for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"}
   assert.equal(report.candidateReady, false);
 });
 
-test("clean receipt reuse survives changing only the report destination and invents no commands", async t => {
-  const f = repository(t);
+test("clean receipt reuse survives changing only the report destination and invents no commands", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "import test from 'node:test'; test('reusable assertion', () => {});");
+  const fixture = toolVersionFixture(f.root, { ...isolatedEnv, CI: "", NODE_TEST_CONTEXT: undefined });
   const { readFile } = await import("node:fs/promises");
   for (const name of ["first", "second"]) {
-    const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "reuse", "--report", `target/validation/feedback/${name}.json`], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, CI: "", NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const result = await f.runCLI(["--run", "--owner", "fixture", "--reason", "reuse", "--report", `target/validation/feedback/${name}.json`], { env: fixture.env });
+    assert.equal(result.status, 0, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   }
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/second.json"), "utf8"));
   assert.equal(report.status, "passed");
@@ -785,21 +910,22 @@ test("clean receipt reuse survives changing only the report destination and inve
   assert(report.phases[0].evidence.receipt);
 });
 
-test("report destinations cannot overwrite source or keep the supervisor alive after rejection", t => {
-  const f = repository(t);
+test("report destinations cannot overwrite source or keep the supervisor alive after rejection", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "throw Error('must not execute');");
-  const result = spawnSync(process.execPath, [cli, "--run", "--report", "frontend/source.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 3000 });
+  const result = await f.runCLI(["--run", "--report", "frontend/source.json"], { env: isolatedEnv });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /ignored target/);
   assert.equal(result.error, undefined);
 });
 
-test("dirty edits during a test-only run invalidate its report even after assertions pass", async t => {
-  const f = repository(t);
+test("dirty edits during a test-only run invalidate its report even after assertions pass", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "import test from 'node:test'; import {writeFileSync} from 'node:fs'; test('changing input', async () => { await new Promise(resolve => setTimeout(resolve, 50)); writeFileSync('dirty','changed during validation'); });");
+  const fixture = toolVersionFixture(f.root, { ...isolatedEnv, NODE_TEST_CONTEXT: undefined });
   f.write("dirty", "dirty before validation");
-  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "dirty source identity", "--report", "target/validation/feedback/dirty.json"], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
-  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const result = await f.runCLI(["--run", "--owner", "fixture", "--reason", "dirty source identity", "--report", "target/validation/feedback/dirty.json"], { env: fixture.env });
+  assert.equal(result.status, 1, result.stdout + result.stderr + JSON.stringify({ error: result.error?.message, signal: result.signal }));
   const { readFile } = await import("node:fs/promises");
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/dirty.json"), "utf8"));
   assert.equal(report.status, "invalidated");
@@ -809,11 +935,11 @@ test("dirty edits during a test-only run invalidate its report even after assert
   assert.equal(report.candidateReady, false);
 });
 
-test("a malformed planning contract produces blocked feedback instead of a passing or missing report", async t => {
-  const f = repository(t);
+test("a malformed planning contract produces blocked feedback instead of a passing or missing report", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
   configureCLI(f, "throw Error('must not execute');");
   f.write("frontend/validation.json", JSON.stringify({ schema: 1, contracts: [{ id: "broken", paths: [], capability: { summary: "missing required fields" } }] }));
-  const result = spawnSync(process.execPath, [cli, "--run", "--report", "target/validation/feedback/blocked.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 10000 });
+  const result = await f.runCLI(["--run", "--report", "target/validation/feedback/blocked.json"], { env: isolatedEnv });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   const { readFile } = await import("node:fs/promises");
   const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/blocked.json"), "utf8"));
@@ -830,4 +956,54 @@ test("structured inventory and execution never accept stderr-only or partial pro
   await assert.rejects(executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/stderr-only.test.mjs"] }, {
     run: async () => ({ code: 0, stdout: "", stderr: tap, output: tap, outputTruncated: false }), log() {},
   }), /zero.*Node/i);
+});
+
+
+test("cheap execution admits only catalog static checks and propagates their failure", async () => {
+  const selected = {
+    blockers: [], rust: [{ package: "core", filters: ["fixture::"] }],
+    node: ["must-not-run.test.mjs"], frontend: ["src/must-not-run.test.ts"],
+    checks: [
+      { name: "format", command: ["cargo", "fmt", "--check"], cwd: "." },
+      { name: "lint", command: ["npm", "run", "lint"], cwd: "frontend" },
+      { name: "type", command: ["npm", "run", "typecheck"], cwd: "frontend" },
+      { name: "regression", kind: "test", command: ["python3", "-m", "unittest"], cwd: "." },
+      { name: "build", resource: "heavy", command: ["cargo", "build"], cwd: "." },
+    ],
+  };
+  const calls = [];
+  await executeCheapChecks(selected, { log: () => {}, run: async (program, args) => {
+    calls.push([program, args]); return completed("");
+  } });
+  assert.deepEqual(calls.map(([, args]) => args[1]), ["format", "lint", "type"]);
+  for (const [program, args] of calls) {
+    assert.equal(program, process.execPath);
+    assert.equal(args[0], fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)));
+  }
+  let attempted = 0;
+  await assert.rejects(executeCheapChecks(selected, { log: () => {}, run: async () => {
+    attempted++; return { ...completed("lint failure"), code: 7 };
+  } }), /lint failure/);
+  assert.equal(attempted, 1);
+  await assert.rejects(executeCheapChecks({ ...selected, blockers: ["unowned source"] }, {
+    run: async () => { throw Error("must not execute"); },
+  }), /unowned source/);
+});
+
+test("cheap CLI runs actual syntax owner while keeping selected tests and heavy locks pending", { timeout: FUNCTIONAL_CLI_WATCHDOG_MS }, async t => {
+  const f = commandFixture(t);
+  configureCLI(f, "throw Error('must not execute the selected test');");
+  for (const name of ["stage.mjs", "stage-inputs.mjs", "syntax.mjs", "windows-process-owner.mjs", "windows-process-owner.ps1", "windows-process-owner.cs"])
+    f.write(`scripts/validation/${name}`, readFileSync(new URL(`../validation/${name}`, import.meta.url), "utf8"));
+  f.write("scripts/fixture.test.mjs", "throw Error('must not execute the selected test'); // changed");
+  mkdirSync(path.join(f.root, ".git/validation-resources/heavy"), { recursive: true });
+  f.write(".git/validation-resources/heavy/owner.json", JSON.stringify({ pid: process.pid }));
+  const passed = await f.runCLI(["--cheap", "--json"]);
+  assert.equal(passed.code, 0, passed.stderr);
+  assert(JSON.parse(passed.stdout).node.includes("scripts/fixture.test.mjs"));
+  assert.match(passed.stderr, /candidate acceptance remain pending/);
+  f.write("scripts/fixture.test.mjs", "export const = ;");
+  const failed = await f.runCLI(["--cheap", "--json"]);
+  assert.notEqual(failed.code, 0);
+  assert.match(failed.stderr, /rejected syntax/);
 });

@@ -329,6 +329,11 @@ enum ControlPairCredit {
     Repaid,
 }
 
+#[cfg(test)]
+fn paid_control_resume_for_test(pair: Option<&ControlComparisonPair>, protected: bool) -> bool {
+    protected && pair.is_some_and(ControlComparisonPair::resume_turn_owed)
+}
+
 struct ControlComparisonPair {
     credit: ControlPairCredit,
     parked: DocumentCheckpoint,
@@ -3149,6 +3154,9 @@ impl Node {
                         hints.iter().any(|hint| hint.public == key.public())
                     )
                 });
+                #[cfg(test)]
+                let paid_resume = key.lane == DocumentLane::Control
+                    && paid_control_resume_for_test(control_pairs.get(&key), protected);
                 let task = documents.spawn(permit.track(async move {
                     #[cfg(test)]
                     let _lifetime = control_task_trace.map(|event| {
@@ -3158,6 +3166,19 @@ impl Node {
                         node.trace_control_task(&peer.public, event, Arc::downgrade(&lifetime));
                         lifetime
                     });
+                    #[cfg(test)]
+                    {
+                        // Owned preparation precedes opening the page's socket.
+                        // Cancellation drops the hook future with this child.
+                        let hook = node
+                            .account_control_dispatch_test_hook
+                            .lock()
+                            .unwrap()
+                            .clone();
+                        if let Some(hook) = hook {
+                            hook(peer.public.clone(), paid_resume).await;
+                        }
+                    }
                     let _ = node.pull_account_documents_page(&peer, &mut state).await;
                     (key, peer, state)
                 }));
@@ -3371,6 +3392,7 @@ impl Node {
                 result = local_tasks.join_next(), if !local_tasks.is_empty() => {
                     match result {
                         Some(Ok(turn)) => {
+                            maintenance_requested |= turn.more_inventory;
                             local_maintenance = Some(turn.state);
                             #[cfg(test)]
                             self.trace_account_client(&self.identity.public(), ||
@@ -3400,6 +3422,14 @@ impl Node {
                                     };
                                     let owner = id.clone();
                                     let task = attachments.spawn(permit.track(async move {
+                                        #[cfg(test)]
+                                        let file_trace = matches!(&job, super::account_group::operations::AccountGroupDataWork::File(_));
+                                        #[cfg(test)]
+                                        let file_started = std::time::Instant::now();
+                                        #[cfg(test)]
+                                        if file_trace {
+                                            node.trace_account_client(&node.identity.public(), || "operation_file_data_begin".into());
+                                        }
                                         let result =
                                             tokio::time::timeout(deadline, node.execute_account_group_data_work(job))
                                                 .await
@@ -3409,6 +3439,13 @@ impl Node {
                                                     ))
                                                 })
                                                 .map(|_| AttachmentOutcome::Complete);
+                                        #[cfg(test)]
+                                        if file_trace {
+                                            node.trace_account_client(&node.identity.public(), || {
+                                                let outcome = super::account_session::client_trace_outcome(&result);
+                                                format!("operation_file_data_end outcome={outcome} capacity_busy={} elapsed_ms={}", result.as_ref().is_err_and(local_sync_capacity_busy), file_started.elapsed().as_millis())
+                                            });
+                                        }
                                         (id, file, false, result, Some(operation))
                                     }));
                                     attachment_owners.insert(task.id(), owner);
@@ -3443,7 +3480,9 @@ impl Node {
                         Some(tick) => { tick.tick().await; }
                         None => std::future::pending::<()>().await,
                     }
-                } => { enqueue_all = true; }
+                } => {
+                    enqueue_all = true;
+                }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     maintenance_requested = true;
@@ -4093,6 +4132,10 @@ mod tests {
             }))
             .into();
         let mut pair = ControlComparisonPair::new(background.clone(), ControlDemand::new(), None);
+        // A foreground continuation can have resumed=true in the dispatch
+        // trace. It must not authorize the parked background fixture gate.
+        assert!(!paid_control_resume_for_test(Some(&pair), true));
+        assert!(!paid_control_resume_for_test(None, true));
         let mut unpaid: DocumentCheckpoint = Cursor::control().into();
         assert!(!pair.finish_page(&mut unpaid));
         assert!(
@@ -4106,6 +4149,8 @@ mod tests {
             "the exact interrupted checkpoint owns the next protected turn"
         );
         assert!(pair.resume_turn_owed());
+        assert!(paid_control_resume_for_test(Some(&pair), true));
+        assert!(!paid_control_resume_for_test(Some(&pair), false));
         assert!(!pair.finish_page(&mut unpaid));
         assert!(
             pair.resume_turn_owed(),

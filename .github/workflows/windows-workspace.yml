@@ -29,6 +29,12 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Use runner-owned native temporary storage
+        shell: pwsh
+        run: |
+          Write-Host "Native temporary storage: $([IO.Path]::GetTempPath()) -> $env:RUNNER_TEMP"
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
@@ -61,9 +67,11 @@ jobs:
           node scripts/check-repository-hygiene.mjs
       - uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       - name: Validate archive and coverage contracts
-        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
+        # Native environment probes and real Cargo fixtures belong to this
+        # serial owner, outside the parallel portable diagnostic suite.
+        run: node --test --test-concurrency=1 scripts/ci/windows-native-deps.test.mjs scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
       - name: Build frontend
         working-directory: frontend
         run: |
@@ -89,18 +97,24 @@ jobs:
           retention-days: 3
 
   tests:
-    name: Windows workspace tests (${{ matrix.shard }}/4)
+    name: Windows workspace tests (${{ matrix.shard }}/8)
     needs: build
     runs-on: windows-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
         shell: bash
     steps:
+      - name: Use runner-owned native temporary storage
+        shell: pwsh
+        run: |
+          Write-Host "Native temporary storage: $([IO.Path]::GetTempPath()) -> $env:RUNNER_TEMP"
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
@@ -113,7 +127,7 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@v2.87.31
         with:
-          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+          tool: cargo-nextest@0.9.150,cargo-llvm-cov@0.8.7
       # No Cargo cache, dependency fetch, frontend rebuild or test compilation.
       - uses: actions/download-artifact@v8
         with:
@@ -122,6 +136,8 @@ jobs:
       - name: Run validated serial shard and export partial coverage
         env:
           CARGO_NET_OFFLINE: 'true'
+          # Collect every selected case so one failure does not hide later defects.
+          MESH_WINDOWS_FAIL_FAST: '0'
         run: |
           eval "$(cargo llvm-cov show-env --sh)"
           node scripts/ci/windows-coverage.mjs consume "${{ matrix.shard }}" "$RUNNER_TEMP/windows-workspace-archive" "$RUNNER_TEMP/windows-workspace-results"

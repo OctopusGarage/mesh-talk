@@ -505,21 +505,36 @@ impl SessionPool {
         &self,
         direction: &Arc<Semaphore>,
     ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
-        self.prepare_capacity(direction);
         let waiting_since = Instant::now();
         tokio::time::timeout(CAPACITY_WAIT, async {
-            let directional = direction
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| TransportError::AdmissionDenied)?;
-            let shared = self
-                .total
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| TransportError::AdmissionDenied)?;
-            Ok(vec![directional, shared])
+            // Keep the same semaphore futures queued while eligibility changes.
+            // An active connection can become idle after the initial capacity
+            // check; only its actual owner can release the TCP permits.
+            let acquisition = async {
+                let directional = direction
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| TransportError::AdmissionDenied)?;
+                let shared = self
+                    .total
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| TransportError::AdmissionDenied)?;
+                Ok(vec![directional, shared])
+            };
+            tokio::pin!(acquisition);
+            loop {
+                let changed = self.inbound_idle.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                self.prepare_capacity(direction);
+                tokio::select! {
+                    result = &mut acquisition => return result,
+                    _ = changed => {}
+                }
+            }
         })
         .await
         .map_err(|_| {
@@ -1057,6 +1072,63 @@ mod tests {
             b"already arrived framed request",
             "readiness and retirement must never consume or corrupt a framed request"
         );
+    }
+
+    #[tokio::test]
+    async fn pending_total_admission_retires_newly_idle_connection_only_after_owner_drops() {
+        use crate::identity::device::DeviceIdentity;
+        use tokio::net::TcpListener;
+        let first = DeviceIdentity::generate();
+        let second = DeviceIdentity::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (mut sending, mut receiving) = tokio::join!(
+            async {
+                let stream = TcpStream::connect(address).await.unwrap();
+                SecureChannel::connect(stream, &first, Some(&second.public()))
+                    .await
+                    .unwrap()
+            },
+            async {
+                let (stream, _) = listener.accept().await.unwrap();
+                SecureChannel::accept(stream, &second).await.unwrap()
+            }
+        );
+        let pool = SessionPool::default();
+        receiving.retain_connection_permits(pool.inbound().await.unwrap());
+        let outbound: Vec<_> = (0..MAX_DIRECTION_CONNECTIONS)
+            .map(|_| pool.try_outbound().unwrap())
+            .collect();
+        sending.send(b"request").await.unwrap();
+        assert_eq!(receiving.recv().await.unwrap(), b"request");
+        receiving.send(b"complete").await.unwrap();
+        assert_eq!(sending.recv().await.unwrap(), b"complete");
+        assert_eq!(pool.total.available_permits(), 0);
+        let admission = pool.inbound();
+        tokio::pin!(admission);
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        // The completed real connection becomes eligible only AFTER admission
+        // is already queued. No new dial or unrelated capacity check wakes it.
+        let (registration, retire) = pool.register_inbound_idle().unwrap();
+        let mut waiting = Box::pin(wait_registered_inbound(&receiving, registration, retire));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        let registration = match futures_util::poll!(&mut waiting) {
+            std::task::Poll::Ready(Ok(Some(registration))) => registration,
+            _ => panic!("queued total admission must retire the newly idle connection"),
+        };
+        assert_eq!(pool.total.available_permits(), 0);
+        assert!(
+            futures_util::poll!(&mut admission).is_pending(),
+            "retirement notification must not manufacture capacity before the real channel drops"
+        );
+        drop(waiting);
+        drop(receiving);
+        let admitted = admission.await.unwrap();
+        drop(registration);
+        drop(admitted);
+        drop(outbound);
+        assert_eq!(pool.total.available_permits(), MAX_TCP_CONNECTIONS);
     }
 
     #[tokio::test]

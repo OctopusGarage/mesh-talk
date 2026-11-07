@@ -1,5 +1,5 @@
 use super::*;
-use crate::identity::account::Account;
+use crate::{eventlog::LogError, identity::account::Account};
 
 fn open_sibling(dir: &std::path::Path, account: &Account) -> Arc<Node> {
     use crate::{discovery::Roster, identity::device::DeviceIdentity};
@@ -2637,8 +2637,14 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
     sibling_peer(&receiver, &source, listener.local_addr().unwrap());
     let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let served_pages = pages.clone();
-    let server_source = source.clone();
-    let server = tokio::spawn(async move {
+    let continuations = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let served_continuations = continuations.clone();
+    let writer_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let released = writer_released.clone();
+    let (append_entered, append_ready) = tokio::sync::oneshot::channel();
+    let (release_append, append_gate) = std::sync::mpsc::channel();
+    let provider = move |server_source: Arc<Node>, listener: TcpListener| async move {
+        let mut first_append = Some((append_entered, append_gate));
         loop {
             let (mut io, bytes) = accept_legacy_account_request(&listener, &server_source).await;
             let (
@@ -2654,10 +2660,34 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
             else {
                 panic!("expected history request");
             };
-            server_source
+            let served = server_source
                 .serve_account_history(&mut io, version, &account_id, cursor, known_digest, wanted)
                 .await;
+            if !served {
+                break;
+            }
+            if let Some(cursor) = cursor {
+                served_continuations.lock().unwrap().push(cursor);
+            }
             let index = served_pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let writer = if let Some((entered, gate)) = first_append.take() {
+                let source = server_source.clone();
+                let released = released.clone();
+                let (locked, admitted) = tokio::sync::oneshot::channel();
+                let writer = tokio::task::spawn_blocking(move || {
+                    let _sent = source.sentlog.lock().unwrap();
+                    locked.send(()).unwrap();
+                    let _ = gate.recv_timeout(Duration::from_secs(5));
+                    released.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                admitted.await.unwrap();
+                entered.send(()).unwrap();
+                Some(writer)
+            } else {
+                None
+            };
+            // Durable acceptance is synchronous. A simulated remote source must
+            // not share the receiver's reactor while waiting for its own store.
             server_source
                 .enqueue_to_account(
                     &server_source.account_id(),
@@ -2666,27 +2696,50 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
                 )
                 .await
                 .unwrap();
+            if let Some(writer) = writer {
+                writer.await.unwrap();
+            }
         }
-    });
+    };
+    let mut server = crate::node::test_support::IndependentPeerRuntime::start_multithreaded_with(
+        source.clone(),
+        listener,
+        provider,
+    )
+    .await;
+    server.launch();
     let worker = tokio::spawn(receiver.clone().run_account_history_loop());
+    // Qualify the first admitted append separately from continuation progress.
+    // The receiver must import an actual page while the source's writer is held.
+    let admitted = tokio::time::timeout(Duration::from_secs(5), append_ready).await;
+    let first_import = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let original = original.clone();
+            let imported = receiver
+                .account_blocking(move |node| {
+                    let received = node.received.lock().unwrap();
+                    for id in original.iter() {
+                        if received.entry(*id)?.is_some() {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .await?;
+            if imported {
+                break Ok::<(), NodeError>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let imported_while_writer_held = !writer_released.load(std::sync::atomic::Ordering::SeqCst);
+    let _ = release_append.send(());
     let progress_started = std::time::Instant::now();
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let ready = original_history_received(&receiver, original.clone()).await;
-            if ready {
-                let imported: HashSet<_> = receiver
-                    .account_blocking(move |node| {
-                        Ok(node
-                            .account_history(&node.account_id(), 20_000)?
-                            .into_iter()
-                            .map(|row| row.id)
-                            .collect())
-                    })
-                    .await
-                    .expect("the public history projection completes off the network runtime");
-                if original.is_subset(&imported) {
-                    break;
-                }
+            if original_history_received(&receiver, original.clone()).await {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -2704,13 +2757,40 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
         pages.load(std::sync::atomic::Ordering::SeqCst),
         original.len(),
     );
+    server.stop().await;
     worker.abort();
-    server.abort();
     let _ = worker.await;
-    let _ = server.await;
+    receiver.runtime_work.close();
+    receiver.sessions.clear();
+    receiver.runtime_work.drain().await;
+    // Check the public projection after stopping the ever-growing writer. Its
+    // full decrypting read is acceptance evidence, not continuation latency.
+    let imported: HashSet<_> = receiver
+        .account_history(&receiver.account_id(), 20_000)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert!(original.is_subset(&imported));
+    admitted
+        .expect("the source must admit its actual append writer before progress measurement")
+        .expect("the source must publish append admission");
+    first_import
+        .expect("the receiver must import a page while the source writer is held")
+        .expect("the admitted first-page observation must succeed");
     assert!(
-        pages.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+        imported_while_writer_held,
+        "a simulated remote source's blocked writer parked the receiver reactor"
+    );
+    assert!(
+        continuations.lock().unwrap().len() >= 3,
         "the source must change between at least three continuation pages"
+    );
+    assert!(
+        continuations.lock().unwrap()[..3]
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]),
+        "ordinary appends must advance the exclusive cursor instead of replaying a prefix"
     );
     outcome.expect("append-only source changes must preserve forward cursor progress");
 }
@@ -2969,11 +3049,14 @@ async fn account_network_children_retain_retirement_admission_until_cancelled() 
     }
 }
 
-fn group_inventory_version_for(
+fn group_inventory_snapshot_for(
     node: &Node,
     key: &crate::node::AccountDocumentKey,
     expected_name: &str,
-) -> Option<crate::node::DocumentVersion> {
+) -> Option<(
+    crate::node::DocumentVersion,
+    crate::node::GroupInventoryReference,
+)> {
     let document = node
         .account_document(key)
         .unwrap_or_else(|_| panic!("canonical inventory document read must succeed"))?;
@@ -2999,7 +3082,15 @@ fn group_inventory_version_for(
             && reference.name == expected_name,
         "canonical inventory must describe the expected group and source"
     );
-    Some(document.meta.version())
+    Some((document.meta.version(), reference))
+}
+
+fn group_inventory_version_for(
+    node: &Node,
+    key: &crate::node::AccountDocumentKey,
+    expected_name: &str,
+) -> Option<crate::node::DocumentVersion> {
+    group_inventory_snapshot_for(node, key, expected_name).map(|(version, _)| version)
 }
 
 #[tokio::test]
@@ -3033,6 +3124,356 @@ async fn account_wake_requires_fresh_inventory_despite_received_owner_access() {
     mandatory_account_wake_case(true).await;
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum HeldInventoryOwnerState {
+    Owner,
+    PendingStaleCursor,
+    PendingReconciling,
+    Rejected(crate::node::AccountGroupRole, &'static str),
+    UnexpectedError(&'static str),
+}
+fn held_inventory_owner_state(
+    access: &Result<
+        (
+            crate::node::AccountGroupRole,
+            crate::node::AccountGroupExecution,
+        ),
+        NodeError,
+    >,
+) -> HeldInventoryOwnerState {
+    use crate::node::{AccountGroupExecution, AccountGroupRole};
+    match access {
+        Ok((AccountGroupRole::Owner, _)) => HeldInventoryOwnerState::Owner,
+        Ok((AccountGroupRole::Unknown, AccountGroupExecution::Reconciling)) => {
+            HeldInventoryOwnerState::PendingReconciling
+        }
+        Err(NodeError::Log(LogError::StaleCursor)) => HeldInventoryOwnerState::PendingStaleCursor,
+        Ok((role, execution)) => HeldInventoryOwnerState::Rejected(
+            *role,
+            match execution {
+                AccountGroupExecution::Local => "local",
+                AccountGroupExecution::ViaDevice(_) => "via_device",
+                AccountGroupExecution::WaitingForDevice => "waiting_for_device",
+                AccountGroupExecution::RequiresUpgrade => "requires_upgrade",
+                AccountGroupExecution::Reconciling => "reconciling",
+            },
+        ),
+        Err(NodeError::Log(_)) => HeldInventoryOwnerState::UnexpectedError("log"),
+        Err(NodeError::Authorization(_)) => {
+            HeldInventoryOwnerState::UnexpectedError("authorization")
+        }
+        Err(_) => HeldInventoryOwnerState::UnexpectedError("other"),
+    }
+}
+
+fn received_owner_control_head(
+    node: &Node,
+    group: ConversationId,
+    source: &crate::identity::device::PublicIdentity,
+) -> Result<Option<crate::node::account_group::wire::GroupControlHead>, NodeError> {
+    let key = crate::node::AccountDocumentKey::GroupControl {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let Some(document) = node.account_document(&key)? else {
+        return Ok(None);
+    };
+    let account = node.account.public().ed25519_pub;
+    let head =
+        crate::node::account_group::wire::GroupControlHead::decode(document.payload(), &account)
+            .ok_or_else(|| {
+                NodeError::Authorization("invalid received Owner control head".into())
+            })?;
+    if document.meta.tombstone
+        || document.meta.key != key
+        || document.meta.account_public != account
+        || document.meta.writer_device != source.user_id()
+        || document.meta.revision != head.revision
+        || head.group != group
+        || head.proof.public() != *source
+        || !node.account_group_binding_current(&head.proof)
+    {
+        return Err(NodeError::Authorization(
+            "received Owner control binding changed".into(),
+        ));
+    }
+    Ok(Some(head))
+}
+
+fn current_signed_owner_grant_matches_source(
+    current: &crate::node::account_group::wire::GroupControlHead,
+    baseline: &crate::node::account_group::wire::GroupControlHead,
+    account: &[u8; 32],
+) -> bool {
+    use crate::node::AccountGroupRole;
+    current.valid(account)
+        && baseline.valid(account)
+        && current.revision >= baseline.revision
+        && current.group == baseline.group
+        && current.proof.public() == baseline.proof.public()
+        && current.proof.account_id() == baseline.proof.account_id()
+        && !current.access.unavailable
+        && !baseline.access.unavailable
+        && current.access.source.role == AccountGroupRole::Owner
+        && current.access.observation.role == AccountGroupRole::Owner
+        && baseline.access.source.role == AccountGroupRole::Owner
+        && baseline.access.observation.role == AccountGroupRole::Owner
+        && current.access.observation.owner == baseline.access.observation.owner
+        && current
+            .access
+            .owner_proof
+            .as_ref()
+            .map(|proof| (proof.public(), proof.account_id()))
+            == baseline
+                .access
+                .owner_proof
+                .as_ref()
+                .map(|proof| (proof.public(), proof.account_id()))
+}
+
+#[tokio::test]
+async fn held_inventory_owner_evidence_rejects_signed_terminal_unavailable_and_unrelated_heads() {
+    use crate::node::account_group::wire::GroupControlHead;
+    use crate::node::{AccountGroupExecution, AccountGroupRole};
+    let (_directory, source, other) = sibling_nodes();
+    let group = source
+        .create_channel("Signed Owner evidence", vec![])
+        .await
+        .unwrap();
+    source.publish_account_group_access_for(group);
+    let baseline = received_owner_control_head(&source, group, &source.identity.public())
+        .unwrap()
+        .unwrap();
+    let account = source.account.public().ed25519_pub;
+    assert!(current_signed_owner_grant_matches_source(
+        &baseline, &baseline, &account
+    ));
+    // A newer signed canonical generation is not a new membership grant.
+    let mut advanced_access = baseline.access.clone();
+    advanced_access.observation.public_state[0] ^= 1;
+    let advanced = GroupControlHead::new(
+        &source.identity,
+        group,
+        baseline.revision + 1,
+        source.own_group_proof(),
+        advanced_access,
+    );
+    assert!(advanced.valid(&account));
+    assert!(!advanced.access.compatible(&baseline.access));
+    assert!(current_signed_owner_grant_matches_source(
+        &advanced, &baseline, &account
+    ));
+    let observed = source
+        .account_group_access(group)
+        .map(|access| (access.role, access.execution));
+    assert_eq!(
+        held_inventory_owner_state(&observed),
+        HeldInventoryOwnerState::Owner
+    );
+    assert_eq!(
+        held_inventory_owner_state(&Err(NodeError::Log(LogError::StaleCursor))),
+        HeldInventoryOwnerState::PendingStaleCursor
+    );
+    assert_eq!(
+        held_inventory_owner_state(&Ok((
+            AccountGroupRole::Unknown,
+            AccountGroupExecution::Reconciling
+        ))),
+        HeldInventoryOwnerState::PendingReconciling
+    );
+    for unavailable in [false, true] {
+        let mut access = baseline.access.clone();
+        if unavailable {
+            access.make_unavailable();
+        } else {
+            access.source.role = AccountGroupRole::Left;
+            access.observation.role = AccountGroupRole::Left;
+            access.observation.sources.clear();
+        }
+        let replacement = GroupControlHead::new(
+            &source.identity,
+            group,
+            baseline.revision + 1,
+            source.own_group_proof(),
+            access,
+        );
+        assert!(
+            replacement.valid(&account),
+            "negative input must have a real valid source signature and wire shape"
+        );
+        assert!(!current_signed_owner_grant_matches_source(
+            &replacement,
+            &baseline,
+            &account
+        ));
+    }
+    let unrelated_group = other
+        .create_channel("Unrelated signed Owner", vec![])
+        .await
+        .unwrap();
+    other.publish_account_group_access_for(unrelated_group);
+    let unrelated = received_owner_control_head(&other, unrelated_group, &other.identity.public())
+        .unwrap()
+        .unwrap();
+    assert!(unrelated.valid(&account));
+    assert!(!current_signed_owner_grant_matches_source(
+        &unrelated, &baseline, &account
+    ));
+    assert!(matches!(
+        held_inventory_owner_state(&Ok((
+            AccountGroupRole::Left,
+            AccountGroupExecution::Reconciling
+        ))),
+        HeldInventoryOwnerState::Rejected(AccountGroupRole::Left, _)
+    ));
+    assert!(matches!(
+        held_inventory_owner_state(&Ok((
+            AccountGroupRole::Dissolved,
+            AccountGroupExecution::Reconciling
+        ))),
+        HeldInventoryOwnerState::Rejected(AccountGroupRole::Dissolved, _)
+    ));
+    assert!(matches!(
+        held_inventory_owner_state(&Err(NodeError::Authorization("not logged".into()))),
+        HeldInventoryOwnerState::UnexpectedError("authorization")
+    ));
+}
+
+// These witnesses belong to actual server header-hook futures, not client tasks.
+// A newer overlapping response must not erase an older still-live withheld header.
+#[derive(Default)]
+struct HeldInventoryHeaders {
+    holders: Vec<(
+        crate::identity::device::PublicIdentity,
+        crate::node::AccountDocumentMeta,
+        std::sync::Weak<()>,
+    )>,
+    overflowed: bool,
+}
+
+impl HeldInventoryHeaders {
+    fn record(
+        &mut self,
+        peer: crate::identity::device::PublicIdentity,
+        meta: crate::node::AccountDocumentMeta,
+    ) -> Arc<()> {
+        self.holders.retain(|(_, _, task)| task.strong_count() > 0);
+        let task = Arc::new(());
+        if self.holders.len() == 64 {
+            self.overflowed = true;
+        } else {
+            self.holders.push((peer, meta, Arc::downgrade(&task)));
+        }
+        task
+    }
+
+    fn qualifying_live_count(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        account: &[u8; 32],
+        key: &crate::node::AccountDocumentKey,
+        floor: &crate::node::DocumentVersion,
+    ) -> usize {
+        self.holders.iter().filter(|(actual, meta, task)| {
+            task.strong_count() > 0 && actual == peer && meta.account_public == *account
+                && meta.key == *key && !meta.tombstone
+                && matches!(key, crate::node::AccountDocumentKey::GroupInventory { source_device, .. } if *source_device == meta.writer_device)
+                && (meta.revision, &meta.writer_device, &meta.content_hash) >= (floor.revision, &floor.writer_device, &floor.content_hash)
+        }).count()
+    }
+
+    fn holds(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        account: &[u8; 32],
+        key: &crate::node::AccountDocumentKey,
+        floor: &crate::node::DocumentVersion,
+        released: bool,
+    ) -> bool {
+        !released && !self.overflowed && self.qualifying_live_count(peer, account, key, floor) > 0
+    }
+}
+
+#[tokio::test]
+async fn held_inventory_headers_preserve_live_overlaps_and_reject_unqualified_holds() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let channel = source
+        .create_channel("Held inventory witnesses", vec![])
+        .await
+        .unwrap();
+    source.prepare_account_group_fanout(channel).await.unwrap();
+    let key = crate::node::AccountDocumentKey::GroupInventory {
+        channel: hex::encode(channel.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let first = source.account_document_meta(&key).unwrap();
+    source
+        .set_profile_display_name("A real superseding inventory label")
+        .unwrap();
+    source.prepare_account_group_fanout(channel).await.unwrap();
+    let next = source.account_document_meta(&key).unwrap();
+    assert!(
+        (next.revision, &next.writer_device, &next.content_hash)
+            > (first.revision, &first.writer_device, &first.content_hash)
+    );
+    let peer = receiver.identity.public();
+    let account = source.account.public().ed25519_pub;
+    let mut held = HeldInventoryHeaders::default();
+    let first_task = held.record(peer.clone(), first.clone());
+    let latest_task = held.record(peer.clone(), next.clone());
+    assert!(held.holds(&peer, &account, &key, &first.version(), false));
+    assert!(held.holds(&peer, &account, &key, &next.version(), false));
+    drop(latest_task);
+    assert!(
+        held.holds(&peer, &account, &key, &first.version(), false),
+        "latest retirement must not erase a live qualifying predecessor"
+    );
+    assert!(
+        !held.holds(&peer, &account, &key, &next.version(), false),
+        "a stale head cannot meet a newer floor"
+    );
+    assert!(!held.holds(
+        &source.identity.public(),
+        &account,
+        &key,
+        &first.version(),
+        false
+    ));
+    assert!(!held.holds(&peer, &[0; 32], &key, &first.version(), false));
+    let other = source
+        .create_channel("Other real inventory", vec![])
+        .await
+        .unwrap();
+    source.prepare_account_group_fanout(other).await.unwrap();
+    let other_key = crate::node::AccountDocumentKey::GroupInventory {
+        channel: hex::encode(other.as_bytes()),
+        source_device: source.user_id(),
+    };
+    assert!(!held.holds(&peer, &account, &other_key, &first.version(), false));
+    assert!(!held.holds(&peer, &account, &key, &first.version(), true));
+    drop(first_task);
+    assert!(!held.holds(&peer, &account, &key, &first.version(), false));
+    let superseding_task = held.record(peer.clone(), next.clone());
+    assert!(
+        held.holds(&peer, &account, &key, &first.version(), false),
+        "a live superseding signed head also withholds the first fresh floor"
+    );
+    drop(superseding_task);
+    // Retired records are pruned, but an impossible number of live responses
+    // invalidates the oracle rather than silently discarding a live witness.
+    for _ in 0..65 {
+        drop(held.record(peer.clone(), first.clone()));
+    }
+    assert_eq!(held.holders.len(), 1);
+    let tasks: Vec<_> = (0..65)
+        .map(|_| held.record(peer.clone(), first.clone()))
+        .collect();
+    assert_eq!(held.holders.len(), 64);
+    assert!(held.overflowed);
+    assert!(!held.holds(&peer, &account, &key, &first.version(), false));
+    drop(tasks);
+}
+
 async fn mandatory_account_wake_case(hold_inventory: bool) {
     use futures_util::FutureExt;
     #[derive(Default)]
@@ -3043,8 +3484,9 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
         first_header_ms: Option<u128>,
         last_header_ms: Option<u128>,
         last_complete_ms: Option<u128>,
-        held: bool,
-        held_task: Option<std::sync::Weak<()>>,
+        held_headers: HeldInventoryHeaders,
+        baseline: Option<crate::node::DocumentVersion>,
+        held_version: Option<crate::node::DocumentVersion>,
     }
     struct ReleaseInventory(Arc<tokio::sync::Semaphore>);
     impl Drop for ReleaseInventory {
@@ -3081,6 +3523,7 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
     *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let expected = receiver.identity.public();
         let own = source.user_id();
+        let account_public = source.account.public().ed25519_pub;
         let observed = inventory_wire.clone();
         let release = inventory_release.clone();
         let previous = previous_session.clone();
@@ -3099,20 +3542,29 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                             if let Ok(meta) =
                                 serde_json::from_slice::<crate::node::AccountDocumentMeta>(body)
                                 && !meta.tombstone
+                                && (!hold_inventory || meta.account_public == account_public)
                                 && meta.writer_device == own
                                 && matches!(&meta.key, crate::node::AccountDocumentKey::GroupInventory { source_device, .. } if *source_device == own)
                                 && wire.key.as_ref().is_none_or(|key| *key == meta.key)
                             {
-                                wire.key.get_or_insert(meta.key);
+                                wire.key.get_or_insert(meta.key.clone());
                                 wire.headers += 1;
                                 let now = started.elapsed().as_millis();
                                 wire.first_header_ms.get_or_insert(now);
                                 wire.last_header_ms = Some(now);
-                                if hold_inventory {
-                                    wire.held = true;
-                                    let task = Arc::new(());
-                                    wire.held_task = Some(Arc::downgrade(&task));
-                                    held_task = Some(task);
+                                if hold_inventory
+                                    && wire.baseline.as_ref().is_some_and(|baseline| {
+                                        (meta.revision, &meta.writer_device, &meta.content_hash)
+                                            > (
+                                                baseline.revision,
+                                                &baseline.writer_device,
+                                                &baseline.content_hash,
+                                            )
+                                    })
+                                {
+                                    wire.held_version = Some(meta.version());
+                                    held_task =
+                                        Some(wire.held_headers.record(actual.clone(), meta));
                                 }
                             }
                         }
@@ -3216,6 +3668,9 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
     let mut source_floor = None;
     let mut source_floor_ms = None;
     let mut receiver_head_ms = None;
+    let mut baseline_inventory = None;
+    let mut baseline_owner_control = None;
+    let mut live_access = None;
     let outcome = std::panic::AssertUnwindSafe(async {
         // Cold reciprocal authentication/document setup is a prerequisite,
         // not part of either subsequent publication's wake observation.
@@ -3230,21 +3685,80 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            if hold_inventory {
+                phase = "negative_owner_precondition";
+                let channel = source
+                    .create_channel("Mandatory group", vec![])
+                    .await
+                    .unwrap();
+                observed_channel = Some(channel);
+                let key = crate::node::AccountDocumentKey::GroupInventory {
+                    channel: hex::encode(channel.as_bytes()),
+                    source_device: source.user_id(),
+                };
+                source_inventory_key = Some(key.clone());
+                loop {
+                    let current = group_inventory_version_for(&source, &key, "Mandatory group");
+                    let received = group_inventory_version_for(&receiver, &key, "Mandatory group");
+                    let owner = receiver
+                        .account_group_access(channel)
+                        .is_ok_and(|access| access.role == super::super::AccountGroupRole::Owner);
+                    let control =
+                        received_owner_control_head(&receiver, channel, &source.identity.public())
+                            .unwrap_or_else(|_| {
+                                panic!("baseline signed Owner control must remain readable")
+                            });
+                    if owner
+                        && current.is_some()
+                        && current == received
+                        && control.as_ref().is_some_and(|head| {
+                            current_signed_owner_grant_matches_source(
+                                head,
+                                head,
+                                &receiver.account.public().ed25519_pub,
+                            )
+                        })
+                    {
+                        baseline_owner_control = control;
+                        baseline_inventory = current;
+                        // Arm only after real Owner access and this exact signed
+                        // baseline were imported. Initial cold publication is free.
+                        inventory_wire.lock().unwrap().baseline = baseline_inventory.clone();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
         })
         .await?;
         // Start before the durable trigger; retain one common five-second
         // window through mandatory delivery and both optional-off assertions.
         tokio::time::timeout(Duration::from_secs(5), async {
-            phase = "create_channel";
-            let channel = source
-                .create_channel("Mandatory group", vec![])
-                .await
-                .unwrap();
-            observed_channel = Some(channel);
-            source_inventory_key = Some(crate::node::AccountDocumentKey::GroupInventory {
-                channel: hex::encode(channel.as_bytes()),
-                source_device: source.user_id(),
-            });
+            phase = if hold_inventory {
+                "publish_fresh_inventory"
+            } else {
+                "create_channel"
+            };
+            let channel = if hold_inventory {
+                // The normal local profile owner changes the inventory member
+                // label, not group authority. The original durable preference
+                // and history triggers below wake the ordinary publisher.
+                source
+                    .set_profile_display_name("Post-owner mandatory inventory")
+                    .unwrap();
+                observed_channel.unwrap()
+            } else {
+                let channel = source
+                    .create_channel("Mandatory group", vec![])
+                    .await
+                    .unwrap();
+                observed_channel = Some(channel);
+                source_inventory_key = Some(crate::node::AccountDocumentKey::GroupInventory {
+                    channel: hex::encode(channel.as_bytes()),
+                    source_device: source.user_id(),
+                });
+                channel
+            };
             source
                 .set_account_preference(
                     SyncCategory::Appearance,
@@ -3263,18 +3777,65 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                 // Capture the first actual signed source head inside this same
                 // trigger window; later publication cannot move this floor.
                 if source_floor.is_none() {
-                    source_floor = group_inventory_version_for(&source, key, "Mandatory group");
+                    source_floor = group_inventory_snapshot_for(&source, key, "Mandatory group")
+                        .filter(|(version, reference)| {
+                            !hold_inventory
+                                || baseline_inventory.as_ref().is_some_and(|baseline| {
+                                    (
+                                        version.revision,
+                                        &version.writer_device,
+                                        &version.content_hash,
+                                    ) > (
+                                        baseline.revision,
+                                        &baseline.writer_device,
+                                        &baseline.content_hash,
+                                    ) && reference.members.iter().any(|member| {
+                                        member.public == source.identity.public()
+                                            && member.name.as_deref()
+                                                == Some("Post-owner mandatory inventory")
+                                    })
+                                })
+                        })
+                        .map(|(version, _)| version);
                     if source_floor.is_some() {
                         source_floor_ms = Some(started.elapsed().as_millis());
                     }
                 }
                 let received = group_inventory_version_for(&receiver, key, "Mandatory group");
-                if received.is_some() && receiver_head_ms.is_none() {
+                if receiver_head_ms.is_none()
+                    && received.as_ref().is_some_and(|version| {
+                        !hold_inventory
+                            || source_floor.as_ref().is_some_and(|floor| {
+                                (
+                                    version.revision,
+                                    &version.writer_device,
+                                    &version.content_hash,
+                                ) >= (floor.revision, &floor.writer_device, &floor.content_hash)
+                            })
+                    })
+                {
                     receiver_head_ms = Some(started.elapsed().as_millis());
                 }
-                mandatory.0 = receiver
+                let access = receiver
                     .account_group_access(channel)
-                    .is_ok_and(|access| access.role == super::super::AccountGroupRole::Owner);
+                    .map(|access| (access.role, access.execution));
+                mandatory.0 = access
+                    .as_ref()
+                    .is_ok_and(|(role, _)| *role == super::super::AccountGroupRole::Owner);
+                live_access = Some(held_inventory_owner_state(&access));
+                if hold_inventory {
+                    assert!(
+                        matches!(
+                            live_access,
+                            Some(
+                                HeldInventoryOwnerState::Owner
+                                    | HeldInventoryOwnerState::PendingStaleCursor
+                                    | HeldInventoryOwnerState::PendingReconciling
+                            )
+                        ),
+                        "Owner control observation rejected: {live_access:?}"
+                    );
+                }
                 mandatory.1 =
                     source_floor
                         .as_ref()
@@ -3339,20 +3900,105 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
     .catch_unwind()
     .await;
     // Snapshot the negative qualification while the real header is still held.
-    let exact_header_held = {
+    let (exact_header_held, held_header_components) = {
         let wire = inventory_wire.lock().unwrap();
-        wire.held
-            && wire
-                .held_task
-                .as_ref()
-                .is_some_and(|task| task.strong_count() > 0)
-            && !inventory_release.is_closed()
-            && wire.key.is_some()
-            && wire.key == source_inventory_key
+        let released = inventory_release.is_closed();
+        let live = wire
+            .held_headers
+            .holders
+            .iter()
+            .filter(|(_, _, task)| task.strong_count() > 0)
+            .count();
+        let qualified = source_inventory_key
+            .as_ref()
+            .zip(source_floor.as_ref())
+            .map_or(0, |(key, floor)| {
+                wire.held_headers.qualifying_live_count(
+                    &receiver.identity.public(),
+                    &source.account.public().ed25519_pub,
+                    key,
+                    floor,
+                )
+            });
+        let held = source_inventory_key
+            .as_ref()
+            .zip(source_floor.as_ref())
+            .is_some_and(|(key, floor)| {
+                wire.held_headers.holds(
+                    &receiver.identity.public(),
+                    &source.account.public().ed25519_pub,
+                    key,
+                    floor,
+                    released,
+                )
+            });
+        (
+            held,
+            (!released, !wire.held_headers.overflowed, live, qualified),
+        )
     };
-    let receiver_meta_absent = source_inventory_key
-        .as_ref()
-        .is_some_and(|key| receiver.account_document_meta(key).is_none());
+    let retained_owner_control = if hold_inventory {
+        observed_channel
+            .map(|group| received_owner_control_head(&receiver, group, &source.identity.public()))
+    } else {
+        None
+    };
+    let retained_owner_valid = retained_owner_control.as_ref().is_some_and(|result| {
+        result
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .zip(baseline_owner_control.as_ref())
+            .is_some_and(|(current, baseline)| {
+                current_signed_owner_grant_matches_source(
+                    current,
+                    baseline,
+                    &receiver.account.public().ed25519_pub,
+                )
+            })
+    });
+    let owner_grant_checks = retained_owner_control.as_ref().and_then(|result| {
+        result
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .zip(baseline_owner_control.as_ref())
+            .map(|(current, baseline)| {
+                use crate::node::AccountGroupRole;
+                let account = receiver.account.public().ed25519_pub;
+                [
+                    current.valid(&account),
+                    baseline.valid(&account),
+                    current.revision >= baseline.revision,
+                    current.group == baseline.group,
+                    current.proof.public() == baseline.proof.public(),
+                    current.proof.account_id() == baseline.proof.account_id(),
+                    !current.access.unavailable,
+                    !baseline.access.unavailable,
+                    current.access.source.role == AccountGroupRole::Owner,
+                    current.access.observation.role == AccountGroupRole::Owner,
+                    baseline.access.source.role == AccountGroupRole::Owner,
+                    baseline.access.observation.role == AccountGroupRole::Owner,
+                    current.access.source.lifetime == baseline.access.source.lifetime,
+                    current.access.observation.owner == baseline.access.observation.owner,
+                    current
+                        .access
+                        .owner_proof
+                        .as_ref()
+                        .map(|proof| (proof.public(), proof.account_id()))
+                        == baseline
+                            .access
+                            .owner_proof
+                            .as_ref()
+                            .map(|proof| (proof.public(), proof.account_id())),
+                ]
+            })
+    });
+    let receiver_baseline_retained = source_inventory_key.as_ref().is_some_and(|key| {
+        receiver
+            .account_document_meta(key)
+            .is_some_and(|meta| !meta.tombstone && Some(meta.version()) == baseline_inventory)
+    });
     if outcome.as_ref().is_ok_and(Result::is_err) {
         let statuses = [(&source, &receiver), (&receiver, &source)].map(|(node, peer)| {
             node.device_sync_status()
@@ -3397,10 +4043,13 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
                 wire.last_header_ms,
                 wire.last_complete_ms,
                 exact_header_held,
+                held_header_components,
+                wire.baseline.clone(),
+                wire.held_version.clone(),
             )
         };
         eprintln!(
-            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?} publication_phases={publication_phases:?} source_floor_ms={source_floor_ms:?} receiver_head_ms={receiver_head_ms:?} inventory_wire(headers,completes,first_header_ms,last_header_ms,last_complete_ms,held_exact)={inventory_wire:?}",
+            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} live_access={live_access:?} retained_signed_owner={retained_owner_valid} owner_grant_checks={owner_grant_checks:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?} publication_phases={publication_phases:?} source_floor_ms={source_floor_ms:?} receiver_head_ms={receiver_head_ms:?} inventory_wire(headers,completes,first_header_ms,last_header_ms,last_complete_ms,held_exact,(armed,bounded,live,qualifying),baseline,held_version)={inventory_wire:?}",
             started.elapsed().as_millis()
         );
     }
@@ -3429,8 +4078,23 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
         );
         assert_eq!(phase, "mandatory_group_observation");
         assert!(
-            mandatory.0,
-            "real Owner access must arrive independently of held inventory"
+            !matches!(retained_owner_control, Some(Err(_))),
+            "held-cutoff signed Owner control read failed"
+        );
+        assert!(
+            retained_owner_valid,
+            "the received signed binding-compatible Owner grant must remain while fresh inventory is held"
+        );
+        assert!(
+            matches!(
+                live_access,
+                Some(
+                    HeldInventoryOwnerState::Owner
+                        | HeldInventoryOwnerState::PendingStaleCursor
+                        | HeldInventoryOwnerState::PendingReconciling
+                )
+            ),
+            "only explicit transient projection readiness may accompany the retained Owner grant"
         );
         assert!(
             source_floor.is_some(),
@@ -3441,8 +4105,8 @@ async fn mandatory_account_wake_case(hold_inventory: bool) {
             "the exact new source inventory header must remain held at timeout"
         );
         assert!(
-            receiver_meta_absent && !mandatory.1,
-            "held canonical inventory must remain absent"
+            receiver_baseline_retained && !mandatory.1,
+            "the real baseline must remain while the newer canonical inventory is held"
         );
         assert!(
             appearance_enable_phases.is_empty(),

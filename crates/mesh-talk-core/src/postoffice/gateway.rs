@@ -17,6 +17,8 @@ use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(4);
+const QUERY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_QUERY_DATAGRAMS: u32 = 4;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_LIMIT: Duration = Duration::from_secs(3600);
@@ -56,27 +58,55 @@ impl std::ops::Deref for GatewayProof {
 /// Probe one explicitly configured endpoint. A fresh nonce, the remote signed
 /// announcement, and the configured fingerprint all have to agree.
 pub async fn query_pinned_relay(remote: SocketAddr, expected_id: &str) -> Option<Announce> {
-    let bind = match remote.ip() {
-        IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-    };
-    let socket = UdpSocket::bind(bind).await.ok()?;
-    let nonce = uuid::Uuid::new_v4().into_bytes();
-    socket.send_to(&encode_query(nonce), remote).await.ok()?;
-    let mut bytes = [0u8; 2048];
-    let (len, source) = tokio::time::timeout(QUERY_TIMEOUT, socket.recv_from(&mut bytes))
-        .await
-        .ok()?
-        .ok()?;
-    if source != remote {
-        return None;
-    }
-    let announce = decode_response(&bytes[..len], nonce)?;
-    (announce.post_office
-        && announce.user_id == expected_id
-        && announce.account_id().is_some()
-        && announce.valid_presence())
-    .then_some(announce)
+    // A reply can be dropped by the responder's per-IP allowance even when the
+    // relay is healthy. Retransmit this identity-free nonce within the existing
+    // query budget; an independent nonce-derived phase avoids lockstep gateways.
+    let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
+    let result = tokio::time::timeout_at(deadline, async {
+        let bind = match remote.ip() {
+            IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+        let socket = UdpSocket::bind(bind).await.ok()?;
+        let nonce = uuid::Uuid::new_v4().into_bytes();
+        let query = encode_query(nonce);
+        // Four datagrams at most. The one-second retry base respects the
+        // responder's existing per-source window; jitter is at most 250 ms.
+        let retry_delay = QUERY_RETRY_INTERVAL
+            + QUERY_RETRY_INTERVAL / 4 * u32::from(nonce[0]) / u32::from(u8::MAX);
+        let mut retry = tokio::time::interval(retry_delay);
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut sent = 0;
+        let mut bytes = [0u8; 2048];
+        loop {
+            tokio::select! {
+                received = socket.recv_from(&mut bytes), if sent > 0 => {
+                    let (len, source) = received.ok()?;
+                    if source != remote {
+                        return None;
+                    }
+                    let announce = decode_response(&bytes[..len], nonce)?;
+                    return (announce.post_office
+                        && announce.user_id == expected_id
+                        && announce.account_id().is_some()
+                        && announce.valid_presence())
+                    .then_some(announce);
+                }
+                _ = retry.tick(), if sent < MAX_QUERY_DATAGRAMS => {
+                    socket.send_to(&query, remote).await.ok()?;
+                    sent += 1;
+                }
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    // A synchronous verification finishing late cannot turn an expired query
+    // into a successful proof.
+    (tokio::time::Instant::now() < deadline)
+        .then_some(result)
+        .flatten()
 }
 
 /// Repeatedly refresh one remote relay and expose its signed proof only to

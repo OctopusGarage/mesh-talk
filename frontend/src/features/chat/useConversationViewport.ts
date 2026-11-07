@@ -276,8 +276,9 @@ export function useConversationViewport(
       const maxTop = scroller
         ? scroller.scrollHeight - scroller.clientHeight
         : 0;
-      if ((!scroller || maxTop < top!) && attempts++ < 30) {
-        frame = requestAnimationFrame(restore);
+      if (restoringScroll.current !== key) return;
+      if (!scroller || maxTop < top!) {
+        if (attempts++ < 30) frame = requestAnimationFrame(restore);
         return;
       }
       if (scroller) {
@@ -303,8 +304,31 @@ export function useConversationViewport(
       // Virtuoso may adjust its scroll position again after measuring rows.
       // Keep the saved offset until the reader starts a new interaction.
     };
+    // After the bounded initial measurement window, resume only when the
+    // virtual list changes geometry. Never clamp away the saved reader target.
+    const observeGeometry = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(restore);
+    };
+    const observer = new MutationObserver(observeGeometry);
+    const scroller = scrollerRef.current;
+    if (scroller)
+      observer.observe(scroller, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+      });
+    const resize =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(observeGeometry);
+    if (scroller) resize?.observe(scroller);
     frame = requestAnimationFrame(restore);
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      observer.disconnect();
+      resize?.disconnect();
+      cancelAnimationFrame(frame);
+    };
   }, [key, loading, messages.length]);
 
   useEffect(() => {

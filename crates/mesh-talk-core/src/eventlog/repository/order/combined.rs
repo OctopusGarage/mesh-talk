@@ -185,16 +185,51 @@ impl EventRepository {
         if end < start || end - start > 128 || bytes == 0 || bytes > 8 * 1024 * 1024 {
             return Err(LogError::InvalidPageBudget);
         }
-        self.database.read(|c|{
-            let mut statement=c.prepare("SELECT s.id,s.clock,s.source_kind,s.ordinal,s.priority,s.sequence,s.charged_bytes FROM history_order_rows r JOIN history_order_candidates s ON s.job=r.job AND s.id=r.id WHERE r.job=?1 AND r.rank>=?2 AND r.rank<?3 ORDER BY r.rank")?;
-            let mut rows=statement.query(params![job.as_slice(),integer(start)?,integer(end)?])?;
-            let mut result=Vec::new();let mut charged=0usize;
-            while let Some(row)=rows.next()? {
-                let cost=usize::try_from(nonnegative(row.get(6)?)?).map_err(|_|LogError::RepositoryCounterExhausted)?;
-                charged=charged.checked_add(cost).ok_or(LogError::RepositoryCounterExhausted)?;
-                if charged>bytes{return Err(LogError::PageBudgetTooSmall{required:charged});}
-                result.push(HistorySelector{id:EventId::new(blob(row,0)?),clock:u64::from_be_bytes(blob(row,1)?),source_kind:row.get(2)?,ordinal:row.get(3)?,priority:row.get(4)?,sequence:u64::from_be_bytes(blob(row,5)?),charged_bytes:cost});
-            }Ok(result)
+        if start == end {
+            return Ok(Vec::new());
+        }
+        self.database.read(|c| {
+            let current: Option<(bool, i64)> = c.query_row(
+                "SELECT ready,next_rank FROM history_order_jobs WHERE domain=?1 AND job=?2",
+                params![self.domain.0.as_slice(), job.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            let Some((true, count)) = current else {
+                return Err(LogError::StaleCursor);
+            };
+            if integer(end)? > nonnegative(count)? {
+                return Err(corrupt("history selector range exceeds ready generation"));
+            }
+            let mut statement = c.prepare("SELECT r.rank,s.id,s.clock,s.source_kind,s.ordinal,s.priority,s.sequence,s.charged_bytes FROM history_order_rows r JOIN history_order_candidates s ON s.job=r.job AND s.id=r.id WHERE r.job=?1 AND r.rank>=?2 AND r.rank<?3 ORDER BY r.rank")?;
+            let mut rows = statement.query(params![job.as_slice(), integer(start)?, integer(end)?])?;
+            let mut result = Vec::new();
+            let mut charged = 0usize;
+            let mut expected = integer(start)?;
+            while let Some(row) = rows.next()? {
+                if row.get::<_, i64>(0)? != expected {
+                    return Err(corrupt("incomplete history selector range"));
+                }
+                let cost = usize::try_from(nonnegative(row.get(7)?)?)
+                    .map_err(|_| LogError::RepositoryCounterExhausted)?;
+                charged = charged.checked_add(cost).ok_or(LogError::RepositoryCounterExhausted)?;
+                if charged > bytes {
+                    return Err(LogError::PageBudgetTooSmall { required: charged });
+                }
+                result.push(HistorySelector {
+                    id: EventId::new(blob(row, 1)?),
+                    clock: u64::from_be_bytes(blob(row, 2)?),
+                    source_kind: row.get(3)?,
+                    ordinal: row.get(4)?,
+                    priority: row.get(5)?,
+                    sequence: u64::from_be_bytes(blob(row, 6)?),
+                    charged_bytes: cost,
+                });
+                expected = advance(expected)?;
+            }
+            if expected != integer(end)? {
+                return Err(corrupt("incomplete history selector range"));
+            }
+            Ok(result)
         })
     }
 }
