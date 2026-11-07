@@ -5373,6 +5373,14 @@ pub(super) fn group_inventory_source_document(
     source: &Node,
     id: crate::eventlog::ConversationId,
 ) -> AccountDocument {
+    try_group_inventory_source_document(source, id)
+        .unwrap_or_else(|error| panic!("directory fixture publication failed: {error}"))
+}
+
+pub(super) fn try_group_inventory_source_document(
+    source: &Node,
+    id: crate::eventlog::ConversationId,
+) -> Result<AccountDocument, NodeError> {
     let count = source
         .log
         .lock()
@@ -5407,7 +5415,7 @@ pub(super) fn group_inventory_source_document(
             Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
             Err(NodeError::Log(crate::eventlog::LogError::Io(error)))
                 if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => panic!("directory fixture publication failed: {error}"),
+            Err(error) => return Err(error),
         }
         assert!(
             turn + 1 < count.saturating_mul(16).saturating_add(1024),
@@ -5418,9 +5426,10 @@ pub(super) fn group_inventory_source_document(
         .account_document(&AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
             source_device: source.user_id(),
+        })?
+        .ok_or_else(|| {
+            NodeError::InvalidInput("directory fixture did not publish a document".into())
         })
-        .unwrap()
-        .unwrap()
 }
 
 fn copy_public_group(source: &Node, target: &Node, group: crate::eventlog::ConversationId) {

@@ -22,6 +22,32 @@ pub(super) fn valid_head(meta: &AccountDocumentMeta, head: &GroupControlHead) ->
         && meta.revision == head.revision
 }
 
+/// Cold selectors may continue promptly; failed durable work must back off.
+#[derive(Default)]
+pub(in crate::node) struct AccessPublication {
+    pending: bool,
+    failed: bool,
+}
+impl AccessPublication {
+    pub(in crate::node) fn is_pending(&self) -> bool {
+        self.pending
+    }
+    pub(in crate::node) fn is_failed(&self) -> bool {
+        self.failed
+    }
+    fn defer(&mut self, error: &NodeError) {
+        match error {
+            NodeError::Log(crate::eventlog::LogError::StaleCursor) => self.pending = true,
+            NodeError::Log(crate::eventlog::LogError::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                self.pending = true
+            }
+            _ => self.failed = true,
+        }
+    }
+}
+
 impl Node {
     pub(in crate::node) fn group_control_heads(
         &self,
@@ -57,7 +83,10 @@ impl Node {
 
     /// Publish only this device's real local projection. Borrowed source roles
     /// never become another device's claimed physical authority.
-    pub(in crate::node) fn publish_account_group_access(&self, after: &mut Option<ConversationId>) {
+    pub(in crate::node) fn publish_account_group_access(
+        &self,
+        after: &mut Option<ConversationId>,
+    ) -> AccessPublication {
         let mut groups = self.channels.lock().expect("channels mutex").channel_ids();
         groups.sort_by_key(|group| *group.as_bytes());
         let groups: Vec<_> = groups
@@ -65,12 +94,13 @@ impl Node {
             .filter(|group| after.is_none_or(|prior| group.as_bytes() > prior.as_bytes()))
             .take(16)
             .collect();
-        self.publish_account_group_access_groups(&groups);
+        let publication = self.publish_account_group_access_groups(&groups);
         *after = if groups.len() == 16 {
             groups.last().copied()
         } else {
             None
         };
+        publication
     }
 
     /// An accepted effect refreshes its exact group before public fanout can wait.
@@ -78,7 +108,8 @@ impl Node {
         self.publish_account_group_access_groups(&[group]);
     }
 
-    fn publish_account_group_access_groups(&self, groups: &[ConversationId]) {
+    fn publish_account_group_access_groups(&self, groups: &[ConversationId]) -> AccessPublication {
+        let mut publication = AccessPublication::default();
         for group in groups {
             let key = AccountDocumentKey::GroupControl {
                 channel: hex::encode(group.as_bytes()),
@@ -105,13 +136,18 @@ impl Node {
             if previous.is_some() && old.is_none() {
                 // Retain the durable source floor until its exact signed body is
                 // repaired. An older public cache cannot guess its later role.
+                publication.failed = true;
                 continue;
             }
             if let Some(head) = &old {
                 match self.account_group_observation_known(*group, head) {
                     Ok(true) => {}
-                    Ok(false) => continue,
+                    Ok(false) => {
+                        publication.failed = true;
+                        continue;
+                    }
                     Err(error) => {
+                        publication.defer(&error);
                         log::debug!("group access publication deferred: {error}");
                         continue;
                     }
@@ -123,6 +159,7 @@ impl Node {
                 Ok(Some(access)) => access,
                 Ok(None) => continue,
                 Err(error) => {
+                    publication.defer(&error);
                     log::debug!("group access publication deferred: {error}");
                     continue;
                 }
@@ -142,6 +179,7 @@ impl Node {
             // Every checkpoint references durable public data. Do this without a
             // document-store lock so public-log readers never invert that order.
             if self.log.lock().expect("log mutex").sync().is_err() {
+                publication.failed = true;
                 continue;
             }
             let mut access = access;
@@ -168,6 +206,7 @@ impl Node {
             let changed = {
                 let mut store = self.account_documents.lock().expect("documents mutex");
                 if store.meta(&key) != previous {
+                    publication.pending = true;
                     continue;
                 }
                 if !store.group_control_payload_fits(&key, head.encode().len()) {
@@ -206,8 +245,12 @@ impl Node {
             match changed {
                 Ok(true) => self.documents_changed(),
                 Ok(false) => {}
-                Err(error) => log::debug!("account group access publication deferred: {error}"),
+                Err(error) => {
+                    publication.failed = true;
+                    log::debug!("account group access publication deferred: {error}");
+                }
             }
         }
+        publication
     }
 }

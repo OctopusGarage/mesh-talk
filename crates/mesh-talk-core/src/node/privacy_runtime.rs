@@ -9,7 +9,7 @@ use std::{
     io,
     path::Path,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -52,6 +52,7 @@ pub(in crate::node) struct PrivacyControl {
     pub generation: AtomicU64,
     pub projection_revision: AtomicU64,
     pub route_probe_cursor: AtomicU64,
+    pub route_probe_retries: Mutex<super::privacy_routing::PrivateProbeRetries>,
     // Last: legacy privacy files and admission captures drop before storage.
     _storage: Option<Arc<crate::storage::profile::context::ProfileStorage>>,
 }

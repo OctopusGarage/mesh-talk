@@ -274,7 +274,6 @@ impl IndexedAccountProfileStore {
             .database()
             .transaction(|c| Self::put_on(c, &value))
     }
-    #[cfg(test)]
     pub(crate) fn revision(&self) -> Result<u64, LogError> {
         self.source
             .profile()

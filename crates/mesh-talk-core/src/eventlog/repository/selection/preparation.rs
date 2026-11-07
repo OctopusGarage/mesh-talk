@@ -336,7 +336,9 @@ impl EventRepository {
                     c.execute("INSERT OR IGNORE INTO participant_sync_receipts VALUES(?1,?2)", params![selection.id.as_slice(), row.header.id.as_bytes().as_slice()])?;
                 }
             }
-            c.execute("INSERT INTO participant_sync_progress VALUES(?1,?2) ON CONFLICT(view) DO UPDATE SET context=excluded.context", params![selection.id.as_slice(), context])?;
+            // Repeated observation of the same selected page must not publish
+            // another durable cursor. Authority/source checks above still run.
+            c.execute("INSERT INTO participant_sync_progress VALUES(?1,?2) ON CONFLICT(view) DO UPDATE SET context=excluded.context WHERE participant_sync_progress.context IS NOT excluded.context", params![selection.id.as_slice(), context])?;
             Ok(())
         })
     }
@@ -356,5 +358,66 @@ impl EventRepository {
             .optional()
             .map_err(Into::into)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eventlog::repository::tests::{database, event};
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn unchanged_selection_resume_preserves_authority_without_durable_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = database(&directory);
+        let repository = EventRepository::new(database.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let author = DeviceIdentity::generate();
+        let root = event(&author, 1, vec![], 1, EventKind::Message);
+        repository.append(&root).unwrap();
+        let view = repository.open_view(&root.conversation_id).unwrap();
+        let selection = repository.begin_selection(&view, 4, 128).unwrap().unwrap();
+        repository
+            .save_selection_progress(&selection, &view, b"selected-page")
+            .unwrap();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        for _ in 0..8 {
+            repository
+                .save_selection_progress(&selection, &view, b"selected-page")
+                .unwrap();
+        }
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "an unchanged resume cursor is observation, not a durable mutation"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        repository
+            .save_selection_progress(&selection, &view, b"next-page")
+            .unwrap();
+        assert_eq!(
+            repository.selection_progress(&selection, &view).unwrap(),
+            Some(b"next-page".to_vec())
+        );
+        assert_eq!(database.successful_write_commits(), commits + 1);
+        // A same-value shortcut must still reject a retired selection.
+        database
+            .transaction(|c| {
+                c.execute(
+                    "UPDATE participant_sync_views SET retired=1 WHERE id=?1",
+                    [selection.id.as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        assert!(matches!(
+            repository.save_selection_progress(&selection, &view, b"next-page"),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
     }
 }

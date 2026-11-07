@@ -13,6 +13,10 @@ use std::{
 const MAX_ACTIVE_PRIVATE_PROBES: usize = 2;
 const MAX_PRIVATE_PROBES_PER_ROUND: usize = 8;
 
+type ProbeIdentity = ([u8; 32], [u8; 32]);
+pub(in crate::node) type PrivateProbeRetries =
+    super::delivery_retry::RetrySchedule<ProbeIdentity, (u64, u64, Vec<std::net::SocketAddr>)>;
+
 impl Node {
     /// Infrastructure classification from a validated full device binding.
     pub fn device_is_post_office(&self, device: &crate::identity::device::PublicIdentity) -> bool {
@@ -189,11 +193,15 @@ impl Node {
     pub(in crate::node) async fn run_private_route_probes(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut network = self.network_changes.subscribe();
         loop {
             // Schedule from the start of a round. Sleeping after a slow ten-
             // second handshake used to leave a twenty-second refresh gap for
             // fifteen-second public evidence, even on a reachable path.
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {},
+                _ = network.changed() => {},
+            }
             self.probe_private_routes().await;
         }
     }
@@ -214,8 +222,8 @@ impl Node {
         if peers.is_empty() {
             return;
         }
-        // Select a bounded batch, but advance the cursor only when a device is
-        // actually launched. A canceled round must not skip its queued suffix.
+        // Advance only launched or deliberately deferred devices. Cancellation
+        // must not skip the suffix that this round never examined.
         let start = self
             .privacy
             .route_probe_cursor
@@ -224,6 +232,7 @@ impl Node {
         peers.rotate_left(start);
         peers.truncate(MAX_PRIVATE_PROBES_PER_ROUND);
         let mut peers = peers.into_iter();
+        let mut reserved = Vec::new();
         // Admit every complete child before spawning. The JoinSet remains owned
         // by this round, including when its unchanged whole-round budget expires.
         let mut probes = tokio::task::JoinSet::new();
@@ -233,22 +242,86 @@ impl Node {
                     let Some(peer) = peers.next() else {
                         break;
                     };
+                    let key = (peer.public.ed25519_pub, peer.public.x25519_pub);
+                    let announcement = self
+                        .roster
+                        .lock()
+                        .expect("roster lock")
+                        .announcement(&peer.public)
+                        .cloned();
+                    let mut routes = self.privacy_route_candidates(
+                        peer.addr,
+                        &peer.public,
+                        announcement.as_ref(),
+                    );
+                    // Affinity ordering is not a changed route set. Ordinary
+                    // heartbeats must not reset a failed historical probe.
+                    routes.sort_unstable();
+                    let generation = self
+                        .privacy
+                        .generation
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let network = *self.network_changes.borrow();
+                    let reservation = self
+                        .privacy
+                        .route_probe_retries
+                        .lock()
+                        .expect("probe retry lock")
+                        .reserve(key, (generation, network, routes), Instant::now());
+                    let Some((token, _)) = reservation else {
+                        // This device retains its retry deadline, so a deferred
+                        // prefix must not hide later healthy devices each round.
+                        self.privacy
+                            .route_probe_cursor
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    };
                     let Some(work) = self.runtime_work.admit() else {
+                        self.privacy
+                            .route_probe_retries
+                            .lock()
+                            .expect("probe retry lock")
+                            .forget(&key);
                         return;
                     };
                     self.privacy
                         .route_probe_cursor
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let node = self.clone();
+                    reserved.push((key, token));
                     probes.spawn(work.track(async move {
-                        let _ = node.privacy_dial(peer.addr, &peer.public).await;
+                        let result = node.privacy_dial(peer.addr, &peer.public).await;
+                        let clean = result.is_ok()
+                            || result
+                                .as_ref()
+                                .is_err_and(super::session_pool::local_capacity_busy);
+                        (key, token, clean)
                     }));
                 }
-                if probes.join_next().await.is_none() {
-                    break;
+                match probes.join_next().await {
+                    Some(Ok((key, token, clean))) => {
+                        reserved.retain(|entry| *entry != (key, token));
+                        self.privacy
+                            .route_probe_retries
+                            .lock()
+                            .expect("probe retry lock")
+                            .complete(&key, token, clean, Instant::now());
+                    }
+                    Some(Err(_)) => {}
+                    None => break,
                 }
             }
         })
         .await;
+        // A spent round budget is no progress too. These advisory hints never
+        // grant presence or retire durable work. Dropping the JoinSet cancels
+        // its actual socket owners; new/changed routes bypass the old deadline.
+        for (key, token) in reserved {
+            self.privacy
+                .route_probe_retries
+                .lock()
+                .expect("probe retry lock")
+                .complete(&key, token, false, Instant::now());
+        }
     }
 }

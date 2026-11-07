@@ -160,6 +160,8 @@ pub(in crate::node) struct AccountDocumentStore {
     intrinsic_cache: BTreeMap<AccountDocumentKey, IntrinsicCacheEntry>,
     intrinsic_cache_bytes: usize,
     #[cfg(test)]
+    body_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     pub(super) inventory_body_validations: usize,
     file: EncryptedRecordLog<Vec<u8>>,
     media: MediaStore,
@@ -311,6 +313,8 @@ impl AccountDocumentStore {
             intrinsic_cache_bytes: 0,
             #[cfg(test)]
             inventory_body_validations: 0,
+            #[cfg(test)]
+            body_reads: std::sync::atomic::AtomicUsize::new(0),
             file,
             media,
             current: BTreeMap::new(),
@@ -437,7 +441,7 @@ impl AccountDocumentStore {
         self.media.remove(ConversationId::new(hash)).unwrap();
     }
     #[cfg(test)]
-    pub(super) fn fail_index_for_test(&mut self, fail: bool) {
+    pub(in crate::node) fn fail_index_for_test(&mut self, fail: bool) {
         self.file.fail_appends_for_test(fail).unwrap();
     }
     #[cfg(test)]
@@ -919,6 +923,11 @@ impl AccountDocumentStore {
         Some(head)
     }
 
+    #[cfg(test)]
+    pub(in crate::node) fn body_read_count(&self) -> usize {
+        self.body_reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(super) fn get(
         &self,
         key: &AccountDocumentKey,
@@ -952,6 +961,9 @@ impl AccountDocumentStore {
                 bytes: zeroize::Zeroizing::new(Vec::new()),
                 limit: meta.content_len as usize,
             };
+            #[cfg(test)]
+            self.body_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.media
                 .copy_decrypted(ConversationId::new(meta.content_hash), &mut output)
                 .map_err(LogError::Io)?;

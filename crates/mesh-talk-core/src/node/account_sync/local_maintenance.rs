@@ -13,7 +13,68 @@ pub(super) struct LocalMaintenance {
     personal_retry_at: Option<std::time::Instant>,
     access: Option<ConversationId>,
     operation_data: Option<super::super::AccountGroupOperationId>,
+    publication_input: Option<PublicationInput>,
+    publication_selected: Option<PublicationInput>,
+    publication_repair_at: Option<std::time::Instant>,
+    publication_retry: Option<(Option<PublicationInput>, std::time::Instant)>,
+    publication_failed: bool,
 }
+
+// This is a caller scheduling stamp, never a substitute for document integrity
+// or authorization at use. Each owner guard is released before reading the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PublicationInput([u8; 32]);
+impl PublicationInput {
+    fn capture(node: &Node) -> Result<Self, crate::eventlog::LogError> {
+        use std::sync::atomic::Ordering;
+        let source = {
+            let log = node.log.lock().expect("log mutex");
+            let repository = log.repository()?;
+            (
+                repository.source_revision()?,
+                repository.destructive_policy_revision()?,
+            )
+        };
+        let profiles = node.profiles.lock().expect("profiles mutex").revision()?;
+        let avatars = node.account_profiles.revision()?;
+        let proofs = node
+            .privacy
+            .state
+            .read()
+            .expect("privacy state mutex")
+            .as_ref()
+            .map(|state| state.proofs.revision());
+        let privacy = (
+            node.privacy.generation.load(Ordering::SeqCst),
+            node.privacy.projection_revision.load(Ordering::SeqCst),
+            proofs,
+        );
+        let policy = node.device_sync_policy_snapshot().1;
+        let documents = *node.account_document_updates.borrow();
+        let mut devices = node.linked_devices();
+        devices.sort_by_key(|device| device.public.user_id());
+        // Announce excludes last-seen timestamps and IP routes: an identical
+        // signed heartbeat is unchanged. Include live bindings too, as private
+        // owner-proof eligibility may consult them. Both roster sets are bounded.
+        let (mut historical, mut live) = {
+            let roster = node.roster.lock().expect("roster mutex");
+            (roster.historical_announcements(), roster.announcements())
+        };
+        historical.sort_by_key(|proof| proof.user_id.clone());
+        live.sort_by_key(|proof| proof.user_id.clone());
+        let roster = (historical, live);
+        let mut groups = node.channels.lock().expect("channels mutex").channel_ids();
+        groups.sort_by_key(|group| *group.as_bytes());
+        let bytes = bincode::serialize(&(
+            source, profiles, avatars, privacy, policy, documents, devices, roster, groups,
+        ))
+        .map_err(|error| crate::eventlog::LogError::Serialization(error.to_string()))?;
+        Ok(Self(Sha256::digest(bytes).into()))
+    }
+}
+
+const PUBLICATION_REPAIR_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const PUBLICATION_FAILURE_RETRY: Duration = Duration::from_secs(5);
 
 pub(super) struct LocalMaintenanceTurn {
     pub state: LocalMaintenance,
@@ -25,12 +86,30 @@ pub(super) struct LocalMaintenanceTurn {
 }
 
 impl LocalMaintenance {
+    pub(super) fn publication_deadline(&self) -> Option<std::time::Instant> {
+        self.publication_retry
+            .map(|(_, at)| at)
+            .or(self.publication_repair_at)
+    }
+
     pub(super) fn run(
         mut self,
         node: Arc<Node>,
         fanout_cursor: u64,
         select_data: bool,
     ) -> LocalMaintenanceTurn {
+        // Capture BEFORE all work, including operation effects that can publish.
+        // A commit during this turn then remains dirty even if it completes here.
+        let publication_input = PublicationInput::capture(&node).ok();
+        let now = std::time::Instant::now();
+        let retry_due = self
+            .publication_retry
+            .is_none_or(|(input, at)| input != publication_input || at <= now);
+        let publish = retry_due
+            && (self.publication_selected.is_some()
+                || publication_input.is_none()
+                || self.publication_input != publication_input
+                || self.publication_repair_at.is_none_or(|at| at <= now));
         if self
             .personal_retry_at
             .is_none_or(|at| at <= std::time::Instant::now())
@@ -52,15 +131,44 @@ impl LocalMaintenance {
             })
             .collect();
         node.migrate_channel_custody(&mut self.custody);
-        node.publish_account_group_access(&mut self.access);
-        self.inventory_cycle_pending |= node
-            .publish_group_inventory(&mut self.inventory)
-            .is_pending();
-        let more_inventory = self.inventory.is_some() || self.inventory_cycle_pending;
-        if self.inventory.is_none() {
-            // An unfinished earlier page earns another fair cycle, not an
-            // unbounded retry of the first hot group.
-            self.inventory_cycle_pending = false;
+        let mut more_inventory = false;
+        let mut publication_complete = false;
+        if publish {
+            self.publication_failed |= publication_input.is_none();
+            if self.publication_selected.is_none() {
+                self.publication_selected = publication_input;
+            }
+            self.publication_retry = None;
+            // An expired repair deadline cannot keep the parent timer ready
+            // while a cold bounded selector or failed cycle is being drained.
+            self.publication_repair_at = None;
+            let access = node.publish_account_group_access(&mut self.access);
+            let inventory = node.publish_group_inventory(&mut self.inventory);
+            self.inventory_cycle_pending |= access.is_pending() || inventory.is_pending();
+            self.publication_failed |= access.is_failed() || inventory.is_failed();
+            more_inventory =
+                self.access.is_some() || self.inventory.is_some() || self.inventory_cycle_pending;
+            if self.access.is_none() && self.inventory.is_none() {
+                if self.publication_failed {
+                    // Keep dirty work without turning an I/O failure into an
+                    // immediately repeated local task. New inputs bypass backoff.
+                    self.publication_retry = Some((
+                        publication_input,
+                        std::time::Instant::now() + PUBLICATION_FAILURE_RETRY,
+                    ));
+                    self.publication_selected = None;
+                    self.publication_failed = false;
+                    more_inventory = false;
+                } else if !self.inventory_cycle_pending {
+                    self.publication_input = self.publication_selected.take();
+                    publication_complete = true;
+                    self.publication_repair_at =
+                        Some(std::time::Instant::now() + PUBLICATION_REPAIR_INTERVAL);
+                }
+                // An unfinished earlier page earns another fair cycle, not an
+                // unbounded retry of the first hot group.
+                self.inventory_cycle_pending = false;
+            }
         }
         if let Err(error) = node.publish_public_profile_documents_page(&mut self.profile) {
             log::debug!("contact profile publication deferred: {error}");
@@ -81,6 +189,11 @@ impl LocalMaintenance {
             }
             turn
         });
+        if publication_complete {
+            // Only the selected stamp was acknowledged. Observe newer inputs
+            // solely to retain one follow-up, including independent work above.
+            more_inventory |= PublicationInput::capture(&node).ok() != self.publication_input;
+        }
         LocalMaintenanceTurn {
             state: self,
             more_inventory,
@@ -144,6 +257,491 @@ pub(super) fn observe_fanout_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn settle_publication(node: &Arc<Node>, mut state: LocalMaintenance) -> LocalMaintenance {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut quiet = 0;
+            loop {
+                let turn = state.run(node.clone(), 0, false);
+                state = turn.state;
+                quiet = if turn.more_inventory { 0 } else { quiet + 1 };
+                if quiet == 4 {
+                    break state;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn unchanged_local_publication_reads_no_document_bodies_after_settle() {
+        let (_directory, source, _receiver) = super::super::selection_tests::sibling_nodes();
+        for index in 0..3 {
+            source
+                .create_channel(&format!("Quiet publication {index}"), vec![])
+                .await
+                .unwrap();
+        }
+        let state = settle_publication(&source, LocalMaintenance::default()).await;
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        assert!(
+            before > 0,
+            "fixture must exercise real document body hydration"
+        );
+        let turn = state.run(source.clone(), 0, false);
+        assert!(!turn.more_inventory);
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count(),
+            before,
+            "an unchanged routine local turn must select before reading document blobs"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_publication_tracks_profiles_proofs_documents_policy_and_newer_dirty_work() {
+        use crate::node::account_documents::GroupInventoryReference;
+        let (_directory, source, sibling) = super::super::selection_tests::sibling_nodes();
+        let group = source
+            .create_channel("Publication inputs", vec![])
+            .await
+            .unwrap();
+        let mut state = settle_publication(&source, LocalMaintenance::default()).await;
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        source
+            .set_profile_display_name("New inventory label")
+            .unwrap();
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        state = settle_publication(&source, state).await;
+        assert!(source.account_documents.lock().unwrap().body_read_count() > before);
+        let document = source.account_document(&key).unwrap().unwrap();
+        let reference: GroupInventoryReference =
+            serde_json::from_slice(document.payload()).unwrap();
+        assert!(
+            reference
+                .members
+                .iter()
+                .any(|member| member.name.as_deref() == Some("New inventory label"))
+        );
+
+        let proof = sibling.signed_announce("Sibling proof", 21212);
+        source.roster.lock().unwrap().update(
+            &proof,
+            "127.0.0.1".parse().unwrap(),
+            &source.user_id(),
+        );
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        state = settle_publication(&source, state).await;
+        assert!(
+            source.account_documents.lock().unwrap().body_read_count() > before,
+            "a changed effective signed proof must invalidate publication"
+        );
+        // Identical signed heartbeats change freshness only.
+        source.roster.lock().unwrap().update(
+            &proof,
+            "127.0.0.1".parse().unwrap(),
+            &source.user_id(),
+        );
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        state = state.run(source.clone(), 0, false).state;
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count(),
+            before
+        );
+
+        source
+            .set_device_hostname(Some("Changed document input"))
+            .unwrap();
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        state = settle_publication(&source, state).await;
+        assert!(source.account_documents.lock().unwrap().body_read_count() > before);
+        source
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        state = settle_publication(&source, state).await;
+        assert!(source.account_documents.lock().unwrap().body_read_count() > before);
+
+        // Hold the actual inventory profile read after input selection. A newer
+        // durable commit inside the turn must retain a follow-up without a tick.
+        source
+            .set_device_hostname(Some("Start a selected turn"))
+            .unwrap();
+        *source.profile_read_hook.lock().unwrap() = Some(Box::new({
+            let source = source.clone();
+            move || {
+                source
+                    .set_device_hostname(Some("Committed during selected turn"))
+                    .unwrap();
+            }
+        }));
+        let turn = state.run(source.clone(), 0, false);
+        assert!(
+            turn.more_inventory,
+            "newer committed work must retain one local follow-up"
+        );
+        assert_ne!(
+            turn.state.publication_input,
+            PublicationInput::capture(&source).ok(),
+            "only the selected-before-work stamp may be acknowledged"
+        );
+        state = settle_publication(&source, turn.state).await;
+        assert_eq!(
+            state.publication_input,
+            PublicationInput::capture(&source).ok()
+        );
+
+        source
+            .rename_channel(group, "Changed public group")
+            .await
+            .unwrap();
+        state = settle_publication(&source, state).await;
+        let document = source.account_document(&key).unwrap().unwrap();
+        let reference: GroupInventoryReference =
+            serde_json::from_slice(document.payload()).unwrap();
+        assert_eq!(reference.name, "Changed public group");
+        // Sparse repair is a caller boundary: direct reads still authenticate
+        // durable bytes immediately, while a due pass re-enters the publishers.
+        state.publication_repair_at = Some(std::time::Instant::now());
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        let turn = state.run(source.clone(), 0, false);
+        assert!(source.account_documents.lock().unwrap().body_read_count() > before);
+        assert!(turn.state.publication_deadline().unwrap() > std::time::Instant::now());
+    }
+
+    #[tokio::test]
+    async fn failed_local_publication_retains_dirty_work_without_hot_retry() {
+        let (_directory, source, _sibling) = super::super::selection_tests::sibling_nodes();
+        let group = source
+            .create_channel("Failed publication", vec![])
+            .await
+            .unwrap();
+        let mut state = settle_publication(&source, LocalMaintenance::default()).await;
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .fail_index_for_test(true);
+        source.set_profile_display_name("Retry this label").unwrap();
+        state = settle_publication(&source, state).await;
+        assert!(state.publication_retry.is_some());
+        assert_ne!(
+            state.publication_input,
+            PublicationInput::capture(&source).ok()
+        );
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        let turn = state.run(source.clone(), 0, false);
+        assert!(!turn.more_inventory);
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count(),
+            before,
+            "a failed publication must retain demand without a hot retry"
+        );
+        state = turn.state;
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .fail_index_for_test(false);
+        state.publication_retry.as_mut().unwrap().1 = std::time::Instant::now();
+        state = settle_publication(&source, state).await;
+        assert!(state.publication_retry.is_none());
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let document = source.account_document(&key).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(document.payload()).unwrap();
+        assert!(
+            value["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["name"] == "Retry this label")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_publication_retains_selected_input_across_pages_and_newer_mutation() {
+        let (_directory, source, _sibling) = super::super::selection_tests::sibling_nodes();
+        let mut groups = Vec::new();
+        for index in 0..17 {
+            groups.push(
+                source
+                    .create_channel(&format!("Selected page {index}"), vec![])
+                    .await
+                    .unwrap(),
+            );
+        }
+        let state = settle_publication(&source, LocalMaintenance::default()).await;
+        source
+            .set_device_hostname(Some("Start a bounded publication cycle"))
+            .unwrap();
+        let selected = PublicationInput::capture(&source).ok();
+        let first = state.run(source.clone(), 0, false);
+        assert!(first.more_inventory);
+        assert!(first.state.inventory.is_some());
+        assert_eq!(first.state.publication_selected, selected);
+        source
+            .set_profile_display_name("Committed between publication pages")
+            .unwrap();
+        let second = first.state.run(source.clone(), 0, false);
+        assert!(second.state.inventory.is_none());
+        assert_eq!(
+            second.state.publication_input, selected,
+            "the last bounded page may acknowledge only the original selected stamp"
+        );
+        assert!(
+            second.more_inventory,
+            "the newer generation retains one full-cycle follow-up"
+        );
+        assert_ne!(
+            second.state.publication_input,
+            PublicationInput::capture(&source).ok()
+        );
+        let state = settle_publication(&source, second.state).await;
+        assert_eq!(
+            state.publication_input,
+            PublicationInput::capture(&source).ok()
+        );
+        for group in groups {
+            let key = AccountDocumentKey::GroupInventory {
+                channel: hex::encode(group.as_bytes()),
+                source_device: source.user_id(),
+            };
+            let document = source.account_document(&key).unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_slice(document.payload()).unwrap();
+            assert!(
+                value["members"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|member| member["name"] == "Committed between publication pages")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sparse_local_publication_repairs_missing_blob_and_retains_unreadable_source_floor() {
+        let (directory, source, _sibling) = super::super::selection_tests::sibling_nodes();
+        let group = source
+            .create_channel("Sparse publication repair", vec![])
+            .await
+            .unwrap();
+        let mut state = settle_publication(&source, LocalMaintenance::default()).await;
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let original = source.account_document(&key).unwrap().unwrap();
+        let blob = directory
+            .path()
+            .join("source")
+            .join(format!("account-document-blobs-{}", source.account_id()))
+            .join("media")
+            .join(format!("{}.bin", hex::encode(original.meta.content_hash)));
+        assert!(
+            blob.is_file(),
+            "fixture must select the real encrypted inventory blob"
+        );
+        std::fs::remove_file(&blob).unwrap();
+        assert!(
+            source.account_document(&key).is_err(),
+            "direct reads still fail immediately"
+        );
+        let before = source.account_documents.lock().unwrap().body_read_count();
+        state = state.run(source.clone(), 0, false).state;
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count(),
+            before,
+            "external damage alone does not turn quiet ticks into body reads"
+        );
+        state.publication_repair_at = Some(std::time::Instant::now());
+        state = settle_publication(&source, state).await;
+        let restored = source.account_document(&key).unwrap().unwrap();
+        assert_eq!(restored.meta, original.meta);
+        assert_eq!(restored.payload(), original.payload());
+
+        let encrypted = std::fs::read(&blob).unwrap();
+        let mut corrupt = encrypted.clone();
+        *corrupt.last_mut().unwrap() ^= 0x80;
+        std::fs::write(&blob, &corrupt).unwrap();
+        assert_eq!(
+            std::fs::metadata(&blob).unwrap().len(),
+            encrypted.len() as u64
+        );
+        assert!(source.account_document(&key).is_err());
+        // A newer canonical input prevents reconstructing the exact unreadable
+        // prior head. Retain its signed floor rather than guessing a replacement.
+        source
+            .set_profile_display_name("After exact floor restoration")
+            .unwrap();
+        state.publication_repair_at = Some(std::time::Instant::now());
+        state = settle_publication(&source, state).await;
+        assert!(state.publication_retry.is_some());
+        assert!(source.account_document(&key).is_err());
+        assert_eq!(source.account_document_meta(&key).unwrap(), original.meta);
+        assert_eq!(std::fs::read(&blob).unwrap(), corrupt);
+        std::fs::write(&blob, &encrypted).unwrap();
+        assert_eq!(
+            source.account_document(&key).unwrap().unwrap().meta,
+            original.meta
+        );
+        state.publication_retry.as_mut().unwrap().1 = std::time::Instant::now();
+        state = settle_publication(&source, state).await;
+        assert!(state.publication_retry.is_none());
+        let document = source.account_document(&key).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(document.payload()).unwrap();
+        assert!(
+            value["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["name"] == "After exact floor restoration")
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_failed_publication_retries_at_owned_deadline_without_periodic_tick() {
+        use futures_util::FutureExt;
+        let (directory, source, _sibling) = super::super::selection_tests::sibling_nodes();
+        let group = source
+            .create_channel("Owned publication retry", vec![])
+            .await
+            .unwrap();
+        let _settled = settle_publication(&source, LocalMaintenance::default()).await;
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let previous = source.account_document_meta(&key).unwrap();
+        source
+            .rename_channel(group, "Inventory write requires retry")
+            .await
+            .unwrap();
+        // Qualify access and directory readiness before injecting an inventory
+        // write failure, independently of cold creation/presentation recovery.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let access = source.publish_account_group_access(&mut None);
+                let directory = {
+                    let log = source.log.lock().unwrap();
+                    source.directory_observation(&log, group)
+                };
+                let directory_ready = match directory {
+                    Ok(_) => true,
+                    Err(crate::eventlog::LogError::StaleCursor) => false,
+                    Err(crate::eventlog::LogError::Io(error))
+                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        false
+                    }
+                    Err(error) => panic!("directory retry fixture preparation failed: {error}"),
+                };
+                if !access.is_pending() && !access.is_failed() && directory_ready {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(source.account_document_meta(&key).unwrap(), previous);
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .fail_index_for_test(true);
+        let failed_at = Arc::new(std::sync::Mutex::new(None));
+        let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let source = source.clone();
+            let failed_at = failed_at.clone();
+            let phases = phases.clone();
+            move |_, phase| {
+                let mut trace = phases.lock().unwrap();
+                if trace.len() == 64 {
+                    trace.pop_front();
+                }
+                trace.push_back(phase.clone());
+                drop(trace);
+                if phase == "inventory_publication_deferred outcome=error" {
+                    failed_at
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(std::time::Instant::now);
+                    // Restore the actual failed storage owner without a semantic
+                    // mutation or wake: its retained deadline must own the retry.
+                    source
+                        .account_documents
+                        .lock()
+                        .unwrap()
+                        .fail_index_for_test(false);
+                }
+            }
+        }));
+        while source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some()
+        {}
+        let mut owner = Box::pin(source.clone().run_account_history_loop_with_tick(None));
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                futures_util::future::poll_fn(|cx| {
+                    assert!(owner.as_mut().poll(cx).is_pending());
+                    if source
+                        .account_document_meta(&key)
+                        .is_some_and(|meta| meta != previous)
+                    {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "failed local publication must retain its own retry wake; phases={:?}",
+                phases.lock().unwrap()
+            );
+            let failed_at = failed_at
+                .lock()
+                .unwrap()
+                .expect("actual index failure must be observed");
+            assert!(
+                failed_at.elapsed() >= PUBLICATION_FAILURE_RETRY,
+                "an error must not become a hot immediate local continuation"
+            );
+        })
+        .catch_unwind()
+        .await;
+        drop(owner);
+        *source.account_client_test_hook.lock().unwrap() = None;
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .fail_index_for_test(false);
+        source.runtime_work.close();
+        let retired = tokio::time::timeout(Duration::from_secs(5), source.runtime_work.drain())
+            .await
+            .is_ok();
+        if !retired {
+            let _ = directory.keep();
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(retired, "publication owner must retire before its store");
+    }
 
     #[tokio::test]
     async fn cold_inventory_directory_work_does_not_request_network_refresh_before_publication() {

@@ -311,6 +311,13 @@ the beginning of each round, without overlapping rounds or appending another
 sleep after slow authentication. A cached address must not allocate a separate
 probe lane for the same device. Only permitted fresh public authentication can
 renew presence; the fifteen-second observation lease is unchanged.
+Failed historical probes use the existing bounded, jittered retry schedule
+(up to fifteen seconds); successful probes retain their five-second cadence.
+The full identity, effective route set and network/privacy generation qualify
+each hint. Changed routes or a new network bypass old pacing; local capacity
+pressure is not negative peer evidence. Deferred prefixes cannot hide later peers,
+and timed-out rounds release their socket owners before further work can use
+the shared capacity.
 Routed probes and the local fallback scan run every five seconds; routed candidate
 pacing is 20 ms (at most 256 candidates per sweep). Bridge registration starts
 refresh waves every five seconds, independently of an earlier stalled relay.
@@ -3176,6 +3183,14 @@ persist whole records in bounded batches, compare the expected local record at
 the commit boundary to preserve concurrent local edits, and reload each affected
 UI projection once. Linked imports respect account-personal conversation removal;
 local committed mutations wake publication immediately.
+
+Routine local group-access/inventory publication compares the existing source,
+profile, proof, policy, document and device metadata before reading bodies.
+The lifetime-owned maintenance cursor retains its pre-work input across bounded
+pages; newer inputs retain a follow-up. Failed publication stays dirty with its
+own five-second retry deadline; a settled pass keeps a five-minute integrity
+repair deadline. Those timers wake local work without manufacturing peer refresh
+traffic. Direct document reads and authorization retain their integrity checks.
 
 Federation wakes on durable mailbox, directory and effective route changes,
 coalesces bursts and caches unchanged inventories. Consecutive full mailbox

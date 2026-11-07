@@ -57,6 +57,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    pending keys before reading, decrypting, cloning or decoding bodies. Paginate
    changes; drain available pages promptly in bounded batches. A slower fallback
    must not delay each already-available page by another interval.
+   A memo that still hydrates its input on every wake is not an I/O optimization.
+   Gate unchanged producers using complete input revisions; acknowledge the
+   selected revisions, retain failed work and schedule sparse integrity repair.
 4. **Bound every retained layer.** Budget bytes/pixels as well as entry count,
    concurrency and queues. Virtualized DOM is not a bounded data store. Keep a
    small active window; evict inactive payloads and load originals only on demand.

@@ -3367,6 +3367,9 @@ impl Node {
                 })
                 .flatten();
             let worker_retry = document_retry.into_iter().chain(history_retry).min();
+            let publication_deadline = local_maintenance
+                .as_ref()
+                .and_then(local_maintenance::LocalMaintenance::publication_deadline);
             tokio::select! {
                 result = local_tasks.join_next(), if !local_tasks.is_empty() => {
                     match result {
@@ -3440,6 +3443,13 @@ impl Node {
                         None => unreachable!("owned local maintenance task"),
                     }
                 }
+                _ = async {
+                    if let Some(at) = publication_deadline {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => { maintenance_requested = true; }
                 _ = async {
                     if let Some(at) = worker_retry {
                         tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;

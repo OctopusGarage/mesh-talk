@@ -16,8 +16,12 @@ const PUBLICATION_SLICE: usize = 16;
 pub(in crate::node) enum InventoryPublication {
     Complete,
     Pending,
+    Failed,
 }
 impl InventoryPublication {
+    pub(in crate::node) fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed)
+    }
     pub(in crate::node) fn is_pending(&self) -> bool {
         matches!(self, Self::Pending)
     }
@@ -757,16 +761,23 @@ impl Node {
             if let Err(error) = self.try_publish_group_inventory_groups(&[*id]) {
                 let outcome = match &error {
                     NodeError::Log(LogError::StaleCursor) => {
-                        publication = InventoryPublication::Pending;
+                        if !publication.is_failed() {
+                            publication = InventoryPublication::Pending;
+                        }
                         "source_pending"
                     }
                     NodeError::Log(LogError::Io(error))
                         if error.kind() == std::io::ErrorKind::WouldBlock =>
                     {
-                        publication = InventoryPublication::Pending;
+                        if !publication.is_failed() {
+                            publication = InventoryPublication::Pending;
+                        }
                         "directory_pending"
                     }
-                    _ => "error",
+                    _ => {
+                        publication = InventoryPublication::Failed;
+                        "error"
+                    }
                 };
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
@@ -977,17 +988,18 @@ impl Node {
                 .as_ref()
                 .is_some_and(|meta| old.is_none() && meta.content_hash != content_hash(&payload))
             {
-                continue;
+                return Err(LogError::CorruptFile(
+                    "unreadable group inventory source floor".into(),
+                )
+                .into());
             }
             let log = self.log.lock().expect("log mutex");
             view.check(log.repository()?)?;
-            if log.sync().is_err() {
-                continue;
-            }
+            log.sync()?;
             let changed = {
                 let mut store = self.account_documents.lock().expect("documents mutex");
                 if store.meta(&key) != previous {
-                    continue;
+                    return Err(LogError::StaleCursor.into());
                 }
                 let meta = if let Some(old) = previous
                     .as_ref()
@@ -1014,9 +1026,9 @@ impl Node {
             match changed {
                 Ok(true) => self.documents_changed(),
                 Ok(false) => {}
-                Err(error) => log::debug!("group inventory publication deferred: {error}"),
+                Err(error) => return Err(error.into()),
             }
-            self.publish_group_activity_for(*id);
+            self.try_publish_group_activity_for(*id)?;
         }
         Ok(())
     }

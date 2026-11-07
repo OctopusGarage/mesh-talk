@@ -211,6 +211,90 @@ async fn private_probe_does_not_multiply_handshakes_for_one_devices_cached_addre
 }
 
 #[tokio::test]
+async fn failed_private_probe_is_paced_but_replaced_route_is_immediately_eligible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    {
+        let mut guard = alice.privacy.state.write().unwrap();
+        let state = guard.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), address.ip()).unwrap();
+    }
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = accepted.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
+            drop(socket); // Real remote authentication failure, not local capacity pressure.
+        }
+    });
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "an unchanged failed historical endpoint must not be retried on every wake"
+    );
+    alice.network_changes.send_modify(|revision| *revision += 1);
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "a new network generation must invalidate old route pacing"
+    );
+    let replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = bob.signed_announce("Bob", replacement.local_addr().unwrap().port());
+    alice
+        .privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .proofs
+        .record(&proof)
+        .unwrap();
+    let replacement_accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let newer = replacement_accepted.clone();
+    let next_server = tokio::spawn(async move {
+        let (socket, _) = replacement.accept().await.unwrap();
+        newer.fetch_add(1, Ordering::SeqCst);
+        drop(socket);
+    });
+    alice
+        .probe_private_routes_with_budget(Duration::from_secs(2))
+        .await;
+    assert_eq!(
+        replacement_accepted.load(Ordering::SeqCst),
+        1,
+        "a changed verified route must bypass an older failure deadline"
+    );
+    server.abort();
+    next_server.abort();
+}
+
+#[tokio::test]
 async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alice");

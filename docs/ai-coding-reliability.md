@@ -402,6 +402,11 @@ IDs or rebuilding flags. The real TCP regression alternates Have sets and requir
 correct fresh responses with zero SQL mutations. Unprepared or closure-dependent
 views retain their existing staged preparation. In every case,
 authority-only view validation deliberately permits a finite old source cutoff.
+The same selected page may be saved repeatedly without advancing its resume
+context. Keep source and view checks inside the owning transaction, but update
+the stored context only when its value changes. The selection preparation
+regression checks zero additional mutations/commits and rejects a retired view
+even for a matching context.
 Do not leave a completed lookup reconstruction classified as protected unfinished
 bulk work. Retire a selection created only for that finished lookup without
 marking bulk coverage complete or discarding a preexisting partial upload. The
@@ -633,6 +638,14 @@ a statement must not freeze a read snapshot, retain old bindings or suppress an
 absence or storage error. Exercise changed parameters and retired owners after
 warming the actual production queries. Intrinsic document memos similarly exclude
 receipt-derived publication authority even when the signed payload is unchanged.
+
+Suppress unchanged producers before entering those verified reads. A publication
+gate must cover every effective input owner, retain the selected pre-work stamp
+through bounded pages and leave newer changes dirty. Sparse integrity repair and
+owned failure deadlines remain necessary; a failed pass is not completion.
+The [local publication regressions](../crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs)
+count actual body reads and cover profile/proof/control changes, in-flight
+invalidation, failed writes and timer-driven recovery without periodic peer polls.
 
 **Evidence:** test the limit and just beyond it, malformed or missing data,
 wrong-owner requests, saturation and recovery after capacity returns. Include

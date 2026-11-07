@@ -336,6 +336,10 @@
           {
             "name": "Modern memberships from a previous account remain archived for the exact local device unless the current account has a valid accepted or pending account-wide grant; legacy membership and genuine current-account departure remain distinct.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Routine local access and inventory publication compares complete pre-work input revisions before body reads, retains bounded page progress and newer dirty work, and owns failed retry and sparse integrity-repair deadlines independently of peer polling. Direct document integrity checks remain authoritative.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           }
         ]
       },
@@ -487,6 +491,7 @@
             "pinned_private_probe_keeps_routes_without_online_presence_or_new_grants",
             "private_probe_does_not_multiply_handshakes_for_one_devices_cached_addresses",
             "private_probe_refreshes_public_presence_before_its_lease_expires",
+            "failed_private_probe_is_paced_but_replaced_route_is_immediately_eligible",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
             "completed_receipt_scope_keeps_the_authenticated_connection_for_the_next_message",
@@ -2065,7 +2070,8 @@
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/privacy_sync/",
         "crates/mesh-talk-core/src/eventlog/repository/selection.rs",
-        "crates/mesh-talk-core/src/node/channels.rs"
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/selection/preparation.rs"
       ],
       "rust": [
         {
@@ -2097,7 +2103,8 @@
             "borrowed_peer_round_parent_defers_other_receiver_until_held_view_release",
             "node::channels::fanout_tests::applied_metadata_only_recovery_retains_one_fresh_group_turn_without_quiet_spin",
             "node::channels::fanout_tests::applied_group_continuations_rotate_past_requeued_low_ids_and_deleted_cursor",
-            "node::channels::fanout_tests::hot_group_sweeps_do_not_alias_four_peer_rotation_across_four_batches"
+            "node::channels::fanout_tests::hot_group_sweeps_do_not_alias_four_peer_rotation_across_four_batches",
+            "unchanged_selection_resume_preserves_authority_without_durable_writes"
           ]
         }
       ],
