@@ -16,6 +16,7 @@ vi.mock("@/lib/events", () => ({
 
 import { useChat, convKey, reactionFromMe } from "./chat";
 import { emptyReception } from "./reception";
+import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
 import type { AccountGroupOperationStatus } from "@/lib/types";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
@@ -176,6 +177,240 @@ it("pulls bounded native receipts through the existing unread owner and commits 
     stop?.();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  }
+});
+
+it("keeps repeated roster pages out of document and full group refreshes", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+  let kinds: unknown = ["roster"];
+  const changes: string[] = [];
+  const unsubscribe = subscribeSyncInvalidation((change) =>
+    changes.push(change.kind),
+  );
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+    if (command === "owner_reception_page")
+      return Promise.resolve({
+        scope,
+        token: "page",
+        after: cursor,
+        next: cursor,
+        through: cursor,
+        complete: true,
+        receipts: [{ kind: "state", event: kinds ? { kinds } : undefined }],
+      });
+    if (command === "owner_reception_ack") return Promise.resolve(false);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    invoke.mockClear();
+    changes.length = 0;
+    for (let n = 0; n < 3; n++) {
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    const commands = invoke.mock.calls.map(([command]) => command);
+    expect(
+      commands.filter((command) => command === "owner_reception_page"),
+    ).toHaveLength(3);
+    expect(commands).not.toContain("list_channels");
+    expect(commands).not.toContain("get_account_documents");
+    expect(commands).not.toContain("owner_personal_conversation_states");
+    expect(commands).toContain("list_peers");
+    expect(changes).toEqual(["roster", "roster", "roster"]);
+    kinds = undefined;
+    invoke.mockClear();
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invoke.mock.calls.map(([command]) => command)).toContain(
+      "list_channels",
+    );
+    expect(changes[changes.length - 1]).toBe("state");
+    for (const malformed of [
+      "roster",
+      ["unknown"],
+      { roster: true },
+      ["roster", "roster", "roster", "roster", "roster"],
+    ]) {
+      kinds = malformed;
+      invoke.mockClear();
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(changes[changes.length - 1]).toBe("state");
+    }
+  } finally {
+    stop();
+    unsubscribe();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("preserves fresh presence while a held full refresh still applies personal and history state", async () => {
+  vi.useFakeTimers();
+  let held = false;
+  let fresh = false;
+  let resolvePersonal!: (rows: PersonalConversationState[]) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: held ? 2 : 1,
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        { user_id: fresh ? "fresh" : "old", name: fresh ? "Fresh" : "Old" },
+      ]);
+    if (command === "list_accounts")
+      return Promise.resolve([
+        {
+          account_id: "friend",
+          device_count: fresh ? 2 : 1,
+          names: [fresh ? "Fresh" : "Old"],
+        },
+      ]);
+    if (command === "owner_personal_conversation_states" && held)
+      return new Promise((resolve) => {
+        resolvePersonal = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    held = true;
+    const full = useChat.getState().refreshRoster();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolvePersonal).toBeDefined();
+    fresh = true;
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().peers[0].user_id).toBe("fresh");
+    resolvePersonal([
+      {
+        conversation: { kind: "account", id: "personal" },
+        hidden: true,
+        history_floor: "floor",
+        local_cleanup_complete: true,
+      },
+    ]);
+    await full;
+    expect(useChat.getState().peers[0].user_id).toBe("fresh");
+    expect(useChat.getState().accounts[0].names).toEqual(["Fresh"]);
+    expect(
+      useChat.getState().personalConversationStates["account:personal"].hidden,
+    ).toBe(true);
+    expect(useChat.getState().historyBaselines).toContain("account:myacct");
+    expect(useChat.getState().historyRevision).toBe(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("does not let a held full identity overwrite a newer presence display name", async () => {
+  vi.useFakeTimers();
+  let holdNext = false;
+  let name = "Alice";
+  let resolveOld!: (value: unknown) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity") {
+      if (holdNext) {
+        holdNext = false;
+        return new Promise((resolve) => {
+          resolveOld = resolve;
+        });
+      }
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        display_name: name,
+      });
+    }
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    holdNext = true;
+    const full = useChat.getState().refreshRoster();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolveOld).toBeDefined();
+    name = "Newer";
+    captured.current?.onStateChanged({
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      kind: "roster",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useAuth.getState().user?.display_name).toBe("Newer");
+    resolveOld({
+      owner: "host",
+      device_id: "me",
+      account_id: "myacct",
+      display_name: "Older",
+      history_revision: 2,
+    });
+    await full;
+    expect(useAuth.getState().user?.display_name).toBe("Newer");
+    expect(useChat.getState().historyRevision).toBe(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("preserves auth user identity for unchanged roster display names", async () => {
+  vi.useFakeTimers();
+  let name = "Alice";
+  invoke.mockImplementation((command: string) =>
+    command === "owner_node_identity"
+      ? Promise.resolve({
+          owner: "host",
+          account_id: "myacct",
+          device_id: "me",
+          display_name: name,
+        })
+      : Promise.resolve([]),
+  );
+  const user = useAuth.getState().user;
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useAuth.getState().user).toBe(user);
+    await useChat.getState().refreshRoster();
+    expect(useAuth.getState().user).toBe(user);
+    name = "Renamed";
+    await useChat.getState().refreshRoster();
+    expect(useAuth.getState().user?.display_name).toBe("Renamed");
+    expect(useAuth.getState().user).not.toBe(user);
+  } finally {
+    stop();
+    vi.useRealTimers();
   }
 });
 

@@ -287,3 +287,42 @@ it("does not turn receipt observation or write failure into a hot retry", async 
     vi.useRealTimers();
   }
 });
+
+it("ignores roster and delivery pulses but refreshes receipt documents on state", async () => {
+  vi.useFakeTimers();
+  const { startLinkedReadReceipts } = await import("./linkedReadReceipts");
+  const { useAuth } = await import("@/store/auth");
+  const { useChat } = await import("@/store/chat");
+  const { chat } = await import("./api");
+  const { notifySyncInvalidation } = await import("./syncInvalidation");
+  const authBefore = useAuth.getState();
+  const chatBefore = useChat.getState();
+  useAuth.setState({
+    user: { id: "receipt-owner", username: "owner", display_name: "Owner" },
+  });
+  useChat.setState({ ready: true, myAccountId: accountId });
+  const policy = vi
+    .spyOn(chat, "getDeviceSyncPolicy")
+    .mockResolvedValue({ history: false } as Awaited<
+      ReturnType<typeof chat.getDeviceSyncPolicy>
+    >);
+  const stop = startLinkedReadReceipts("receipt-owner");
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(policy).toHaveBeenCalledTimes(1);
+    for (let n = 0; n < 10; n++)
+      for (const kind of ["roster", "delivery", "files"] as const)
+        notifySyncInvalidation({ owner: "receipt-owner", kind });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(policy).toHaveBeenCalledTimes(1);
+    notifySyncInvalidation({ owner: "receipt-owner", kind: "state" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(policy).toHaveBeenCalledTimes(2);
+  } finally {
+    stop();
+    policy.mockRestore();
+    useAuth.setState(authBefore);
+    useChat.setState(chatBefore);
+    vi.useRealTimers();
+  }
+});

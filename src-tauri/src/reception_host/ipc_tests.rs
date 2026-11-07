@@ -166,6 +166,109 @@ fn registered_pull_and_ack_keep_one_page_and_fence_replaced_owner_and_app_lock()
 }
 
 #[test]
+fn duplicate_ack_after_failed_reset_keeps_reset_domains_and_profile_cursor() {
+    let fixture = Fixture::new();
+    let first = fixture.pull(Value::Null, true).unwrap();
+    fixture.ack(&first).unwrap();
+    assert!(
+        fixture
+            .pull(json!({"epoch":"bad", "sequence":"0"}), true)
+            .is_err()
+    );
+    assert_eq!(fixture.ack(&first).unwrap(), json!(true));
+    let retry = fixture.pull(first["next"].clone(), false).unwrap();
+    assert!(
+        retry["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["event"]["kinds"] == json!(["state"]))
+    );
+    fixture.ack(&retry).unwrap();
+}
+
+#[test]
+fn domain_pages_ack_only_observed_kinds_and_empty_progress_do_not_invent_state() {
+    let fixture = Fixture::new();
+    let first = fixture.pull(Value::Null, true).unwrap();
+    assert!(
+        first["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["event"]["kinds"] == json!(["state"]))
+    );
+    fixture.ack(&first).unwrap();
+    let empty = fixture.pull(first["next"].clone(), false).unwrap();
+    assert!(
+        !empty["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "state")
+    );
+    fixture.ack(&empty).unwrap();
+    let pulse = |kind| {
+        crate::events::emit_node_state_changed(
+            fixture.view.app_handle(),
+            crate::events::NodeStateChangedEvent {
+                owner: fixture.scope.owner.clone(),
+                account_id: fixture.scope.account_id.clone(),
+                device_id: fixture.scope.device_id.clone(),
+                kind,
+            },
+        )
+    };
+    pulse("roster");
+    let roster = fixture.pull(empty["next"].clone(), false).unwrap();
+    assert!(
+        roster["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["event"]["kinds"] == json!(["roster"]))
+    );
+    pulse("roster");
+    pulse("delivery");
+    assert_eq!(fixture.ack(&roster).unwrap(), json!(true));
+    let next = fixture.pull(roster["next"].clone(), false).unwrap();
+    assert!(
+        next["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["event"]["kinds"] == json!(["roster", "delivery"]))
+    );
+    fixture.ack(&next).unwrap();
+    progress(
+        fixture.view.app_handle(),
+        &fixture.scope,
+        crate::events::FileProgressEvent {
+            file_conv: "file".into(),
+            direction: "receive",
+            done: 1,
+            total: 2,
+        },
+    );
+    let next = fixture.pull(next["next"].clone(), false).unwrap();
+    assert!(
+        next["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "progress")
+    );
+    assert!(
+        !next["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "state")
+    );
+    fixture.ack(&next).unwrap();
+}
+
+#[test]
 fn selected_avatar_ipc_preserves_clear_and_rejects_retired_owner() {
     let fixture = Fixture::new();
     let body = json!({"owner":"owner","accountId":fixture.scope.account_id});

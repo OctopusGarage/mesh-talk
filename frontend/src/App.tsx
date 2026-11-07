@@ -193,7 +193,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user || locked) return;
+    if (!owner || locked) return;
     let lastSent = 0;
     const activity = () => {
       const now = Date.now();
@@ -208,17 +208,17 @@ export default function App() {
       window.removeEventListener("pointerdown", activity);
       window.removeEventListener("keydown", activity);
     };
-  }, [user, locked]);
+  }, [owner, generation, locked]);
 
   useEffect(() => {
-    if (user && !locked)
+    if (owner && !locked)
       void auth
         .setCallActive(callPhase !== "idle" && callPhase !== "ended")
         .catch(() => {});
-  }, [user, locked, callPhase]);
+  }, [owner, generation, locked, callPhase]);
 
   useEffect(() => {
-    if (!user || locked) return;
+    if (!owner || locked) return;
     const check = () => {
       void refreshLock();
     };
@@ -228,10 +228,10 @@ export default function App() {
       window.removeEventListener("focus", check);
       document.removeEventListener("visibilitychange", check);
     };
-  }, [user, locked, refreshLock]);
+  }, [owner, generation, locked, refreshLock]);
 
   useEffect(() => {
-    if (!user || locked || autoLockSeconds === 0) return;
+    if (!owner || locked || autoLockSeconds === 0) return;
     let timer: ReturnType<typeof setTimeout>;
     const schedule = () => {
       clearTimeout(timer);
@@ -273,7 +273,15 @@ export default function App() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [user, locked, autoLockSeconds, lockWhenHidden, lock, refreshLock]);
+  }, [
+    owner,
+    generation,
+    locked,
+    autoLockSeconds,
+    lockWhenHidden,
+    lock,
+    refreshLock,
+  ]);
 
   return (
     <>

@@ -1,3 +1,4 @@
+import { receptionKinds } from "@/lib/api/reception";
 import {
   startRecoveryRefresh,
   RECOVERY_REFRESH_MS,
@@ -300,7 +301,11 @@ async function pollUntilReady(
         }
         set({ startupId: startup.startup_id });
       }
-      if (identity.display_name && useAuth.getState().user?.id === owner)
+      if (
+        identity.display_name &&
+        useAuth.getState().user?.id === owner &&
+        useAuth.getState().user?.display_name !== identity.display_name
+      )
         useAuth.setState((state) => ({
           user: state.user
             ? { ...state.user, display_name: identity.display_name! }
@@ -607,6 +612,12 @@ const rosterRefresh = createRosterRefresh({
     refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending),
 });
 
+const presenceRosterRefresh = createRosterRefresh({
+  capture: () => captureChat(useChat.getState),
+  refresh: (hasPending) =>
+    refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending, true),
+});
+
 /** Apply explicit local-complete floors before archive work can refill deleted caches. */
 function applyPersonalConversationStates(
   rawSet: Set,
@@ -686,17 +697,24 @@ function applyPersonalConversationStates(
   return { changed: true, reloadActive };
 }
 
+let rosterObservationSequence = 0;
+let publishedRosterObservation = 0;
+let publishedIdentityObservation = 0;
+
 async function refreshRosterSnapshot(
   rawSet: Set,
   get: Get,
   hasPending: () => boolean,
+  presenceOnly = false,
 ) {
   const lease = captureChat(get);
   const set = guardedSet(rawSet, lease.current);
   if (!lease.current()) return;
   if (!get().ready) return;
-  const request = get().rosterRequest + 1;
-  set({ rosterRequest: request });
+  const observation = ++rosterObservationSequence;
+  // Presence observations must not cancel a full state refresh in flight.
+  const request = get().rosterRequest + (presenceOnly ? 0 : 1);
+  if (!presenceOnly) set({ rosterRequest: request });
   try {
     let identity;
     try {
@@ -728,18 +746,29 @@ async function refreshRosterSnapshot(
       get().retryBoot();
       return;
     }
-    if (identity.display_name && useAuth.getState().user?.id === lease.owner)
-      useAuth.setState((state) => ({
-        user: state.user
-          ? { ...state.user, display_name: identity.display_name! }
-          : null,
-      }));
-    const [peers, listedAccounts, personal] = await Promise.all([
+    // Identity metadata has its own publication point: a newer identity can
+    // finish before its roster reads. Replacement checks above remain mandatory.
+    if (observation >= publishedIdentityObservation) {
+      publishedIdentityObservation = observation;
+      if (
+        identity.display_name &&
+        useAuth.getState().user?.id === lease.owner &&
+        useAuth.getState().user?.display_name !== identity.display_name
+      )
+        useAuth.setState((state) => ({
+          user: state.user
+            ? { ...state.user, display_name: identity.display_name! }
+            : null,
+        }));
+    }
+    const [observedPeers, listedAccounts, personal] = await Promise.all([
       readWithDeadline(() => chat.listPeers()),
       readWithDeadline(() => chat.listAccounts()),
-      readWithDeadline(() =>
-        chat.personalConversationStates(lease.owner!, identity.account_id),
-      ).catch(() => null),
+      presenceOnly
+        ? Promise.resolve(null)
+        : readWithDeadline(() =>
+            chat.personalConversationStates(lease.owner!, identity.account_id),
+          ).catch(() => null),
     ]);
     if (!lease.current() || get().rosterRequest !== request || hasPending())
       return;
@@ -749,17 +778,27 @@ async function refreshRosterSnapshot(
       lease,
       personal,
     );
-    const accounts = listedAccounts.filter((account) => {
+    // Full state work can wait on personal documents after its roster facts
+    // were read. Keep any newer published presence while still applying those
+    // personal documents and continuing the full history reconciliation.
+    const publishObservation = observation >= publishedRosterObservation;
+    const peers = publishObservation ? observedPeers : get().peers;
+    const accounts = (
+      publishObservation ? listedAccounts : get().accounts
+    ).filter((account) => {
       const personal =
         get().personalConversationStates[`account:${account.account_id}`];
       return !(personal?.hidden && personal.local_cleanup_complete);
     });
     setPushStateSupport(identity.supports_push_state ? lease.owner : null);
-    const channelWork = personalEffects.changed
-      ? channelRefresh.invalidate()
-      : channelRefresh.ifDue();
+    const channelWork = presenceOnly
+      ? Promise.resolve()
+      : personalEffects.changed
+        ? channelRefresh.invalidate()
+        : channelRefresh.ifDue();
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
+    if (publishObservation) publishedRosterObservation = observation;
     const previous = get();
     const rosterChanged =
       JSON.stringify([previous.peers, previous.accounts]) !==
@@ -780,6 +819,7 @@ async function refreshRosterSnapshot(
         ...(resolved.length ? { unread, pendingUnknownUnread } : {}),
       });
     }
+    if (presenceOnly) return;
     await channelWork;
     if (!lease.current() || get().rosterRequest !== request || hasPending())
       return;
@@ -1168,10 +1208,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
                   applyChatFileProgress(receipt.event);
                   break;
                 case "state":
-                  void get().refreshRoster();
-                  void get().refreshChannels();
-                  void get().refreshStatuses(undefined, true);
-                  notifySyncInvalidation({ owner: scope.owner, kind: "state" });
+                  for (const kind of receptionKinds(receipt.event))
+                    applyInvalidation(kind);
                   break;
               }
             }
@@ -1336,6 +1374,19 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
     scheduleControl();
 
+    const applyInvalidation = (
+      kind: "state" | "roster" | "delivery" | "files",
+    ) => {
+      notifySyncInvalidation({ owner: lease.owner!, kind });
+      if (kind === "state") {
+        void refreshRoster(true);
+        void get().refreshChannels();
+        void get().refreshStatuses(undefined, true);
+      } else if (kind === "roster") void presenceRosterRefresh();
+      else void get().refreshStatuses(undefined, true);
+      if (kind !== "roster") void refreshGroupOperationIntents(rawSet, get);
+    };
+
     const unlisten = subscribeNodeEvents({
       onReceptionWake: (scope) => {
         if (
@@ -1357,12 +1408,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           e.device_id !== state.myId
         )
           return;
-        notifySyncInvalidation({ owner: e.owner, kind: e.kind });
-        if (["state", "roster", "delivery", "files"].includes(e.kind))
-          void refreshGroupOperationIntents(rawSet, get);
-        if (e.kind === "state" || e.kind === "roster") void refreshRoster(true);
-        if (e.kind === "delivery" || e.kind === "files")
-          void state.refreshStatuses(undefined, true);
+        applyInvalidation(e.kind);
       },
       onIntegrationMessageAccepted: (e) => {
         const state = get();

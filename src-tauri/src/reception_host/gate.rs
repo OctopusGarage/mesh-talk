@@ -7,6 +7,7 @@ pub(super) struct Pending {
     pub next: Cursor,
     pub generation: u64,
     pub profiles: ProfilePosition,
+    pub domains: [u64; 4],
 }
 /// Current values are paged again after renderer replacement or a revision
 /// change. Advancing this cursor requires the same renderer ACK as the page.
@@ -32,6 +33,9 @@ pub(super) struct Gate {
     pub pending: Option<Pending>,
     pub last_ack: Option<Pending>,
     pub profiles: ProfilePosition,
+    // Fixed slots: full state, roster, delivery, files. Nonzero versions stay
+    // dirty until an ACK observes that exact version, including while a page waits.
+    pub domains: [u64; 4],
     wake_outstanding: bool,
 }
 impl Gate {
@@ -42,10 +46,24 @@ impl Gate {
             pending: None,
             last_ack: None,
             profiles: ProfilePosition::default(),
+            domains: [1, 0, 0, 0],
             wake_outstanding: false,
         }
     }
+    #[cfg(test)]
     pub fn invalidate(&mut self) -> bool {
+        self.invalidate_kind(None)
+    }
+    pub fn invalidate_kind(&mut self, kind: Option<&str>) -> bool {
+        if let Some(kind) = kind {
+            let index = match kind {
+                "roster" => 1,
+                "delivery" => 2,
+                "files" => 3,
+                _ => 0,
+            };
+            self.domains[index] = self.generation.wrapping_add(1);
+        }
         self.generation = self.generation.wrapping_add(1);
         if self.wake_outstanding {
             false
@@ -66,6 +84,8 @@ impl Gate {
         self.pending = None;
         if reset {
             self.profiles = ProfilePosition::default();
+            self.generation = self.generation.wrapping_add(1);
+            self.domains[0] = self.generation;
         }
         self.wake_outstanding = true;
         Ok(())
@@ -73,6 +93,11 @@ impl Gate {
     pub fn acknowledge(&mut self, pending: Pending, more: bool) -> bool {
         let dirty = more || !pending.profiles.complete || self.generation != pending.generation;
         self.pending = None;
+        for (current, observed) in self.domains.iter_mut().zip(pending.domains) {
+            if *current == observed {
+                *current = 0;
+            }
+        }
         self.profiles = pending.profiles.clone();
         self.last_ack = Some(pending);
         self.wake_outstanding = dirty;
@@ -103,11 +128,49 @@ mod tests {
                 sequence: "1".into(),
             },
             generation,
+            domains: [0; 4],
             profiles: ProfilePosition {
                 complete: true,
                 ..Default::default()
             },
         }
+    }
+    #[test]
+    fn failed_wake_retries_without_discarding_domains() {
+        let mut gate = Gate::new(scope());
+        assert!(gate.invalidate_kind(Some("roster")));
+        let observed = gate.domains;
+        gate.emitted(false);
+        assert!(gate.invalidate_kind(None));
+        assert_eq!(gate.domains, observed);
+    }
+    #[test]
+    fn domains_remain_until_ack_and_new_pulses_survive_the_pending_page() {
+        let mut gate = Gate::new(scope());
+        let mut first = pending(gate.generation);
+        first.domains = gate.domains;
+        gate.acknowledge(first, false);
+        assert_eq!(gate.domains, [0; 4]);
+        for _ in 0..10_000 {
+            gate.invalidate_kind(Some("roster"));
+        }
+        assert_eq!(gate.domains[0], 0);
+        assert_ne!(gate.domains[1], 0);
+        let mut page = pending(gate.generation);
+        page.domains = gate.domains;
+        gate.invalidate_kind(Some("roster"));
+        gate.invalidate_kind(Some("delivery"));
+        assert!(gate.acknowledge(page, false));
+        assert_ne!(gate.domains[1], 0);
+        assert_ne!(gate.domains[2], 0);
+        let mut page = pending(gate.generation);
+        page.domains = gate.domains;
+        assert!(!gate.acknowledge(page, false));
+        assert_eq!(gate.domains, [0; 4]);
+        gate.invalidate();
+        assert_eq!(gate.domains, [0; 4]);
+        gate.begin(true).unwrap();
+        assert_ne!(gate.domains[0], 0);
     }
     #[test]
     fn stalled_consumer_has_one_wake_and_one_page_reservation() {

@@ -340,6 +340,10 @@
           {
             "name": "Routine local access and inventory publication compares complete pre-work input revisions before body reads, retains bounded page progress and newer dirty work, and owns failed retry and sparse integrity-repair deadlines independently of peer polling. Direct document integrity checks remain authoritative.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Physical local groups exclude already-unused inventory rows before body hydration; nonlocal references and direct readers retain current binding and missing/corrupt-body checks.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },
@@ -1181,7 +1185,8 @@
             "node::node::tests::participant_event_",
             "participant_ciphertext_prefix_",
             "participant_kind_metadata_",
-            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress"
+            "ready_history_upload_id_pages_do_not_rewrite_terminal_export_progress",
+            "idle_resource_kind_metadata_terminal_is_read_only_and_appends_advance"
           ]
         }
       ],

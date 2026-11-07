@@ -9430,7 +9430,7 @@ fn group_inventory_repeated_queries_reuse_intrinsic_validation_but_check_live_bi
     assert!(first.contains_key(&hex::encode(id.as_bytes())));
     for _ in 0..8 {
         assert_eq!(source.group_inventory_references(), first);
-        source.list_channels().unwrap();
+        assert_eq!(source.group_inventory_references(), first);
     }
     assert_eq!(
         source.inventory_body_validations.load(Ordering::Relaxed) - before,
@@ -9440,7 +9440,7 @@ fn group_inventory_repeated_queries_reuse_intrinsic_validation_but_check_live_bi
     assert_eq!(
         source.inventory_live_binding_checks.load(Ordering::Relaxed) - live_before,
         17,
-        "every query must still check current source binding"
+        "every direct inventory query must still check current source binding"
     );
     source
         .account_documents
@@ -9564,5 +9564,90 @@ fn group_control_repeated_access_reuses_intrinsic_validation() {
         control_head_body_validations() - before,
         1,
         "unchanged signed control head must cross the full-body decode/crypto path once"
+    );
+}
+
+#[tokio::test]
+async fn idle_resource_physical_channel_listing_skips_unused_inventory_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = node(&dir.path().join("source"), &Account::generate());
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Physical inventory");
+    group_inventory_source_document(&source, id);
+    let before = source.test_group_inventory_body_read_count();
+    assert!(
+        source
+            .group_inventory_references()
+            .contains_key(&hex::encode(id.as_bytes()))
+    );
+    assert!(
+        source.test_group_inventory_body_read_count() > before,
+        "fixture must contain a real inventory body"
+    );
+    let before = source.test_group_inventory_body_read_count();
+    for _ in 0..8 {
+        assert!(
+            source
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|channel| channel.id == id)
+        );
+    }
+    assert_eq!(source.test_group_inventory_body_read_count(), before);
+    let mut maintenance =
+        crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
+    for _ in 0..8 {
+        source.maintain_account_channels(&mut maintenance).await;
+    }
+    assert_eq!(source.test_group_inventory_body_read_count(), before);
+}
+
+#[test]
+fn idle_resource_nonlocal_inventory_listing_reads_and_checks_live_sources() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Reference only");
+    let document = group_inventory_source_document(&source, id);
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(document.meta.clone(), document.payload())
+        .unwrap();
+    assert!(!target.channels.lock().unwrap().channel_ids().contains(&id));
+    let reads = target.test_group_inventory_body_read_count();
+    let checks = target.inventory_live_binding_checks.load(Ordering::Relaxed);
+    for _ in 0..8 {
+        let summary = target
+            .list_channels()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap();
+        assert!(summary.archived);
+        assert_eq!(summary.name, "Reference only");
+    }
+    assert_eq!(target.test_group_inventory_body_read_count() - reads, 8);
+    assert_eq!(
+        target.inventory_live_binding_checks.load(Ordering::Relaxed) - checks,
+        8
+    );
+    assert!(
+        !target.channels.lock().unwrap().channel_ids().contains(&id),
+        "inventory must not install membership"
+    );
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .remove_blob_for_test(document.meta.content_hash);
+    assert!(
+        !target.list_channels().unwrap().iter().any(|c| c.id == id),
+        "warm validation must not hide missing durable inventory"
     );
 }

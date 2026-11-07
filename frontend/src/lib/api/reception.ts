@@ -18,7 +18,32 @@ export type HostReception =
   | { kind: "profile"; event: ProfileReceivedEvent }
   | { kind: "call"; event: CallSignalEvent }
   | { kind: "progress"; event: FileProgressEvent }
-  | { kind: "state" };
+  | {
+      kind: "state";
+      event?: { kinds: Array<"state" | "roster" | "delivery" | "files"> };
+    };
+
+export type ReceptionKind = "state" | "roster" | "delivery" | "files";
+
+/** Older hosts omit metadata; malformed or future domains need conservative repair. */
+export function receptionKinds(event: unknown): ReceptionKind[] {
+  const kinds =
+    event && typeof event === "object" && "kinds" in event
+      ? event.kinds
+      : undefined;
+  if (
+    !Array.isArray(kinds) ||
+    kinds.length > 4 ||
+    !kinds.every(
+      (kind) =>
+        typeof kind === "string" &&
+        ["state", "roster", "delivery", "files"].includes(kind),
+    )
+  )
+    return ["state"];
+  if (kinds.includes("state")) return ["state"];
+  return [...new Set(kinds)] as ReceptionKind[];
+}
 
 export const reception = {
   pull: (

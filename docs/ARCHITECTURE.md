@@ -1912,6 +1912,10 @@ current runtime authority fences every page and ACK. Replacing a runtime stops
 old pulls, and a new WebView may replace a lost unacknowledged page. A missing or
 corrupt previously committed snapshot is an explicit recovery failure, never an
 implicit advance past unread work.
+Domain invalidations share this ACK boundary: their captured versions are retired
+only by the matching page acknowledgement. Coalescing preserves their meaning
+and fixed cardinality; an empty receipt page is not a global state mutation.
+See [push-driven reconciliation](network-design-reference.md#push-driven-reconciliation-and-recovery).
 
 `RuntimeStartup::bounded` and `Node::open_bounded_with_profile_lease` select the
 additive production delivery mode. They allocate no DM, channel, file or profile

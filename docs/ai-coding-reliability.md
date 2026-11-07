@@ -500,6 +500,10 @@ Capture the owner's exact session/runtime installation and relevant revision at
 entry. Revalidate through the existing atomic commit seam before side effects
 and before publishing private results. Treat frontend generation guards as UI
 ownership, not host authorization. Read commands can expose stale private data too.
+Bind session effects to exact owner/generation rather than a replaceable display
+object. Cosmetic profile refreshes must not restart inactivity timers, republish
+call state or count as user input. The mounted [App regressions](../frontend/src/App.test.ts)
+exercise metadata updates, actual input and same-owner session replacement.
 
 A routing or capability preview must not become a second admission owner. When
 the canonical reader reports a typed stale projection, preserve its existing
@@ -599,6 +603,11 @@ existing frame, file, count, depth and byte limits. Preserve exact account/devic
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
 do not remove backpressure to make a benchmark look faster.
+Coalescing must preserve semantic scope as well as queue size. Retain bounded
+invalidation domains through pending-page ACKs; do not turn a roster pulse,
+progress update or empty read into a global refresh. The native reception gate
+and registered IPC tests, together with the [chat consumer](../frontend/src/store/chat.test.ts),
+exercise quiet pages and changes arriving during acknowledgement.
 
 Filter lightweight metadata before cloning large payloads. An empty final result
 does not prove that a query avoided full-record reads. Durable selection indexes

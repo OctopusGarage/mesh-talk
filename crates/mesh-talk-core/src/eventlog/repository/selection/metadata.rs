@@ -127,7 +127,7 @@ impl EventRepository {
                 c.execute("INSERT INTO participant_policy_revisions VALUES(?1,?2,?3) ON CONFLICT(domain,kind) DO UPDATE SET ordinal=max(ordinal,excluded.ordinal)",params![self.domain.0.as_slice(),kind,ordinal])?;
             }
             let next=if rows.len()<limit {cutoff-1} else {rows.last().expect("nonempty metadata page").0};
-            c.execute("UPDATE participant_kind_scan SET ordinal=?2 WHERE domain=?1",params![self.domain.0.as_slice(),next])?;
+            c.execute("UPDATE participant_kind_scan SET ordinal=?2 WHERE domain=?1 AND ordinal<>?2",params![self.domain.0.as_slice(),next])?;
             Ok(PreparationStep{ready:next>=cutoff-1,rows:rows.len(),bytes:rows.len()*row_bytes,edges:0})
         })
     }
@@ -214,6 +214,59 @@ mod tests {
         maintenance::{MaintenanceState, ProfileMaintenanceToken},
         tests::{database, event},
     };
+
+    #[test]
+    fn idle_resource_kind_metadata_terminal_is_read_only_and_appends_advance() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let budget = PreparationBudget::default();
+        assert!(repository.prepare_kind_metadata_step(budget).unwrap().ready);
+        let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        for _ in 0..8 {
+            let step = repository.prepare_kind_metadata_step(budget).unwrap();
+            assert!(step.ready);
+            assert_eq!(step.rows, 0);
+        }
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(db.successful_write_commits(), commits);
+        let author = DeviceIdentity::generate();
+        let appended = event(&author, 1, vec![], 1, EventKind::Message);
+        repository.append(&appended).unwrap();
+        assert!(repository.prepare_kind_metadata_step(budget).unwrap().ready);
+        assert!(
+            repository
+                .raw_kind_revisions(appended.conversation_id)
+                .unwrap()
+                .unwrap()[EventKind::Message as usize]
+                >= 0
+        );
+        db.transaction(|c| {
+            c.execute("DELETE FROM participant_kind_scan", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(repository.prepare_kind_metadata_step(budget).is_err());
+        db.transaction(|c| {
+            c.execute(
+                "INSERT INTO participant_kind_scan(domain,ordinal) VALUES(?1,-1)",
+                [repository.domain.0.as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let recovered = repository.prepare_kind_metadata_step(budget).unwrap();
+        assert!(recovered.ready);
+        assert_eq!(recovered.rows, 1);
+        assert!(
+            repository
+                .raw_kind_revisions(appended.conversation_id)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     fn profile_snapshot(repository: &EventRepository) -> ProfileMaintenanceToken {
         let identity = DeviceIdentity::generate();

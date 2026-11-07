@@ -186,7 +186,7 @@ export function startLinkedReadReceipts(owner: string): () => void {
   });
   const stopRecovery = startRecoveryRefresh(() => void sync.poll());
   const unsubscribe = subscribeSyncInvalidation((change) => {
-    if (change.owner === owner) void sync.poll();
+    if (change.owner === owner && change.kind === "state") void sync.poll();
   });
   void sync.poll();
   return () => {

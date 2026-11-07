@@ -49,6 +49,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    user navigation and foreground activation. Schedule the next actual expiry or
    retry deadline. Empty success is not progress and must not keep a fast retry
    hot. Coalesce duplicate wakes; retain bounded dirty work while a task is busy.
+   Preserve invalidation domains through batching and acknowledgement; a roster
+   heartbeat must not reload unrelated settings or history. Empty pages do not
+   imply a global change. Presentation metadata does not renew user activity.
+
 2. **Use recovery deliberately.** A fallback repairs missed events; it is not the
    main data path. Back off failures, stop with the owner and refresh on return.
    Native delivery, discovery leases, calls and real expiry retain their own
@@ -62,6 +66,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    selected revisions, retain failed work and schedule sparse integrity repair.
    Separate volatile evidence from stable projections: refresh presence without
    rehydrating group history; validate a complete reply before caching its token.
+   Apply already-authoritative metadata exclusions before body reads, including
+   inventory rows that a physical local group would later discard.
+
 4. **Bound every retained layer.** Budget bytes/pixels as well as entry count,
    concurrency and queues. Virtualized DOM is not a bounded data store. Keep a
    small active window; evict inactive payloads and load originals only on demand.

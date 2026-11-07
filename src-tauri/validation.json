@@ -1370,6 +1370,10 @@
           {
             "name": "Notifications begin at launch high-water and coalesce a bounded live window independently of durable unread processing.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; empty/progress pages do not create global state, roster-only pages avoid unrelated payload reloads and legacy receipts retain full repair.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },

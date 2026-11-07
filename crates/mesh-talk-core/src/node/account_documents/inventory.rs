@@ -783,6 +783,26 @@ impl Node {
         references_from_rows(self, &mut store, rows)
     }
 
+    /// Listing already owns physical groups from its channel-book snapshot.
+    /// Discard only those unused rows before reading their durable bodies.
+    pub(in crate::node) fn group_inventory_references_excluding_local(
+        &self,
+        local_ids: &std::collections::HashSet<ConversationId>,
+    ) -> BTreeMap<String, GroupInventoryReference> {
+        if local_ids.is_empty() {
+            return self.group_inventory_references();
+        }
+        let excluded: BTreeSet<_> = local_ids
+            .iter()
+            .map(|id| hex::encode(id.as_bytes()))
+            .collect();
+        let mut store = self.account_documents.lock().expect("documents mutex");
+        let rows = store.inventory_rows().into_iter().filter(|meta| {
+            !matches!(&meta.key, AccountDocumentKey::GroupInventory { channel, .. } if excluded.contains(channel))
+        }).collect();
+        references_from_rows(self, &mut store, rows)
+    }
+
     /// Publish only physical local groups, with canonical facts and their witness
     /// derived together from the existing complete public reducer.
     pub(in crate::node) fn publish_group_inventory(

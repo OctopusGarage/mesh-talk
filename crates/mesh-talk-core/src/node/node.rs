@@ -1629,7 +1629,10 @@ impl Node {
             .into_iter()
             .map(|channel| (*channel.id.as_bytes(), channel))
             .collect();
-        for reference in self.group_inventory_references().into_values() {
+        for reference in self
+            .group_inventory_references_excluding_local(&local_ids)
+            .into_values()
+        {
             let Ok(bytes) = hex::decode(&reference.channel_id) else {
                 continue;
             };

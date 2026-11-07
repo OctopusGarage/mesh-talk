@@ -55,7 +55,8 @@ export function ChatApp() {
       { background: false },
     );
     const unsubscribe = subscribeSyncInvalidation((change) => {
-      if (change.owner === owner) void useDrafts.getState().refresh();
+      if (change.owner === owner && change.kind === "state")
+        void useDrafts.getState().refresh();
     });
     const flush = () => {
       void useDrafts.getState().flush();

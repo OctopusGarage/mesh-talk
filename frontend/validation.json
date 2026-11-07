@@ -775,10 +775,12 @@
       "frontend": [
         "src/store/auth.test.ts",
         "src/store/appLock.test.ts",
-        "src/lib/themeContrast.test.ts"
+        "src/lib/themeContrast.test.ts",
+        "src/App.test.ts"
       ],
       "escalation": [
-        "Bootstrap, error-boundary rendering, styling and ambient types have conservative state/theme unit fallback only; these tests do not mount the application root. Required browser shell/visual scenarios and affected native startup/session evidence remain separate."
+        "Bootstrap and error-boundary changes use auth/state/theme checks plus mounted root effect regressions. Required browser shell/visual scenarios and affected native startup/session evidence remain separate.",
+        "Mounted App tests require cosmetic metadata not to renew activity or reset auto-lock; actual input and exact same-owner generation replacement retain their own activity lifetime."
       ]
     },
     {
@@ -2408,7 +2410,8 @@
         "frontend/src/lib/api/reception.ts",
         "frontend/src/store/chat.ts",
         "frontend/src/store/chat.test.ts",
-        "frontend/src/lib/events.ts"
+        "frontend/src/lib/events.ts",
+        "frontend/e2e/resource-idle.spec.ts"
       ],
       "frontend": [
         "src/store/avatars.test.ts",
@@ -2428,6 +2431,10 @@
           {
             "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "ACK-qualified fixed invalidation domains preserve newer pending changes; empty/progress pages do not create global state, roster-only pages avoid unrelated payload reloads and legacy receipts retain full repair.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           }
         ]
       },
@@ -3127,6 +3134,18 @@
         "src-tauri/src/owner_commands/reactions.rs"
       ],
       "browser": ["e2e/reaction-summaries.spec.ts", "e2e/chat.spec.ts"],
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-reception-domain-acceptance",
+      "paths": [
+        "frontend/src/lib/api/reception.ts",
+        "frontend/src/store/chat.ts",
+        "src-tauri/src/reception_host.rs",
+        "src-tauri/src/reception_host/",
+        "frontend/e2e/resource-idle.spec.ts"
+      ],
+      "browser": ["e2e/resource-idle.spec.ts"],
       "native": ["host"]
     }
   ]
