@@ -84,8 +84,10 @@ test("native workspace test passes collect and upload their own platform coverag
 
 test("health reports cheap formatting and frontend static failures before expensive suites", () => {
   const script = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
+  assert.ok(script.includes("cargo fmt --all -- --check"));
   assert.ok(script.indexOf("cargo fmt --all -- --check") < script.indexOf('scripts/ai-eval-smoke.sh'));
-  for (const command of ['npx prettier --check src/', 'npm run lint', 'npm run typecheck']) {
+  for (const command of ['npm run format:check', 'npm run lint', 'npm run typecheck']) {
+    assert.ok(script.includes(command), `missing static command: ${command}`);
     assert.ok(script.indexOf(command) < script.indexOf('node --test scripts/test-ai-eval.mjs'), command);
     assert.ok(script.indexOf(command) < script.indexOf('npm run build'), command);
   }
@@ -93,9 +95,10 @@ test("health reports cheap formatting and frontend static failures before expens
 
 test("affected preflight checks frontend formatting before diagnostics and compilation", () => {
   const script = readFileSync(new URL("../pr-preflight.sh", import.meta.url), "utf8");
-  assert.ok(script.includes("npx prettier --check src/"));
-  assert.ok(script.indexOf("npx prettier --check src/") < script.indexOf('node "$stage" diagnostics'));
-  assert.ok(script.indexOf("npx prettier --check src/") < script.indexOf('node "$stage" rust-selectors'));
+  const command = 'node "$stage" frontend-format --profile shared --inputs frontend -- npm run format:check';
+  assert.ok(script.includes(command));
+  assert.ok(script.indexOf(command) < script.indexOf('node "$stage" diagnostics'));
+  assert.ok(script.indexOf(command) < script.indexOf('node "$stage" rust-selectors'));
 });
 
 test("full health holds a managed checkout lease and never reuses its aggregate verdict", async t => {

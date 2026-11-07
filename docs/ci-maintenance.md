@@ -73,6 +73,10 @@ before publication. Version projections, contract references and hygiene already
 belong to structural standards; reuse that owner rather than adding duplicate
 gates. Do not install dependencies, compile Rust, launch browsers or run suites
 implicitly in the cheap mode. Source changes during checking invalidate it.
+For entry-point changes, also run the affected contract tests selected by the
+existing validation plan before publication. A syntax pass or a hand-picked
+filename sample cannot detect stale semantic routing expectations; cheap PR
+checks do not certify those tests passed.
 
 The frontend precheck reads the target from `codecov.yml`, includes partially
 covered branches in the uncovered denominator and rejects omitted changed files.
@@ -460,6 +464,18 @@ Finish unrelated cold preparation before dispatching that read, using a scoped
 owned barrier before I/O where necessary. Do not pause a post-send hook to conceal
 the network timeout. Consolidate repeated readiness polls into that preparation
 owner; retain exact live-task and measured-operation assertions at admission.
+
+Batch unobserved durable fixture construction through an existing validated
+transaction seam when individual commit boundaries are outside the requirement.
+Retain every signed event, per-event validation and index update, a completed
+durable commit before observation, exact corpus assertions and the original
+measured operation. Never batch away the transaction boundaries under test.
+Commit CLI fixture infrastructure to its private baseline before introducing the
+intended source change; unrelated copied tools must not inflate changed-file
+validation or consume the assertion's watchdog.
+When host tool startup is unrelated to the assertion, reuse the existing scoped
+version-probe fixture rather than spawning extra version processes. Keep actual
+commands and identity queries observable; do not replace the work under test.
 
 Browser commands use the existing process owner with a deadline inside the total
 job budget, reserving time for joined cleanup and evidence upload. Keep streamed

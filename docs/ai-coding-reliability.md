@@ -402,6 +402,11 @@ Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
 
+Source-order contracts must assert that each required command exists before
+comparing its position. A missing substring returns a sentinel such as `-1` and
+can otherwise make an ordering assertion pass vacuously. Match the canonical
+command owner and keep actual execution controls for behavior beyond routing.
+
 Browser fixtures must make hydrated backend settings agree with the intended
 frontend state before navigation; a later settings response must not silently
 remove the capability under test. The call-readiness fixture owns that setup.

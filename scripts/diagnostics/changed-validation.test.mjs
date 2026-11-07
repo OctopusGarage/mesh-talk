@@ -561,29 +561,34 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     f.write(manifest, JSON.stringify(data));
     if (managed) {
       f.write("scripts/build-retention.py", "import pathlib,subprocess,sys,time\npathlib.Path('target/managed-wrapper-entered').write_text('waiting')\nwhile not pathlib.Path('target/allow-managed').exists(): time.sleep(.05)\nsys.exit(subprocess.call(sys.argv[sys.argv.index('--')+1:]))\n");
-      // This is fixture infrastructure, not a retention implementation change.
-      // Keep it in the baseline so selection cannot add an unrelated Python
-      // test stage before the formatting marker this regression observes.
-      f.git(["add", "scripts/build-retention.py"]);
-      f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "configure managed wrapper"]);
     }
+    // Commit all runner infrastructure before selecting this fixture's source.
+    // Otherwise copying the real stage/syntax owners adds unrelated syntax
+    // checks to a test of formatting order, locking and source invalidation.
+    f.git(["add", "scripts/"]);
+    f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "configure static phase infrastructure"]);
+    f.write("scripts/fixture.test.mjs", "import test from 'node:test'; test('fixture', () => {});\n// Select the owning fixture contract.\n");
+    assert.deepEqual(discoverChanges(f.root, "HEAD").files, ["scripts/fixture.test.mjs"],
+      "infrastructure must not add unrelated changed-source checks");
     await mkdir(path.join(f.root, "target/bin"), { recursive: true });
     const cargo = path.join(f.root, "target/bin/cargo");
     f.write("target/bin/cargo", `#!/usr/bin/env node\nconst fs=require('node:fs'); if(process.argv[2]==='--version'){console.log('cargo fixture');}else if(process.argv[2]==='fmt'){fs.writeFileSync('target/fast-static-ran','yes');}else{fs.writeFileSync('target/heavy-command-ran','yes');process.exit(9);}`);
     chmodSync(cargo, 0o755);
-    // This is an ordering/input-invalidation fixture, not a benchmark of the
-    // host npm/rustc startup. Keep version probes deterministic while retaining
-    // the real stage locks, commands, source fingerprints and existing deadlines.
-    f.write("target/bin/rustc", "#!/usr/bin/env node\nconsole.log('rustc fixture');\n");
-    chmodSync(path.join(f.root, "target/bin/rustc"), 0o755);
-    const toolVersions = path.join(f.root, "target/tool-versions.cjs");
-    f.write("target/tool-versions.cjs", "const path=require('node:path');if(['npm','npm-cli.js'].includes(path.basename(process.argv[1]||''))&&process.argv[2]==='--version'){console.log('npm fixture');process.exit(0);}\n");
+    // Replace only tool-version probes, retaining the real formatting command,
+    // stage identities, resource locks and original lifecycle watchdog.
+    const toolVersions = toolVersionFixture(f.root, {
+      ...isolatedEnv, NODE_TEST_CONTEXT: undefined,
+      MESH_VALIDATION_AFFECTED_CHILD: undefined,
+      MESH_VALIDATION_AFFECTED_PHASE: undefined,
+      MESH_VALIDATION_AFFECTED_INPUTS: undefined,
+      PATH: `${path.dirname(cargo)}${path.delimiter}${process.env.PATH}`,
+    });
     lock = path.join(f.root, ".git/validation-resources", createHash("sha256").update("heavy").digest("hex"));
     await mkdir(lock, { recursive: true });
     writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid }));
     phase = "start CLI";
     completion = execute([process.execPath, cli, "--checks", "--run", "--report", "target/validation/feedback/queued.json", ...(managed ? ["--managed"] : []), "--owner", "fixture", "--reason", "phase fixture"], {
-      cwd: f.root, env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined, MESH_VALIDATION_AFFECTED_CHILD: undefined, MESH_VALIDATION_AFFECTED_PHASE: undefined, MESH_VALIDATION_AFFECTED_INPUTS: undefined, NODE_OPTIONS: `--require ${JSON.stringify(toolVersions)} ${process.env.NODE_OPTIONS || ""}`, PATH: `${path.dirname(cargo)}${path.delimiter}${process.env.PATH}` },
+      cwd: f.root, env: toolVersions.env,
       signal: controller.signal,
       onSpawn: ownedPid => { pid = ownedPid; },
       onOutput: chunk => { output = (output + chunk.toString()).slice(-65536); },
@@ -644,6 +649,8 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
       assert.notEqual(result.code, 0);
       assert.equal(result.cleanupUnverified, false, result.error);
     }
+    assert.deepEqual(new Set((await readFile(toolVersions.probes, "utf8")).trim().split("\n")),
+      new Set(["cargo", "rustc", "npm"]), "all canonical tool identities must still be queried");
     phase = "assertions complete";
   },
 );
