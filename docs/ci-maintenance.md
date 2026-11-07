@@ -75,8 +75,13 @@ gates. Do not install dependencies, compile Rust, launch browsers or run applica
 implicitly in the cheap mode. Source changes during checking invalidate it.
 Workflow edits also run the existing fast CI policy owner locally. Configuration
 assertions and runner inventory discovery belong here; application execution and
-native compiler fixtures do not. Update the existing policy assertion when its
+native compiler fixtures do not. Keep static policy assertions independently runnable
+without native tool setup. Scope fixture configuration changes to their owning
+table or profile; repeated valid values elsewhere must remain unchanged. Update the existing policy assertion when its
 requirement changes instead of adding a second overlapping test in another file.
+Write generated reports into the task-owned evidence directory, not the source
+checkout. Fixtures for source-integrity checks must preserve production ignore
+rules; adding a fixture-only ignore can hide a real dirty-worktree failure.
 For entry-point changes, also run the affected contract tests selected by the
 existing validation plan before publication. A syntax pass or a hand-picked
 filename sample cannot detect stale semantic routing expectations; cheap PR
@@ -185,6 +190,24 @@ inventory or resource policy changes. Selected cases and tiny tool-contract
 fixtures do not establish that the full cohort fits its per-case, suite and job
 budgets. Preserve executed and unrun counts when fail-fast or a watchdog truncates
 that evidence.
+
+Budget a mutation chunk for the baseline obligation, every selected mutant's
+build and complete consumer suite, setup and report publication. Do not assume
+mutants fail early or reuse an old selected-count constant as the inventory grows.
+The planner must preserve the rotating sample's exact union while bounding each
+worker's work; a shorter chunk changes scheduling, not assurance coverage.
+A shared baseline may remove repeated execution only when workers validate the
+same run, source, tools, configuration, complete inventory and trusted producer
+attempt through the existing evidence owner. Preserve raw tool reports: an
+external baseline is separate verified evidence, never an invented tool outcome.
+Failed-only reruns may reuse the attested successful producer attempt from the
+same run; missing or mismatched evidence must fail before mutant execution.
+Keep compilation, individual-test, complete-suite and job limits distinct and
+reserve time for process retirement and evidence publication. Invoked tools may
+create independent process groups; retain the real tool's cancellation and build
+retirement controls, not only successful-run evidence. A closed supervisor pipe
+cannot replace the actual work owner's acknowledgment. See
+[actual work ownership](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
 
 Stop an already failed candidate before starting another expensive compilation
 partition. Linux/macOS native testing finishes all selected Host cases, then

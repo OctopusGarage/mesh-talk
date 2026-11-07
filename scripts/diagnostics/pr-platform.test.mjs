@@ -9,6 +9,24 @@ const sha = "a".repeat(40);
 const capturedOutput = (stdout, stderr = "") => ({ stdout, stderr, output: stdout + stderr, outputTruncated: false });
 const signalReadyLeaf = "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});const fs=require('node:fs');const ready=process.argv[1];const pending=ready+'.pending';fs.writeFileSync(pending,String(process.pid));fs.renameSync(pending,ready);setInterval(()=>{},1000)";
 
+test("guest command rejects invalid cooperative grace before starting work", async t => {
+  const { mkdtemp, rm, access } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-guest-grace-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const marker = join(directory, "must-not-start");
+  for (const terminationGraceMs of [null, -1, 0.5, 30001, Infinity, "2000"]) {
+    const rejected = await runCommand(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1],'started')", marker], { terminationGraceMs });
+    assert.equal(rejected.code, null);
+    assert.match(rejected.error, /termination grace/u);
+    await assert.rejects(access(marker), { code: "ENOENT" });
+  }
+  const accepted = await runCommand(process.execPath, ["-e", "process.exit(0)"], { terminationGraceMs: 20000 });
+  assert.equal(accepted.code, 0);
+  assert.equal(accepted.cleanupUnverified, false);
+});
+
 test("one explicit test plan preserves selectors as argv data on both platforms", async () => {
   const flags = parseFlags(["--core-filter", "name;$(touch sentinel)", "--host-filter", "owner_commands", "e2e/privacy.spec.ts"]);
   const plan = buildPlan(flags, ["crates/mesh-talk-core/src/node.rs", "src-tauri/src/commands.rs"]);

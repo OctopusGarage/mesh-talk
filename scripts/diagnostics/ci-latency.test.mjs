@@ -5,6 +5,7 @@ import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { versions } from "../ci/windows-coverage.mjs";
+import { nextestProfileSection, replaceNextestProfileText } from "./test-fixtures/nextest.mjs";
 
 // Also runs in cheap PR validation. Keep this owner limited to configuration
 // assertions and test-inventory discovery; no suites, compilation or installs.
@@ -202,7 +203,8 @@ test("only auxiliary diagnostic transport is optional; acceptance artifacts stay
       if (prefix) seen.push(`${file}:${prefix}`);
     }
   }
-  assert.deepEqual(seen.sort(), Object.entries(optional).flatMap(([file, prefixes]) => prefixes.map(prefix => `${file}:${prefix}`)).sort());
+  // A declared diagnostic role may appear in both a baseline and its workers.
+  assert.deepEqual([...new Set(seen)].sort(), Object.entries(optional).flatMap(([file, prefixes]) => prefixes.map(prefix => `${file}:${prefix}`)).sort());
   const diagnostics = step(read("check-health.yml"), "Diagnostic and release gate regressions (all platforms)");
   assert.doesNotMatch(diagnostics, /continue-on-error/u);
   assert.match(diagnostics, /--result tmp\/health-diagnostics\.json/u);
@@ -234,14 +236,15 @@ test("heavy hosted Linux builds reclaim only unused image SDKs before cache expa
   const sources = [
     ["ci.yml", read("ci.yml")],
     ["hidden-contacts-native.yml", read("hidden-contacts-native.yml")],
-    ["mutants.yml", read("mutants.yml")],
+    ...["baseline", "mutants"].map(id => [`mutants.yml/${id}`, workflowJob(read("mutants.yml"), id)]),
     ["sanitizers.yml", read("sanitizers.yml").split("  cohort:\n")[1].split("  shards:\n")[0]],
     ["release.yml", read("release.yml").split("  build-release:\n")[1].split("  verify-release:\n")[0]],
   ];
   for (const [file, source] of sources) {
     const preparation = step(source, "Prepare hosted Linux build storage");
     assert.ok(preparation, `${file}: missing disk preparation`);
-    assert.match(preparation, /runner.os == 'Linux'/);
+    const fixedRunner = source.match(/^    runs-on: (.+)$/mu)?.[1];
+    if (!/^ubuntu-/u.test(fixedRunner ?? "")) assert.match(preparation, /runner.os == 'Linux'/);
     assert.match(preparation, /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/);
     assert.match(preparation, /scripts\/ci\/runner-storage\.mjs --prepare/);
     const index = source.indexOf("name: Prepare hosted Linux build storage");
@@ -257,7 +260,10 @@ test("heavy hosted Linux builds reclaim only unused image SDKs before cache expa
     assert.ok(source.indexOf("name: Preserve runner storage measurements") < cache);
 
   }
-  assert.match(step(read("mutants.yml"), "Prepare hosted Linux build storage"), /steps.selection.outputs.selected != '0'/);
+  for (const id of ["baseline", "mutants"]) {
+    assert.match(workflowJob(read("mutants.yml"), id), /^    if: .*needs\.plan\.outputs\.selected != '0'/mu,
+      `mutants.yml/${id}: the whole heavy job must reject an empty plan before setup`);
+  }
   assert.doesNotMatch(read("ui-shards.yml"), /runner-storage\.mjs/, "browser-only shards do not need native build reclamation");
 });
 
@@ -532,4 +538,44 @@ test("actual native Perl acceptance runs in the serial Windows producer after bo
   const scopeGuard = /^        if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}\n/mu;
   assert.match(contract, scopeGuard);
   assert.doesNotMatch(contract.replace(scopeGuard, ""), /continue-on-error|\|\| true|\n\s*if:/u);
+});
+
+test("ordinary process hang policy preserves heavy-case margin and dedicated exceptions", () => {
+  const config = readFileSync(
+    new URL("../../.config/nextest.toml", import.meta.url),
+    "utf8",
+  );
+  const section = nextestProfileSection(config, "default");
+  assert(section, "ordinary profile must explicitly bound stuck processes");
+  const policy = section.match(
+    /slow-timeout = \{ period = "(\d+)s", terminate-after = (\d+), grace-period = "5s" \}/u,
+  );
+  assert(policy, "ordinary process watchdog must fail and terminate");
+  assert.equal(Number(policy[1]), 60);
+  assert.equal(Number(policy[2]), 15);
+  assert.equal(Number(policy[1]) * Number(policy[2]), 900);
+  assert.match(config, /heavy.*400s/u);
+  assert.match(
+    config,
+    /period = "15s", terminate-after = 4, grace-period = "5s"/u,
+  );
+  assert.match(
+    config,
+    /period = "30s", terminate-after = 10, grace-period = "5s"/u,
+  );
+
+  assert.doesNotMatch(config, /on-timeout\s*=\s*"pass"/u);
+});
+
+test("Nextest fixture acceleration changes only its owned profile", () => {
+  const policy = 'slow-timeout = { period = "60s", terminate-after = 15, grace-period = "5s" }';
+  for (const newline of ["\n", "\r\n"]) {
+    const config = ['[profile.default]', policy, '[[profile.default.overrides]]', 'priority = 100', '[profile.mutants]', policy, 'test-threads = 4', ''].join(newline);
+    const accelerated = replaceNextestProfileText(config, "default", policy, policy.replace('"60s"', '"100ms"'));
+    assert.match(nextestProfileSection(accelerated, "default"), /period = "100ms"/u);
+    assert.equal(nextestProfileSection(accelerated, "mutants"), nextestProfileSection(config, "mutants"));
+    assert.equal(accelerated.slice(accelerated.indexOf('[[profile.default.overrides]]')), config.slice(config.indexOf('[[profile.default.overrides]]')));
+    assert.throws(() => replaceNextestProfileText(config, "absent", policy, ""), /expected one Nextest profile/u);
+    assert.throws(() => replaceNextestProfileText(config, "default", "absent policy", ""), /expected one replacement/u);
+  }
 });

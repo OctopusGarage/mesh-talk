@@ -160,6 +160,22 @@ launch its web server in another group; use the actual tool's teardown protocol
 and retain independent server-retirement controls in the UI command owner. Missing
 cooperative teardown evidence cannot become verified cleanup merely because the
 CLI exited or its group disappeared.
+Tools such as Nextest and cargo-mutants create independently grouped children.
+Killing their supervisor can close captured output while a real test remains
+alive. Trace the tool's actual child ownership and shutdown protocol; neither
+pipe closure nor the original group's disappearance proves retirement. The
+[Linux mutation owner](../scripts/release/mutation-process-owner.py) uses a kernel
+subreaper, pidfd-verified direct-child authority and one reaping loop across
+normal exit and cancellation. If descriptor allocation fails, only a sole reaper
+may signal a kernel-verified direct child whose status remains unreaped; consuming
+that status before signalling would lose the identity guarantee. Child enumeration supplies candidates, not absence
+proof; only kernel `ECHILD` after reaping establishes no owned descendants.
+Missing, invalid or incomplete retirement acknowledgment keeps cleanup unverified.
+Reserve the owner's bounded teardown window without changing ordinary callers'
+defaults or using process names, stale PIDs or broad group sweeps as authority.
+Actual direct-tool, nested-tool and active-build cancellation controls retain an
+unrelated sibling and require acknowledged test retirement before returning.
+
 Leader exit and output-pipe closure are separate lifecycle events. Bound draining
 after owned-group retirement: an escaped descendant can retain inherited pipes
 forever. Close only the owner's read ends, retain unverified cleanup and quarantine
@@ -409,6 +425,18 @@ workspace/toolchain data, redirected paths and non-hosted environments.
 Keep secrets and private payloads out of diagnostic logs and fixtures.
 
 ## R10: Evidence that exercises the failure
+
+Scope fixture transformations and assertions to the owning configuration table,
+not globally unique text. Test the same valid value in an unrelated profile and
+verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnostics/test-fixtures/nextest.mjs)
+and [cheap CI policy regressions](../scripts/diagnostics/ci-latency.test.mjs)
+protect this boundary; actual compiler fixtures still exercise native behavior.
+
+Source-integrity fixtures must not ignore tool output that production leaves
+untracked. Keep generated evidence outside the source checkout and assert the
+checkout stays clean after real tool execution; also prove unrelated untracked
+source is still rejected. The [shared mutation controls](../scripts/release/run-mutants.test.mjs)
+own this regression without weakening the production cleanliness gate.
 
 Keep unrelated tool-version startup outside process-lifecycle assertions. The
 [supervisor isolation regression](../scripts/diagnostics/windows-process-owner.test.mjs)

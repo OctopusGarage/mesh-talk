@@ -1241,7 +1241,7 @@ functional convergence phases above, once the original operation is admitted, or
 proof starts, the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
 Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
-work drains. The overall nextest per-test 60-second and mutation 360-second
+work drains. The owning Nextest per-test and complete mutation-suite
 limits remain authoritative; stage bounds do not add together into a larger test
 budget. Only waits with this specific pre-admission/controlled-hold purpose use
 the cold helper; do not replace unrelated eight-second waits by matching their
@@ -1597,38 +1597,42 @@ scheduled run. Dispatch Mutation Testing after a critical invariant change when
 immediate deep evidence is needed. This policy keeps all ordinary platform,
 security, unit, integration and coverage acceptance gates in place.
 
-Mutation runners list their exact rotating/diff selection before installing native
-system libraries, restoring compiled caches or building the frontend. An empty
-selection skips those execution costs; listing errors fail the runner. Nonempty
-selections still execute their own unmodified baseline and strict outcome validation.
-The preflight does not narrow the sample or certify any test result. Pinned-tool
-smoke tests cover empty and nonempty selections without compiling a failing fixture.
+Mutation planning lists the exact rotating/diff selection before installing
+native libraries, restoring compiled caches or building the frontend. Discovery
+errors fail the run. An actual empty selection skips baseline and worker execution
+costs and remains explicitly empty; it does not certify tests passed. The planner
+preserves the original rotating sample's exact union, rejects duplicate or
+inconsistent selections, and bounds each worker's selected count from the owned
+compile, suite and job budgets. Budget complete surviving mutants as well as
+caught ones; do not assume every mutation fails early.
 
-Daily/manual mutation testing retains one rotating workspace sample across four runners and
-four isolated test processes per runner. The 180-minute job budget covers setup,
-the baseline and the observed sample of up to 17 mutants. Each complete workspace
-suite has a 360-second bound; individual tests retain the 60-second hang detector
-and five-second termination grace. Failed or interrupted reports still fail the gate.
+Nonempty daily/manual runs execute one complete unmodified workspace baseline.
+The [mutation runner](../scripts/release/run-mutants.mjs) owns finite compilation,
+complete inventory discovery and test execution. The
+[mutation evidence owner](../scripts/release/mutation-evidence.mjs) validates its
+receipt and each worker's unchanged tool report. Workers may skip their inline
+baseline only after verifying the immutable baseline artifact against trusted
+current-run producer outputs, source, tools, configuration and inventory. A
+failed-only rerun may reuse the successful producer's original attested attempt
+within that same run. Missing, stale, partial or incompatible evidence fails before
+mutation execution; do not synthesize a `Baseline` report record. Shared baseline
+and worker execution is Linux-only and uses the existing command owner with the
+scoped kernel subreaper. It retains actual work through tool-specific shutdown,
+then verifies kernel-owned descendants are reaped before acknowledging cleanup.
+Run `node --test scripts/release/mutation-process-owner.test.mjs` with the pinned
+tools on Linux for direct Nextest, nested mutation and active-build cancellation
+controls. Non-Linux skips are not native qualification.
 
-Run 40922461468 exposed a budget mismatch: the package baseline ran 2,228 tests
-and took 223 seconds on the slower runner, while every mutation ran 2,829 tests.
-The baseline core work plus observed host work already exceeds a 240-second
-four-process budget, even before the remaining workspace tests.
-At cancellation, the active tests were only milliseconds to ten seconds old;
-none had reached the individual hang limit. Other shards completed the same full
-inventory in 183–209 seconds, confirming runner variance rather than a universal
-hang. The six-minute suite budget includes the larger inventory and variance;
-it does not reclassify those interrupted runs as successes or change test scope.
-Reassess budgets using actual commands, inventories and build/test timings as the
-workspace grows, rather than comparing a package baseline with a workspace run.
-
-The pinned cargo-mutants 27.1.0 baseline selects only packages containing the
-selected mutations, even with `--workspace --test-workspace true`; individual
-mutations still run the complete workspace. Record both actual commands and test
-inventories. A package-only baseline is not a measured workspace baseline, and
-its wall time must not be compared directly with a larger mutation run. Acceptance
-also requires the separate complete workspace CI gate; no mutation baseline is
-skipped or reported as broader than it ran.
+Every mutation retains complete workspace consumers and four isolated test
+processes. Per-case hang detection, the complete-suite deadline and owned compile
+bounds are independent and remain in their executable owners. The workflow
+reserves separate setup, cleanup and publication time and limits concurrent
+workers. Inspect all planned reports; failed, cancelled, interrupted or incomplete
+work never becomes a successful sweep. The separate ordinary workspace CI gate
+remains required. Pinned-tool smoke fixtures exercise actual selection, external
+baseline failure/rejection, caught/surviving/hanging mutations and report format.
+A tiny tool-contract pass does not establish that the complete product inventory
+fits its execution budget; remeasure that full baseline after material growth.
 
 The mutation runner explicitly sets `CARGO_INCREMENTAL=1` for both tool child
 processes because rust-cache exports `0` through the job environment. The real-tool
@@ -1641,9 +1645,9 @@ time, proves the real send owns the guard, and checks it remains pending at
 9.999 seconds, then the unchanged ten-second production timer must complete before
 the original twelve-second outer bound and release that guard. Paused time
 auto-drives the awaited timer, including Tokio's millisecond tick rounding. No real
-UDP clock is accelerated. Test inventory, four
-processes and the sixty-second per-test limit remain unchanged; the complete
-workspace uses the 360-second suite budget described above.
+UDP clock is accelerated. Test inventory and four
+isolated processes remain unchanged; the owning Nextest profile and mutation
+runner define the independent per-case and complete-suite limits.
 Scheduling estimates are not completed-run evidence; validate the full unchanged
 workspace inventory on the current candidate before claiming a timing improvement.
 
