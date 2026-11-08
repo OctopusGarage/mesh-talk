@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WKGDG1ABQ1BA93464BHZ39",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-08T03:34:04.600771Z",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/sanitizers.yml",
+    "docs/ci-maintenance.md",
+    "scripts/ci/asan.mjs",
+    "scripts/diagnostics/asan.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "232b6def33d6",
+  "checkpoint_transcript_start": 30210,
+  "transcript_lines_at_start": 30210,
+  "compact_transcript_start": 3483,
+  "token_usage": {
+    "input_tokens": 76743,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 8530304,
+    "output_tokens": 29434,
+    "api_call_count": 37,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 481,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 4,
+      "credentialed_uri": 0,
+      "entropy": 486,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 8
+  }
+}
