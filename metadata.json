@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WEJGVJN32CCZFVG3GEETBE",
+  "strategy": "manual-commit",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/ci-maintenance.md",
+    "scripts/ci/asan-cli.test.mjs",
+    "scripts/ci/asan.mjs",
+    "scripts/diagnostics/asan.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 13788,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 2640128,
+    "output_tokens": 12037,
+    "api_call_count": 18,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 424,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 4,
+      "credentialed_uri": 0,
+      "entropy": 429,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
