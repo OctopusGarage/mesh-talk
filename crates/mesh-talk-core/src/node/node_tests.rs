@@ -9784,6 +9784,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let delivery_work = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let delivery_trace_started = std::time::Instant::now();
     let delivery_trace_omitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let replay_expected = Arc::new(Mutex::new(None::<String>));
+    let replay_offered_erased = Arc::new(std::sync::atomic::AtomicBool::new(false));
     for (label, current, peer) in [
         ("source", &a1_node, a2_node.identity.public()),
         ("sibling", &a2_node, a1_node.identity.public()),
@@ -9791,8 +9793,16 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         let trace = delivery_trace.clone();
         let work = delivery_work.clone();
         let omitted = delivery_trace_omitted.clone();
+        let replay_expected = replay_expected.clone();
+        let replay_offered_erased = replay_offered_erased.clone();
         *current.account_client_test_hook.lock().unwrap() =
             Some(Arc::new(move |observed, phase| {
+                if label == "sibling"
+                    && observed == peer
+                    && replay_expected.lock().unwrap().as_ref() == Some(&phase)
+                {
+                    replay_offered_erased.store(true, std::sync::atomic::Ordering::Release);
+                }
                 if observed != peer
                     || !(phase.starts_with("dial_")
                         || phase.starts_with("session_")
@@ -9978,19 +9988,43 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     }
     new_channel_delivery.expect("new channel messages still arrive");
     phase("erase_recheck_begin");
-    tokio::time::sleep(Duration::from_secs(11)).await;
-    let history = tokio::time::timeout_at(new_delivery_deadline + Duration::from_secs(11), async {
+    // Observe an actual fresh source replay, not elapsed time or an unchanged
+    // digest response. Keep both the real commit and query on the peer reactor.
+    let replay_node = a2_node.clone();
+    let replay_source = a2_node.routing_peer(&a1_node.user_id()).unwrap();
+    let expected = replay_expected.clone();
+    let permit = a2_node.runtime_work.admit().unwrap();
+    let mut replay = a2_peer.as_ref().unwrap().runtime_handle().spawn(permit.track(async move {
+        *expected.lock().unwrap() = Some(format!(
+            "history_channel_committed task={:?} channel={} event={}",
+            tokio::task::try_id(), hex::encode(channel.as_bytes()), old_channel_id.to_hex()
+        ));
+        replay_node.replay_account_history_for_test(&replay_source).await?;
         loop {
-            match channel_texts(&a2_node) {
-                Ok(history) => break history,
+            match replay_node.channel_history(channel, 10) {
+                Ok(history) => return Ok::<_, NodeError>(history),
                 Err(NodeError::Log(LogError::StaleCursor)) => {}
-                Err(error) => panic!("linked erase observation failed: {error}"),
+                Err(error) => return Err(error),
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    })
-    .await
-    .expect("linked erase is readable within the existing delivery and observation window");
+    }));
+    let history = match tokio::time::timeout_at(
+        new_delivery_deadline + Duration::from_secs(11), &mut replay
+    ).await {
+        Ok(result) => result.expect("owned replay task must finish").expect("linked erase replay and observation must succeed"),
+        Err(_) => {
+            // Cancellation does not abandon an admitted blocking commit: the
+            // existing peer retirement below also drains its actual work owner.
+            replay.abort();
+            let retired = replay.await;
+            assert!(retired.is_ok() || retired.is_err_and(|error| error.is_cancelled()));
+            panic!("linked erase replay is readable within the existing delivery and observation window");
+        }
+    };
+    assert!(replay_offered_erased.load(std::sync::atomic::Ordering::Acquire),
+        "fresh replay must offer the exact erased channel payload and await its real commit");
+    let history: Vec<_> = history.into_iter().filter(|entry| entry.file.is_none()).collect();
     assert_eq!(
         history.len(),
         1,

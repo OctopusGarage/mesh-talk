@@ -839,8 +839,17 @@ Exercise interrupted log finalization as well as child retirement through the
 existing [process-owner controls](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
 Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
-run cannot qualify an unbounded environmental dependency for later main runs. Asynchronous
-progress notifications are observations, not readiness barriers. Cancellation
+run cannot qualify an unbounded environmental dependency for later main runs.
+Do not use a fixed sleep to infer that background synchronization has happened.
+Bind negative assertions to an actual post-change operation: for deletion replay,
+prove the erased record was offered again and all pages were applied before
+checking that it remains absent. A successful page, unchanged-digest response or
+unrelated worker notification does not prove a complete replay. Keep deadlines
+as failure bounds, and retain ownership and joins for admitted work on timeout.
+Give counterfactual source copies their own Cargo target directory. Relative
+package paths can collide across copies and reuse a mutated test executable;
+the canonical candidate must never consume a negative control's build output.
+Asynchronous progress notifications are observations, not readiness barriers. Cancellation
 fixtures must bind readiness to still-live owned work after the required real
 materialization, then assert its retirement before later admission or cleanup;
 a bounded fallback may fail missing readiness but cannot manufacture a pass.
