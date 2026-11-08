@@ -786,7 +786,18 @@ intended source change; unrelated copied tools must not inflate changed-file
 validation or consume the assertion's watchdog.
 
 Lifecycle regressions should exercise the real supervisor and child processes
-without making unrelated host tool startup part of their success condition.
+without making unrelated host tool startup part of their success condition. Full-host
+network fixtures must use the existing independent device runtime owner, retain
+the original offline/online cuts and observation budgets, and join actual work
+before profile reuse on success and failure. A timer sharing a synchronously
+stalled reactor provides no independent watchdog; isolate device scheduling
+rather than extending timeouts or assigning one shared reactor more workers.
+Keep the genuine held-worker delivery control alongside reconnect acceptance.
+Separating accept and maintenance loops does not move direct observer queries,
+public sends or their caller-owned idle-expiry tasks onto those device runtimes;
+those paths can still stall the observer's timer. Local fixture success does not
+establish the historical Windows lock, complete watchdog independence or native
+platform qualification.
 When tool identity is outside the assertion, reuse the existing
 [tool-version fixture](../scripts/diagnostics/test-fixtures/tool-versions.mjs)
 and verify that its probes were actually consumed. Keep the real command,

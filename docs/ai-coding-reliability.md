@@ -132,7 +132,14 @@ reactor. The growing-history regression in
 holds the actual source writer until a receiver page imports, then measures
 continuation progress separately from setup and checks advancing cursors.
 Full-host file fixtures retain a separate two-worker reactor for each simulated
-application. This includes the explicit account File result/retry rigs: use the
+application. The [linked reconnect fixture](../crates/mesh-talk-core/src/node/node_tests.rs)
+also uses that owner at its original offline/online cuts and joins admitted work
+before reopening a profile, on failure as well as success. This separates device
+accept and maintenance loops; direct observer queries and public sends, including
+caller-owned idle-expiry tasks, can still run on the observer reactor. A timer on
+that reactor cannot bound a synchronous stall. Preserve the observation budget
+and do not infer a particular deadlock or complete watchdog independence from an
+unpolled timer alone. This includes the explicit account File result/retry rigs: use the
 existing independent peer owner for source, requester, recipient and the launched
 fresh sibling, keeping inactive retry phases and every byte/manifest assertion.
 Release fault helpers before joining hosts, and preserve body failure after

@@ -9381,6 +9381,8 @@ async fn send_to_account_self_syncs_to_own_other_device() {
 #[tokio::test]
 async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     use crate::identity::account::Account;
+    use crate::node::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
 
     let fixture_started = std::time::Instant::now();
     let phase = |name: &'static str| {
@@ -9591,7 +9593,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         })
     };
 
-    let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
+    // Each device owns its protocol reactor; the observer must not share a
+    // synchronous maintenance turn with either simulated application.
+    let mut a1_peer = None;
+    let mut a2_peer = None;
+    let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
+    let mut source = IndependentPeerRuntime::start_multithreaded(Arc::clone(&a1_node), a1_listener).await;
+    source.launch();
+    a1_peer = Some(source);
     phase("incoming_dm_send_begin");
     bob_node
         .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
@@ -9612,7 +9621,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     assert!(dm_texts(&a2_node).unwrap().is_empty());
 
     phase("incoming_source_observation_finished");
-    let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
+    let mut sibling = IndependentPeerRuntime::start_multithreaded(Arc::clone(&a2_node), a2_listener).await;
+    sibling.launch();
+    a2_peer = Some(sibling);
     phase("sibling_join_observation_begin");
     let join_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     tokio::time::timeout_at(join_deadline, async {
@@ -10256,14 +10267,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     // Cancelling the accept loop does not cancel admitted blocking storage work.
     // Retire it before the same exclusive profile is opened again.
     phase("sibling_retirement_begin");
-    a2_node.runtime_work.close();
     a2_node.clear_delivery_observations();
-    a2_task.abort();
-    let _ = a2_task.await;
-    a2_node.sessions.clear();
-    tokio::time::timeout(Duration::from_secs(5), a2_node.runtime_work.drain())
-        .await
-        .expect("the old sibling's admitted storage work must retire");
+    let mut retirement = Box::pin(a2_peer.take().unwrap().stop());
+    let retired_in_budget = tokio::time::timeout(Duration::from_secs(5), &mut retirement).await;
+    if retired_in_budget.is_err() {
+        // A failed observation budget does not transfer thread-join ownership.
+        retirement.await;
+    }
+    retired_in_budget.expect("the old sibling's admitted storage work must retire");
     a2_node.close_profile().unwrap();
     phase("sibling_retirement_finished");
     let (reopen_dm, _reopen_dm_rx) = mpsc::unbounded_channel();
@@ -10335,9 +10346,34 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         std::fs::read(reopened_channel_copy).unwrap(),
         channel_attachment_bytes
     );
+    }))
+    .catch_unwind()
+    .await;
+    // Retire actual workers on assertion failure too, before the exclusive
+    // profile directories and the observer runtime can be dropped.
+    let mut cleanup_failure = None;
+    if let Some(sibling) = a2_peer.take() {
+        cleanup_failure = std::panic::AssertUnwindSafe(sibling.stop())
+            .catch_unwind()
+            .await
+            .err();
+    }
     phase("source_abort_begin");
-    a1_task.abort();
+    if let Some(source) = a1_peer.take() {
+        let stopped = std::panic::AssertUnwindSafe(source.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
     phase("body_finished_runtime_drop_next");
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+    if let Some(error) = cleanup_failure {
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[test]
