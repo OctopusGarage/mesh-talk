@@ -125,7 +125,11 @@ export function ContactContextMenu({
   account,
   name,
   children,
+  actions,
+  onOpenChange,
 }: {
+  actions?: React.ReactNode;
+  onOpenChange?: (open: boolean) => void;
   account: string;
   name: string;
   children: React.ReactNode;
@@ -138,11 +142,12 @@ export function ContactContextMenu({
   const myAccountId = useChat((s) => s.myAccountId);
   return (
     <>
-      <ContextMenu>
+      <ContextMenu onOpenChange={onOpenChange}>
         <ContextMenuTrigger asChild data-context-menu>
           {children}
         </ContextMenuTrigger>
         <ContextMenuContent>
+          {actions}
           <ContextMenuItem
             data-testid={`hide-contact-menu-${account}`}
             disabled={!loaded || account === myAccountId}

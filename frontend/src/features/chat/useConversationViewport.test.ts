@@ -880,3 +880,62 @@ it("lets reader intent cancel a queued geometry restoration", async () => {
   await nextAnimationFrame();
   expect(scroller.scrollTop).toBe(40);
 });
+
+it("owns live-edge pinning for row insertion and resize until reader input", async () => {
+  const callbacks: ResizeObserverCallback[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  await render("account:images");
+  const scroller = container.firstElementChild as HTMLElement;
+  let height = 1000;
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: () => height },
+    clientHeight: { value: 300 },
+  });
+  scroller.scrollTop = 700;
+  const scrollTo = vi.fn(() => {
+    scroller.scrollTop = height - scroller.clientHeight;
+  });
+  Object.assign(viewport.virtuosoRef, { current: { scrollTo } });
+  await act(async () => viewport.atBottomStateChange(true));
+  await nextAnimationFrame();
+  scrollTo.mockClear();
+
+  height = 1200;
+  // Use the actual mutation observer, as an inserted message does.
+  await act(async () => scroller.append(document.createElement("div")));
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalledWith({
+    top: Number.MAX_SAFE_INTEGER,
+    behavior: "auto",
+  });
+  expect(scroller.scrollTop).toBe(900);
+  scrollTo.mockClear();
+
+  height = 1400;
+  await act(async () => {
+    for (const callback of callbacks) callback([], {} as ResizeObserver);
+  });
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalled();
+  expect(scroller.scrollTop).toBe(1100);
+  scrollTo.mockClear();
+
+  viewport.stopRestoring();
+  height = 1600;
+  await act(async () => {
+    for (const callback of callbacks) callback([], {} as ResizeObserver);
+    scroller.append(document.createElement("div"));
+  });
+  await nextAnimationFrame();
+  expect(scrollTo).not.toHaveBeenCalled();
+  expect(scroller.scrollTop).toBe(1100);
+});

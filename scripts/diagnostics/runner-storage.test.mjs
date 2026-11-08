@@ -58,7 +58,12 @@ test("rejects non-hosted, self-hosted and non-Linux contexts before mutation", a
 });
 
 test("CLI rejects missing confirmation and arbitrary path arguments", () => {
-  for (const args of [[], ["--prepare", "/tmp"], ["--root", "/tmp"]]) {
+  for (const args of [
+    [],
+    ["--prepare", "/tmp"],
+    ["--measure", "/tmp"],
+    ["--root", "/tmp"],
+  ]) {
     const result = spawnSync(
       process.execPath,
       [
@@ -167,5 +172,31 @@ test(
       await readFile(join(outside, "workspace/keep"), "utf8"),
       "payload",
     );
+  },
+);
+
+test(
+  "consumer storage measurement preserves every image payload",
+  posix,
+  async (t) => {
+    const { measureRunnerStorage } = await import("../ci/runner-storage.mjs");
+    const root = await fixture(t);
+    for (const path of [
+      "usr/share/dotnet",
+      "usr/local/lib/android",
+      "opt/ghc",
+      "workspace",
+    ])
+      await payload(root, path);
+    const report = await measureRunnerStorage(context(root));
+    for (const value of Object.values(report))
+      assert.ok(Number.isFinite(value) && value > 0);
+    for (const path of [
+      "usr/share/dotnet",
+      "usr/local/lib/android",
+      "opt/ghc",
+      "workspace",
+    ])
+      assert.equal(await readFile(join(root, path, "keep"), "utf8"), "payload");
   },
 );

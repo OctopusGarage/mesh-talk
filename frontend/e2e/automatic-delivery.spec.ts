@@ -3,6 +3,7 @@ import {
   enterChat,
   openBobDm,
   revealComposerTools,
+  revealComposerAttachments,
   BOB,
 } from "./helpers/session";
 import { seedMarketPacks } from "./helpers/packs";
@@ -366,7 +367,7 @@ for (const kind of ["text", "sticker", "file card"] as const) {
       await page.getByTestId("sticker-pack-cats").click();
       await page.getByTestId("sticker-option-pack:cats:cat-01-01").click();
     } else {
-      await revealComposerTools(page);
+      await revealComposerAttachments(page);
       await page.getByTestId("composer-attach").click();
       await expect(
         page.getByTestId("message-bubble").filter({ hasText: "card.txt" }),
@@ -445,7 +446,7 @@ test("a native picker completed after conversation navigation cannot send to the
       return original(cmd, args);
     };
   });
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   await expect
     .poll(() =>
@@ -474,7 +475,7 @@ test("a native picker completed after conversation navigation cannot send to the
       window as unknown as { __pickerRace: { entered: boolean } }
     ).__pickerRace.entered = false;
   });
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   await expect
     .poll(() =>
@@ -869,7 +870,7 @@ test("typed channel File stays pending until canonical metadata commits and orig
     };
     host.__mockDeferNext("owner_submit_account_group_file");
   });
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   const bubble = page
     .getByTestId("message-bubble")

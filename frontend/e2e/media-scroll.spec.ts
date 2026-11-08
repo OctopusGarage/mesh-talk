@@ -82,16 +82,29 @@ async function releaseImages(page: import("@playwright/test").Page) {
   });
 }
 
-// A virtualized row may be absent between renders. Sample its geometry in one
-// browser task rather than nesting locator attachment waits inside expect.poll.
-async function readRowHeight(
-  page: import("@playwright/test").Page,
+// A virtualized row may be absent between renders. Sample decode and geometry
+// in one browser task; the outer assertion owns readiness, not a locator wait.
+async function readMediaRow(
+  page: Pick<import("@playwright/test").Page, "evaluate">,
   messageId: string,
 ) {
   return page.evaluate((id) => {
     const rows = document.querySelectorAll(`[data-message-id="${id}"]`);
     if (rows.length > 1) throw new Error(`Duplicate message row: ${id}`);
-    return rows[0]?.getBoundingClientRect().height;
+    const row = rows[0];
+    if (!row) return undefined;
+    const images = row.querySelectorAll<HTMLImageElement>(
+      '[data-testid="file-image"]',
+    );
+    if (images.length > 1) throw new Error(`Duplicate media image: ${id}`);
+    const image = images[0];
+    const box = image?.getBoundingClientRect();
+    return {
+      height: row.getBoundingClientRect().height,
+      naturalWidth: image?.naturalWidth,
+      imageAspectRatio:
+        box && box.height > 0 ? box.width / box.height : undefined,
+    };
   }, messageId);
 }
 
@@ -137,21 +150,22 @@ test("scrolling away and returning to latest reuses media without changing row h
     video: false,
     invalid: false,
   });
-  await releaseImages(page);
   const row = page.locator('[data-message-id="scroll-message-59"]');
+  // Fixture preparation must reach the visible newest row before the decode
+  // assertion's budget begins; initial virtualizer layout is still pending here.
+  await expect(row.getByRole("status")).toBeVisible();
+  await releaseImages(page);
   await expect
-    .poll(() =>
-      row
-        .getByTestId("file-image")
-        .evaluate((el) => (el as HTMLImageElement).naturalWidth),
+    .poll(
+      async () => (await readMediaRow(page, "scroll-message-59"))?.naturalWidth,
     )
     .toBe(1600);
   await expect(row).toBeVisible();
   await expect
-    .poll(async () => {
-      const box = await row.getByTestId("file-image").boundingBox();
-      return box ? box.width / box.height : undefined;
-    })
+    .poll(
+      async () =>
+        (await readMediaRow(page, "scroll-message-59"))?.imageAspectRatio,
+    )
     .toBeCloseTo(8, 1);
   const log = page.getByRole("log");
   // The newest row can render before the virtualizer finishes its initial
@@ -168,7 +182,7 @@ test("scrolling away and returning to latest reuses media without changing row h
       ),
     )
     .toBeLessThanOrEqual(1);
-  const initialHeight = await readRowHeight(page, "scroll-message-59");
+  const initialHeight = (await readMediaRow(page, "scroll-message-59"))?.height;
   expect(initialHeight).toBeGreaterThan(0);
   const readsBefore = await page.evaluate(
     () =>
@@ -193,13 +207,18 @@ test("scrolling away and returning to latest reuses media without changing row h
   await log.press("Home");
   await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBe(0);
   await expect(row).toHaveCount(0);
-  expect(await readRowHeight(page, "scroll-message-59")).toBeUndefined();
+  // This observer exposes one DOM snapshot, so a future attachment-waiting
+  // implementation fails this absent-row control immediately.
+  const snapshotOnly = {
+    evaluate: page.evaluate.bind(page),
+  };
+  expect(await readMediaRow(snapshotOnly, "scroll-message-59")).toBeUndefined();
   await page.getByTestId("jump-to-latest").click();
   await expect(row.getByTestId("file-image")).toBeVisible();
   // The virtualizer can replace this row after visibility but before geometry
   // is read. A missing box is pending, never a successful height measurement.
   await expect
-    .poll(() => readRowHeight(page, "scroll-message-59"))
+    .poll(async () => (await readMediaRow(page, "scroll-message-59"))?.height)
     .toBe(initialHeight);
   const readsAfter = await page.evaluate(
     () =>
@@ -208,6 +227,36 @@ test("scrolling away and returning to latest reuses media without changing row h
   expect(readsAfter, "Virtualized remount must reuse the live media URL").toBe(
     readsBefore,
   );
+  // Independent sampler controls must not consume the cache retention window.
+  // Preserve the strict locator's duplicate rejection even for hidden images.
+  await page.evaluate(() => {
+    const control = document.createElement("div");
+    control.dataset.messageId = "media-snapshot-control";
+    control.hidden = true;
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 16;
+    canvas.getContext("2d")!.fillRect(0, 0, 16, 16);
+    for (let index = 0; index < 2; index++) {
+      const image = document.createElement("img");
+      image.src = canvas.toDataURL();
+      image.alt = "Duplicate-image validation fixture";
+      image.dataset.testid = "file-image";
+      control.append(image);
+    }
+    document.body.append(control);
+  });
+  try {
+    await expect(
+      readMediaRow(snapshotOnly, "media-snapshot-control"),
+    ).rejects.toThrow("Duplicate media image");
+  } finally {
+    await page.evaluate(() => {
+      document
+        .querySelector('[data-message-id="media-snapshot-control"]')
+        ?.remove();
+    });
+  }
 });
 
 for (const [label, width, height] of [

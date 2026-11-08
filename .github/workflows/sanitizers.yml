@@ -29,6 +29,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Upgrade through a reviewed PR with all eight native instrumentation controls.
+  MESH_ASAN_TOOLCHAIN: nightly-2026-11-07
   RUSTFLAGS: "-Zsanitizer=address"
   RUSTDOCFLAGS: "-Zsanitizer=address"
   ASAN_OPTIONS: "detect_leaks=1"
@@ -75,18 +77,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Resolve installed nightly manifest
+      - name: Install configured nightly cohort
         uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: ${{ env.MESH_ASAN_TOOLCHAIN }}
           components: rust-src
       - name: Publish exact installed nightly cohort
         id: cohort
         run: node scripts/ci/asan.mjs cohort
-      - name: Install exact producer nightly cohort
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: ${{ steps.cohort.outputs.toolchain }}
-          components: rust-src
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -94,9 +92,10 @@ jobs:
           # Preserve the compatible cache prefix after moving compilation jobs.
           shared-key: sanitizers-shards
       - name: Install pinned Nextest
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest@0.9.150
+          fallback: none
       - name: Verify pinned ASan archive protocol
         run: node --test scripts/ci/asan-cli.test.mjs
       - name: Compile and seal the ASan core archive once
@@ -143,9 +142,10 @@ jobs:
           toolchain: ${{ needs.cohort.outputs.toolchain }}
           components: rust-src
       - name: Install pinned Nextest
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest@0.9.150
+          fallback: none
       - name: Download the current compiled ASan archive
         uses: actions/download-artifact@v8
         with:

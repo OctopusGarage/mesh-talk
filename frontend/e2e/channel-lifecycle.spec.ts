@@ -36,7 +36,7 @@ test("a channel can be hidden and restored locally", async ({ page }) => {
   await expect(row).toBeVisible();
   await row.hover();
   await page.getByTestId(`conversation-actions-${CHANNEL.id}`).click();
-  await page.getByRole("button", { name: "Hide channel" }).click();
+  await page.getByRole("menuitem", { name: "Hide channel" }).click();
   await expect(row).not.toBeVisible();
   await page.getByText("Hidden channels (1)").click();
   await page.getByRole("button", { name: "Restore" }).click();

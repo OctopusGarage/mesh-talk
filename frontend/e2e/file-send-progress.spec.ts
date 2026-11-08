@@ -1,5 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
-import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
+import {
+  enterChat,
+  openBobDm,
+  revealComposerAttachments,
+} from "./helpers/session";
 
 // Successful portable scenarios retain evidence in the full Chromium run.
 test.use({ trace: "on" });
@@ -60,7 +64,7 @@ for (const attachment of [
         return result;
       };
     }, attachment.path);
-    await revealComposerTools(page);
+    await revealComposerAttachments(page);
     await page.getByTestId(attachment.button).click();
     const bubble = page.getByTestId("message-bubble").last();
     await expect(
@@ -163,9 +167,9 @@ test("concurrent sends keep progress with their own file bubbles", async ({
     };
   });
 
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   await expect
     .poll(() =>
@@ -273,7 +277,7 @@ test("a failed folder send removes preparing progress and offers retry", async (
       "invalid input: file manifest exceeds transport frame",
     );
   });
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   const bubble = page.getByTestId("message-bubble").last();
   await expect(bubble.getByText("Failed to send")).toBeVisible();

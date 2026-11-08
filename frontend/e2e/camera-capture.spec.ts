@@ -1,5 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
-import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
+import {
+  enterChat,
+  openBobDm,
+  revealComposerAttachments,
+} from "./helpers/session";
 
 for (const viewport of [
   { width: 1440, height: 1000 },
@@ -29,8 +33,8 @@ for (const viewport of [
     });
     await enterChat(page);
     await openBobDm(page);
-    await revealComposerTools(page);
     await page.getByTestId("composer-input").fill("Photo draft");
+    await revealComposerAttachments(page);
     await page.getByTestId("composer-camera").click();
     await expect(page.getByTestId("camera-shutter")).toBeEnabled();
     await page.screenshot({ path: testInfo.outputPath("camera-preview.png") });

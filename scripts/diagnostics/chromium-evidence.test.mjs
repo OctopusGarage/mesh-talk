@@ -132,18 +132,24 @@ test("downloaded collectors preserve attempt, OS partitions and diagnostic produ
     assert.deepEqual(collected.map(row => row.actual), ["linux", "darwin", "win32"].map(platform => ({ ...identity, platform })));
     const rendered = [];
     const options = { merge: async (_directory, os) => rendered.push(os), log() {} };
-    await renderDownloadedReports(join(root, "reports"), join(root, "merged"), { runAttempt: "2", linuxResult: "failure", desktopResult: "cancelled" }, options);
+    await renderDownloadedReports(join(root, "reports"), join(root, "merged"), { runAttempt: "2", linuxResult: "failure", desktopResult: "cancelled", windowsResult: "failure" }, options);
     assert.deepEqual(rendered, systems, "failed admitted producers still yield diagnostic reports");
     rendered.length = 0;
-    await renderDownloadedReports(join(root, "reports"), join(root, "skipped"), { runAttempt: "2", linuxResult: "success", desktopResult: "skipped" }, options);
+    await renderDownloadedReports(join(root, "reports"), join(root, "skipped"), { runAttempt: "2", linuxResult: "success", desktopResult: "skipped", windowsResult: "skipped" }, options);
     assert.deepEqual(rendered, [systems[0]]);
-    for (const change of [{ runAttempt: "1" }, { linuxResult: "unknown" }, { linuxResult: "skipped", desktopResult: "skipped" }]) {
-      await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "negative"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", ...change }, options), /incomplete/);
+    for (const [desktopResult, windowsResult, expected] of [["skipped", "success", [systems[0], systems[2]]], ["success", "skipped", systems.slice(0, 2)]]) {
+      rendered.length = 0;
+      await renderDownloadedReports(join(root, "reports"), join(root, "mixed"), {runAttempt:"2", linuxResult:"success", desktopResult, windowsResult}, options);
+      assert.deepEqual(rendered, expected);
+    }
+    for (const windowsResult of [undefined, "", "unknown", "in_progress"]) await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "invalid-windows"), {runAttempt:"2", linuxResult:"success", desktopResult:"success", windowsResult}, options), /incomplete/);
+    for (const change of [{ runAttempt: "1" }, { linuxResult: "unknown" }, { linuxResult: "skipped", desktopResult: "skipped", windowsResult: "skipped" }]) {
+      await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "negative"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", windowsResult: "success", ...change }, options), /incomplete/);
     }
     await rm(join(root, "reports", "playwright-ui-macos-26-intel-8-2"), { recursive: true });
     rendered.length = 0;
-    await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "missing"), { runAttempt: "2", linuxResult: "success", desktopResult: "success" }, options));
+    await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "missing"), { runAttempt: "2", linuxResult: "success", desktopResult: "success", windowsResult: "success" }, options));
     assert.deepEqual(rendered, [systems[0], systems[2]], "missing Mac evidence does not suppress available OS diagnostics");
-    await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "broken"), { runAttempt: "2", linuxResult: "success", desktopResult: "skipped" }, { merge: async () => { throw Error("corrupt blob"); }, log() {} }));
+    await assert.rejects(renderDownloadedReports(join(root, "reports"), join(root, "broken"), { runAttempt: "2", linuxResult: "success", desktopResult: "skipped", windowsResult: "skipped" }, { merge: async () => { throw Error("corrupt blob"); }, log() {} }));
   } finally { await rm(root, { recursive: true, force: true }); }
 });

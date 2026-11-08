@@ -9,6 +9,64 @@ import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 
 const signalReadyWorker = "process.on('SIGTERM',()=>{});const fs=require('node:fs');const ready=process.argv[1];fs.writeFileSync(ready+'.pending',String(process.pid));fs.renameSync(ready+'.pending',ready);setInterval(()=>{},1000)";
 
+for (const phase of ["write", "final"]) for (const cancelled of [true, false]) test(`${cancelled ? "cancellation settles held" : "failure rejects"} log ${phase} after actual command retirement`, { skip: process.platform === "win32", timeout: 12000 }, async () => {
+  const { execute } = await import("../validation/stage.mjs");
+  const { Writable } = await import("node:stream");
+  const controller = new AbortController();
+  let release, pid, timer, completion, entered = false;
+  const originalKill = process.kill;
+  let groupAbsenceVerified = false;
+  const lateGroupSignals = [];
+  if (phase === "final") process.kill = function (target, signal) {
+    if (target !== -pid) return originalKill.call(this, target, signal);
+    if (groupAbsenceVerified) {
+      // Never actually signal a PGID after the kernel proved it absent.
+      if (signal !== 0) { lateGroupSignals.push(signal); return true; }
+      throw Object.assign(Error("Previously retired fixture group"), { code: "ESRCH" });
+    }
+    try { return originalKill.call(this, target, signal); }
+    catch (error) {
+      if (signal === 0 && error.code === "ESRCH") groupAbsenceVerified = true;
+      throw error;
+    }
+  };
+  const hold = done => {
+    entered = true;
+    if (cancelled) { release = done; queueMicrotask(() => controller.abort()); }
+    else done(Error(`Controlled log ${phase} failure`));
+  };
+  const output = new Writable({
+    write(_chunk, _encoding, done) { if (phase === "write") hold(done); else done(); },
+    final(done) { if (phase === "final") hold(done); else done(); },
+  });
+  try {
+    completion = execute([process.execPath, "-e", "console.log('actual owned output')"], {
+      env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, signal: controller.signal,
+      logPath: "fixture-owned-log", createLogStream: () => output, onOutput() {}, onSpawn: value => { pid = value; },
+    });
+    const result = await Promise.race([completion, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("cancelled log finalization remained pending")), 7000); })]);
+    assert.equal(entered, true);
+    assert.equal(controller.signal.aborted, cancelled);
+    assert.equal(result.code, cancelled ? 130 : 1);
+    assert.equal(result.failureKind, "failed");
+    assert.match(result.error, cancelled ? /log.*cancel/i : /Controlled log .* failure/);
+    if (phase === "final") assert.equal(result.exitCode, 0);
+    assert.equal(result.cleanupUnverified, false);
+    assert.equal(output.destroyed, true);
+    if (phase === "final") {
+      assert.equal(groupAbsenceVerified, true, "the real kernel must establish retirement before finalization");
+      assert.deepEqual(lateGroupSignals, [], "log failure must not signal a retired process-group identity");
+    }
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+    release?.();
+    try { if (completion) await completion; }
+    finally { process.kill = originalKill; }
+  }
+});
+
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "mesh-stage-"));
   t.after(() => rm(root, { recursive: true, force: true }));

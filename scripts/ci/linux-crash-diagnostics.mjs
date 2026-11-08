@@ -11,6 +11,7 @@ import {
   rename,
   lstat,
   readdir,
+  rmdir,
   rm,
 } from "node:fs/promises";
 import { join, resolve, sep, basename } from "node:path";
@@ -382,17 +383,56 @@ async function collect(p) {
     );
   await rm(p.state);
 }
+export async function withSelftestFiles(p, state, operation) {
+  const directory = join(state.workspace, "target/llvm-cov-target/debug/deps");
+  const token = randomUUID();
+  const executable = join(directory, `linux-exit-crash-control-${token}`);
+  const source = join(p.root, `exit-crash-control-${token}.c`);
+  const created = [];
+  let ownsSource = false;
+  try {
+    for (const relative of [
+      "target",
+      "target/llvm-cov-target",
+      "target/llvm-cov-target/debug",
+      "target/llvm-cov-target/debug/deps",
+    ]) {
+      const candidate = join(state.workspace, relative);
+      try {
+        await mkdir(candidate);
+        created.push(candidate);
+      } catch (error) {
+        if (error.code !== "EEXIST" || !(await lstat(candidate)).isDirectory())
+          throw error;
+      }
+    }
+    const file = await open(source, "wx");
+    ownsSource = true;
+    try {
+      await file.writeFile(
+        '#include <signal.h>\n#include <stdlib.h>\n#include <stdio.h>\n__attribute__((noinline)) void diagnostic_exit_crash(void) { raise(SIGSEGV); }\nint main(void) { atexit(diagnostic_exit_crash); puts("body passed"); fflush(stdout); return 0; }\n',
+      );
+    } finally {
+      await file.close();
+    }
+    return await operation({ source, executable });
+  } finally {
+    if (ownsSource) await rm(source, { force: true });
+    await rm(executable, { force: true });
+    // Remove only directories created here, and never remove new contents.
+    for (const owned of created.reverse()) {
+      try {
+        await rmdir(owned);
+      } catch (error) {
+        if (error.code === "ENOTEMPTY" || error.code === "EEXIST") break;
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+  }
+}
 async function selftest(p) {
   const state = JSON.parse(await readFile(p.state, "utf8"));
-  const directory = join(state.workspace, "target/llvm-cov-target/debug/deps");
-  await mkdir(directory, { recursive: true });
-  const executable = join(directory, "linux-exit-crash-control");
-  const source = join(p.root, "exit-crash-control.c");
-  await writeFile(
-    source,
-    '#include <signal.h>\n#include <stdlib.h>\n#include <stdio.h>\n__attribute__((noinline)) void diagnostic_exit_crash(void) { raise(SIGSEGV); }\nint main(void) { atexit(diagnostic_exit_crash); puts("body passed"); fflush(stdout); return 0; }\n',
-  );
-  try {
+  return withSelftestFiles(p, state, async ({ source, executable }) => {
     await command(["cc", "-g", "-O0", source, "-o", executable]);
     const result = await command([executable], { expected: null });
     if (result.signal !== "SIGSEGV")
@@ -415,10 +455,7 @@ async function selftest(p) {
       !/SIGSEGV/u.test(report.output)
     )
       throw Error("Selftest core must symbolize the actual exit crash");
-  } finally {
-    await rm(source, { force: true });
-    await rm(executable, { force: true });
-  }
+  });
 }
 if (
   process.argv[1] &&

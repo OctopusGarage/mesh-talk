@@ -3,10 +3,11 @@ import { Bookmark, MoreHorizontal, Pencil, Pin, PinOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { IdentityGlyph, PresenceDot } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { cn } from "@/lib/utils";
@@ -110,13 +111,69 @@ export function ConversationRow({
               ? groupPresenceLabel(presence, t)
               : presenceLabel(presence, t));
 
+  const actions = (
+    <>
+      <ContextMenuItem
+        onSelect={() => {
+          setActionsOpen(false);
+          onRename();
+        }}
+        data-testid={`conversation-rename-${conv.id}`}
+        aria-label={`${t("sidebar.rename")} ${conv.name}`}
+        className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Pencil className="h-3.5 w-3.5" />
+        {t("sidebar.rename")}
+      </ContextMenuItem>
+      <ContextMenuItem
+        onSelect={() => {
+          setActionsOpen(false);
+          onTogglePin();
+        }}
+        data-testid={`conversation-pin-${conv.id}`}
+        aria-label={`${t(pinned ? "sidebar.unpin" : "sidebar.pin")} ${conv.name}`}
+        className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {pinned ? (
+          <PinOff className="h-3.5 w-3.5" />
+        ) : (
+          <Pin className="h-3.5 w-3.5" />
+        )}
+        {t(pinned ? "sidebar.unpin" : "sidebar.pin")}
+      </ContextMenuItem>
+      {channel && onHide && (
+        <ContextMenuItem
+          onSelect={() => {
+            setActionsOpen(false);
+            onHide();
+          }}
+          className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {t("sidebar.hideChannel")}
+        </ContextMenuItem>
+      )}
+      {onDelete && (
+        <ContextMenuItem
+          onSelect={() => {
+            setActionsOpen(false);
+            onDelete();
+          }}
+          data-testid={`conversation-delete-${conv.id}`}
+          className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm text-destructive hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {t("conversationDeletion.delete")}
+        </ContextMenuItem>
+      )}
+    </>
+  );
+
   const row = (
     <div
       role="group"
       aria-label={`${listPosition} / ${listSize}`}
       className={cn(
         "conversation-row group relative flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left",
-        isActive ? "bg-signal/10" : "hover:bg-accent/45",
+        isActive || actionsOpen ? "bg-signal/10" : "hover:bg-accent/45",
       )}
     >
       {!channel && !personal && (
@@ -213,88 +270,55 @@ export function ConversationRow({
         </Badge>
       )}
       {!personal && (
-        <Popover open={actionsOpen} onOpenChange={setActionsOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              data-testid={`conversation-actions-${conv.id}`}
-              title={t("sidebar.moreActions")}
-              aria-label={`${t("sidebar.moreActions")} ${conv.name}`}
-              className={cn(
-                "absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11 [@media(hover:none)]:opacity-100",
-                actionsOpen
-                  ? "opacity-100"
-                  : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
-              )}
-            >
-              <MoreHorizontal className="h-4 w-4" />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent align="end" className="w-44 p-1">
-            <button
-              type="button"
-              onClick={() => {
-                setActionsOpen(false);
-                onRename();
-              }}
-              data-testid={`conversation-rename-${conv.id}`}
-              aria-label={`${t("sidebar.rename")} ${conv.name}`}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-              {t("sidebar.rename")}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActionsOpen(false);
-                onTogglePin();
-              }}
-              data-testid={`conversation-pin-${conv.id}`}
-              aria-label={`${t(pinned ? "sidebar.unpin" : "sidebar.pin")} ${conv.name}`}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {pinned ? (
-                <PinOff className="h-3.5 w-3.5" />
-              ) : (
-                <Pin className="h-3.5 w-3.5" />
-              )}
-              {t(pinned ? "sidebar.unpin" : "sidebar.pin")}
-            </button>
-            {channel && onHide && (
-              <button
-                type="button"
-                onClick={() => {
-                  setActionsOpen(false);
-                  onHide();
-                }}
-                className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {t("sidebar.hideChannel")}
-              </button>
-            )}
-            {onDelete && (
-              <button
-                type="button"
-                onClick={() => {
-                  setActionsOpen(false);
-                  onDelete();
-                }}
-                data-testid={`conversation-delete-${conv.id}`}
-                className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm text-destructive hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {t("conversationDeletion.delete")}
-              </button>
-            )}
-          </PopoverContent>
-        </Popover>
+        <button
+          type="button"
+          data-testid={`conversation-actions-${conv.id}`}
+          title={t("sidebar.moreActions")}
+          aria-label={`${t("sidebar.moreActions")} ${conv.name}`}
+          aria-haspopup="menu"
+          aria-expanded={actionsOpen}
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            // Use the row's existing context-menu trigger so both entry points
+            // share actions, disabled states and destructive confirmations.
+            event.currentTarget.dispatchEvent(
+              new MouseEvent("contextmenu", {
+                bubbles: true,
+                cancelable: true,
+                button: 2,
+                clientX: rect.left,
+                clientY: rect.bottom,
+              }),
+            );
+          }}
+          className={cn(
+            "absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11 [@media(hover:none)]:opacity-100",
+            actionsOpen
+              ? "bg-accent opacity-100"
+              : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
+          )}
+        >
+          <MoreHorizontal className="h-4 w-4" />
+        </button>
       )}
     </div>
   );
-  if (channel || personal) return row;
+  if (personal) return row;
+  if (channel)
+    return (
+      <ContextMenu onOpenChange={setActionsOpen}>
+        <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+        <ContextMenuContent>{actions}</ContextMenuContent>
+      </ContextMenu>
+    );
   return (
     <>
-      <ContactContextMenu account={conv.id} name={conv.name}>
+      <ContactContextMenu
+        account={conv.id}
+        name={conv.name}
+        actions={actions}
+        onOpenChange={setActionsOpen}
+      >
         {row}
       </ContactContextMenu>
       <MemberProfileDialog

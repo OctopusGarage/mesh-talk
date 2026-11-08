@@ -9381,6 +9381,8 @@ async fn send_to_account_self_syncs_to_own_other_device() {
 #[tokio::test]
 async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     use crate::identity::account::Account;
+    use crate::node::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
 
     let fixture_started = std::time::Instant::now();
     let phase = |name: &'static str| {
@@ -9409,6 +9411,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let a1_port = a1_listener.local_addr().unwrap().port();
     let a2_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a2_port = a2_listener.local_addr().unwrap().port();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
 
     let a1_roster = Arc::new(Mutex::new(Roster::default()));
     add_account_peer(
@@ -9424,7 +9428,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         &bob,
         &bob_account,
         "Bob",
-        4000,
+        bob_port,
         &a1.public().user_id(),
     );
     let a2_roster = Arc::new(Mutex::new(Roster::default()));
@@ -9591,7 +9595,20 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         })
     };
 
-    let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
+    // Each device owns its protocol reactor; the observer must not share a
+    // synchronous maintenance turn with either simulated application.
+    let mut a1_peer = None;
+    let mut a2_peer = None;
+    let mut bob_peer = None;
+    let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
+    let mut source = IndependentPeerRuntime::start_multithreaded(Arc::clone(&a1_node), a1_listener).await;
+    source.launch();
+    a1_peer = Some(source);
+    // Bob is online when sending this DM. Local acceptance plus one best-effort
+    // flush is insufficient: its actual host owns recovery after a failed round.
+    let mut sender = IndependentPeerRuntime::start_multithreaded(Arc::clone(&bob_node), bob_listener).await;
+    sender.launch();
+    bob_peer = Some(sender);
     phase("incoming_dm_send_begin");
     bob_node
         .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
@@ -9612,7 +9629,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     assert!(dm_texts(&a2_node).unwrap().is_empty());
 
     phase("incoming_source_observation_finished");
-    let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
+    let mut sibling = IndependentPeerRuntime::start_multithreaded(Arc::clone(&a2_node), a2_listener).await;
+    sibling.launch();
+    a2_peer = Some(sibling);
     phase("sibling_join_observation_begin");
     let join_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     tokio::time::timeout_at(join_deadline, async {
@@ -9765,6 +9784,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let delivery_work = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let delivery_trace_started = std::time::Instant::now();
     let delivery_trace_omitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let replay_revisions = Arc::new(Mutex::new((None::<u64>, None::<u64>)));
+    let replay_changed = Arc::new(tokio::sync::Notify::new());
     for (label, current, peer) in [
         ("source", &a1_node, a2_node.identity.public()),
         ("sibling", &a2_node, a1_node.identity.public()),
@@ -9772,8 +9793,27 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         let trace = delivery_trace.clone();
         let work = delivery_work.clone();
         let omitted = delivery_trace_omitted.clone();
+        let replay_revisions = replay_revisions.clone();
+        let replay_changed = replay_changed.clone();
         *current.account_client_test_hook.lock().unwrap() =
             Some(Arc::new(move |observed, phase| {
+                if label == "sibling" && observed == peer {
+                    if let Some(receipt) = phase.strip_prefix("history_channel_committed revision=")
+                        && let Some((revision, record)) = receipt.split_once(' ')
+                        && record == format!("channel={} event={}", hex::encode(channel.as_bytes()), old_channel_id.to_hex())
+                    {
+                        let revision: u64 = revision.parse().expect("owner emits a policy revision");
+                        let mut seen = replay_revisions.lock().unwrap();
+                        seen.0 = Some(seen.0.map_or(revision, |old| old.max(revision)));
+                        replay_changed.notify_one();
+                    }
+                    if let Some(revision) = phase.strip_prefix("history_sweep_committed revision=") {
+                        let revision: u64 = revision.parse().expect("owner emits a policy revision");
+                        let mut seen = replay_revisions.lock().unwrap();
+                        seen.1 = Some(seen.1.map_or(revision, |old| old.max(revision)));
+                        replay_changed.notify_one();
+                    }
+                }
                 if observed != peer
                     || !(phase.starts_with("dial_")
                         || phase.starts_with("session_")
@@ -9959,19 +9999,60 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     }
     new_channel_delivery.expect("new channel messages still arrive");
     phase("erase_recheck_begin");
-    tokio::time::sleep(Duration::from_secs(11)).await;
-    let history = tokio::time::timeout_at(new_delivery_deadline + Duration::from_secs(11), async {
+    // Reset through the public policy owner: its new revision retires old
+    // workers and clears their digest/cursor before a canonical fresh sweep.
+    let replay_node = a2_node.clone();
+    let revisions = replay_revisions.clone();
+    let changed = replay_changed.clone();
+    let permit = a2_node.runtime_work.admit().unwrap();
+    let mut replay = a2_peer.as_ref().unwrap().runtime_handle().spawn(permit.track(async move {
+        let previous = replay_node.device_sync_policy_snapshot().1;
+        replay_node.set_device_sync_category(crate::node::SyncCategory::History, false)?;
+        replay_node.set_device_sync_category(crate::node::SyncCategory::History, true)?;
+        let revision = replay_node.device_sync_policy_snapshot().1;
+        assert!(revision > previous, "real policy reset must advance its revision");
         loop {
-            match channel_texts(&a2_node) {
-                Ok(history) => break history,
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let (offered, completed) = *revisions.lock().unwrap();
+            if completed == Some(revision) {
+                assert_eq!(offered, Some(revision),
+                    "fresh sweep must offer the exact erased payload before terminal commit");
+                break;
+            }
+            notified.await;
+        }
+        loop {
+            match replay_node.channel_history(channel, 10) {
+                Ok(history) => return Ok::<_, NodeError>(history),
                 Err(NodeError::Log(LogError::StaleCursor)) => {}
-                Err(error) => panic!("linked erase observation failed: {error}"),
+                Err(error) => return Err(error),
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    })
-    .await
-    .expect("linked erase is readable within the existing delivery and observation window");
+    }));
+    let completed = tokio::time::timeout_at(
+        new_delivery_deadline + Duration::from_secs(11), &mut replay
+    ).await;
+    if !matches!(&completed, Ok(Ok(Ok(_)))) {
+        eprintln!("linked replay failure revisions={:?} work={:?} omitted={} phases={:?}",
+            replay_revisions.lock().unwrap(), delivery_work.lock().unwrap(),
+            delivery_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            delivery_trace.lock().unwrap());
+    }
+    let history = match completed {
+        Ok(result) => result.expect("owned replay task must finish").expect("linked erase replay and observation must succeed"),
+        Err(_) => {
+            // Cancellation still joins the fixture task; peer retirement below
+            // drains the coordinator's actual admitted blocking commits.
+            replay.abort();
+            let retired = replay.await;
+            assert!(retired.is_ok() || retired.is_err_and(|error| error.is_cancelled()));
+            panic!("linked erase replay is readable within the existing delivery and observation window");
+        }
+    };
+    let history: Vec<_> = history.into_iter().filter(|entry| entry.file.is_none()).collect();
     assert_eq!(
         history.len(),
         1,
@@ -10256,14 +10337,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     // Cancelling the accept loop does not cancel admitted blocking storage work.
     // Retire it before the same exclusive profile is opened again.
     phase("sibling_retirement_begin");
-    a2_node.runtime_work.close();
     a2_node.clear_delivery_observations();
-    a2_task.abort();
-    let _ = a2_task.await;
-    a2_node.sessions.clear();
-    tokio::time::timeout(Duration::from_secs(5), a2_node.runtime_work.drain())
-        .await
-        .expect("the old sibling's admitted storage work must retire");
+    let mut retirement = Box::pin(a2_peer.take().unwrap().stop());
+    let retired_in_budget = tokio::time::timeout(Duration::from_secs(5), &mut retirement).await;
+    if retired_in_budget.is_err() {
+        // A failed observation budget does not transfer thread-join ownership.
+        retirement.await;
+    }
+    retired_in_budget.expect("the old sibling's admitted storage work must retire");
     a2_node.close_profile().unwrap();
     phase("sibling_retirement_finished");
     let (reopen_dm, _reopen_dm_rx) = mpsc::unbounded_channel();
@@ -10335,9 +10416,42 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         std::fs::read(reopened_channel_copy).unwrap(),
         channel_attachment_bytes
     );
+    }))
+    .catch_unwind()
+    .await;
+    // Retire actual workers on assertion failure too, before the exclusive
+    // profile directories and the observer runtime can be dropped.
+    let mut cleanup_failure = None;
+    if let Some(sibling) = a2_peer.take() {
+        cleanup_failure = std::panic::AssertUnwindSafe(sibling.stop())
+            .catch_unwind()
+            .await
+            .err();
+    }
+    if let Some(sender) = bob_peer.take() {
+        let stopped = std::panic::AssertUnwindSafe(sender.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
     phase("source_abort_begin");
-    a1_task.abort();
+    if let Some(source) = a1_peer.take() {
+        let stopped = std::panic::AssertUnwindSafe(source.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
     phase("body_finished_runtime_drop_next");
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+    if let Some(error) = cleanup_failure {
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[test]

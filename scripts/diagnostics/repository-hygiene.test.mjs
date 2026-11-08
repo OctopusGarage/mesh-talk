@@ -132,7 +132,7 @@ test("the existing commit, health and CI gates enforce the same policy", () => {
   for (const file of [
     "../../hooks/pre-commit",
     "../check-health.sh",
-    "../../.github/workflows/ci.yml",
+    "../../.github/workflows/check-health.yml",
   ]) {
     assert.match(
       readFileSync(new URL(file, import.meta.url), "utf8"),

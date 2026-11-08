@@ -21,6 +21,10 @@ UPnP = "UPnP"
 # PNG filter 4 uses the Paeth predictor (a proper algorithm name).
 paeth = "paeth"
 
+[type.swift.extend-identifiers]
+# CoreBluetooth's CBAttributePermissions.writeable is the SDK's API spelling.
+writeable = "writeable"
+
 [type.changelog]
 extend-glob = ["CHANGELOG.md"]
 # Release-please commit-link labels are identifiers, not English words.

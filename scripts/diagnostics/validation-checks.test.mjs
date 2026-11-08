@@ -13,18 +13,47 @@ test("test-only mode remains available and checks are explicitly requested", () 
   assert.equal(parseOptions(["--cheap"]).run, false);
   assert.throws(() => parseOptions(["--cheap", "--run"]), /do not combine/);
 });
+test("cheap spelling checks preserve changed path arguments and configured exclusions", () => {
+  const files = ["src-tauri/examples/bluetooth-radio.swift", "docs/two words.md", "--option.swift", "-", "frontend/src/locales/en.json", "removed.swift", "docs/two words.md"];
+  const checks = buildStaticChecks(plan({ files, deleted: ["removed.swift"] }));
+  const spelling = checks.find(check => check.name === "spelling");
+  assert.deepEqual(spelling?.command, ["typos", "--force-exclude", "--", "./src-tauri/examples/bluetooth-radio.swift", "./docs/two words.md", "./--option.swift", "./-", "./frontend/src/locales/en.json"]);
+  assert.equal(spelling.cwd, ".");
+  assert(phasePlan(plan({ checks }), "static").checks.includes(spelling));
+  assert(!checks.some(check => check.command.includes("--isolated")), "implicit repository spelling configuration remains authoritative");
+});
+test("spelling configuration changes require the existing full default scan", () => {
+  for (const deleted of [[], ["_typos.toml"]]) {
+    const checks = buildStaticChecks(plan({ files: ["_typos.toml", "README.md"], deleted }));
+    assert.deepEqual(checks.find(check => check.name === "spelling")?.command, ["typos"]);
+  }
+  assert(!buildStaticChecks(plan({ files: ["removed.swift"], deleted: ["removed.swift"] })).some(check => check.name === "spelling"));
+});
+test("cheap spelling failure rejects publication before any application suite", async () => {
+  const selected = plan({ files: ["src-tauri/examples/bluetooth-radio.swift"], node: ["never-run.test.mjs"] });
+  selected.checks = buildStaticChecks(selected);
+  const calls = [];
+  await assert.rejects(executeCheapChecks(selected, { log() {}, run: async (_program, args) => {
+    calls.push(args[1]);
+    return args[1] === "spelling" ? { code: 1, output: "spelling failure" } : { code: 0, output: "pass" };
+  } }), /spelling failure/);
+  assert.deepEqual(calls, ["spelling"]);
+});
 test("documentation-only checks do not start compilers or browsers", () => {
-  assert.deepEqual(buildStaticChecks(plan({ files: ["docs/ARCHITECTURE.md"] })), []);
+  const checks = buildStaticChecks(plan({ files: ["docs/ARCHITECTURE.md"] }));
+  assert.deepEqual(checks.map(check => check.name), ["spelling"]);
+  assert.deepEqual(checks[0].command, ["typos", "--force-exclude", "--", "./docs/ARCHITECTURE.md"]);
 });
 test("workflow and shell edits add their existing static checks but removed scripts are not executed", () => {
   assert.deepEqual(buildStaticChecks(plan({ files: ["scripts/removed.sh"], deleted: ["scripts/removed.sh"] })), []);
   const checks = buildStaticChecks(plan({ files: [".github/workflows/ci.yml", "scripts/changed.sh"] }));
-  assert.deepEqual(checks.map(check => check.name), ["changed-syntax", "ci-policy", "ci-docs-policy", "shell-lint"]);
+  assert.deepEqual(checks.map(check => check.name), ["changed-syntax", "spelling", "ci-policy", "ci-docs-policy", "shell-lint"]);
   assert.deepEqual(checks[0].command, ["node", "scripts/validation/syntax.mjs", "--files", ".github/workflows/ci.yml", "scripts/changed.sh"]);
-  assert.deepEqual(checks[1].command, ["node", "--test", "scripts/diagnostics/ci-latency.test.mjs"]);
-  assert.equal(checks[1].kind, "policy");
-  assert.deepEqual(checks[2].command, ["node", "--test", ciDocsPolicyTest]);
-  assert.deepEqual(checks[3].command, ["shellcheck", "--severity=warning", "--", "scripts/changed.sh"]);
+  assert.deepEqual(checks[1].command, ["typos", "--force-exclude", "--", "./.github/workflows/ci.yml", "./scripts/changed.sh"]);
+  assert.deepEqual(checks[2].command, ["node", "--test", "scripts/diagnostics/ci-latency.test.mjs"]);
+  assert.equal(checks[2].kind, "policy");
+  assert.deepEqual(checks[3].command, ["node", "--test", ciDocsPolicyTest]);
+  assert.deepEqual(checks[4].command, ["shellcheck", "--severity=warning", "--", "scripts/changed.sh"]);
 });
 test("cheap workflow policy failures reject publication without admitting application suites", async () => {
   const selected = plan({ files: [".github/workflows/ci.yml"], node: ["never-run.test.mjs"] });
@@ -34,7 +63,7 @@ test("cheap workflow policy failures reject publication without admitting applic
     calls.push(args[1]);
     return args[1] === "ci-policy" ? { code: 1, output: "stale workflow policy" } : { code: 0, output: "syntax pass" };
   } }), /stale workflow policy/);
-  assert.deepEqual(calls, ["changed-syntax", "ci-policy"]);
+  assert.deepEqual(calls, ["changed-syntax", "spelling", "ci-policy"]);
   const removed = buildStaticChecks(plan({ files: [".github/workflows/removed.yml"], deleted: [".github/workflows/removed.yml"] }));
   assert.deepEqual(removed.map(check => check.name), ["ci-policy", "ci-docs-policy"]);
 });
@@ -56,7 +85,7 @@ test("policy checks execute once while test-only plans retain the same assertion
     calls.push(args);
     return { code: 0, output: "policy pass" };
   } });
-  assert.deepEqual(calls.map(args => args[1]), ["changed-syntax", "ci-policy", "ci-docs-policy"]);
+  assert.deepEqual(calls.map(args => args[1]), ["changed-syntax", "spelling", "ci-policy", "ci-docs-policy"]);
 });
 test("scope source, composite actions and scope tests run policy locally exactly once", () => {
   for (const file of ["scripts/ci/docs-scope.mjs", ciDocsPolicyTest, ".github/actions/ci-scope/action.yml"]) {
@@ -95,8 +124,8 @@ test("build stages forward required output artifacts to the evidence runner", as
 });
 test("frontend validation composes formatting, lint, source/E2E types and production build", () => {
   const checks = buildStaticChecks(plan({ files: ["frontend/src/store/chat.ts"] }));
-  assert.deepEqual(checks.map(check => check.name), ["frontend-format", "frontend-lint", "frontend-types", "frontend-build"]);
-  assert(checks.every(check => check.inputs === "frontend"));
+  assert.deepEqual(checks.map(check => check.name), ["spelling", "frontend-format", "frontend-lint", "frontend-types", "frontend-build"]);
+  assert(checks.slice(1).every(check => check.inputs === "frontend" && check.cwd === "frontend"));
   assert(!JSON.stringify(checks).includes("playwright"));
   assert.deepEqual(checks.find(check => check.name === "frontend-format").command, ["npm", "run", "format:check"]);
   assert(!checks.some(check => check.command[0] === "npx"), "cheap checks must not auto-install missing tools");
@@ -116,7 +145,7 @@ test("cheap static feedback runs separately from heavy builds and test execution
   original.checks = buildStaticChecks(original);
   const fast = phasePlan(original, "static");
   const heavy = phasePlan(original, "tests");
-  assert.deepEqual(fast.checks.map(check => check.name), ["frontend-format", "frontend-lint", "frontend-types"]);
+  assert.deepEqual(fast.checks.map(check => check.name), ["spelling", "frontend-format", "frontend-lint", "frontend-types"]);
   assert.deepEqual(fast.node, []);
   assert.deepEqual(fast.frontend, []);
   assert.deepEqual(fast.rust, []);
@@ -129,6 +158,6 @@ test("cheap static feedback runs separately from heavy builds and test execution
 
 test("retention guard edits run its real subprocess and filesystem regressions before heavy work", () => {
   const checks = buildStaticChecks(plan({ files: ["scripts/build-retention.py"] }));
-  assert.deepEqual(checks.map(check => check.command), [["node", "scripts/validation/syntax.mjs", "--files", "scripts/build-retention.py"], ["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_build_retention.py", "-v"]]);
+  assert.deepEqual(checks.map(check => check.command), [["node", "scripts/validation/syntax.mjs", "--files", "scripts/build-retention.py"], ["typos", "--force-exclude", "--", "./scripts/build-retention.py"], ["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_build_retention.py", "-v"]]);
   assert.deepEqual(phasePlan(plan({ checks }), "static").checks, checks);
 });

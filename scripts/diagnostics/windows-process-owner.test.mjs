@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { Writable } from "node:stream";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +19,40 @@ const leader = fileURLToPath(new URL("./fixtures/windows-native-leader.ps1", imp
 
 // These portable cases exercise the actual parent bridge and an actual child
 // process. They validate receipt interpretation, not Windows kernel retirement.
+for (const mode of ["verified", "missing", "unavailable"]) for (const cancelled of [true, false]) test(`${cancelled ? "cancelled held" : "failed"} log finalization preserves ${mode} Windows retirement evidence`, { timeout: 12000 }, async t => {
+  const { executeWindows } = await import("../validation/windows-process-owner.mjs");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-held-log-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const app = path.join(directory, "target.exe");
+  if (mode !== "unavailable") await writeFile(app, "Protocol fixture; no native target is launched.\n");
+  const fixture = `let input='';process.stdin.on('data',chunk=>{input+=chunk;const end=input.indexOf('\\n');if(end<0)return;const request=JSON.parse(input.slice(0,end));if(process.argv[1]==='verified')require('node:fs').writeFileSync(request.receipt,JSON.stringify({schema:1,nonce:request.nonce,result:{retired:true,exitCode:0}}));process.exit(0);});`;
+  const controller = new AbortController();
+  let release, timer, completion, entered = false, helper;
+  const output = new Writable({ write(_chunk, _encoding, done) { done(); }, final(done) {
+    entered = true;
+    if (cancelled) { release = done; queueMicrotask(() => controller.abort()); }
+    else done(Error("Controlled log final failure"));
+  } });
+  try {
+    completion = executeWindows([app], { signal: controller.signal, logPath: "fixture-owned-log", createLogStream: () => output,
+      cwd: process.cwd(), env: process.env, onOutput() {}, spawnOwner(_program, _args, options) {
+        helper = spawn(process.execPath, ["-e", fixture, mode], options); return helper;
+      } });
+    const result = await Promise.race([completion, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("Windows cancelled log finalization remained pending")), 7000); })]);
+    assert.equal(entered, true);
+    assert.equal(result.code, mode === "unavailable" || !cancelled ? 1 : 130);
+    assert.equal(result.failureKind, "failed");
+    assert.match(result.error, cancelled ? /log.*cancel/i : /Controlled log final failure/);
+    if (mode === "verified") assert.equal(result.exitCode, 0);
+    assert.equal(result.cleanupUnverified, mode === "missing");
+    assert.equal(output.destroyed, true);
+    if (helper) assert.throws(() => process.kill(helper.pid, 0), { code: "ESRCH" });
+  } finally {
+    clearTimeout(timer); controller.abort(); release?.();
+    if (completion) await completion;
+  }
+});
+
 for (const mode of ["missing", "malformed", "stale", "unconfirmed", "verified-zero", "verified-nonzero"]) {
   const verified = mode.startsWith("verified-");
   const exitCode = mode === "verified-nonzero" ? 1 : 0;
