@@ -31,14 +31,6 @@
       "prompt": "/0/prompt.txt"
     }
   ],
-  "token_usage": {
-    "input_tokens": 51107,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 16913408,
-    "output_tokens": 64318,
-    "api_call_count": 43,
-    "subagent_tokens_complete": false
-  },
   "redaction": {
     "replacements": 1998,
     "layers": {
