@@ -1,0 +1,73 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6XA8GEJ5367TD6A904GY4VG",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-08T10:11:45.656694Z",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "crates/mesh-talk-core/examples/bluetooth-rehearsal.rs",
+    "crates/mesh-talk-core/src/transport/ble.rs",
+    "crates/mesh-talk-core/src/transport/mod.rs",
+    "crates/mesh-talk-core/validation.json",
+    "docs/ARCHITECTURE.md",
+    "docs/README.md",
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "docs/native-bluetooth.md",
+    "frontend/e2e/automatic-delivery.spec.ts",
+    "frontend/e2e/camera-capture.spec.ts",
+    "frontend/e2e/channel-lifecycle.spec.ts",
+    "frontend/e2e/composer-layout.spec.ts",
+    "frontend/e2e/directory-transfer.spec.ts",
+    "frontend/e2e/file-send-progress.spec.ts",
+    "frontend/e2e/helpers/session.ts",
+    "frontend/e2e/protected-messages.spec.ts",
+    "frontend/e2e/reaction-summaries.spec.ts",
+    "frontend/e2e/ui-audit-composer.spec.ts",
+    "frontend/e2e/unread-badge.spec.ts",
+    "frontend/src/features/chat/Composer.tsx",
+    "frontend/src/features/chat/ConversationView.tsx",
+    "frontend/src/features/chat/HiddenContactsDialog.tsx",
+    "frontend/src/features/chat/MessageBubble.test.ts",
+    "frontend/src/features/chat/MessageBubble.tsx",
+    "frontend/src/features/chat/Sidebar.test.ts",
+    "frontend/src/features/chat/sidebar/ConversationRow.test.ts",
+    "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+    "src-tauri/examples/bluetooth-radio-tests.swift",
+    "src-tauri/examples/bluetooth-radio.plist",
+    "src-tauri/examples/bluetooth-radio.swift"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "43be931b4eed",
+  "checkpoint_transcript_start": 38487,
+  "transcript_lines_at_start": 38487,
+  "compact_transcript_start": 4503,
+  "token_usage": {
+    "input_tokens": 122337,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 28909312,
+    "output_tokens": 93192,
+    "api_call_count": 129,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 2120,
+    "layers": {
+      "betterleaks": 5,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 8,
+      "credentialed_uri": 0,
+      "entropy": 2120,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 8
+  }
+}
