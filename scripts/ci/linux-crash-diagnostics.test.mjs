@@ -20,6 +20,7 @@ import {
   validateExecutable,
   boundedCapture,
   limits,
+  withSelftestFiles,
 } from "./linux-crash-diagnostics.mjs";
 
 test("kernel full-path core names decode as data and reject malformed names", () => {
@@ -174,3 +175,80 @@ test(
     );
   },
 );
+
+test("selftest fixture retires only its owned tree on success and failure", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "mesh-core-selftest-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const state = { workspace: join(root, "workspace") };
+  const p = { root: join(root, "diagnostics") };
+  await mkdir(state.workspace);
+  await mkdir(p.root);
+  const target = join(state.workspace, "target");
+  const coverage = join(target, "llvm-cov-target");
+  const exercise = async (fail = false, concurrentFile = false) => {
+    const operation = withSelftestFiles(
+      p,
+      state,
+      async ({ source, executable }) => {
+        assert.match(await readFile(source, "utf8"), /diagnostic_exit_crash/u);
+        await writeFile(executable, "owned fixture executable");
+        if (concurrentFile)
+          await writeFile(join(coverage, "unrelated"), "preserve");
+        if (fail) throw Error("controlled compile failure");
+        return "completed";
+      },
+    );
+    if (fail) await assert.rejects(operation, /controlled compile failure/u);
+    else assert.equal(await operation, "completed");
+    assert.deepEqual(await readdir(p.root), [], "source must retire");
+  };
+  for (const fail of [false, true]) {
+    await exercise(fail);
+    assert.deepEqual(
+      await readdir(state.workspace),
+      [],
+      "fresh consumer must retain no target, even empty",
+    );
+    await mkdir(target);
+    await writeFile(join(target, "native-output"), "preserve");
+    await exercise(fail);
+    assert.deepEqual(await readdir(target), ["native-output"]);
+    assert.equal(
+      await readFile(join(target, "native-output"), "utf8"),
+      "preserve",
+    );
+    await rm(target, { recursive: true });
+    await mkdir(join(coverage, "debug/deps"), { recursive: true });
+    await writeFile(
+      join(coverage, "debug/deps/linux-exit-crash-control"),
+      "pre-existing executable",
+    );
+    await exercise(fail);
+    assert.equal(
+      await readFile(
+        join(coverage, "debug/deps/linux-exit-crash-control"),
+        "utf8",
+      ),
+      "pre-existing executable",
+    );
+    await rm(target, { recursive: true });
+  }
+  await assert.rejects(
+    withSelftestFiles({ root: join(root, "missing-diagnostics") }, state, () =>
+      assert.fail("source setup failure must prevent execution"),
+    ),
+    { code: "ENOENT" },
+  );
+  assert.deepEqual(
+    await readdir(state.workspace),
+    [],
+    "partial setup must retire created directories",
+  );
+  await exercise(true, true);
+  assert.deepEqual(
+    await readdir(coverage),
+    ["unrelated"],
+    "new unrelated contents prevent ancestor removal",
+  );
+  assert.equal(await readFile(join(coverage, "unrelated"), "utf8"), "preserve");
+});

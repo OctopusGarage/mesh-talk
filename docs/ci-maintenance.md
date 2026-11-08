@@ -660,7 +660,13 @@ as quoted environment variables or argv entries, and exercise quotes, spaces and
 literal `$()` in test paths. Keep `target/llvm-cov-target` and embedded CLI paths.
 Default timing markers stay in each consumer's execution log; ignored backend
 markers stay in their original redacted suite logs. Each actual Linux execution
-runner retains crash setup/selftest, always-run collection and verified restoration.
+runner retains crash setup/selftest, always-run collection and verified restoration. Diagnostic selftests must retire their own source, executable and
+empty directories on success and failure before archive admission. Track which
+directories the selftest created; preserve pre-existing trees and newly arrived
+contents. An empty directory still violates a fresh-target contract: never weaken
+archive admission or delete an unowned target to compensate. The real-filesystem
+controls in `linux-crash-diagnostics.test.mjs` cover fresh and populated consumers
+without claiming native kernel qualification.
 Consumer jobs use the storage owner's read-only `--measure` mode without repeating the producer's SDK cleanup; inspect actual space, archive and diagnostic
 image usage before changing storage policy.
 

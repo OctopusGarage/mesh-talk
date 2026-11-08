@@ -454,7 +454,12 @@ negative controls outside the journey's active retention window.
 
 Keep extracted runtimes outside diagnostic artifact roots on failure as well as
 success. Stage under an owned directory on the destination filesystem, retire it
-in the extraction owner's cleanup path, and preserve unrelated build outputs.
+in the extraction owner's cleanup path, and preserve unrelated build outputs. Diagnostic preparation has the same
+ownership obligation: even empty directories can violate a later fresh-target
+admission contract. Record directories actually created, remove only those that
+remain empty, and preserve pre-existing files and trees on setup or execution
+failure. The [Linux crash selftest lifecycle controls](../scripts/ci/linux-crash-diagnostics.test.mjs)
+exercise this composition without weakening archive admission.
 The [Linux archive fixture](../scripts/ci/linux-workspace-cli.test.mjs) rejects
 extraction after real binary materialization and checks diagnostics stay free of
 runtime binaries; successful-path cleanup alone does not prove this boundary. Bind archive-only application stack
