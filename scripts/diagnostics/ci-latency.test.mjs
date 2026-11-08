@@ -358,6 +358,8 @@ test("health owns fast checks without repeating Rust or browser suites", () => {
 test("full browser coverage remains on every desktop OS with bounded shards", () => {
   const ui = read("e2e-ui.yml");
   const shardWorkflow = read("ui-shards.yml");
+  assert.match(step(shardWorkflow, "Install dependencies"), /npm ci --no-audit --no-fund/u);
+  assert.match(read("check-health.yml"), /run: npm run audit:ci/u);
   const baseline = shardWorkflow.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(ui, /operating_systems: '\["ubuntu-24.04"\]'/);
   assert.match(ui, /operating_systems: '\["macos-26-intel"\]'/);

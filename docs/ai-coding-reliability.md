@@ -648,6 +648,12 @@ Start a progress deadline only after the required stalled operation is admitted,
 and prove the competing work is still incomplete at that point. Release only
 that work's barrier while retaining the stall. Measure cancellation separately
 from setup and history progress; preserve each behavior's required bound.
+An independent safety observer must also distinguish its pre-arm setup from
+post-arm admission. Starting both deadlines when its thread is created lets slow
+setup release the controlled gate before the asserted blockers enter. Keep each
+phase bounded, begin its deadline at the corresponding handshake, and exercise
+that transition with a controlled clock. The profile-rewrite retirement fixture
+in `runtime_retirement_tests.rs` owns this observer regression.
 
 A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck

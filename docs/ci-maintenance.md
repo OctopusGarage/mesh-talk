@@ -329,6 +329,11 @@ A lockfile does not protect an unpinned `npx` download. Install Node-based
 verification tools from the committed lockfile and reuse their owning npm script
 in CI and local checks. Frontend audits use `npm run audit:ci` with the existing
 `frontend/audit-ci.json` policy.
+Browser execution shards should install with `npm ci --no-audit --no-fund`:
+the install-time advisory summary repeats the dedicated audit without enforcing
+its policy. Keep the explicit audit gate; disable only this duplicate install
+work, not lifecycle scripts or checks for other dependency owners. Measure any
+claimed saving separately from the full installation duration.
 
 Build twice consecutively with identical source, profile, features and environment.
 Inspect unexpected second-build work before enlarging caches or runner counts:
@@ -515,6 +520,9 @@ artifact overhead as well as execution. More shards can increase queueing and
 runner minutes; more workers per machine can increase memory pressure, port
 exhaustion and test interference. Review the product of platform, architecture,
 browser, feature and shard dimensions before expanding a matrix.
+Treat elapsed-time targets as diagnostic goals, not acceptance requirements.
+Prefer a stable, simple pipeline over extra shards, retries or orchestration
+introduced only to reach an arbitrary duration.
 Inspect actual worker-scoped options and test-group assignment as well as case
 counts: tracing modes can produce distinct worker groups and uneven tails.
 Shuffle may reorder work only after shard allocation; verify its actual effect
@@ -749,8 +757,12 @@ request identity, immutable control state and the lifetime of the actual task.
 Historical logs or a previously authenticated request do not prove that a live
 request has entered the required phase. Keep cancellation, task joining and
 cleanup correct on success, failure and panic.
-Keep the owning API's pending/error distinction in bounded observers; see the
-[failure-evidence rules](ai-coding-reliability.md#r10-evidence-that-exercises-the-failure).
+Give pre-arm setup and the measured admission separate bounded phases; an
+independent watchdog must not release a test barrier merely because unrelated
+preparation consumed its observation window. Keep the owning API's pending/error
+distinction in bounded observers. The
+[failure-evidence rules](ai-coding-reliability.md#r10-evidence-that-exercises-the-failure)
+identify the owning retirement-observer regression.
 When key ordering determines the scenario, use deterministic noncolliding fixture
 identities and check actual signed keys or cursors; random IDs can exercise only
 the easier path. Preserve real signing, publication and receipt assertions.
