@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement } from "react";
+import { act, createElement, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
@@ -37,7 +37,13 @@ afterEach(async () => {
   host.remove();
   useDrafts.getState().reset();
 });
-async function render(prioritizeSubtitle = true) {
+async function render(
+  prioritizeSubtitle = true,
+  actions?: Pick<
+    ComponentProps<typeof ConversationRow>,
+    "onRename" | "onTogglePin" | "onHide" | "onDelete"
+  >,
+) {
   await act(async () =>
     root.render(
       createElement(ConversationRow, {
@@ -48,6 +54,7 @@ async function render(prioritizeSubtitle = true) {
         pinned: false,
         onTogglePin: () => {},
         onRename: () => {},
+        ...actions,
         listPosition: 1,
         listSize: 1,
       }),
@@ -165,3 +172,38 @@ it("opens the same action menu from the overflow button and the row context menu
     document.querySelector('[data-testid="conversation-pin-team"]'),
   ).not.toBeNull();
 });
+
+it.each([
+  { label: "Pin to top", requested: "onTogglePin" },
+  { label: "Hide channel", requested: "onHide" },
+  { label: "Delete chat", requested: "onDelete" },
+] as const)(
+  "selects $label once and closes the shared action menu",
+  async ({ label, requested }) => {
+    const actions = {
+      onRename: vi.fn(),
+      onTogglePin: vi.fn(),
+      onHide: vi.fn(),
+      onDelete: vi.fn(),
+    };
+    await render(true, actions);
+    const trigger = host.querySelector<HTMLButtonElement>(
+      '[data-testid="conversation-actions-team"]',
+    )!;
+    await act(async () => trigger.click());
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const item = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((entry) => entry.textContent?.trim() === label);
+    expect(item, `${label} must be available in the real menu`).toBeDefined();
+    await act(async () => item!.click());
+    for (const [name, callback] of Object.entries(actions)) {
+      expect(
+        callback,
+        `${label} must invoke only ${requested}`,
+      ).toHaveBeenCalledTimes(name === requested ? 1 : 0);
+    }
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  },
+);
