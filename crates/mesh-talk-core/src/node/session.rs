@@ -854,13 +854,19 @@ impl SyncProgress {
         let remote_have =
             recv_have_owned(channel, false, conversation, backend.remote_have_budget()).await?;
         self.remote_have_count = Some(intersection_count(backend, &have_view, &remote_have).await?);
-        drop(have_view);
         let report = backend.apply(&response.events)?;
         if backend.admission_denied() {
             return Err(SessionError::UnexpectedMessage);
         }
-        // Ingest may add causal parents; select a fresh outgoing cutoff.
-        let outgoing_view = backend::open_prepared_view(backend, &conversation).await?;
+        // Keep only the owned selection across apply, never a store guard.
+        // Ingest or concurrent changes may add causal parents or change policy;
+        // only an exact freshly qualified source may reuse prepared decisions.
+        let outgoing_view = if backend.reusable_view(&have_view)? {
+            have_view
+        } else {
+            drop(have_view);
+            backend::open_prepared_view(backend, &conversation).await?
+        };
         let mut followups = select_export_frames(
             backend,
             &outgoing_view,

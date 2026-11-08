@@ -2042,3 +2042,133 @@ async fn ordinary_request_terminal_send_failure_and_cancellation_release_retaine
         );
     }
 }
+
+/// Exercise the production requester over encrypted TCP, observing committed SQL
+/// admissions rather than wrapper calls or wall time. The peer pauses at ReqHave.
+#[tokio::test]
+async fn requester_have_selection_reuse_loopback() {
+    use crate::discovery::Announce;
+    use crate::identity::account::Account;
+    use std::sync::atomic::Ordering;
+    for mutation in ["unchanged", "append", "received", "delete", "revoke"] {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(), DeviceIdentity::generate(), Account::generate(), &proof,
+        );
+        node.cached_peer_snapshot_async().await.unwrap();
+        let conversation = super::super::conversation::dm_conversation_id(
+            &node.identity.public(), &peer.public(),
+        );
+        let append = |seq| {
+            let event = Event::new(&node.identity, conversation, seq, vec![], seq, 0,
+                EventKind::Message, vec![7; 128]);
+            let id = event.id;
+            node.log.lock().unwrap().append_durable(event).unwrap();
+            id
+        };
+        let first = append(1);
+        while !node.log.lock().unwrap().repository().unwrap()
+            .prepare_kind_metadata_step(crate::eventlog::sync::network::PreparationBudget::default())
+            .unwrap().ready {}
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TABLE test_selection_counts(views INTEGER, rows INTEGER);
+                INSERT INTO test_selection_counts VALUES(0,0);
+                CREATE TEMP TRIGGER test_selection_admission AFTER INSERT ON main.participant_sync_views
+                BEGIN UPDATE test_selection_counts SET views=views+1; END;
+                CREATE TEMP TRIGGER test_selection_row AFTER INSERT ON main.participant_sync_rows
+                BEGIN UPDATE test_selection_counts SET rows=rows+1; END;")?;
+            Ok(())
+        }).unwrap();
+        let counts = || node.storage.database().read(|c| {
+            Ok(c.query_row("SELECT views, rows FROM test_selection_counts", [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?)
+        }).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let received = Event::new(&peer, conversation, 2, vec![first], 2, 0,
+            EventKind::Message, vec![8; 128]);
+        let received_id = received.id;
+        let server_node = node.clone();
+        let (reached, barrier) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(stream, &peer).await.unwrap();
+            assert!(matches!(decode(&channel.recv().await.unwrap()).unwrap(),
+                SyncWire::Request(_)));
+            let have = recv_have(&mut channel, true, conversation).await.unwrap();
+            assert!(have.contains(&first));
+            reached.send(()).unwrap();
+            resume.await.unwrap();
+            channel.send(&encode(&SyncWire::Response(SyncResponse {
+                conversation, events: if mutation == "received" { vec![received] } else { vec![] }, have: vec![],
+            })).unwrap()).await.unwrap();
+            channel.send(&encode(&SyncWire::RespHave(HaveChunk {
+                conversation, ids: if mutation == "received" { vec![received_id] } else { vec![] }, more: false,
+            })).unwrap()).await.unwrap();
+            match channel.recv().await {
+                Ok(bytes) => match decode(&bytes).unwrap() {
+                    SyncWire::Followup(f) => f.events.into_iter().map(|e| e.id).collect::<Vec<_>>(),
+                    other => panic!("unexpected followup: {other:?}"),
+                },
+                Err(_) => Vec::new(),
+            }
+        });
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut channel = SecureChannel::connect(stream, &node.identity, Some(&proof.public()))
+            .await.unwrap();
+        // A continuing production round has already completed capability probing.
+        let mut progress = SyncProgress { started: true, ..Default::default() };
+        let store = node.sync_store(&proof.public());
+        let client = progress.step_burst_paged(&mut channel, &store, conversation, 1);
+        let mut appended = None;
+        let mutate = async {
+            barrier.await.unwrap();
+            assert_eq!(counts(), (1, 1));
+            if mutation == "append" { appended = Some(append(2)); }
+            if mutation == "delete" {
+                server_node.log.lock().unwrap().repository().unwrap()
+                    .drop_conversation(&conversation).unwrap();
+            }
+            if mutation == "revoke" {
+                server_node.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            release.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(client, mutate);
+        drop(channel);
+        let exported = task.await.unwrap();
+        if mutation == "revoke" || mutation == "delete" {
+            assert!(result.is_err());
+            assert!(exported.is_empty(), "revoked authority exported stale events");
+        } else {
+            result.unwrap();
+            assert!(exported.contains(&first));
+            if let Some(id) = appended {
+                assert!(exported.contains(&id), "fresh cutoff omitted concurrent append");
+                assert_eq!(counts(), (2, 3));
+            } else if mutation == "received" {
+                assert_eq!(progress.total.applied, 1, "peer event was not durably applied");
+                assert_eq!(counts(), (2, 3), "received causal event must select a new cutoff");
+                assert!(!exported.contains(&received_id), "remote Have was ignored");
+            } else {
+                assert_eq!(counts(), (1, 1), "unchanged round rebuilt its prepared selection");
+            }
+        }
+        }).await.unwrap_or_else(|_| panic!("requester selection scenario {mutation} timed out"));
+    }
+}
+
+#[test]
+fn unsupported_selection_reuse_stays_conservative() {
+    let (_dir, store, _, conversation) = tiny_fixture();
+    let view = NetworkSyncStore::open_view(&store, &conversation).unwrap();
+    assert!(!NetworkSyncStore::reusable_view(&store, &view).unwrap());
+    let legacy = Mutex::new(EventLog::default());
+    let backend = LegacyCollectingNetworkAdapter(&legacy);
+    let view = backend.open_view(&conversation).unwrap();
+    assert!(!backend.reusable_view(&view).unwrap());
+}

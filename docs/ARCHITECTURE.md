@@ -392,6 +392,15 @@ history insertion. See [group conversation reception](group-conversation-recepti
 for user behavior, compatibility and resource limits. A successful bounded peer
 exchange is an observation, never a claim that offline members have no more data.
 
+Indexed event reads fetch current bytes and check retained visibility, indexed
+metadata, canonical form and content integrity on every read. Their repository
+may reuse at most 256 intrinsic signature proofs keyed by the exact event ID,
+author key and signature. This memo contains no bodies or permissions; changed
+or failed proofs are verified again, eviction and reopen discard evidence, and
+an unavailable memo falls back to normal verification. Wire admission remains
+independently authenticated. Legacy encrypted-log replay has a separate read
+contract and does not inherit this indexed-read guarantee.
+
 - **Event** — content-addressed: `id = SHA-256(domain ‖ content)`; fields `conversation,
 author (Ed25519 pub, self-certifying), seq, parents (→ hash-linked DAG), lamport,
 wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadMarker/

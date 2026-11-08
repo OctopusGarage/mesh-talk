@@ -168,6 +168,13 @@ pub trait NetworkSyncStore {
             ..Default::default()
         })
     }
+    /// Qualify an exclusively owned prepared view for another selection phase.
+    /// True requires the complete current source and authority stamp to match;
+    /// finite-cutoff validation alone may intentionally permit later appends.
+    /// Have-dependent export preparation remains a separate obligation.
+    fn reusable_view(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(false)
+    }
     /// Reuse completed export preparation only for this exclusively owned view
     /// under fresh source and authority qualification. Have-dependent plans
     /// require exact Have; independent plans must rebind their page cursor to

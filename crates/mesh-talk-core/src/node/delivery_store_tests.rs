@@ -2588,11 +2588,17 @@ fn duplicate_group_file_reservation_does_not_resync_confirmed_outbox() {
         DeliveryStore::open_with_limits(directory.path(), "pw", DeliveryLimits::default()).unwrap();
     store.retain_incoming_group_file(card.clone()).unwrap();
     let records = store.outbox_records;
+    let validations = store.record_validations.get();
     sync_observations::reset();
     for _ in 0..4 {
         store.retain_incoming_group_file(card.clone()).unwrap();
     }
     assert_eq!(store.outbox_records, records);
+    assert_eq!(
+        store.record_validations.get(),
+        validations,
+        "an identical durable file card must not revalidate its immutable certificate"
+    );
     assert!(store.file_card(card.id) == Some(&card));
     assert_eq!(
         sync_observations::counts(),
@@ -2600,7 +2606,33 @@ fn duplicate_group_file_reservation_does_not_resync_confirmed_outbox() {
         "an already durable immutable reservation must not flush its outbox again"
     );
     drop(store);
-    let store =
+    let mut store =
         DeliveryStore::open_with_limits(directory.path(), "pw", DeliveryLimits::default()).unwrap();
     assert!(store.file_card(card.id) == Some(&card));
+    let validations = store.record_validations.get();
+    store.retain_incoming_group_file(card.clone()).unwrap();
+    assert_eq!(store.record_validations.get(), validations);
+
+    let mut conflicting = card.clone();
+    conflicting
+        .completion_binding
+        .as_mut()
+        .unwrap()
+        .certificate
+        .as_mut()
+        .unwrap()
+        .signature[0] ^= 1;
+    assert!(
+        store
+            .retain_incoming_group_file(conflicting.clone())
+            .is_err()
+    );
+    assert!(store.file_card(card.id) == Some(&card));
+
+    // Equality must not grant a different immutable card the original's proof.
+    conflicting.id = EventId::new([74; 32]);
+    assert!(store.retain_incoming_group_file(conflicting).is_err());
+    assert_eq!(store.file_cards().count(), 1);
+    store.erase_file(card.conversation, card.id).unwrap();
+    assert!(store.retain_incoming_group_file(card).is_err());
 }

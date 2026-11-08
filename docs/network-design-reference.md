@@ -1016,6 +1016,14 @@ group membership, consent, file progress and outgoing entitlement. Source
 removal or changed authority therefore stops the same attempt without waiting
 for the next retry.
 
+One synchronous consent decision also shares its exact retained manifest rather
+than reading and verifying the same body again. Indexed repository reads already
+authenticate the body; legacy encrypted-log reads retain explicit verification.
+Reuse still checks current retained visibility and propagates read failures after
+completion reservation. An identical already-durable file card reuses its
+validated immutable certificate, while erasure/conflict checks and any pending
+outbox durability retry remain active. Neither optimization caches permission.
+
 Exact outgoing entitlement retains at most four heavy recipient/channel views.
 Pending finite preparation advances through admission and periodic retry turns;
 only ready views may be evicted. Refill skips already queued keys without
@@ -2518,6 +2526,14 @@ remains current; a finite older cutoff must not be labeled with a later stamp.
 Cold or changing observations are cache misses. A summary contains only the
 fingerprint, count and protocol requirements; differing summaries still use
 fresh bounded reconciliation and ordinary export authorization.
+
+After applying a response, a requester may reuse its prepared Have selection for
+outgoing reconciliation only when the backend explicitly supports reuse and a
+fresh complete source/authority stamp still equals the captured ready stamp.
+Unknown or changed stamps discard that selection before fresh preparation.
+Peer-Have-dependent export closure and every page/send check remain fresh; no
+store guard or database transaction spans response application or network waits.
+This avoids a second identical temporary selection, not durable receive writes.
 
 Paged exchanges retain one ID chunk and bounded event frames rather than all
 local IDs. Existing peer Have chunk and aggregate limits remain enforced.

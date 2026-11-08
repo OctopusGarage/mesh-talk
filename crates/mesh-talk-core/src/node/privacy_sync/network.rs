@@ -703,6 +703,30 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .trace_account_client(&self.peer, || "network_view_captured".into());
         Ok(view)
     }
+    fn reusable_view(&self, view: &Self::View) -> Result<bool, LogError> {
+        if !view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready()
+        {
+            return Ok(false);
+        }
+        let Some(stamp) = &view.metadata_stamp else {
+            return Ok(false);
+        };
+        if self.history_sync_stamp(&view.conversation)?.as_ref() != Some(stamp) {
+            return Ok(false);
+        }
+        match self.validate_view(view) {
+            Ok(()) => {}
+            Err(LogError::StaleCursor) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        // Validation observes live authority independently. Recheck the exact
+        // source afterward instead of absorbing an append during validation.
+        Ok(self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp))
+    }
     fn take_custody_view(
         &mut self,
         conversation: &ConversationId,
@@ -3073,6 +3097,7 @@ mod control_publication_tests {
             cold.metadata_stamp.is_none(),
             "fixture must start without raw-kind evidence"
         );
+        assert!(!NetworkSyncStore::reusable_view(&*store, &cold).unwrap());
         assert_eq!(NetworkSyncStore::metadata(&*store, &cold).unwrap().count, 1);
         assert!(
             NetworkSyncStore::probe_metadata(&*store, &conversation)
@@ -3087,7 +3112,9 @@ mod control_publication_tests {
         // cutoff; that existing contract is separate from cache publication.
         let finite = open_prepared(&store, &conversation);
         assert!(finite.metadata_stamp.is_some());
+        assert!(NetworkSyncStore::reusable_view(&*store, &finite).unwrap());
         append(2);
+        assert!(!NetworkSyncStore::reusable_view(&*store, &finite).unwrap());
         assert_eq!(
             NetworkSyncStore::metadata(&*store, &finite).unwrap().count,
             1

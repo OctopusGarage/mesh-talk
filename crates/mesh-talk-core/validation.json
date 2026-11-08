@@ -1209,7 +1209,7 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Legacy profile maintenance preserves required ancestors, latest leaves and paced rewrites; indexed participant maintenance uses bounded metadata selection and atomic SQL application with the same reclamation thresholds.",
+            "name": "Legacy profile maintenance preserves required ancestors, latest leaves and paced rewrites; indexed participant maintenance uses bounded metadata selection and atomic SQL application with the same reclamation thresholds. Indexed reads retain fresh body/header/canonical/integrity checks while a repository-local 256-entry positive memo reuses only exact event-ID/author/signature proofs; failed, tampered, retired and reopened inputs retain their original authentication and visibility boundaries.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -2501,7 +2501,7 @@
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Group controls remain bound to the exact retained offer, current signed membership and recipient device; group permission never grants private-DM access.",
+            "name": "Group controls remain bound to the exact retained offer, current signed membership and recipient device; group permission never grants private-DM access. A synchronous consent decision reads and authenticates its retained manifest once, preserving legacy verification, fresh retained visibility and read failures. Identical validated durable file-card reservations avoid repeated certificate verification while retaining erasure/conflict checks and pending durability retry.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
@@ -2953,6 +2953,8 @@
           "filters": [
             "node::opaque_relay::",
             "node::session::mailbox::tests::",
+            "requester_have_selection_reuse_loopback",
+            "unsupported_selection_reuse_stays_conservative",
             "postoffice::storage::role::delta::tests::",
             "participant_history_upload_",
             "participant_history_sync_stamp_",
@@ -2980,7 +2982,7 @@
         "guide": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization",
         "invariants": [
           {
-            "name": "Unchanged scoped versions precede historical body access; finite cursor windows bind store, mailbox, arrival incarnation and destructive epoch.",
+            "name": "Unchanged scoped versions precede historical body access; finite cursor windows bind store, mailbox, arrival incarnation and destructive epoch. A requester can reuse its ready Have selection after response admission only under fresh complete source/authority stamp equality; changed or unknown stamps and unsupported backends prepare afresh, retaining peer-Have closure and per-page/final-send validation.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {

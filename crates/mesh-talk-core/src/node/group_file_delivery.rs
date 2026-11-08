@@ -127,14 +127,20 @@ impl Node {
             {
                 return Ok(None);
             }
-            let Some(event) = self.log.lock().expect("log lock").get(&manifest)? else {
+            let (event, authenticated_read) = {
+                let log = self.log.lock().expect("log lock");
+                (log.get(&manifest)?, log.repository().is_ok())
+            };
+            let Some(event) = event else {
                 return Ok(None);
             };
             if event.kind != EventKind::FileManifest
                 || event.conversation_id != row.conversation
                 || event.author.user_id() != row.from
-                || !event.verify_integrity()
-                || !event.verify_signature()
+                // Indexed reads authenticate the exact body against its header.
+                // Legacy replay trusts encrypted records, so preserve its explicit checks.
+                || (!authenticated_read
+                    && (!event.verify_integrity() || !event.verify_signature()))
             {
                 return Ok(None);
             }

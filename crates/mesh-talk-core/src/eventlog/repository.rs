@@ -58,6 +58,10 @@ pub(crate) struct CommittedHeader {
     pub active: bool,
 }
 const HEADER_COLUMNS: &str = "id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes";
+// Intrinsic Ed25519 evidence only: no bodies, visibility or authorization. Exact
+// bytes are fetched and their canonical content hash is checked on every read.
+const SIGNATURE_PROOFS: usize = 256;
+type SignatureProof = ([u8; 32], [u8; 32], [u8; 64]);
 
 /// Same-transaction decision after owner validation and before new graph writes.
 pub(crate) enum AppendGate<B> {
@@ -72,6 +76,7 @@ pub(crate) enum GatedAppend<B> {
 pub(crate) struct EventRepository {
     database: RepositoryOwner,
     domain: EventDomainId,
+    signature_proofs: Box<std::sync::Mutex<std::collections::HashSet<SignatureProof>>>,
     #[cfg(test)]
     before_mutation: std::sync::Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
     store_uuid: [u8; 16],
@@ -172,6 +177,7 @@ impl EventRepository {
         Ok(Self {
             database,
             domain,
+            signature_proofs: Default::default(),
             #[cfg(test)]
             before_mutation: std::sync::Mutex::new(None),
             store_uuid,
@@ -444,11 +450,39 @@ impl EventRepository {
             || header != EventHeader::of(&event, body_len)
             || !event.is_canonical()
             || !event.verify_integrity()
-            || !event.verify_signature()
+            || !self.verify_retained_signature(&event)
         {
             return Err(corrupt("event body and indexed metadata disagree"));
         }
         Ok(Some(event))
+    }
+    /// Called only after current source/header, canonical form and content hash
+    /// checks. A hit proves the same signature, never permission to read an ID.
+    fn verify_retained_signature(&self, event: &Event) -> bool {
+        let Ok(signature) = event.sig.as_slice().try_into() else {
+            return false;
+        };
+        let proof = (*event.id.as_bytes(), *event.author.ed25519_pub(), signature);
+        if self
+            .signature_proofs
+            .lock()
+            .ok()
+            .is_some_and(|proofs| proofs.contains(&proof))
+        {
+            return true;
+        }
+        if !event.verify_signature() {
+            return false;
+        }
+        // A poisoned optional memo degrades to ordinary verification. Never
+        // hold its guard while doing crypto, I/O or acquiring another owner.
+        if let Ok(mut proofs) = self.signature_proofs.lock() {
+            if proofs.len() >= SIGNATURE_PROOFS {
+                proofs.clear();
+            }
+            proofs.insert(proof);
+        }
+        true
     }
     pub(crate) fn header(&self, id: &EventId) -> Result<Option<EventHeader>, LogError> {
         self.database.read(|c| self.header_on(c, id))

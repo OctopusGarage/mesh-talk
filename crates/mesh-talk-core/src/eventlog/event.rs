@@ -7,6 +7,34 @@ use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+pub(crate) mod signature_observations {
+    use std::cell::Cell;
+    thread_local! { static COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
+    pub(crate) fn check() {
+        COUNT.with(|count| {
+            if let Some(n) = count.get() {
+                count.set(Some(n + 1));
+            }
+        });
+    }
+    pub(crate) fn observe<T>(work: impl FnOnce() -> T) -> (T, usize) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                COUNT.with(|count| count.set(None));
+            }
+        }
+        COUNT.with(|count| {
+            assert!(count.get().is_none());
+            count.set(Some(0));
+        });
+        let _reset = Reset;
+        let result = work();
+        (result, COUNT.with(|count| count.get().unwrap()))
+    }
+}
+
 /// Domain separator for event-content hashing.
 const EVENT_DOMAIN: &[u8] = b"mesh-talk-event-v1";
 
@@ -221,6 +249,8 @@ impl Event {
 
     /// True if `sig` is a valid Ed25519 signature over `id` by `author`.
     pub fn verify_signature(&self) -> bool {
+        #[cfg(test)]
+        signature_observations::check();
         let Ok(sig): Result<[u8; 64], _> = self.sig.as_slice().try_into() else {
             return false;
         };

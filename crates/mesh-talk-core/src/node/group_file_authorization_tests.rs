@@ -1587,3 +1587,194 @@ async fn assert_live_group_offer_checks(change: &'static str) {
         );
     }
 }
+
+#[tokio::test]
+async fn group_file_control_decision_reads_authenticated_manifest_once() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let peer = fixture.peers[0].public();
+    // Warm mutable authorization/completion projections before measuring.
+    node.file_consent_controls(&peer, &[(fixture.file, fixture.manifest)], true)
+        .unwrap();
+    let before = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    let writes = node
+        .storage
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        for _ in 0..3 {
+            assert!(
+                node.file_consent_controls(&peer, &[(fixture.file, fixture.manifest)], true)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    });
+    assert_eq!(
+        signatures, 0,
+        "warm authenticated manifests reuse only their intrinsic signature proof"
+    );
+    let after = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    assert_eq!(
+        after.0 - before.0,
+        3,
+        "one authenticated body fetch per synchronous control decision"
+    );
+    assert_eq!(
+        after.1 - before.1,
+        3,
+        "one authenticated decode per synchronous control decision"
+    );
+    assert_eq!(
+        node.storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        writes,
+        "unchanged consent must not write"
+    );
+}
+
+#[tokio::test]
+async fn group_file_incoming_control_reuses_exact_retained_manifest_and_preserves_read_failure() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let signer = &fixture.peers[0];
+    let peer = signer.public();
+    // Install a peer-signed equivalent offer in the same retained transcript,
+    // using the existing immutable transfer so the actual control owner runs.
+    let mut row = node
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(fixture.manifest)
+        .unwrap()
+        .unwrap();
+    let event = {
+        let mut log = node.log.lock().unwrap();
+        let source = log.get(&fixture.manifest).unwrap().unwrap();
+        let (parents, lamport) = log.prepare(&fixture.channel).unwrap();
+        let sequence = log
+            .next_sequence(&fixture.channel, &Author::from_ed25519(peer.ed25519_pub))
+            .unwrap();
+        let event = Event::new(
+            signer,
+            fixture.channel,
+            sequence,
+            parents,
+            lamport,
+            source.wall_clock,
+            EventKind::FileManifest,
+            source.ciphertext,
+        );
+        log.append(event.clone()).unwrap();
+        event
+    };
+    row.event_id = event.id;
+    row.from = peer.user_id();
+    row.wall_clock = event.wall_clock;
+    node.received_files
+        .lock()
+        .unwrap()
+        .record_file_with_reception(&row, Some(&event), None)
+        .unwrap();
+    crate::node::test_support::settle_group_metadata(node, fixture.channel);
+    let offers = [(fixture.file, event.id)];
+    let first = node.file_consent_controls(&peer, &offers, true).unwrap();
+    assert_eq!(first.len(), 1);
+    let decision = super::super::file_consent::Decision::open(&first[0]).unwrap();
+    assert_eq!(decision.manifest, event.id);
+    assert_eq!(decision.sender, peer);
+    assert_eq!(decision.recipient, node.identity.public());
+    // Initial publication has not yet crossed the persisted-control read
+    // verifier. Warm that independent proof before measuring unchanged reads.
+    assert_eq!(
+        node.file_consent_controls(&peer, &offers, true).unwrap(),
+        first
+    );
+    let before = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    let writes = node
+        .storage
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        for _ in 0..3 {
+            let controls = node.file_consent_controls(&peer, &offers, true).unwrap();
+            assert_eq!(controls.len(), 1);
+            assert_eq!(controls[0].id, first[0].id);
+            assert_eq!(controls[0].sig, first[0].sig);
+        }
+    });
+    let after = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    assert_eq!((after.0 - before.0, after.1 - before.1), (3, 3));
+    assert_eq!(
+        signatures, 0,
+        "warm unchanged controls reuse intrinsic proofs while every manifest is still read and authenticated"
+    );
+    assert_eq!(
+        node.storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        writes
+    );
+    assert!(
+        node.incoming_offer_with_retained_event(
+            fixture.file,
+            Some(event.id),
+            Some(&peer),
+            Some(&event)
+        )
+        .unwrap()
+        .is_some()
+    );
+    node.log.lock().unwrap().fail_read_for(Some(event.id));
+    assert!(
+        node.incoming_offer_with_retained_event(
+            fixture.file,
+            Some(event.id),
+            Some(&peer),
+            Some(&event)
+        )
+        .is_err(),
+        "retained-body reuse must preserve a current read failure"
+    );
+    node.log.lock().unwrap().fail_read_for(None);
+    assert!(
+        node.incoming_offer_with_retained_event(
+            fixture.file,
+            Some(event.id),
+            Some(&peer),
+            Some(&event)
+        )
+        .unwrap()
+        .is_some(),
+        "the same offer recovers when its owner becomes readable"
+    );
+}

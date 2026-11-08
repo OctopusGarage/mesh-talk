@@ -62,6 +62,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    changes; drain available pages promptly in bounded batches. A slower fallback
    must not delay each already-available page by another interval.
    A memo that still hydrates its input on every wake is not an I/O optimization.
+   Reuse authenticated immutable input within one decision instead of reading
+   and verifying it again down the call chain; keep current authority and read
+   failure checks independent of that reuse.
    Gate unchanged producers using complete input revisions; acknowledge the
    selected revisions, retain failed work and schedule sparse integrity repair.
    Separate volatile evidence from stable projections: refresh presence without

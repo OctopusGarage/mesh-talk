@@ -40,6 +40,13 @@ pub(super) trait SessionBackend {
             ..Default::default()
         })
     }
+    /// Qualify an exclusively owned prepared view for another selection phase.
+    /// True requires the complete current source and authority stamp to match;
+    /// finite-cutoff validation alone may intentionally permit later appends.
+    /// Have-dependent export preparation remains a separate obligation.
+    fn reusable_view(&self, _view: &Self::View) -> Result<bool, LogError> {
+        Ok(false)
+    }
     fn reusable_export(
         &self,
         _view: &Self::View,
@@ -385,6 +392,12 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .prepare_view_step(v, budget)
+    }
+    fn reusable_view(&self, view: &S::View) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .reusable_view(view)
     }
     fn reusable_export(
         &self,

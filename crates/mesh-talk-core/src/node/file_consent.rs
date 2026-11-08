@@ -239,11 +239,15 @@ impl Node {
             {
                 continue;
             }
-            if let Some((event, row)) = group_offer {
-                self.retain_group_file_completion(&event, &row)?;
+            if let Some((event, row)) = group_offer.as_ref() {
+                self.retain_group_file_completion(event, row)?;
             }
-            let Some((automatic, account, _, _)) =
-                self.incoming_offer(file, Some(manifest), Some(sender))?
+            let Some((automatic, account, _, _)) = self.incoming_offer_with_retained_event(
+                file,
+                Some(manifest),
+                Some(sender),
+                group_offer.as_ref().map(|(event, _)| event),
+            )?
             else {
                 continue;
             };

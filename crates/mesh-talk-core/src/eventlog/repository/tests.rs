@@ -27,6 +27,104 @@ pub(super) fn database(dir: &tempfile::TempDir) -> Arc<EncryptedDatabase> {
         EncryptedDatabase::open(&dir.path().join("profile.db"), "password", b"profile").unwrap(),
     )
 }
+
+#[test]
+fn repeated_authenticated_reads_reuse_only_intrinsic_signature_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let domain = EventDomainId([1; 16]);
+    let repository = EventRepository::new(db.clone(), domain).unwrap();
+    let message = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    repository.append(&message).unwrap();
+    let reads = repository.body_read_counts();
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        for _ in 0..4 {
+            assert_eq!(repository.get(&message.id).unwrap(), Some(message.clone()));
+        }
+    });
+    assert_eq!(
+        signatures, 1,
+        "one intrinsic signature proof for unchanged authenticated bytes"
+    );
+    assert_eq!(repository.body_read_counts().0 - reads.0, 4);
+
+    // A warm proof never authenticates a different signature claiming this ID.
+    let mut forged = message.clone();
+    forged.sig[0] ^= 1;
+    let replace = |event: &Event| {
+        let bytes = bincode::serialize(event).unwrap();
+        db.transaction(|c| {
+            c.execute(
+                "UPDATE retained_events SET body=?1 WHERE domain=?2 AND id=?3",
+                params![bytes, domain.0.as_slice(), message.id.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    };
+    replace(&forged);
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        assert!(repository.get(&message.id).is_err());
+        assert!(repository.get(&message.id).is_err());
+    });
+    assert_eq!(signatures, 2, "failed proofs must never enter the memo");
+    let mut corrupt = message.clone();
+    corrupt.ciphertext[0] ^= 1;
+    replace(&corrupt);
+    assert!(
+        repository.get(&message.id).is_err(),
+        "content integrity remains checked before a signature hit"
+    );
+    replace(&message);
+    assert_eq!(repository.get(&message.id).unwrap(), Some(message.clone()));
+    let other = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    assert!(other.get(&message.id).unwrap().is_none());
+    drop(repository);
+    let repository = EventRepository::new(db, domain).unwrap();
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        assert_eq!(repository.get(&message.id).unwrap(), Some(message.clone()));
+    });
+    assert_eq!(signatures, 1, "reopen must establish its own proof");
+    repository
+        .drop_conversation(&message.conversation_id)
+        .unwrap();
+    assert!(
+        repository.get(&message.id).unwrap().is_none(),
+        "a warm signature proof must not resurrect retired data"
+    );
+}
+
+#[test]
+fn intrinsic_signature_proof_capacity_requires_verification_after_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let events = (1..=257)
+        .map(|seq| event(&identity, seq, vec![], seq, EventKind::Message))
+        .collect::<Vec<_>>();
+    for event in &events {
+        repository.append(event).unwrap();
+    }
+    for event in &events {
+        assert_eq!(repository.get(&event.id).unwrap(), Some(event.clone()));
+    }
+    let (_, signatures) = crate::eventlog::event::signature_observations::observe(|| {
+        assert_eq!(
+            repository.get(&events[0].id).unwrap(),
+            Some(events[0].clone())
+        );
+    });
+    assert_eq!(
+        signatures, 1,
+        "bounded positive evidence must verify an evicted proof again"
+    );
+}
 #[test]
 fn bounded_selected_body_and_kind_count_admit_before_blob_fetch() {
     let dir = tempfile::tempdir().unwrap();

@@ -664,6 +664,19 @@ complete cryptographic key; it must not retain mutable membership, holder bindin
 document availability or final counts. Verify actual crypto invocation counts and
 mutate authority or stored observations between rows. The custody batch regressions
 in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs) cover this boundary.
+Trace the actual read owner's guarantee before sharing a verified object:
+encrypted legacy replay need not verify signatures as indexed reads do. Exact
+equality with an owner-validated durable record can reuse intrinsic verification,
+but must preserve current erasure checks and failed durability retries. The
+[group-file controls](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+count real body reads and signatures, retain nonempty signed decisions and test
+read failure/recovery; [delivery-store controls](../crates/mesh-talk-core/src/node/delivery_store_tests.rs)
+cover identical, conflicting, forged, reopened and erased reservations.
+Intrinsic signature memos must key every verification input and retain no body
+or permission. Current reads, canonical/content checks and source errors still
+precede reuse. The [repository regressions](../crates/mesh-talk-core/src/eventlog/repository/tests.rs)
+cover unchanged reads, forged signatures, repeated negative results, content
+tampering, retirement, reopen and bounded eviction.
 
 Reuse compiled static SQL through the existing bounded connection cache rather
 than caching authorization results. Every execution must still bind the current

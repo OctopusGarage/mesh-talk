@@ -594,6 +594,8 @@ pub(crate) struct DeliveryStore {
     outbox_records: usize,
     needs_sync: bool,
     deferred_profile_binding: bool,
+    #[cfg(test)]
+    record_validations: std::cell::Cell<usize>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -994,6 +996,8 @@ impl DeliveryStore {
             outbox_records: records.len(),
             needs_sync: false,
             deferred_profile_binding: false,
+            #[cfg(test)]
+            record_validations: std::cell::Cell::new(0),
         };
         for record in records {
             store.validate_record(&record)?;
@@ -1893,6 +1897,12 @@ impl DeliveryStore {
             return Err(invalid("invalid incoming group file reservation"));
         }
         self.check_file_slot(&file)?;
+        // Installed cards were authenticated before durable acceptance (or on
+        // reopen). Exact equality reuses only immutable evidence; the live
+        // erasure/capacity checks above and pending durability retry stay active.
+        if self.files.get(&file.id) == Some(&file) {
+            return self.outbox.sync();
+        }
         self.install_record(OutboxRecord::FileCard(file))
     }
 
@@ -3216,6 +3226,9 @@ impl DeliveryStore {
     }
 
     fn validate_record(&self, record: &OutboxRecord) -> Result<(), LogError> {
+        #[cfg(test)]
+        self.record_validations
+            .set(self.record_validations.get() + 1);
         match record {
             OutboxRecord::FileCard(file) => {
                 let mut ids = HashSet::new();
