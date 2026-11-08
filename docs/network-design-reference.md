@@ -1623,8 +1623,8 @@ existing worker remains active when optional history, attachment, appearance and
 contact synchronization are disabled, so mandatory account control requests and
 results can progress promptly. Every subsequent content exchange independently
 enforces its category permissions. A local TCP/authentication capacity rejection
-leaves the Wake revision unacknowledged and retries unchanged work on the existing
-ten-second reconciliation interval. A newer durable local publication may bypass
+leaves the Wake revision unacknowledged for sparse reconciliation while the peer
+remains eligible. A newer durable local publication may bypass
 only that local-admission cooldown through the existing notification/debounce;
 remote exchange or capability failures retain their sixty-second cooldown even
 when another local publication occurs. Neither path adds a sender or TCP slot.
@@ -3208,7 +3208,27 @@ existing policy-checked pull. Two senders coalesce changes for 100 ms, use a
 five-second exchange deadline and retain a sixty-second failed-capability cooldown.
 Local durable changes coalesce into bounded hint senders; imports do not republish
 hints, preventing feedback loops. Old peers
-reject the appended optional tags safely and keep ten-second anti-entropy.
+reject the appended optional tags safely. Five-minute reconciliation repairs lost
+hints and legacy peers, and visits only currently eligible sources. Cached routes
+and certificates alone do not make a sibling available. Fresh signed discovery,
+admitted private authentication or an authenticated hint can resume the exact
+source; unchanged heartbeats and generic local maintenance notifications do not
+restart all sibling pulls. Private availability is bounded, expires and is fenced
+by identity, privacy, network and synchronization policy. It does not publish an
+invisible device in the public roster.
+
+Each receiver owns its partial history/document comparisons and missing local
+attachment work. Offline sources park this work rather than repeatedly failing;
+fresh availability resumes it. Runtime comparison cursors are memory-backed,
+while accepted imports remain durable. Source retention and the source's own
+unacknowledged delivery work retain their separate owners. Hint acknowledgement
+confirms only the hint, never content receipt. Offline status preserves the local
+missing-attachment count; protocol, content and storage failures remain failures.
+Missing-byte selection retains at most 256 candidate IDs per source. Attachment
+terminals continue this local handoff without restarting source history; local
+refills share one worker. Handoffs retain the total missing count separately.
+Page selection still traverses
+local file metadata and is not a constant-cost query over arbitrary retention.
 Existing frame indices and stored encodings remain unchanged.
 Appending records does not reset a forward cursor: a changed sweep schedules a
 fresh pass for IDs inserted behind that cursor. Up-to-date status requires a

@@ -118,6 +118,15 @@ impl PeerRecord {
             .collect()
     }
 
+    /// Last current public-evidence deadline, independently of retained dial routes.
+    pub(crate) fn presence_deadline(&self, now: Instant) -> Option<Instant> {
+        self.routes
+            .iter()
+            .filter_map(PeerEndpoint::public_presence_deadline)
+            .filter(|deadline| *deadline > now)
+            .max()
+    }
+
     /// Fresh observations with their exact introducing endpoint retained.
     /// A post-office endpoint identifies the introducer, not the member's location.
     pub fn presence_routes(&self, now: Instant) -> impl Iterator<Item = (&PeerEndpoint, u64, u64)> {

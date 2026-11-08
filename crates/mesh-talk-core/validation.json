@@ -300,6 +300,8 @@
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/availability.rs",
+        "crates/mesh-talk-core/src/node/account_sync/attachment_selection.rs",
         "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
         "crates/mesh-talk-core/src/node/channels.rs",
@@ -336,6 +338,10 @@
           {
             "name": "Modern memberships from a previous account remain archived for the exact local device unless the current account has a valid accepted or pending account-wide grant; legacy membership and genuine current-account departure remain distinct.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Receiver-owned sibling pulls follow targeted fresh availability and authenticated change hints; cached routes, local maintenance notifications and unchanged heartbeats create no bulk demand. Offline work retains progress and missing-byte counts; five-minute eligible-source repair preserves legacy and lost-hint recovery without delaying productive pages.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
           },
           {
             "name": "Routine local access and inventory publication compares complete pre-work input revisions before body reads, retains bounded page progress and newer dirty work, and owns failed retry and sparse integrity-repair deadlines independently of peer polling. Direct document integrity checks remain authoritative.",

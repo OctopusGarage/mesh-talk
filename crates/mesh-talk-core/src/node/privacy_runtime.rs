@@ -1001,6 +1001,7 @@ impl Node {
                 }
             }
         }
+        self.observe_sibling_availability(public);
         let mut roster = self.roster.lock().expect("roster lock not poisoned");
         if publicly_visible {
             roster.update_authenticated(announce, ip, &self.user_id());
@@ -1419,6 +1420,7 @@ impl Node {
             addr.ip(),
             channel.peer_publicly_visible(),
         )?;
+        self.observe_sibling_availability(channel.peer_identity());
         self.preferred_routes
             .lock()
             .expect("routes lock not poisoned")
@@ -1531,6 +1533,7 @@ impl Node {
                 ip,
                 channel.peer_publicly_visible(),
             )?;
+            self.observe_sibling_availability(channel.peer_identity());
         }
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         self.guard_channel(&mut channel, generation);

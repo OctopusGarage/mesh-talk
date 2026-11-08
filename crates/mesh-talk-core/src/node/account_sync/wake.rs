@@ -133,6 +133,7 @@ pub(in crate::node) struct AccountWake {
     changed: tokio::sync::Notify,
     // Only exact certified siblings enter this map (the registry is capped at64).
     received: Mutex<ReceivedWakes>,
+    pub(super) availability: super::availability::Availability,
 }
 impl Default for AccountWake {
     fn default() -> Self {
@@ -145,6 +146,7 @@ impl Default for AccountWake {
             revision: AtomicU64::new(1),
             changed: tokio::sync::Notify::new(),
             received: Mutex::new(ReceivedWakes::default()),
+            availability: Default::default(),
         }
     }
 }
@@ -237,6 +239,7 @@ impl Node {
             {
                 return false;
             }
+            self.observe_sibling_availability(channel.peer_identity());
             let certified: HashSet<_> = self
                 .linked_devices()
                 .iter()
@@ -253,7 +256,7 @@ impl Node {
                 self.trace_account_client(channel.peer_identity(), || {
                     format!("wake_received revision={revision}")
                 });
-                self.account_sync_notify.notify_one();
+                self.request_sibling_pull(channel.peer_identity());
             }
         }
         // Duplicate hints still receive an ack. No data or settings cross this path.
@@ -320,7 +323,7 @@ impl Node {
     }
 
     pub(in crate::node) async fn run_account_wake_loop(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(RETRY_INTERVAL);
+        let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut roster = self
             .roster
@@ -328,6 +331,7 @@ impl Node {
             .expect("roster mutex not poisoned")
             .subscribe_changes();
         let mut network = self.network_changes.subscribe();
+        let mut availability = self.account_wake.availability.changed.subscribe();
         let mut acknowledged: HashMap<String, u64> = HashMap::new();
         let mut retry_after: HashMap<String, WakeRetry> = HashMap::new();
         let mut active = HashSet::new();
@@ -337,6 +341,7 @@ impl Node {
             HashMap::new();
         let mut aborts: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
         loop {
+            queue.retain(|(_, peer)| self.sibling_sync_available(&peer.public));
             while active.len() < SENDERS {
                 let Some((id, peer)) = queue.pop_front() else {
                     break;
@@ -363,8 +368,18 @@ impl Node {
                 task_owners.insert(task.id(), (owner.clone(), routes));
                 aborts.insert(owner, task);
             }
+            let capacity_retry = retry_after
+                .values()
+                .filter(|retry| retry.local_revision.is_some() && retry.until > Instant::now())
+                .map(|retry| retry.until)
+                .min();
             tokio::select! {
+                _ = async {
+                    if let Some(at) = capacity_retry { tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await; }
+                    else { std::future::pending::<()>().await; }
+                } => {}
                 _ = tick.tick() => {}
+                _ = availability.changed() => {}
                 _ = self.account_wake.changed.notified() => { tokio::time::sleep(DEBOUNCE).await; }
                 changed = roster.changed() => {
                     if changed.is_err() { return; }
@@ -413,6 +428,7 @@ impl Node {
             for device in devices {
                 let id = device.public.user_id();
                 if id == self.user_id()
+                    || !self.sibling_sync_available(&device.public)
                     || acknowledged
                         .get(&id)
                         .is_some_and(|known| *known >= revision)
@@ -619,9 +635,12 @@ mod tests {
         );
         assert!(ui.has_changed().unwrap(), "import must notify the local UI");
         assert_eq!(
-            node.device_sync_status()
-                .into_iter()
+            node.account_sync_status
+                .lock()
+                .unwrap()
+                .values()
                 .find(|s| s.device_id == source.user_id())
+                .cloned()
                 .unwrap()
                 .document_phase,
             SyncPhase::CatchingUp

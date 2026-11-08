@@ -55,6 +55,11 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
 
 2. **Use recovery deliberately.** A fallback repairs missed events; it is not the
    main data path. Back off failures, stop with the owner and refresh on return.
+   A stored address or linked-device certificate is not current availability.
+   Park offline peer work without discarding receiver progress; resume on fresh
+   eligible evidence. Send bounded change hints to available siblings and let
+   each receiver own its incremental pull. Local maintenance notifications and
+   unchanged presence heartbeats must not restart every sibling's history scan.
    Native delivery, discovery leases, calls and real expiry retain their own
    timing contracts; never slow them merely to meet an idle chart.
 3. **Read metadata before payloads.** Compare revision/digest/cursor and query

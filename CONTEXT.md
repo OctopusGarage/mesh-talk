@@ -235,6 +235,14 @@ but does not create fresh device evidence or prove delivery. Authoritative
 withdrawal ends it immediately. Offline is client-relative, not global sign-out.
 _Avoid_: global online state, guaranteed connectivity.
 
+**Sibling synchronization availability**:
+Fresh evidence that a certified same-account device is eligible for a private
+synchronization attempt. This can include authenticated private activity without
+public presence. A retained route or certificate alone is insufficient; an
+attempt can still fail. The receiving device owns its pull progress and missing
+local bytes; the source owns its retained data and its own durable delivery facts.
+_Avoid_: public online state, source-owned receiver progress, delivery confirmation.
+
 **Roster**:
 A projection of known devices and their observations. A raw roster can include
 infrastructure and does not define channel membership.

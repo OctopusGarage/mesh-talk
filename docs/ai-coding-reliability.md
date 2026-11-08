@@ -355,6 +355,18 @@ must not discard unfinished history or a refresh received during the exchange.
 Consume a coalesced wake only when its follow-up remains scheduled after every
 error branch. A failure without pending work must still avoid a busy retry loop.
 
+Separate remembered routes, fresh availability and synchronization demand. A
+certificate or cached endpoint permits neither an assumption of online presence
+nor endless bulk retries. Scope private authenticated availability to the exact
+identity, current authority and a finite deadline; public invisibility must not
+disable authorized private recovery. A repeated live heartbeat is not new data,
+while expired-to-fresh evidence at the same endpoint is a reconnect. Preserve
+receiver-owned partial comparisons while offline, and renew productive work only
+from admitted current-scope evidence. Local publication should hint receivers,
+not restart pulls from every sibling. The availability and local-notification
+regressions in [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+exercise this separation alongside the sparse-repair owner.
+
 Retain demand throughout backoff. A future retry deadline makes queued work
 temporarily ineligible; it does not consume that work. Wake the existing scheduler
 at the earliest retained deadline when a worker is available, without relying on
