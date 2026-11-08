@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6X2FS0W15G6AN1BNJ3DXQ6H",
+  "strategy": "manual-commit",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs",
+    "crates/mesh-talk-core/src/node/node_tests.rs",
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "scripts/diagnostics/validation-stage.test.mjs",
+    "scripts/diagnostics/windows-process-owner.test.mjs",
+    "scripts/validation/stage.mjs",
+    "scripts/validation/windows-process-owner.mjs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 700408,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 55338880,
+    "output_tokens": 140119,
+    "api_call_count": 202,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 2074,
+    "layers": {
+      "betterleaks": 4,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 8,
+      "credentialed_uri": 0,
+      "entropy": 2075,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
