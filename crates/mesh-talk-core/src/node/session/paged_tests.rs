@@ -226,12 +226,13 @@ async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
         let db = Arc::new(
             EncryptedDatabase::open(&dir.path().join("profile.db"), "pw", b"profile").unwrap(),
         );
-        let repository = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
         let signer = DeviceIdentity::generate();
         let conversation = ConversationId::new([7; 32]);
         let mut log = EventLog::default();
         let mut parent = None;
         let mut missing_roots = Vec::new();
+        let mut sql_events = Vec::new();
         // More than one Have chunk. SQL-only roots are inserted opposite
         // canonical clock priority; their child has an inverted signed clock.
         for seq in 1..=1501 {
@@ -245,7 +246,7 @@ async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
                 EventKind::Message,
                 vec![],
             );
-            repository.append(&event).unwrap();
+            sql_events.push(event.clone());
             if seq <= 2 {
                 missing_roots.push(event.id);
             } else {
@@ -273,7 +274,24 @@ async fn paged_sql_and_legacy_real_tcp_converge_both_directions() {
             EventKind::Message,
             vec![2],
         );
-        repository.append(&sql_extra).unwrap();
+        sql_events.push(sql_extra.clone());
+        // Both complete corpora precede the network window. Batch only setup
+        // commits; append_on retains canonical event validation and index updates.
+        db.transaction(|tx| {
+            for event in &sql_events {
+                assert_eq!(
+                    repository.append_on(tx, event)?,
+                    crate::eventlog::AppendOutcome::Appended
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(repository.count(&conversation).unwrap(), 1502);
+        let heads = repository.heads(&conversation).unwrap();
+        assert_eq!(heads.len(), 1500);
+        assert!(heads.contains(&sql_extra.id));
+        assert!(heads.contains(&parent.unwrap()));
         log.append(legacy_extra.clone()).unwrap();
         let sql = Arc::new(Mutex::new(TinyPagedStore::new(repository)));
         let legacy = Arc::new(Mutex::new(log));

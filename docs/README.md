@@ -21,7 +21,7 @@ surfaces to their owners, change triggers, evidence and follow-up records.
 | Contribute to the desktop app                 | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                           |
 | Implement or review a reliable change         | [AI coding reliability guide](ai-coding-reliability.md)      | [Module ownership](module-boundaries.md) · [Testing feedback loop](testing-feedback-loop.md)                                                     |
 | Design for low resource use                   | [Performance requirements](performance-requirements.md)      | [Module ownership](module-boundaries.md) · [Network budgets](network-design-reference.md#8-resource-budgets-compatibility-and-performance)       |
-| Keep CI fast and reliable                     | [CI maintenance](ci-maintenance.md)                          | [Testing feedback loop](testing-feedback-loop.md) · [Quality gates](quality-gates.md)                                                            |
+| Keep CI fast and reliable                     | [CI maintenance](ci-maintenance.md)                           | [Documentation-only PR scope](ci-maintenance.md#documentation-only-pr-scope) · [Testing feedback loop](testing-feedback-loop.md) · [Quality gates](quality-gates.md) |
 | Review security or past validation            | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Validation and evaluation](#validation-and-evaluation)            |
 
 For menu locations and everyday tasks, start with the [user guide](help/README.md).

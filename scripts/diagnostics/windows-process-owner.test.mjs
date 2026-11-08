@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { execute } from "../validation/stage.mjs";
+import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
+import { removeCliFixture } from "./test-fixtures/cli.mjs";
 
 const windows = process.platform === "win32";
 const powershell = path.join(process.env.SystemRoot || "C:/Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -277,12 +279,19 @@ test("Windows native launch failure returns proof without unowned fallback", { s
 });
 
 test("Windows lookup preserves bare names, quoted PATH and duplicate environment selection", { skip: !windows, timeout: 10000 }, async t => {
-  const { mkdir, link } = await import("node:fs/promises");
+  const { mkdir, copyFile, stat } = await import("node:fs/promises");
   const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-path-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => removeCliFixture(root));
   const bin = path.join(root, "quoted bin");
   await mkdir(bin);
-  await link(process.execPath, path.join(bin, "owned-node.exe"));
+  const executable = path.join(bin, "owned-node.exe");
+  await copyFile(process.execPath, executable);
+  // The fixture image must not alias the still-running harness's executable.
+  // Child retirement cannot release an image owned by this external process.
+  const [harnessImage, fixtureImage] = await Promise.all([
+    stat(process.execPath, { bigint: true }), stat(executable, { bigint: true }),
+  ]);
+  assert.notDeepEqual([fixtureImage.dev, fixtureImage.ino], [harnessImage.dev, harnessImage.ino]);
   const output = [];
   const result = await run(["owned-node", "-e", "process.stdout.write(process.env.OWNER_VALUE)"], {
     cwd: root, env: { ...process.env, PATH: `"${bin}"`, Path: "D:/no-such-owned-path", OWNER_VALUE: "first", owner_value: "second" }, onOutput(chunk) { output.push(chunk); },
@@ -541,12 +550,17 @@ test("an output-limit control cannot cancel its enclosing validation supervisor"
   const output = path.join(root, "result.json");
   const stage = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
   const caseName = "command stream capture shares one byte window and retains the output-limit failure";
+  // Tool startup is outside this ownership regression. Keep the real stage,
+  // command, cancellation and receipt while fixing only its identity dependency.
+  const versions = toolVersionFixture(root, {
+    ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined,
+  });
   const result = spawnSync(process.execPath, [stage, "stream-control", "--result", output, "--", process.execPath,
     "--test", `--test-name-pattern=^${caseName}$`, fileURLToPath(import.meta.url)], {
     cwd: root,
     // This synthetic supervisor owns the expected cancellation, independently
     // of the real runner executing this regression.
-    env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined },
+    env: versions.env,
     encoding: "utf8", timeout: 10000, maxBuffer: 4 * 1024 * 1024,
   });
   assert.equal(result.error, undefined, result.error?.message);
@@ -555,6 +569,11 @@ test("an output-limit control cannot cancel its enclosing validation supervisor"
   const receipt = JSON.parse(await readFile(output, "utf8"));
   assert.equal(receipt.code, 0);
   assert.equal(receipt.cleanupUnverified, false);
+  const probes = (await readFile(versions.probes, "utf8")).trim().split("\n");
+  assert.ok(probes.length >= 6, "tool identity must be captured and revalidated");
+  assert.equal(probes.length % 3, 0, "each identity observation probes the complete tool set");
+  for (let index = 0; index < probes.length; index += 3)
+    assert.deepEqual(probes.slice(index, index + 3), ["cargo", "rustc", "npm"]);
 });
 
 test("machine output requires an explicitly complete stdout capture", async () => {

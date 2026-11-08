@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { rm } from "node:fs/promises";
+import { removeCliFixture } from "./test-fixtures/cli.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { delimiter, resolve as resolvePath } from "node:path";
@@ -125,11 +125,6 @@ test("rejects malformed paginated responses", async () => {
     await assert.rejects(resolve([], { input: { read: async () => response } }));
   }
 });
-
-// A copied executable may remain briefly locked after its process exits on Windows.
-function removeCliFixture(path) {
-  return rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-}
 
 test("CLI appends only a numeric run output and hides API failure details", async () => {
   mkdirSync("tmp", { recursive: true });

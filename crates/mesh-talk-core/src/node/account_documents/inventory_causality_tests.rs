@@ -373,7 +373,16 @@ fn group_inventory_directory_normal_control_history_growth_stays_available() {
     let external = node(&directory.path().join("external"), &Account::generate());
     let group = group_inventory_legacy_fixture(&source, &external, "Long-lived directory");
     copy_public_group(&external, &source, group);
+    let initial_count = source
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .count(&group)
+        .unwrap();
     let mut parent = source.log.lock().unwrap().heads(&group).unwrap()[0];
+    let mut history = Vec::new();
     for seq in 2..=4098 {
         let event = Event::new(
             &source.identity,
@@ -386,7 +395,28 @@ fn group_inventory_directory_normal_control_history_growth_stays_available() {
             format!("Directory revision {seq}").into_bytes(),
         );
         parent = event.id;
-        source.log.lock().unwrap().append(event).unwrap();
+        history.push(event);
+    }
+    // This fixture observes the completed history, not intermediate commits.
+    // Retain canonical per-event validation and indexes in one durable transaction.
+    {
+        let log = source.log.lock().unwrap();
+        let repository = log.repository().unwrap();
+        source
+            .storage
+            .database()
+            .transaction(|tx| {
+                for event in &history {
+                    assert_eq!(
+                        repository.append_on(tx, event)?,
+                        crate::eventlog::AppendOutcome::Appended
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(repository.count(&group).unwrap(), initial_count + 4097);
+        assert_eq!(repository.heads(&group).unwrap(), vec![parent]);
     }
     source.process_channel(group);
     let current = group_inventory_source_document(&source, group);

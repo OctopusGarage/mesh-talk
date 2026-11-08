@@ -1,4 +1,4 @@
-import { Bookmark, ListChecks, X } from "lucide-react";
+import { Star, ListChecks, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import type { ChatMessage } from "@/store/conversationModel";
@@ -50,7 +50,7 @@ export function CollectionToolbar({
         </Button>
       )}
       <Button size="sm" onClick={onCollect} disabled={selected.length === 0}>
-        <Bookmark className="mr-1 h-4 w-4" aria-hidden="true" />
+        <Star className="mr-1 h-4 w-4" aria-hidden="true" />
         {t("messageFavorites.collect")}
       </Button>
     </div>

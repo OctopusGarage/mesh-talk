@@ -16,8 +16,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: mutants-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
+  group: mutants-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 permissions:
   contents: read
@@ -32,127 +32,246 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
-      - uses: taiki-e/install-action@v2.87.31
+      - uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
       - name: Verify pinned mutation runner behavior
-        run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs
+        run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs scripts/release/mutation-process-owner.test.mjs
 
-  mutants:
-    name: Workspace mutation sample (${{ matrix.worker }})
+  plan:
+    name: Plan complete rotating mutation sample
     needs: runner-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Cover setup plus 18 builds/suites (baseline and 17 mutants) at the
-    # observed 130s build and bounded 360s suite budgets, without truncation.
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false # Keep other reports if one runner has a baseline/tool failure.
-      matrix:
-        worker: [0, 1, 2, 3]
+    timeout-minutes: 10
     env:
-      # rust-cache otherwise defaults this to 0, defeating per-mutant rebuild reuse.
       CARGO_INCREMENTAL: '1'
-      MUTATION_WORKER: ${{ matrix.worker }}
-      MUTATION_WORKERS: '4'
+    outputs:
+      selected: ${{ steps.selection.outputs.selected }}
+      matrix: ${{ steps.selection.outputs.matrix }}
+      rust: ${{ steps.selection.outputs.rust }}
+      node: ${{ steps.selection.outputs.node }}
+      digest: ${{ steps.selection.outputs.digest }}
+      producer_attempt: ${{ steps.selection.outputs.producer_attempt }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 1 # Daily sampling does not need repository history
-
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install mutation test tools
-        uses: taiki-e/install-action@v2.87.31
+      - uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
-
       - name: Select mutation sample
         id: selection
         working-directory: src-tauri
-        run: node ../scripts/release/run-mutants.mjs --list-only
+        run: node ../scripts/release/run-mutants.mjs --plan "$RUNNER_TEMP/mutation-plan"
+      - name: Preserve mutation plan
+        id: upload
+        if: always() && (steps.selection.outcome == 'success' || steps.selection.outcome == 'failure')
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mutation-plan/
+          if-no-files-found: error
+          retention-days: 7
 
+  baseline:
+    name: Complete unmutated workspace baseline
+    needs: plan
+    if: needs.plan.result == 'success' && needs.plan.outputs.selected != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    env:
+      CARGO_INCREMENTAL: '1'
+      MUTATION_PLAN_DIGEST: ${{ needs.plan.outputs.digest }}
+      MUTATION_PLAN_ATTEMPT: ${{ needs.plan.outputs.producer_attempt }}
+    outputs:
+      digest: ${{ steps.baseline.outputs.digest }}
+      producer_attempt: ${{ steps.baseline.outputs.producer_attempt }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ needs.plan.outputs.rust }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ needs.plan.outputs.node }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install mutation test tools
+        uses: taiki-e/install-action@v2.88.1
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
+      - name: Download exact mutation plan
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.plan.outputs.artifact_id }}
+          path: ${{ runner.temp }}/mutation-plan
       - name: Prepare hosted Linux build storage
         id: runner_storage
-        if: steps.selection.outputs.selected != '0' && runner.os == 'Linux'
         shell: bash
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
-
       - name: Preserve runner storage measurements
         if: always() && steps.runner_storage.outcome == 'success'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/runner-storage.json
           if-no-files-found: error
           retention-days: 14
-
       - name: Prepare Ubuntu archive source
-        if: steps.selection.outputs.selected != '0'
         shell: bash
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
-
       - name: Install Tauri system dependencies
-        if: steps.selection.outputs.selected != '0'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf
-
       - name: Cache mutation build
-        if: steps.selection.outputs.selected != '0'
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: '.'
-          key: mutants
-
+          # Equivalent to the original key=mutants plus job=mutants prefix.
+          shared-key: mutants-mutants
       - name: Build frontend
-        if: steps.selection.outputs.selected != '0'
         working-directory: frontend
         run: |
           npm ci
           npm run build
-
-      # The shared runner contract passed before these shards started.
-      - name: Mutants (workspace sample)
-        if: steps.selection.outputs.selected != '0'
+      - name: Execute and seal complete baseline
+        id: baseline
         working-directory: src-tauri
-        run: node ../scripts/release/run-mutants.mjs
-
-      - name: Upload mutants report
-        # A test-only/config-only diff can exit successfully without creating a report.
-        if: always() && hashFiles('mutants.out/**') != ''
+        run: node ../scripts/release/run-mutants.mjs --baseline "$RUNNER_TEMP/mutation-plan" "$RUNNER_TEMP/mutation-baseline"
+      - name: Preserve real baseline evidence
+        id: upload
+        if: always() && (steps.baseline.outcome == 'success' || steps.baseline.outcome == 'failure')
         uses: actions/upload-artifact@v7
         with:
-          name: mutants-report-${{ matrix.worker }}
-          path: mutants.out/
+          name: mutation-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mutation-baseline/
           if-no-files-found: error
+          retention-days: 7
 
-  # Preserve the stable branch-protection check across matrix size changes.
+  mutants:
+    name: Workspace mutation sample (${{ matrix.worker }})
+    needs: [plan, baseline]
+    if: needs.plan.result == 'success' && needs.plan.outputs.selected != '0' && needs.baseline.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      CARGO_INCREMENTAL: '1'
+      MUTATION_PLAN_DIGEST: ${{ needs.plan.outputs.digest }}
+      MUTATION_PLAN_ATTEMPT: ${{ needs.plan.outputs.producer_attempt }}
+      MUTATION_BASELINE_DIGEST: ${{ needs.baseline.outputs.digest }}
+      MUTATION_BASELINE_ATTEMPT: ${{ needs.baseline.outputs.producer_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ needs.plan.outputs.rust }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ needs.plan.outputs.node }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install mutation test tools
+        uses: taiki-e/install-action@v2.88.1
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
+      - name: Download exact mutation plan
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.plan.outputs.artifact_id }}
+          path: ${{ runner.temp }}/mutation-plan
+      - name: Prepare hosted Linux build storage
+        id: runner_storage
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
+      - name: Preserve runner storage measurements
+        if: always() && steps.runner_storage.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-storage.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Prepare Ubuntu archive source
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Cache mutation build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The baseline is the sole trusted writer of the existing shared key.
+          save-if: 'false'
+          workspaces: '.'
+          key: mutants
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Download exact successful baseline producer artifact
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.baseline.outputs.artifact_id }}
+          path: ${{ runner.temp }}/mutation-baseline
+      - name: Mutants (workspace sample)
+        id: execution
+        working-directory: src-tauri
+        env:
+          MUTATION_WORKER: ${{ matrix.worker }}
+        run: node ../scripts/release/run-mutants.mjs --worker "$RUNNER_TEMP/mutation-plan" "$RUNNER_TEMP/mutation-baseline" "$RUNNER_TEMP/mutation-worker" "$MUTATION_WORKER"
+      - name: Upload mutants report
+        if: always() && (steps.execution.outcome == 'success' || steps.execution.outcome == 'failure')
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-report-${{ matrix.worker }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mutation-worker/
+          if-no-files-found: error
+          retention-days: 14
+
   mutation-gate:
     name: mutants
-    needs: [runner-contract, mutants]
-    if: always()
+    needs: [runner-contract, plan, baseline, mutants]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require all mutation shards
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+      - name: Require all planned work and runner contracts
         env:
           CONTRACTS: ${{ needs.runner-contract.result }}
           DEEP: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          PLAN: ${{ needs.plan.result }}
+          SELECTED: ${{ needs.plan.outputs.selected }}
+          BASELINE: ${{ needs.baseline.result }}
           SHARDS: ${{ needs.mutants.result }}
-        run: |
-          test "$CONTRACTS" = success
-          if [ "$DEEP" = true ]; then
-            test "$SHARDS" = success
-          else
-            test "$SHARDS" = skipped
-          fi
+        run: node scripts/release/run-mutants.mjs --gate

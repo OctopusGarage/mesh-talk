@@ -127,7 +127,7 @@ fi
 
 # Check code formatting (Frontend)
 print_status "success" "Checking frontend code formatting..."
-if ! { cd frontend && node "$stage" frontend-format --profile shared --inputs frontend -- npx prettier --check src/; }; then
+if ! { cd frontend && node "$stage" frontend-format --profile shared --inputs frontend -- npm run format:check; }; then
     print_status "error" "Frontend code formatting issues found. Run 'npx prettier --write src/' to fix."
     exit 1
 fi

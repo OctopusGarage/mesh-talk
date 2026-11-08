@@ -1,6 +1,6 @@
 import { FavoriteMessageText } from "./FavoriteMessageText";
 import { useEffect, useRef, useState } from "react";
-import { Bookmark, ChevronLeft, Pencil, Search, Trash2 } from "lucide-react";
+import { Star, ChevronLeft, Pencil, Search, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   Dialog,
@@ -67,7 +67,7 @@ export function FavoritesDialog() {
           disabled={!ready}
           className="mt-2 w-full justify-start gap-2 text-[13px]"
         >
-          <Bookmark className="h-4 w-4" aria-hidden="true" />
+          <Star className="h-4 w-4" aria-hidden="true" />
           {t("messageFavorites.title")}
         </Button>
       </DialogTrigger>
@@ -390,7 +390,7 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
               )}
               {!loading && !error && items.length === 0 && (
                 <div className="px-4 py-12 text-center">
-                  <Bookmark
+                  <Star
                     className="mx-auto mb-3 h-6 w-6 text-muted-foreground"
                     aria-hidden="true"
                   />

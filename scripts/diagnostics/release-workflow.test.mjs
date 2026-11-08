@@ -5,14 +5,24 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
+const packageApp = fileURLToPath(new URL("../release/package-app.sh", import.meta.url));
+const packageSource = readFileSync(packageApp, "utf8");
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("release artifact steps delegate policy with target passed as data", () => {
+  for (const [name, mode] of [["Collect build artifacts", "collect"], ["Generate SHA256 checksums", "checksums"], ["Package and sign artifacts", "package"]]) {
+    const step = workflow.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
+    assert.ok(step, name);
+    assert.ok(step.includes(`run: bash scripts/release/package-app.sh ${mode}`));
+    assert.doesNotMatch(step, /run: \|/);
+    if (mode === "package") assert.match(step, /TARGET: \$\{\{ matrix\.target \}\}/);
+  }
+  assert.doesNotMatch(packageSource, /\$\{\{/);
+});
+
 test("manual packages exclude updater payloads while the signed manifest binds standalone roles", { skip: process.platform === "win32" }, () => {
-  const checksumStep = workflow.split(/^      - /m).find((step) => step.startsWith("name: Generate SHA256 checksums"));
-  const packageStep = workflow.split(/^      - /m).find((step) => step.startsWith("name: Package and sign artifacts"));
-  const commands = (step) => step.split("        run: |\n")[1].split("\n")
-    .filter((line) => /^ {10}/.test(line) || /^\s*$/.test(line)).map((line) => line.replace(/^ {10}/, "")).join("\n");
   for (const [target, platform, extensions] of [
     ["aarch64-apple-darwin", "macos_arm64", ["dmg"]],
     ["x86_64-apple-darwin", "macos_x86_64", ["dmg"]],
@@ -32,12 +42,12 @@ test("manual packages exclude updater payloads while the signed manifest binds s
         [`${full}.delta.json`, `${full}.delta.json.sig`, raw, `${raw}.sig`, `mesh-talk-patch_v0.1.5_${platform}_from-v0.1.4.zst`])];
       for (const name of standalone) files.set(name, Buffer.from(`standalone ${name}`));
       for (const [name, bytes] of files) writeFileSync(join(root, "release", name), bytes);
-      execFileSync("bash", ["-c", commands(checksumStep)], { cwd: root, stdio: "pipe" });
-      // Only the external OIDC signing service is replaced; execute the actual
-      // checksum and packaging commands against real files and ZIPs.
-      const packageScript = commands(packageStep).replaceAll("${{ matrix.target }}", target)
-        .replace('node scripts/release/sign-blob.mjs "$ZIP_NAME" "$BUNDLE_FILE"', 'test -s "$ZIP_NAME"');
-      execFileSync("bash", ["-c", packageScript], { cwd: root, env: { ...process.env, ARTIFACT_TAG: "v0.1.5" }, stdio: "pipe" });
+      execFileSync("bash", [packageApp, "checksums"], { cwd: root, stdio: "pipe" });
+      // Replace only the external signing service; exercise the real helper.
+      mkdirSync(join(root, "scripts/release"), { recursive: true });
+      writeFileSync(join(root, "scripts/release/sign-blob.mjs"), 'import {readFileSync,writeFileSync} from "node:fs"; const [zip,bundle]=process.argv.slice(2); if(!readFileSync(zip).length) process.exit(1); writeFileSync(bundle,zip);');
+      const packageEnv = { ...process.env, TARGET: target, ARTIFACT_TAG: "v0.1.5" };
+      execFileSync("bash", [packageApp, "package"], { cwd: root, env: packageEnv, stdio: "pipe" });
       const archive = join(root, "release_zips", `mesh-talk_v0.1.5_${platform}.zip`);
       const members = execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/);
       assert.deepEqual(members.sort(), [...extensions.map((extension) => `release/installer with spaces.${extension}`), "release/SHA256SUMS", "release/UPDATER_SHA256SUMS"].sort(), platform);
@@ -53,7 +63,7 @@ test("manual packages exclude updater payloads while the signed manifest binds s
         assert.ok(updaterManifest.includes(`${createHash("sha256").update(files.get(name)).digest("hex")}  ./${name}`), name);
       }
       execFileSync("zip", [archive, `release/${full}`], { cwd: root, stdio: "pipe" });
-      execFileSync("bash", ["-c", packageScript], { cwd: root, env: { ...process.env, ARTIFACT_TAG: "v0.1.5" }, stdio: "pipe" });
+      execFileSync("bash", [packageApp, "package"], { cwd: root, env: packageEnv, stdio: "pipe" });
       assert.deepEqual(execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/).sort(), members.sort(), "repackaging must discard stale ZIP entries");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -71,13 +81,14 @@ test("native release inspection uses the shared pinned toolchain and a real NSIS
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const toolchain = health.split("      - name: Install pinned native inspection toolchain\n")[1]?.split("      - ")[0];
   assert.ok(toolchain, "all three portable platforms must execute the tool bootstrap before merge");
-  assert.doesNotMatch(toolchain, /if:/);
+  assert.match(toolchain, /if:.*steps\.scope\.outputs\.full == 'true'/);
   assert.match(toolchain, /python scripts\/release\/sevenzip\.py install/);
   const native = health.split("      - name: Native release inspection regression\n")[1]?.split("      - ")[0];
   assert.ok(native, "portable health must exercise a genuine plugin installer");
-  assert.match(native, /if: runner\.os == 'Linux'/);
+  assert.match(native, /if:.*steps\.scope\.outputs\.full == 'true'.*runner\.os == 'Linux'/);
   assert.match(native, /apt-get install[^\n]*\bnsis\b/);
   const smoke = health.split("      - name: Verify native NSIS payload equivalence\n")[1]?.split("      - ")[0];
+  assert.match(smoke || "", /if:.*steps\.scope\.outputs\.full == 'true'.*runner\.os == 'Linux'/);
   assert.match(smoke || "", /python scripts\/release\/test_native_nsis\.py -v/);
 });
 
@@ -91,7 +102,7 @@ test("Linux release builds retain the Ubuntu 22.04 runtime baseline across archi
 test("release matrix builds native Windows and Linux ARM64 packages", () => {
   assert.match(workflow, /runner: windows-11-(?:vs2026-)?arm[\s\S]*?target: aarch64-pc-windows-msvc/);
   assert.match(workflow, /runner: ubuntu-22\.04-arm[\s\S]*?target: aarch64-unknown-linux-gnu/);
-  assert.match(workflow, /aarch64-pc-windows-msvc\)[\s\S]*?ARCH="arm64"/);
+  assert.match(packageSource, /aarch64-pc-windows-msvc\)[\s\S]*?ARCH="arm64"/);
 });
 
 test("Windows ARM64 installs a pinned x64 Cosign binary for emulated signing", () => {
@@ -103,11 +114,6 @@ test("Windows ARM64 installs a pinned x64 Cosign binary for emulated signing", (
 
 for (const runner of ["Windows", "Linux", "macOS"]) {
   test(`${runner} checksum step hashes real files and preserves filenames with spaces`, () => {
-    const step = workflow.split(/^      - /m).find((value) => value.startsWith("name: Generate SHA256 checksums"));
-    assert.ok(step);
-    const commands = step.split("        run: |\n")[1];
-    assert.ok(commands);
-    const script = commands.split("\n").filter((line) => /^ {10}/.test(line) || /^\s*$/.test(line)).map((line) => line.replace(/^ {10}/, "")).join("\n");
     const root = mkdtempSync(join(tmpdir(), "mesh-talk-checksums-"));
     try {
       const release = join(root, "release");
@@ -115,7 +121,7 @@ for (const runner of ["Windows", "Linux", "macOS"]) {
       const files = new Map([["installer with spaces.exe", Buffer.from("binary installer\0data")], ["package.msi", Buffer.from("second installer")]]);
       for (const [name, bytes] of files) writeFileSync(join(release, name), bytes);
       for (let attempt = 0; attempt < 2; attempt++) {
-        execFileSync("bash", ["-c", script], { cwd: root, env: { ...process.env, RUNNER_OS: runner } });
+        execFileSync("bash", [packageApp, "checksums"], { cwd: root, env: { ...process.env, RUNNER_OS: runner } });
         const lines = readFileSync(join(release, "SHA256SUMS"), "utf8").trim().split(/\r?\n/);
         assert.equal(lines.length, files.size, "checksums must not include SHA256SUMS itself");
         const names = new Set();
@@ -134,9 +140,9 @@ for (const runner of ["Windows", "Linux", "macOS"]) {
       mkdirSync(bin);
       const digest = createHash("sha256").update(files.get("installer with spaces.exe")).digest("hex");
       writeFileSync(join(bin, "sha256sum"), `#!/usr/bin/env bash\nif [[ "$1" == '-c' ]]; then exit 0; fi\nfor file in "$@"; do\n  [[ "$file" != */package.msi ]] || exit 23\n  printf '%s  %s\\n' '${digest}' "$file"\ndone\n`, { mode: 0o755 });
-      assert.throws(() => execFileSync("bash", ["-c", script], { cwd: root, env: { ...process.env, RUNNER_OS: runner, PATH: `${bin}${delimiter}${process.env.PATH}` } }), "a partial checksum failure must stop packaging/signing");
+      assert.throws(() => execFileSync("bash", [packageApp, "checksums"], { cwd: root, env: { ...process.env, RUNNER_OS: runner, PATH: `${bin}${delimiter}${process.env.PATH}` } }), "a partial checksum failure must stop packaging/signing");
       for (const name of files.keys()) rmSync(join(release, name));
-      assert.throws(() => execFileSync("bash", ["-c", script], { cwd: root, env: { ...process.env, RUNNER_OS: runner } }), "empty releases must fail before packaging/signing");
+      assert.throws(() => execFileSync("bash", [packageApp, "checksums"], { cwd: root, env: { ...process.env, RUNNER_OS: runner } }), "empty releases must fail before packaging/signing");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -184,7 +190,7 @@ test("both release archive roles use the bounded signing owner before mandatory 
   for (const name of ["Package and sign artifacts", "Package and sign post-office node"]) {
     const step = workflow.split(/^      - /m).find((value) => value.startsWith(`name: ${name}\n`));
     assert.ok(step, name);
-    assert.match(step, /node scripts\/release\/sign-blob\.mjs/);
+    assert.match(name === "Package and sign artifacts" ? packageSource : step, /node scripts\/release\/sign-blob\.mjs/);
     assert.doesNotMatch(step, /cosign sign-blob/);
   }
   const verifier = readFileSync(new URL("../release/verify-release.sh", import.meta.url), "utf8");
@@ -207,7 +213,7 @@ test("Stable mutation commands cannot run after a newly unsuccessful source chec
     const fixture = join(temporary, "source-check.mjs");
     const source = new URL("../release/check-source-checks.mjs", import.meta.url).href;
     const policy = new URL("../ci/required-checks.mjs", import.meta.url).href;
-    writeFileSync(fixture, `import {requireSourceChecks} from ${JSON.stringify(source)};\nimport {releaseSourceChecks} from ${JSON.stringify(policy)};\nconst checks=releaseSourceChecks.map((name,id)=>({name,id,app:{slug:"github-actions"},status:"completed",conclusion:"success"}));\nif(process.env.NEW_CHECK_STATE!=="success") checks.push({...checks[0],id:999,...JSON.parse(process.env.NEW_CHECK_STATE)});\nrequireSourceChecks(checks,[]);\n`);
+    writeFileSync(fixture, `import {requireSourceChecks} from ${JSON.stringify(source)};\nimport {releaseSourceChecks,releaseSourceWorkflows} from ${JSON.stringify(policy)};\nconst paths=[...new Set(Object.values(releaseSourceWorkflows))];const provenance={repo:"owner/repo",sha:"a".repeat(40),runs:paths.map((path,i)=>({path,id:i+1,run_attempt:1,check_suite_id:i+1,repository:{full_name:"owner/repo"},head_repository:{full_name:"owner/repo"},head_sha:"a".repeat(40),head_branch:"main",event:"push",status:"completed",conclusion:"success"}))};const checks=releaseSourceChecks.map((name,id)=>({name,id,check_suite:{id:paths.indexOf(releaseSourceWorkflows[name])+1},app:{slug:"github-actions"},status:"completed",conclusion:"success"}));\nif(process.env.NEW_CHECK_STATE!=="success") checks.push({...checks[0],id:999,...JSON.parse(process.env.NEW_CHECK_STATE)});\nrequireSourceChecks(checks,[],provenance);\n`);
     const prelude = 'node() { if [ "$1" = scripts/release/check-source-checks.mjs ]; then "$REAL_NODE" "$CHECK_FIXTURE"; else printf "PUBLIC_MUTATION\\n"; fi; }\n';
     for (const script of [commands(image) + '\nprintf "PUBLIC_MUTATION\\n"', commands(publication)]) {
       const run = (script, state) => spawnSync("bash", ["-e", "-c", prelude + script], { encoding: "utf8", env: { ...process.env, REAL_NODE: process.execPath, CHECK_FIXTURE: fixture, NEW_CHECK_STATE: state, SOURCE_REPO: "fixture/repo", SOURCE_SHA: "a".repeat(40), RELEASE_TAG: "v1.2.3" } });
@@ -226,5 +232,32 @@ test("Stable mutation commands cannot run after a newly unsuccessful source chec
     }
   } finally {
     rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+
+test("macOS release linking discards local symbols before native packaging", () => {
+  const producer = workflow.split("  build-release:")[1].split("  verify-release:")[0];
+  for (const target of ["AARCH64_APPLE_DARWIN", "X86_64_APPLE_DARWIN"]) {
+    assert.ok(producer.includes(`CARGO_TARGET_${target}_RUSTFLAGS: "-C link-arg=-Wl,-x"`));
+  }
+  assert.doesNotMatch(producer, /CARGO_TARGET_.*(?:WINDOWS|LINUX).*link-arg=-Wl,-x/);
+});
+
+
+test("macOS local-symbol stripping preserves executable output and native signature", { skip: process.platform !== "darwin", timeout: 30000 }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-release-symbols-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = join(root, "probe.rs");
+  writeFileSync(source, '#[inline(never)] fn local_probe(x: u64) -> u64 { std::hint::black_box(x) + 1 }\nfn main() { println!("{}", local_probe(41)); }\n');
+  for (const stripped of [false, true]) {
+    const binary = join(root, stripped ? "stripped" : "baseline");
+    execFileSync("rustc", ["--crate-name", "symbol_probe", "-C", "opt-level=3", ...(stripped ? ["-C", "link-arg=-Wl,-x"] : []), source, "-o", binary]);
+    assert.equal(execFileSync(binary, [], { encoding: "utf8" }).trim(), "42");
+    const symbols = execFileSync("nm", [binary], { encoding: "utf8" });
+    if (stripped) assert.doesNotMatch(symbols, / [tbs] /);
+    else assert.match(symbols, /local_probe/);
+    execFileSync("codesign", ["--force", "--sign", "-", binary]);
+    execFileSync("codesign", ["--verify", "--strict", binary]);
   }
 });

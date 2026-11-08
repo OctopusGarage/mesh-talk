@@ -17,6 +17,19 @@ export const releaseSourceChecks = Object.freeze([
   "Analyze (rust)", "Analyze (actions)", "Analyze (javascript-typescript)",
 ]);
 
+// Top-level workflow ownership: reusable jobs belong to their caller's suite.
+export const releaseSourceWorkflows = Object.freeze({
+  ...Object.fromEntries(workspace.map(name => [name, ".github/workflows/ci.yml"])),
+  ...Object.fromEntries(health.map(name => [name, ".github/workflows/e2e-ui.yml"])),
+  ...Object.fromEntries([...backend, ...native].map(name => [name, ".github/workflows/e2e-backend.yml"])),
+  "Playwright UI E2E": ".github/workflows/e2e-ui.yml",
+  "ASan + LeakSanitizer (core)": ".github/workflows/sanitizers.yml",
+  mutants: ".github/workflows/mutants.yml",
+  scan: ".github/workflows/gitleaks.yml",
+  "Scorecard analysis": ".github/workflows/scorecard.yml",
+  ...Object.fromEntries(["rust", "actions", "javascript-typescript"].map(language => [`Analyze (${language})`, ".github/workflows/codeql.yml"])),
+});
+
 export function pendingSuccessfulChecks(checks, names, appSlug = "github-actions") {
   assert.ok(Array.isArray(checks), "source checks must be an array");
   return names.filter(name => {

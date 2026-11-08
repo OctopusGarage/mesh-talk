@@ -51,8 +51,9 @@ export interface FavoriteAttachmentMock {
  * The real backend is covered separately by the Rust multi-process suite (`make e2e`); this
  * suite guards the UI rendering + wiring (the layer that black-screened v0.1.0).
  */
-export const test = base.extend({
-  page: async ({ page }, provide) => {
+export const test = base.extend<{ mockCallsEnabled: boolean }>({
+  mockCallsEnabled: [false, { option: true }],
+  page: async ({ page, mockCallsEnabled }, provide) => {
     // Keep UI scenarios independent of the public catalog. Marketplace tests
     // register their own routes later and override this empty default.
     await page.route("**/marketplace/catalog.json", (route) =>
@@ -62,7 +63,7 @@ export const test = base.extend({
         body: JSON.stringify({ schemaVersion: 1, packs: [] }),
       }),
     );
-    await page.addInitScript(() => {
+    await page.addInitScript((callsEnabled: boolean) => {
       // E2E-only fixture switch. The URL keeps each adversarial state reloadable without
       // adding test controls to the product UI: ?data=worst|huge|peers-huge|members-huge|empty|offline.
       const dataMode = new URLSearchParams(window.location.search).get("data");
@@ -706,7 +707,7 @@ export const test = base.extend({
         stay_signed_in: true,
         last_user: null as string | null,
         retention_days: 0,
-        calls_enabled: false,
+        calls_enabled: callsEnabled,
         post_office_enabled: true,
         post_office_send_enabled: true,
         post_office_receive_enabled: true,
@@ -2874,7 +2875,7 @@ export const test = base.extend({
         value: { unregisterListener },
         configurable: true,
       });
-    });
+    }, mockCallsEnabled);
     const collectCoverage = process.env.MESH_TALK_E2E_COVERAGE === "1";
     if (collectCoverage)
       await page.coverage.startJSCoverage({ resetOnNavigation: false });

@@ -3070,7 +3070,9 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
     }
 }
 
-#[tokio::test]
+// Delivery and ACK persistence share the production multithreaded host. Keep
+// their protocol workers independent of this fixture's observation future.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let dir = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -3114,18 +3116,39 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     let received = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await;
-    let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        observe_durable_delivery(&a, id),
+    )
     .await;
+    let status_at_cutoff = a.delivery_status(id);
+    a.runtime_work.close();
+    b.runtime_work.close();
     at.abort();
     bt.abort();
     let _ = at.await;
     let _ = bt.await;
+    let mut retired = true;
+    for current in [&a, &b] {
+        current.sessions.clear();
+        retired &= tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            current.runtime_work.drain(),
+        )
+        .await
+        .is_ok();
+    }
+    if !retired {
+        let profiles = (dir.keep(), bd.keep());
+        panic!(
+            "valid-message fixture work did not retire; profiles retained at {profiles:?}; status_at_cutoff={status_at_cutoff:?}"
+        );
+    }
     assert_eq!(received.unwrap().unwrap().text, b"small after rejection");
-    assert!(delivered.is_ok());
+    assert!(
+        delivered.is_ok(),
+        "authenticated valid-message ACK must be durably installed within 3s; status_at_cutoff={status_at_cutoff:?}"
+    );
 }
 
 #[tokio::test]
@@ -4646,19 +4669,24 @@ async fn sync_delivery_test_stage(
     timing.finish();
 }
 
+async fn observe_durable_delivery(node: &Node, id: EventId) {
+    loop {
+        let notified = node.delivery_status_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
+            return;
+        }
+        notified.await;
+    }
+}
+
 async fn wait_for_durable_delivery(node: &Node, id: EventId) {
     let mut timing = super::delivery_runtime::TestTiming::new("receipt-durable-wait-3s");
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let notified = node.delivery_status_notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
-                break;
-            }
-            notified.await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        observe_durable_delivery(node, id),
+    )
     .await
     .expect("authenticated receipt durably installed within 3s");
     timing.finish();

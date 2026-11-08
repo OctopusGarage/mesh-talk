@@ -2,6 +2,13 @@ name: Native core workflow evaluation
 
 on:
   workflow_call:
+    inputs:
+      full:
+        type: string
+        default: 'true'
+      upstream_result:
+        type: string
+        default: success
   workflow_dispatch:
 
 permissions:
@@ -9,28 +16,38 @@ permissions:
 
 jobs:
   native:
+    if: ${{ !cancelled() }}
     name: Real native UI (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2022, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ (inputs.full || 'true') == 'true' && matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ (inputs.full || 'true') }}
+          upstream_result: ${{ inputs.upstream_result || 'success' }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Prepare hosted Linux build storage
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         id: runner_storage
-        if: runner.os == 'Linux'
         shell: bash
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/runner-storage.mjs --prepare | tee "$RUNNER_TEMP/runner-storage.json"
 
       - name: Preserve runner storage measurements
-        if: always() && steps.runner_storage.outcome == 'success'
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && steps.runner_storage.outcome == 'success') }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: runner-storage-${{ github.job }}-${{ strategy.job-index || 0 }}-${{ github.run_attempt }}
@@ -39,36 +56,42 @@ jobs:
           retention-days: 14
 
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ steps.scope.outputs.full == 'true' }}
       - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           # Keep compiled dependencies when a scenario fails, not its verdict.
           cache-on-failure: true
       - name: Diagnose multicast on the actual native test runner
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/diagnostics/native-multicast-probe.mjs
       - name: Route the fixture multicast group locally (macOS runner only)
-        if: runner.os == 'macOS'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'macOS') }}
         run: |
           sudo route -n add -host 224.0.0.167 -interface 127.0.0.1
           node scripts/diagnostics/native-multicast-probe.mjs --require
       - name: Prepare Ubuntu archive source
-        if: runner.os == 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         shell: bash
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
       - name: Linux native webview dependencies
-        if: runner.os == 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev xvfb openbox dbus-x11 xdotool fonts-noto-cjk fonts-noto-color-emoji
       - name: Install frontend dependencies
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: frontend
         run: npm ci
       - name: Verify fail-closed evidence validator
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node --test scripts/diagnostics/hidden-contacts-report.test.mjs scripts/diagnostics/png-evidence.test.mjs scripts/diagnostics/native-core-scenarios.test.mjs
       - name: Build source-pinned frontend, production app, CLI and native driver
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/validation/native-build.mjs
       - name: Run native evaluation (Linux desktop session)
-        if: runner.os == 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         env:
           NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
           EVAL_SOURCE_SHA: ${{ github.sha }}
@@ -81,13 +104,13 @@ jobs:
             node scripts/diagnostics/hidden-contacts.mjs
           '
       - name: Run native evaluation (Windows and macOS desktop)
-        if: runner.os != 'Linux'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os != 'Linux') }}
         env:
           NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
           EVAL_SOURCE_SHA: ${{ github.sha }}
         run: node scripts/diagnostics/hidden-contacts.mjs
       - name: Upload native evidence even on failure
-        if: always()
+        if: ${{ steps.scope.outputs.full == 'true' && (always()) }}
         uses: actions/upload-artifact@v7
         with:
           name: native-core-${{ matrix.os }}-${{ github.run_attempt }}

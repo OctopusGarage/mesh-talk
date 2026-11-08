@@ -2,6 +2,8 @@ import { test, expect } from "./tauri-mock";
 import { BOB, enterChat, openBobDm } from "./helpers/session";
 import type { PeerInfo } from "../src/lib/types";
 
+test.use({ mockCallsEnabled: true });
+
 /** The real header and call dialogs with a controlled backend roster. */
 async function prepare(
   page: import("@playwright/test").Page,
@@ -47,7 +49,7 @@ async function prepare(
           ? projectRoutes(result as PeerInfo[])
           : result;
       };
-      useSettings.setState({ callsEnabled: true });
+      await useSettings.getState().load();
       await useChat.getState().refreshRoster();
     },
     { account: BOB.account, direct },

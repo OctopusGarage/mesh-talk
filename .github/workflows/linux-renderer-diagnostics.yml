@@ -2,15 +2,9 @@ name: Linux renderer diagnostics
 
 on:
   workflow_dispatch:
-  push:
-    branches: [dev]
-    paths:
-      - .github/workflows/linux-renderer-diagnostics.yml
-      - scripts/diagnostics/renderer-*.mjs
-      - src-tauri/src/main.rs
-      - src-tauri/src/linux_renderer.rs
-      - src-tauri/src/diagnostics.rs
-      - src-tauri/src/lib.rs
+
+# Incident-specific comparison rigs are opt-in; ordinary native acceptance is
+# owned by hidden-contacts-native.yml and its required backend caller.
 
 permissions:
   contents: read

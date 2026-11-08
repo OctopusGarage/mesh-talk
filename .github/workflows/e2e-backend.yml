@@ -22,8 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,34 +32,49 @@ env:
 
 # Linux backend evidence is produced once by the instrumented CI workspace job.
 jobs:
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
+
   backend-platform:
+    if: ${{ !cancelled() }}
+    needs: [scope]
     name: Backend core (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2022, macos-26-intel]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ needs.scope.outputs.full == 'true' && matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # mesh-talk-core + the mesh-talk-node binary are UI-free (no GTK/WebKit needed).
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
       - name: Install Rust toolchain
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install evidence runner
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
 
       - name: Cache Rust build
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Configure hosted macOS multicast route
-        if: runner.os == 'macOS'
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'macOS') }}
         run: |
           sudo route -n add -host 224.0.0.167 -interface 127.0.0.1
           node scripts/diagnostics/native-multicast-probe.mjs --require
@@ -67,6 +82,7 @@ jobs:
       # Native CLI processes, signed discovery, encrypted TCP, restart, relay,
       # channels and byte-for-byte file transfer; never pass on zero selected tests.
       - name: Run multi-process E2E
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/evals/backend-runner.mjs
         env:
           EVAL_SOURCE_SHA: ${{ github.sha }}
@@ -75,6 +91,7 @@ jobs:
       # Stage a real 110 MiB folder on its own. Running it beside the unit suite
       # can starve time-sensitive socket tests, especially under ASan.
       - name: Run large-folder enqueue regression
+        if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         run: |
           set -o pipefail
@@ -85,7 +102,7 @@ jobs:
           node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
 
       - name: Preserve backend evaluation evidence
-        if: always()
+        if: ${{ steps.scope.outputs.full == 'true' && (always()) }}
         uses: actions/upload-artifact@v7
         with:
           name: backend-core-${{ matrix.os }}-${{ github.run_attempt }}
@@ -94,4 +111,9 @@ jobs:
           retention-days: 14
 
   native-core:
+    if: ${{ !cancelled() }}
+    needs: [scope]
     uses: ./.github/workflows/hidden-contacts-native.yml
+    with:
+      full: ${{ needs.scope.outputs.full }}
+      upstream_result: ${{ needs.scope.result }}

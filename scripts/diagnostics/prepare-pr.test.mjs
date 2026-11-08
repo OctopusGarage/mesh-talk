@@ -41,6 +41,15 @@ test(
       git(["update-ref", "refs/remotes/origin/main", "HEAD"]).status,
       0,
     );
+    const preflightSource = readFileSync(
+      resolve("scripts/pr-preflight.sh"),
+      "utf8",
+    );
+    assert.match(
+      preflightSource,
+      /frontend-format --profile shared --inputs frontend -- npm run format:check/,
+    );
+    assert.doesNotMatch(preflightSource, /frontend-format[^\n]*npx prettier/);
     copyFileSync(
       resolve("scripts/prepare-pr.sh"),
       join(root, "scripts/prepare-pr.sh"),
@@ -52,7 +61,10 @@ test(
       );
     writeFileSync(join(root, "scripts/pr-platform/run.mjs"), "");
     writeFileSync(join(root, "scripts/validation/pr-scenarios.mjs"), "");
-    writeFileSync(join(root, "scripts/validation/standards.mjs"), "process.exit(Number(process.env.STANDARDS_STATUS || 0));\n");
+    writeFileSync(
+      join(root, "scripts/validation/standards.mjs"),
+      "process.exit(Number(process.env.STANDARDS_STATUS || 0));\n",
+    );
     const trace = join(root, "trace");
     writeFileSync(
       join(root, "scripts/check-health.sh"),
@@ -60,33 +72,60 @@ test(
     );
     writeFileSync(
       join(root, "scripts/pr-preflight.sh"),
-      '#!/bin/bash\necho "preflight:$MESH_VALIDATION_PREFLIGHT" >> "$TRACE"\nif [ "${CHANGE_BASE:-0}" = 1 ]; then git update-ref refs/remotes/origin/main 0000000000000000000000000000000000000000; fi\nexit "${PREFLIGHT_STATUS:-0}"\n',
+      '#!/bin/bash\necho "preflight:$MESH_VALIDATION_PREFLIGHT:$FAST:$*" >> "$TRACE"\nif [ "${CHANGE_BASE:-0}" = 1 ]; then git update-ref refs/remotes/origin/main 0000000000000000000000000000000000000000; fi\nexit "${PREFLIGHT_STATUS:-0}"\n',
       { mode: 0o755 },
     );
     const run = (env) =>
-      spawnSync("bash", [join(root, "scripts/prepare-pr.sh")], {
-        cwd: root,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          TRACE: trace,
-          FAST: "1",
-          MESH_VALIDATION_PREFLIGHT: "1",
-          ...env,
+      spawnSync(
+        "bash",
+        [
+          "-c",
+          'bash "$1" --core-filter core_case; result=$?; printf "caller:%s\\n" "$FAST"; exit "$result"',
+          "prepare-fixture",
+          join(root, "scripts/prepare-pr.sh"),
+        ],
+        {
+          cwd: root,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            TRACE: trace,
+            FAST: "1",
+            MESH_VALIDATION_PREFLIGHT: "1",
+            ...env,
+          },
         },
-      });
+      );
     writeFileSync(trace, "");
     assert.equal(run({ STANDARDS_STATUS: "19" }).status, 19);
-    assert.equal(readFileSync(trace, "utf8"), "", "standards failure must stop before expensive preflight or health");
+    assert.equal(
+      readFileSync(trace, "utf8"),
+      "",
+      "standards failure must stop before expensive preflight or health",
+    );
     assert.equal(run({ HEALTH_STATUS: "9" }).status, 9);
-    assert.equal(readFileSync(trace, "utf8"), "preflight:0\nhealth:0\n");
+    assert.equal(
+      readFileSync(trace, "utf8"),
+      "preflight:0:0:--core-filter core_case\nhealth:0\n",
+    );
     writeFileSync(trace, "");
     assert.equal(run({ PREFLIGHT_STATUS: "8" }).status, 8);
-    assert.equal(readFileSync(trace, "utf8"), "preflight:0\n");
+    assert.equal(
+      readFileSync(trace, "utf8"),
+      "preflight:0:0:--core-filter core_case\n",
+    );
     writeFileSync(trace, "");
     const success = run({});
     assert.equal(success.status, 0, success.stderr);
-    assert.equal(readFileSync(trace, "utf8"), "preflight:0\nhealth:0\n");
+    assert.match(
+      success.stdout,
+      /caller:1/,
+      "full preparation must not mutate its caller FAST=1",
+    );
+    assert.equal(
+      readFileSync(trace, "utf8"),
+      "preflight:0:0:--core-filter core_case\nhealth:0\n",
+    );
     assert.notEqual(
       run({ CHANGE_BASE: "1" }).status,
       0,

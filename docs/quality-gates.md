@@ -46,19 +46,32 @@ Full health requires cargo-deny, cargo-machete, typos, Gitleaks, ShellCheck and
 actionlint; missing tools fail rather than being silently skipped. CI installs them
 explicitly. `--fast` remains a clearly labeled partial local check.
 
-Health runs as a reusable workflow inside the UI orchestrator for every PR and
+For full-scope candidates, Health runs inside the UI orchestrator for every PR and
 merge candidate, and independently on its weekly/manual triggers. All three
-platform unit and diagnostic suites remain mandatory; source-only formatting,
-type/lint and dependency policy run once. The Linux unit coverage producer seals
+platform diagnostic suites remain mandatory. The complete frontend unit suite
+runs once with coverage on Linux; its platform branches use explicit mocks,
+while real browser/native behavior retains the platform matrices. Source-only
+formatting, type/lint and dependency policy run once. The Linux coverage producer seals
 its line map for same-run UI consumers; source, workflow, run, attempt and digest
-must all match. Superseded PR, merge and push candidate runs are cancelled automatically.
+must all match. Superseded PR and merge candidates are cancelled automatically. Every main push
+has its own verification group, preserving pending commits for release evidence.
 Health uses a distinct caller-workflow/event namespace, so independent manual or
 scheduled runs cannot cancel the UI caller or its same-run evidence producer.
+
+Inert documentation PRs may omit unrelated product execution only after the
+[documentation scope owner](ci-maintenance.md#documentation-only-pr-scope)
+proves eligibility against the exact tested merge. Required check identities
+remain present and validate that decision; their success means the product work
+is not applicable, not that its tests ran. Applicable documentation and security
+checks still run. Failed selection, mixed changes and authority inputs cannot
+qualify. Main pushes, merge groups, schedules and manual runs retain complete
+execution. Release consumers require checks from the owning successful trusted
+main-push workflow suite, never PR-only scope decisions.
 
 Branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
 release policy and replacement mapping. Source and all platform checks are
-individually required; Windows requires its build producer and both archive
+individually required; Windows requires its build producer and all archive
 consumers. Release acceptance uses the same direct names plus its main-only
 checks, including ASan and mutation-runner acceptance. A newer failed, pending or
 missing check still rejects the exact source. Stable repeats this strict check
@@ -77,28 +90,39 @@ Mutation testing uses pinned cargo-mutants 27.1.0 and examines all Rust workspac
 members on daily and manual runs. PR, push and merge-queue runs validate the pinned
 runner with real fixture crates; they do not sample product mutations. See the
 [mutation execution policy](testing-feedback-loop.md) for ownership and budgets.
-Each broad run rotates through one of 256 round-robin samples and partitions that
-same sample across four runners (subshards of 1024), without changing the selected
-mutant set. Each runner uses one in-place worker, incremental compilation, the
-symbol-free `mutants` Cargo profile, and the workspace-root build cache. Every
-mutant still runs the workspace tests through cargo-nextest pinned by the
-[shared CI tool owner](../scripts/ci/windows-coverage.mjs). Its
-`mutants` profile isolates each test in a process and fails tests exceeding 60
-seconds (with a five-second termination grace period). This catches injected busy
-loops even when they prevent an async timeout from being polled. The 360-second
-whole-suite deadline remains a hard failure. Reports are uploaded as `mutants-report-0`
-through `mutants-report-3`; assess all four reports for the complete sample.
+Each broad run rotates through one of 256 round-robin samples. The existing
+[mutation evidence owner](../scripts/release/mutation-evidence.mjs) partitions
+that exact selected set into bounded chunks; worker count may grow without
+changing the sample. Each worker retains one in-place mutation process,
+incremental compilation, the symbol-free `mutants` Cargo profile and the existing
+workspace-root cache. Every mutant still tests the complete workspace through the
+pinned cargo-nextest runner. Scheduling and deadlines belong to that owner, the
+[Nextest profile](../.config/nextest.toml) and the workflow rather than duplicated
+numeric assumptions in documentation.
 
-The pinned mutation tool runs an unmutated baseline for the packages containing
-the selected mutations; each mutation runs the complete workspace. Record the
-actual commands and inventories, and retain the separate workspace CI gate. Empty selections
-only validate selection/tooling and do not constitute baseline evidence. Tiny
-dependency-free fixture crates check the actual pinned CLI, caught/advisory outcomes,
-baseline failure, empty selection, and hanging mutations via
-`node --test scripts/release/run-mutants.test.mjs`.
-Selected counts, completed outcomes, baseline,
-tool exit code and summary counts must agree. Zero selected mutations are recorded
-explicitly and may have no report; a stale report is rejected.
+Deep runs execute one complete unmutated workspace baseline before admitting
+workers. Its receipt must attest actual successful execution, complete inventory,
+source, configuration and tool identities. Workers verify the immutable artifact
+against trusted current-run producer outputs before skipping their own inline
+baseline. A successful producer from an earlier attempt of the same run may be
+reused by a failed-only rerun; another source or run cannot qualify it. Raw
+cargo-mutants reports in this mode must contain no inline `Baseline` outcome;
+never fabricate one. Shared execution uses the Linux kernel owner for separately grouped tool work;
+normal exit, cancellation and build cleanup must verify complete retirement before
+any baseline or worker result is sealed. Missing acknowledgment is incomplete
+evidence. Ordinary portable inline baseline execution remains supported.
+Empty selections validate selection/tooling only and do not constitute baseline
+evidence. Assess the baseline receipt and every planned worker report together.
+
+Selected counts, completed outcomes, baseline evidence, tool exits and summary
+counts must agree. A zero selection is recorded explicitly and may have no report;
+a stale report is rejected. Real dependency-free fixtures exercise the pinned CLI,
+caught/advisory outcomes, baseline failure, empty selection, hanging mutations
+and shared-baseline rejection through
+`node --test scripts/release/run-mutants.test.mjs`. Individual process watchdogs
+remain distinct from the complete-suite deadline: intentional hanging-mutant
+controls retain the pinned tool's caught classification, while a failed baseline
+or inconclusive tool-level timeout never qualifies acceptance.
 
 Survivors remain advisory and must be triaged in review. Unviable mutants are not
 caught mutants. Timeouts, usage/diff/internal errors, absent reports and incomplete

@@ -21,6 +21,14 @@ pub(in crate::node) type AccountSessionTestHook = dyn Fn(
     + Sync;
 
 #[cfg(test)]
+pub(in crate::node) type AccountControlDispatchTestHook = dyn Fn(
+        crate::identity::device::PublicIdentity,
+        bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
+#[cfg(test)]
 pub(in crate::node) type AccountClientTestHook =
     dyn Fn(crate::identity::device::PublicIdentity, String) + Send + Sync;
 

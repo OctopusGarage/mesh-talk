@@ -8,10 +8,10 @@ import {
   useAutomaticDownloads,
 } from "@/lib/automaticDownloads";
 import { createAttachmentDecision } from "./attachments/attachmentDecision";
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
-  Bookmark,
+  Star,
   ListChecks,
   Copy,
   CornerUpLeft,
@@ -22,7 +22,7 @@ import {
   Trash2,
   Undo2,
 } from "lucide-react";
-import { motion } from "framer-motion";
+import { motion, useAnimationControls } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import { IdentityGlyph } from "@/components/identity";
 import {
@@ -47,7 +47,7 @@ import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { formatTime, humanSize, shortId } from "@/lib/format";
-import { fadeSlideUp } from "@/lib/motion";
+import { fadeSlideUp, useMotionOK } from "@/lib/motion";
 import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { useStickerAsset } from "@/lib/usePack";
 import { usePacks } from "@/store/packs";
@@ -404,6 +404,16 @@ export function MessageBubble({
   onRecall: (m: ChatMessage) => void;
   onReEdit: (text: string) => void;
 }) {
+  const motionOK = useMotionOK();
+  const arrivalAnimation = useAnimationControls();
+  useLayoutEffect(() => {
+    if (motionOK) void arrivalAnimation.start("visible");
+    else {
+      arrivalAnimation.stop();
+      arrivalAnimation.set({ opacity: 1, y: 0 });
+    }
+    return () => arrivalAnimation.stop();
+  }, [motionOK, arrivalAnimation]);
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
   const installedPacks = usePacks((s) => s.packs);
@@ -481,8 +491,8 @@ export function MessageBubble({
             ? t("message.recalledByYou")
             : t("message.recalledBy", { name: authorLabel })
         }
-        initial={fresh ? "hidden" : false}
-        animate="visible"
+        initial={motionOK && fresh ? "hidden" : false}
+        animate={arrivalAnimation}
         variants={fadeSlideUp}
         className="flex items-center justify-center gap-2 px-4 py-1"
       >
@@ -529,8 +539,8 @@ export function MessageBubble({
       role="article"
       data-testid="message-bubble"
       aria-label={ariaLabel}
-      initial={fresh ? "hidden" : false}
-      animate="visible"
+      initial={motionOK && fresh ? "hidden" : false}
+      animate={arrivalAnimation}
       variants={fadeSlideUp}
       className={cn(
         "group flex gap-2.5 px-4",
@@ -715,7 +725,7 @@ export function MessageBubble({
                   data-testid="msg-collect"
                   onSelect={() => onCollect(m)}
                 >
-                  <Bookmark className="h-3.5 w-3.5 opacity-70" />
+                  <Star className="h-3.5 w-3.5 opacity-70" />
                   {t(
                     collected
                       ? "messageFavorites.saved"
@@ -830,7 +840,7 @@ export function MessageBubble({
                   onClick={() => m.id && onReact(m.id, r.emoji)}
                   disabled={readOnly}
                   className={cn(
-                    "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "reaction-chip flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     me
                       ? "border-signal bg-signal/15 text-signal"
                       : "border-border bg-muted/50 hover:bg-muted",

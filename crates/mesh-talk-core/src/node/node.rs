@@ -305,6 +305,9 @@ pub struct Node {
     pub(in crate::node) account_session_test_hook:
         Mutex<Option<Arc<super::account_session::AccountSessionTestHook>>>,
     #[cfg(test)]
+    pub(in crate::node) account_control_dispatch_test_hook:
+        Mutex<Option<Arc<super::account_session::AccountControlDispatchTestHook>>>,
+    #[cfg(test)]
     pub(in crate::node) account_client_test_hook:
         Mutex<Option<Arc<super::account_session::AccountClientTestHook>>>,
     #[cfg(test)]
@@ -1273,6 +1276,8 @@ impl Node {
             accepted_hook: Mutex::new(None),
             #[cfg(test)]
             account_session_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            account_control_dispatch_test_hook: Mutex::new(None),
             #[cfg(test)]
             account_client_test_hook: Mutex::new(None),
             #[cfg(test)]

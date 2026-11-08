@@ -1,11 +1,16 @@
 # Local test feedback loop
 
 During feature development, run the smallest tests that cross the changed
-boundary. The pre-commit hook checks staged whitespace and source formatting;
-it does not launch test suites. Record the focused commands and results in the
+boundary. The pre-commit hook checks staged whitespace, source formatting,
+structural ownership, hygiene and changed-script/workflow syntax; it does not
+launch test suites. It selects staged paths but validates worktree bytes. Record the focused commands and results in the
 PR. Commit the candidate and use `./scripts/create-pr.sh -- <gh pr create options>`
-for fast publication after cheap source, whitespace, structural and hygiene checks.
-CI runs the comprehensive suites after publication; all required checks must pass
+for publication after cheap source/static checks, ownership planning, hygiene
+and applicable verified frontend patch-coverage checks. Use `make pr-check`
+first to run that cheap static phase without tests, builds or browser/native work.
+CI runs the applicable protected scope after publication; full-scope candidates retain
+the comprehensive suites, while the [documentation scope](ci-maintenance.md#documentation-only-pr-scope)
+may omit unrelated product execution. All required checks must pass
 on the current PR head before merge. Creating a PR does not certify acceptance.
 For comprehensive local validation, pass `--full-preflight` before the `--`
 separator with affected selectors/specs, or run `./scripts/prepare-pr.sh`
@@ -15,6 +20,8 @@ when explicitly requested or when the changed behavior needs process/browser evi
 
 | Changed boundary            | Fast local command                                                                                          | Broader trigger                                             |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Cheap PR preparation        | `make pr-check` | Only static checks; test/browser/native evidence remains pending |
+| Script / workflow syntax    | `node scripts/validation/syntax.mjs --base origin/main` | Clean committed candidate and required CI remain authoritative |
 | Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge             |
 | Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge             |
 | One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke`                                   | `make e2e` when requested or for release validation         |
@@ -74,6 +81,10 @@ its descendants retired. Shared runners use the validation stage's process owner
 rather than creating an independent nested process group. On POSIX, the outer
 owner retains termination escalation and resource leases through verified group
 retirement, including ignored-stdio descendants and ordinary leader exit.
+Leader exit and pipe closure are independent: bound output draining after group
+retirement, fail closed on escaped inherited-pipe holders and quarantine leases
+without publishing success. Later cancellation must not clear that uncertainty
+when the known group retires; preserve the first failure and original exit status.
 Nested cancellation notifies that owner. Windows commands join a private native
 job at process creation, before the first target instruction, with no breakaway
 or inherited job handle. The owning adapter preserves argv, environment, working
@@ -84,7 +95,9 @@ helper exit or kill-on-close containment alone cannot certify cleanup.
 PID readiness fixtures install their signal handlers, write the complete PID to
 a private staging file and atomically rename it to the observed marker. Readers
 accept only a positive safe integer PID; opening or truncating a file is not a
-startup acknowledgment. A real held-write control must reject an exposed empty
+startup acknowledgment. A numeric stdout fragment is not a framed identity;
+failed publication must retire the actual created child before reporting failure.
+A real held-write control must reject an exposed empty
 marker and retain its own child handle for cleanup before publication completes.
 Ordinary leader exit starts
 owned-scope retirement. Retire remaining descendants and verify cleanup before
@@ -204,7 +217,7 @@ prove that presentation waits for layout rather than a fixed delay.
 
 PR Chromium portable core acceptance reuses the complete full-suite execution on
 each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
-core scenario paths from each of four shards, copies and validates screenshots,
+core scenario paths from each platform's complete shard set, copies and validates screenshots,
 success traces and raw scenario metadata, then validates the exact once-only
 union using the current source/run/attempt/platform identity. Missing, failed,
 flaky or skipped portable scenarios fail acceptance.
@@ -219,14 +232,14 @@ Windows uses the same `windows-latest` runner as the full suite; Chromium contex
 settings match the standalone portable configuration. The collector reopens evidence on Linux with
 an explicit expected source platform, rather than trusting a producer verdict.
 Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
-Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
+Linux, eight macOS and four Windows runners. Linux coverage depends on its own shards
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
-Desktop browser shards start after Health and WebKit complete, with at most three
-desktop shards active at once. Linux retains four concurrent shards. These job
+Desktop browser shards start after Health and WebKit complete, with at most four
+shards active per desktop OS at once. Linux retains four concurrent shards. These job
 dependencies and admission limits reduce macOS runner demand while retaining all
-four shards per OS and their complete same-attempt evidence. Portable Health and
+platform-specific partitions and their complete same-attempt evidence. Portable Health and
 independent backend jobs use the standard `macos-26-intel` pool, alongside
 WebKit and Chromium browser suites. The complete Rust workspace and real native
 desktop acceptance retain `macos-latest` Apple Silicon execution. The workspace
@@ -244,9 +257,9 @@ Staging desktop admission keeps full Chromium out of the initial ARM burst. Inte
 not a larger-runner purchase; both pools still require measured queue and execution
 evidence. Keep artifact consumers and app-bound required check names aligned when
 changing labels.
-The full suite keeps its existing harness budgets: Linux 90 seconds when collecting
-browser coverage, Windows 90 seconds and macOS 30 seconds; standalone portable uses
-Linux/macOS 30 seconds and Windows 120 seconds. These are harness watchdogs, not
+The full suite retains its existing 90-second functional-case watchdog on all
+platforms. Standalone portable retains 120 seconds on Windows and the full-suite
+allowance elsewhere. These are harness watchdogs, not
 product latency assertions. Chromium's device and timezone are aligned; the
 Windows image is the full suite's `windows-latest`, not the former standalone
 `windows-2022` image.
@@ -1228,7 +1241,7 @@ functional convergence phases above, once the original operation is admitted, or
 proof starts, the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
 Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
-work drains. The overall nextest per-test 60-second and mutation 360-second
+work drains. The owning Nextest per-test and complete mutation-suite
 limits remain authoritative; stage bounds do not add together into a larger test
 budget. Only waits with this specific pre-admission/controlled-hold purpose use
 the cold helper; do not replace unrelated eight-second waits by matching their
@@ -1415,14 +1428,16 @@ independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                                                                |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
+| `check-health.yml` platform jobs      | Help and diagnostic/Python regressions on Linux/macOS/Windows; complete frontend units with coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                                                                 |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
 | `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                 |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                                                                       |
 
 Health is called by the UI workflow for every PR base and merge candidate, with
-its own weekly/manual entry points. Direct source and platform checks are required
+its own weekly/manual entry points. Only proven inert documentation PRs use the
+[documentation scope](ci-maintenance.md#documentation-only-pr-scope); full-scope
+candidates retain every platform diagnostic and product obligation. Direct source and platform checks are required
 individually; no new VM is allocated merely to copy their aggregate result. The
 replacement policy and source-release consumers share
 `scripts/ci/required-checks.mjs`, including current-source ASan and mutation-runner
@@ -1467,10 +1482,25 @@ and assertions are identical in both modes. CI uploads Rust coverage from each
 platform. Both workflows remain protected, including strict
 coverage upload failures. Native CI has a 90-minute job budget; Health portable
 jobs have a 25-minute budget. These are execution bounds, not latency promises.
+Health diagnostics run through the canonical stage owner with an absolute budget
+captured before setup, leaving time for joined cleanup and always-uploaded logs,
+structured results and active Node test lifecycle evidence. A timeout still fails.
 Compare hosted queue, execution and all-required-check completion after deployment.
 
-Full Chromium tests use four Playwright shards per OS, with one worker and zero
-retries per runner. This keeps the existing per-machine rendering budget while
+WebKit core and extended inventories use parallel producers and retain the stable
+`Portable UI (macos-26-intel, webkit)` required check through a full-union collector.
+The existing portable evidence owner validates every source/run/attempt-bound
+partition and the complete scenario inventory; missing producers do not pass.
+
+Full Chromium tests use eight Playwright shards on macOS and four each on Linux
+and Windows, with one worker and zero retries per runner. Desktop admission allows
+four concurrent shards per OS after Health and WebKit; Linux starts independently.
+The platform-specific inventory owner rejects incomplete or mismatched layouts.
+The full Chromium command reuses the validation process owner through
+`scripts/ci/ui-runner.mjs`. Its absolute deadline includes setup since budget
+initialization and reserves cleanup/upload time inside the existing job budget.
+Streamed logs, owner status and append-only case progress survive interruption;
+partial evidence cannot satisfy the existing strict acceptance collectors. This keeps the existing per-machine rendering budget while
 running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.
@@ -1530,6 +1560,12 @@ blob/trace evidence upload to succeed. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
 
+Portable/report artifact orchestration belongs to
+`scripts/evals/chromium-evidence.mjs`; workflows invoke its collectors rather than
+reimplementing platform counts and result policy. The optional-pack job retains
+built-asset absence and ES2021 syntax validation. Its two browser scenarios and
+coverage execute once in the full Linux matrix, with actual inventory proof.
+
 Successful shard uploads contain the raw Playwright blob (including its
 attachments) and structured JSON results, without a second copy of
 `test-results/`. Failed or interrupted UI execution additionally retains raw
@@ -1561,38 +1597,42 @@ scheduled run. Dispatch Mutation Testing after a critical invariant change when
 immediate deep evidence is needed. This policy keeps all ordinary platform,
 security, unit, integration and coverage acceptance gates in place.
 
-Mutation runners list their exact rotating/diff selection before installing native
-system libraries, restoring compiled caches or building the frontend. An empty
-selection skips those execution costs; listing errors fail the runner. Nonempty
-selections still execute their own unmodified baseline and strict outcome validation.
-The preflight does not narrow the sample or certify any test result. Pinned-tool
-smoke tests cover empty and nonempty selections without compiling a failing fixture.
+Mutation planning lists the exact rotating/diff selection before installing
+native libraries, restoring compiled caches or building the frontend. Discovery
+errors fail the run. An actual empty selection skips baseline and worker execution
+costs and remains explicitly empty; it does not certify tests passed. The planner
+preserves the original rotating sample's exact union, rejects duplicate or
+inconsistent selections, and bounds each worker's selected count from the owned
+compile, suite and job budgets. Budget complete surviving mutants as well as
+caught ones; do not assume every mutation fails early.
 
-Daily/manual mutation testing retains one rotating workspace sample across four runners and
-four isolated test processes per runner. The 180-minute job budget covers setup,
-the baseline and the observed sample of up to 17 mutants. Each complete workspace
-suite has a 360-second bound; individual tests retain the 60-second hang detector
-and five-second termination grace. Failed or interrupted reports still fail the gate.
+Nonempty daily/manual runs execute one complete unmodified workspace baseline.
+The [mutation runner](../scripts/release/run-mutants.mjs) owns finite compilation,
+complete inventory discovery and test execution. The
+[mutation evidence owner](../scripts/release/mutation-evidence.mjs) validates its
+receipt and each worker's unchanged tool report. Workers may skip their inline
+baseline only after verifying the immutable baseline artifact against trusted
+current-run producer outputs, source, tools, configuration and inventory. A
+failed-only rerun may reuse the successful producer's original attested attempt
+within that same run. Missing, stale, partial or incompatible evidence fails before
+mutation execution; do not synthesize a `Baseline` report record. Shared baseline
+and worker execution is Linux-only and uses the existing command owner with the
+scoped kernel subreaper. It retains actual work through tool-specific shutdown,
+then verifies kernel-owned descendants are reaped before acknowledging cleanup.
+Run `node --test scripts/release/mutation-process-owner.test.mjs` with the pinned
+tools on Linux for direct Nextest, nested mutation and active-build cancellation
+controls. Non-Linux skips are not native qualification.
 
-Run 40922461468 exposed a budget mismatch: the package baseline ran 2,228 tests
-and took 223 seconds on the slower runner, while every mutation ran 2,829 tests.
-The baseline core work plus observed host work already exceeds a 240-second
-four-process budget, even before the remaining workspace tests.
-At cancellation, the active tests were only milliseconds to ten seconds old;
-none had reached the individual hang limit. Other shards completed the same full
-inventory in 183–209 seconds, confirming runner variance rather than a universal
-hang. The six-minute suite budget includes the larger inventory and variance;
-it does not reclassify those interrupted runs as successes or change test scope.
-Reassess budgets using actual commands, inventories and build/test timings as the
-workspace grows, rather than comparing a package baseline with a workspace run.
-
-The pinned cargo-mutants 27.1.0 baseline selects only packages containing the
-selected mutations, even with `--workspace --test-workspace true`; individual
-mutations still run the complete workspace. Record both actual commands and test
-inventories. A package-only baseline is not a measured workspace baseline, and
-its wall time must not be compared directly with a larger mutation run. Acceptance
-also requires the separate complete workspace CI gate; no mutation baseline is
-skipped or reported as broader than it ran.
+Every mutation retains complete workspace consumers and four isolated test
+processes. Per-case hang detection, the complete-suite deadline and owned compile
+bounds are independent and remain in their executable owners. The workflow
+reserves separate setup, cleanup and publication time and limits concurrent
+workers. Inspect all planned reports; failed, cancelled, interrupted or incomplete
+work never becomes a successful sweep. The separate ordinary workspace CI gate
+remains required. Pinned-tool smoke fixtures exercise actual selection, external
+baseline failure/rejection, caught/surviving/hanging mutations and report format.
+A tiny tool-contract pass does not establish that the complete product inventory
+fits its execution budget; remeasure that full baseline after material growth.
 
 The mutation runner explicitly sets `CARGO_INCREMENTAL=1` for both tool child
 processes because rust-cache exports `0` through the job environment. The real-tool
@@ -1605,9 +1645,9 @@ time, proves the real send owns the guard, and checks it remains pending at
 9.999 seconds, then the unchanged ten-second production timer must complete before
 the original twelve-second outer bound and release that guard. Paused time
 auto-drives the awaited timer, including Tokio's millisecond tick rounding. No real
-UDP clock is accelerated. Test inventory, four
-processes and the sixty-second per-test limit remain unchanged; the complete
-workspace uses the 360-second suite budget described above.
+UDP clock is accelerated. Test inventory and four
+isolated processes remain unchanged; the owning Nextest profile and mutation
+runner define the independent per-case and complete-suite limits.
 Scheduling estimates are not completed-run evidence; validate the full unchanged
 workspace inventory on the current candidate before claiming a timing improvement.
 
@@ -1802,8 +1842,17 @@ fixture directory if retirement cannot be verified. Existing delivery and
 compaction deadlines remain unchanged.
 
 AddressSanitizer and LeakSanitizer retain the complete default core-library
-inventory and instrumented standard library across four independent Linux
-partitions. Each runner executes one test at a time with no retries. The exact
+inventory and instrumented standard library in one source-pinned Nextest archive.
+Its Linux consumers execute the serial partitions owned by `scripts/ci/asan.mjs`,
+one test at a time with no retries. Its non-instrumented archive protocol fixture
+runs once in the sanitizer producer before expensive compilation, rather than
+again in both ordinary native jobs. It remains available for focused local checks.
+The producer seals the full default inventory
+and source/compiler/config/platform identity. Trusted job outputs bind both the
+archive and manifest digests; consumers verify those bytes before extraction and
+compare the actual inventory before execution, without rebuilding the core.
+Extract disposable runtimes beside, rather than inside, uploaded evidence; the
+collector needs execution proofs, inventories and smoke logs, not repeated binaries. The exact
 nightly cohort comes from the installed release manifest and matching compiler
 and Cargo fingerprints. An explicit Nextest sanitizer config preserves the
 original case budgets without inheriting unrelated Host/Windows watchdogs.
@@ -1811,7 +1860,7 @@ Every shard first proves a real clean execution and an actual intentional
 use-after-free diagnosis using the same sanitizer settings and target.
 
 The existing `ASan + LeakSanitizer (core)` required check is the substantive
-full-union validator. It requires all four jobs to succeed, exact
+full-union validator. It requires the producer and every partition to succeed, exact
 source/run/attempt/shard artifact names, matching compiler/config identities,
 identical full inventories, and a disjoint exhaustive selected union. It
 revalidates each successful execution and the raw clean/error smoke channels;
@@ -1824,7 +1873,11 @@ Build-cache publication
 remains main-only.
 
 `scripts/ci/asan-cli.test.mjs` uses the pinned Nextest with an already installed
-stable compiler to prove the listing, partition, execution and receipt protocol.
+Rust compiler to prove actual archive production, extraction, listing, partition,
+execution and receipt behavior. It removes producer build outputs and verifies
+all consumers execute without rebuilding, including the explicit target-triple
+layout. Changed source/inventory, missing digests, corrupt archive/manifest bytes
+and a producer identity change reject before acceptance.
 Synthetic diagnostic records in that fixture do not prove sanitizer
 instrumentation. The real Linux clean/error controls and complete source-bound
 core execution remain required hosted evidence.

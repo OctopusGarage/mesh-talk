@@ -7,8 +7,8 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { rustPackages } from "../pr-platform/rust-packages.mjs";
 import { readVersion } from "../release/version.mjs";
 import { releaseInputs } from "../release/preflight.mjs";
-import { releaseSourceChecks } from "../ci/required-checks.mjs";
-import { requireSourceChecks, waitForSourceChecks } from "../release/check-source-checks.mjs";
+import { releaseSourceChecks, releaseSourceWorkflows } from "../ci/required-checks.mjs";
+import { requireSourceChecks as requireProvenSourceChecks, waitForSourceChecks } from "../release/check-source-checks.mjs";
 
 const inputs = { ref: "refs/tags/v0.1.6", runId: "123", version: "0.1.6", desktopVersion: "0.1.6", existingRelease: null };
 
@@ -44,7 +44,15 @@ test("tag preflight finds a published release even when GitHub's tag endpoint re
 });
 
 const names = releaseSourceChecks;
-const checks = names.map((name, id) => ({ name, id, app: { slug: "github-actions" }, status: "completed", conclusion: "success" }));
+const paths = [...new Set(Object.values(releaseSourceWorkflows))];
+const provenance = {
+  repo: "owner/repo", sha: "a".repeat(40),
+  runs: paths.map((path, index) => ({ id: index + 1, run_attempt: 1, check_suite_id: index + 1, path,
+    repository: { full_name: "owner/repo" }, head_repository: { full_name: "owner/repo" },
+    head_sha: "a".repeat(40), head_branch: "main", event: "push", status: "completed", conclusion: "success" })),
+};
+const requireSourceChecks = (checks, alerts, source = provenance) => requireProvenSourceChecks(checks, alerts, source);
+const checks = names.map((name, id) => ({ name, id, check_suite: { id: paths.indexOf(releaseSourceWorkflows[name]) + 1 }, app: { slug: "github-actions" }, status: "completed", conclusion: "success" }));
 
 test("publication requires successful current-source CI and all CodeQL languages", () => {
   requireSourceChecks(checks, []);
@@ -188,7 +196,7 @@ function checkWait(states, { timeoutMs = 20, intervalMs = 10 } = {}) {
   return { result, sleeps, messages, reads: () => reads };
 }
 
-const successState = { checks, openAlerts: [] };
+const successState = { ...provenance, checks, openAlerts: [] };
 const pendingState = { ...successState, checks: [{ ...checks[0], status: "in_progress", conclusion: null }, ...checks.slice(1)] };
 
 test("Nightly waits for pending and missing exact-source checks to become successful", async () => {
@@ -236,4 +244,93 @@ test("Nightly waiting expires with the pending names and caps the last sleep to 
   await assert.rejects(run.result, /Timed out.*checks/);
   assert.deepEqual(run.sleeps, [10, 5]);
   assert.equal(run.reads(), 3);
+});
+
+
+test("PR success at the release SHA cannot substitute for trusted main push evidence", () => {
+  assert.throws(() => requireSourceChecks(checks, [], { repo: "owner/repo", sha: "a".repeat(40), runs: [] }), /main|workflow|source/);
+});
+
+
+test("release evidence requires provenance and every check's owning main push suite", () => {
+  assert.throws(() => requireProvenSourceChecks(checks, []), /source/);
+  for (const change of [
+    { event: "pull_request" }, { event: "workflow_dispatch" }, { event: "schedule" },
+    { head_branch: "v1.2.3" }, { head_sha: "b".repeat(40) }, { path: ".github/workflows/other.yml" },
+    { repository: { full_name: "foreign/repo" } }, { head_repository: { full_name: "foreign/repo" } },
+  ]) {
+    assert.throws(() => requireSourceChecks(checks, [], { ...provenance, runs: [{ ...provenance.runs[0], ...change }, ...provenance.runs.slice(1)] }), /check/);
+  }
+  assert.throws(() => requireSourceChecks([{ ...checks[0], check_suite: { id: provenance.runs[1].check_suite_id } }, ...checks.slice(1)], []), /check/);
+  assert.throws(() => requireSourceChecks([{ ...checks[0], check_suite: undefined }, ...checks.slice(1)], []), /check/);
+});
+
+test("newer PR or manual checks retain the same-source failure and pending veto", async () => {
+  for (const event of ["pull_request", "workflow_dispatch"]) {
+    for (const change of [{ status: "completed", conclusion: "failure" }, { status: "queued", conclusion: null }, { status: "in_progress", conclusion: null }]) {
+      const changed = [...checks, { ...checks[0], id: 9999, check_suite: { id: 999 }, ...change }];
+      const state = { ...successState, checks: changed, runs: [...provenance.runs, { ...provenance.runs[0], id: 999, check_suite_id: 999, event }] };
+      assert.throws(() => requireSourceChecks(changed, [], state), /required source check not successful/);
+      const waiting = checkWait([state, successState]);
+      if (change.conclusion === "failure") {
+        await assert.rejects(waiting.result, /required source check not successful/);
+        assert.equal(waiting.reads(), 1);
+      } else {
+        await waiting.result;
+        assert.equal(waiting.reads(), 2);
+      }
+    }
+  }
+});
+
+test("successful foreign-suite checks cannot replace main evidence and pending names remain unique", async () => {
+  const { pendingSourceChecks } = await import("../release/check-source-checks.mjs");
+  const foreign = { ...checks[0], id: 9999, check_suite: { id: 999 } };
+  const changed = [...checks.slice(1), foreign];
+  assert.throws(() => requireSourceChecks(changed, []), /required source check not successful/);
+  const pending = [...checks.slice(1), { ...foreign, status: "in_progress", conclusion: null }];
+  const names = pendingSourceChecks(pending, [], provenance);
+  assert.deepEqual(names, [checks[0].name]);
+});
+
+test("latest main push attempt rejects failure and waits for pending instead of falling back", async () => {
+  for (const conclusion of ["failure", "cancelled", "skipped", "neutral", null]) {
+    const runs = [...provenance.runs, { ...provenance.runs[0], id: 999, check_suite_id: 999, conclusion }];
+    assert.throws(() => requireSourceChecks(checks, [], { ...provenance, runs }), /workflow/);
+  }
+  const pending = { ...successState, runs: [...provenance.runs, { ...provenance.runs[0], id: 999, status: "in_progress", conclusion: null }] };
+  const run = checkWait([pending, successState]);
+  await run.result;
+  assert.equal(run.reads(), 2);
+  const missing = checkWait([{ ...successState, runs: [] }, successState]);
+  await missing.result;
+  assert.equal(missing.reads(), 2);
+});
+
+test("successful failed-jobs-only reruns retain successful jobs in the selected suite", () => {
+  requireSourceChecks(checks, [], { ...provenance, runs: provenance.runs.map(run => ({ ...run, run_attempt: 2 })) });
+  const runs = [...provenance.runs, { ...provenance.runs[0], run_attempt: 2, conclusion: "failure" }];
+  assert.throws(() => requireSourceChecks(checks, [], { ...provenance, runs }), /workflow/);
+});
+
+
+test("release CLI reads paginated workflow provenance and never accepts only PR checks", { skip: process.platform === "win32" }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-source-provenance-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const gh = join(root, "gh");
+  writeFileSync(gh, `#!${process.execPath}\nconst fs=require('node:fs');const args=process.argv.slice(2);if(!args.includes('--paginate')||!args.includes('--slurp'))process.exit(2);const endpoint=args.at(-1);fs.appendFileSync(process.env.TRACE,endpoint+'\\n');let value;if(endpoint.includes('/check-runs?'))value=[{check_runs:JSON.parse(process.env.CHECKS)}];else if(endpoint.includes('/code-scanning/alerts?'))value=[[]];else if(endpoint.includes('/actions/runs?'))value=JSON.parse(process.env.RUN_PAGES);else process.exit(3);process.stdout.write(JSON.stringify(value));\n`, { mode: 0o755 });
+  const trace = join(root, "trace");
+  const run = runs => spawnSync(process.execPath, [resolve("scripts/release/check-source-checks.mjs"), provenance.repo, provenance.sha], {
+    encoding: "utf8", env: { ...process.env, PATH: `${root}${delimiter}${process.env.PATH}`, TRACE: trace,
+      CHECKS: JSON.stringify(checks), RUN_PAGES: JSON.stringify([{ workflow_runs: runs.slice(0, 2) }, { workflow_runs: runs.slice(2) }]) },
+  });
+  const healthy = run(provenance.runs);
+  assert.equal(healthy.status, 0, healthy.stderr);
+  assert.match(readFileSync(trace, "utf8"), new RegExp(`/actions/runs\\?head_sha=${provenance.sha}&per_page=100`));
+  for (const runs of [[], provenance.runs.map(run => ({ ...run, event: "pull_request" }))]) {
+    const blocked = run(runs);
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /required source check not successful/);
+    assert.doesNotMatch(blocked.stdout, /checks passed/);
+  }
 });
