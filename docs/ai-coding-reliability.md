@@ -444,6 +444,13 @@ platform path owner while retaining exact identity and escape checks; the
 [archive diagnostics](../scripts/diagnostics/windows-coverage.test.mjs) own those
 controls. Local execution does not replace actual Windows qualification.
 
+Keep extracted runtimes outside diagnostic artifact roots on failure as well as
+success. Stage under an owned directory on the destination filesystem, retire it
+in the extraction owner's cleanup path, and preserve unrelated build outputs.
+The [Linux archive fixture](../scripts/ci/linux-workspace-cli.test.mjs) rejects
+extraction after real binary materialization and checks diagnostics stay free of
+runtime binaries; successful-path cleanup alone does not prove this boundary.
+
 Source-integrity fixtures must not ignore tool output that production leaves
 untracked. Keep generated evidence outside the source checkout and assert the
 checkout stays clean after real tool execution; also prove unrelated untracked

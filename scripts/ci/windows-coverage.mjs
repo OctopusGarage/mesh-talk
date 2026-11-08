@@ -10,9 +10,12 @@ import {
   createReadStream,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
   writeSync,
@@ -24,20 +27,151 @@ export const versions = Object.freeze({ nextest: "0.9.150", llvmCov: "0.8.7" });
 export const windowsPartitions = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8]);
 export function archiveProfile(name = "windows") {
   assert.ok(
-    ["windows", "macos-remaining"].includes(name),
+    ["windows", "macos-remaining", "linux-workspace"].includes(name),
     "Unsupported archive profile",
   );
-  const instrumented = name === "windows";
+  const instrumented = name !== "macos-remaining";
   return {
     name,
     instrumented,
     buildArgs: instrumented
       ? ["--workspace", "--locked"]
       : ["--workspace", "--exclude", "mesh-talk", "--locked"],
-    partitions: instrumented ? windowsPartitions : [1, 2],
-    testThreads: instrumented ? 1 : 4,
+    partitions: name === "windows" ? windowsPartitions : [1, 2],
+    testThreads: name === "windows" ? 1 : 4,
+    ...(name === "linux-workspace"
+      ? { targetRelative: "target/llvm-cov-target" }
+      : {}),
   };
 }
+const targetDirectory = (root, profile) =>
+  path.join(root, profile.targetRelative ?? "target");
+const linuxRuntimePackages = [
+  "libc6",
+  "libgtk-3-0t64",
+  "libwebkit2gtk-4.1-0",
+  "libayatana-appindicator3-1",
+  "librsvg2-2",
+  "libstdc++6",
+];
+
+// This accepts observations, not an attestation. identity() gathers them from the
+// current kernel/image/package manager before and after every native execution.
+export function validateLinuxRuntime(env, observed) {
+  assert.equal(observed.platform, "linux", "Linux archive requires Linux");
+  assert.equal(observed.arch, "x64", "Linux archive requires x64");
+  assert.equal(
+    env.GITHUB_ACTIONS,
+    "true",
+    "Linux archive requires GitHub Actions",
+  );
+  assert.equal(
+    env.RUNNER_ENVIRONMENT,
+    "github-hosted",
+    "Linux archive requires hosted runner",
+  );
+  assert.equal(env.RUNNER_OS, "Linux", "Linux archive requires Linux runner");
+  assert.match(
+    env.ImageOS ?? "",
+    /^ubuntu(?:-)?\d{2}(?:\.\d{2})?$/u,
+    "Linux archive requires an identified Ubuntu image",
+  );
+  assert.match(
+    env.ImageVersion ?? "",
+    /^\d{8}\.\d+\.\d+$/u,
+    "Missing Linux image version",
+  );
+  assert.match(
+    observed.osRelease,
+    /^ID=(?:ubuntu|"ubuntu")$/mu,
+    "Linux archive requires Ubuntu",
+  );
+  assert.match(
+    observed.osRelease,
+    /^VERSION_ID=(?:26\.04|"26\.04")$/mu,
+    "Linux archive requires Ubuntu 26.04",
+  );
+  assert.match(
+    observed.glibc,
+    /^glibc \d+\.\d+$/u,
+    "Missing glibc runtime identity",
+  );
+  const packages = observed.runtimePackages
+    .trim()
+    .split("\n")
+    .map((line) => line.split("\t"));
+  assert.deepEqual(
+    packages.map(([name]) => name).sort(),
+    [...linuxRuntimePackages].sort(),
+    "Incomplete Linux runtime packages",
+  );
+  assert.ok(
+    packages.every((row) => row.length === 2 && /^[0-9][^\s]*$/u.test(row[1])),
+    "Missing Linux runtime package version",
+  );
+  return {
+    kind: "native-linux",
+    platform: observed.platform,
+    arch: observed.arch,
+    distribution: "ubuntu",
+    versionId: "26.04",
+    glibc: observed.glibc,
+    runtimePackages: packages.sort(([a], [b]) => a.localeCompare(b, "en")),
+    observation: {
+      osRelease: observed.osRelease,
+      imageOS: env.ImageOS,
+      imageVersion: env.ImageVersion,
+    },
+  };
+}
+
+function linuxRuntime(fixtureRuntime) {
+  if (fixtureRuntime !== undefined) {
+    assert.ok(
+      !process.env.CI && !process.env.GITHUB_ACTIONS,
+      "Local fixture identity cannot run in CI",
+    );
+    assert.notEqual(
+      process.platform,
+      "linux",
+      "Linux qualification must use actual native identity",
+    );
+    assert.deepEqual(
+      fixtureRuntime,
+      {
+        kind: "generic-archive-fixture",
+        platform: process.platform,
+        arch: process.arch,
+        root: process.cwd(),
+        qualification: "not-native-linux",
+      },
+      "Invalid local fixture identity",
+    );
+    return fixtureRuntime;
+  }
+  assert.equal(
+    process.platform,
+    "linux",
+    "Linux archive requires native Linux",
+  );
+  return validateLinuxRuntime(process.env, {
+    platform: process.platform,
+    arch: process.arch,
+    osRelease: readFileSync("/etc/os-release", "utf8"),
+    glibc: tool("getconf", ["GNU_LIBC_VERSION"]),
+    runtimePackages: tool("dpkg-query", [
+      "-W",
+      "-f=${Package}\t${Version}\n",
+      ...linuxRuntimePackages,
+    ]),
+  });
+}
+const manifestSchema = (profile, fixtureRuntime) =>
+  profile.name === "linux-workspace"
+    ? fixtureRuntime
+      ? "linux-archive-fixture-v1"
+      : 2
+    : 1;
 export function validateMacEnvironment(env, root) {
   for (const name of Object.keys(env)) {
     assert.ok(
@@ -270,7 +404,18 @@ export function validateLcov(text) {
 }
 
 export function verifyIdentity(expected, actual) {
-  assert.deepEqual(actual, expected, "Consumer identity differs from producer");
+  // Image rollout metadata is retained as provenance. The observed Ubuntu
+  // version, architecture, glibc and resolved runtime packages own ABI equality.
+  const compatible = (identity) => {
+    if (identity.archiveProfile !== "linux-workspace") return identity;
+    const { runtimeObservation: _observation, ...inputs } = identity;
+    return inputs;
+  };
+  assert.deepEqual(
+    compatible(actual),
+    compatible(expected),
+    "Consumer identity differs from producer",
+  );
 }
 
 export function verifyTargets(listing, metadata, profileName = "windows") {
@@ -317,19 +462,24 @@ export function verifyTargets(listing, metadata, profileName = "windows") {
   );
 }
 
-export function validateProfilePath(profile, root) {
+export function validateProfilePath(profile, root, directory = path.join(root, "target")) {
   assert.ok(typeof profile === "string" && path.isAbsolute(profile), "LLVM_PROFILE_FILE must be absolute");
-  const relative = path.relative(path.join(root, "target"), profile);
+  const relative = path.relative(directory, profile);
   assert.ok(relative && !relative.startsWith("..") && !path.isAbsolute(relative), "LLVM_PROFILE_FILE must remain under workspace/target");
 }
 
 async function identity(
   evidence = () => undefined,
   profile = archiveProfile(),
+  fixtureRuntime,
 ) {
   const root = process.cwd();
   if (profile.instrumented)
-    validateProfilePath(process.env.LLVM_PROFILE_FILE, root);
+    validateProfilePath(
+      process.env.LLVM_PROFILE_FILE,
+      root,
+      targetDirectory(root, profile),
+    );
   else {
     assert.equal(process.platform, "darwin", "macos-remaining requires Darwin");
     validateMacEnvironment(process.env, root);
@@ -365,12 +515,37 @@ async function identity(
       "1",
       "Source cargo llvm-cov show-env --sh before running this command",
     );
+    if (profile.name === "linux-workspace") {
+      assert.equal(
+        process.env.CARGO_TARGET_DIR,
+        targetDirectory(root, profile),
+        "Linux CARGO_TARGET_DIR must preserve the instrumented target",
+      );
+      assert.equal(
+        process.env.CARGO_LLVM_COV_BUILD_DIR,
+        targetDirectory(root, profile),
+        "Linux coverage build directory differs",
+      );
+      assert.equal(
+        process.env.CARGO_PROFILE_DEV_DEBUG,
+        "line-tables-only",
+        "Linux debug profile must retain line tables",
+      );
+      assert.equal(
+        process.env.CARGO_PROFILE_TEST_DEBUG,
+        "line-tables-only",
+        "Linux debug profile must retain line tables",
+      );
+    }
     assert.equal(
       path.resolve(process.env.CARGO_LLVM_COV_TARGET_DIR ?? ""),
-      path.join(root, "target"),
-      "Coverage target must be workspace/target",
+      targetDirectory(root, profile),
+      "Coverage target differs from archive profile",
     );
   }
+  const runtime =
+    profile.name === "linux-workspace" ? linuxRuntime(fixtureRuntime) : {};
+  const { observation: runtimeObservation, ...runtimeCompatibility } = runtime;
   return {
     sourceSha: sha,
     root,
@@ -381,6 +556,23 @@ async function identity(
     nextest: nextest.trim(),
     llvmCov: llvmCov.trim(),
     buildArgs: profile.buildArgs,
+    ...(profile.name === "linux-workspace"
+      ? {
+          archiveProfile: profile.name,
+          targetDirectory: targetDirectory(root, profile),
+          runtime: runtimeCompatibility,
+          ...(runtimeObservation ? { runtimeObservation } : {}),
+          instrumentationEnvironment: Object.fromEntries(
+            Object.entries(process.env)
+              .filter(([name]) =>
+                /^(?:(?:__)?CARGO_LLVM_COV|LLVM_PROFILE_FILE$|RUSTFLAGS$|CARGO_ENCODED_RUSTFLAGS$|RUSTC_WRAPPER$|RUSTC_WORKSPACE_WRAPPER$|CARGO_TARGET_DIR$)/u.test(
+                  name,
+                ),
+              )
+              .sort(([a], [b]) => a.localeCompare(b, "en")),
+          ),
+        }
+      : {}),
     ...(!profile.instrumented
       ? {
           archiveProfile: profile.name,
@@ -412,7 +604,7 @@ async function list(args, options) {
     ),
   );
 }
-export function verifyLayout(binaries, root) {
+export function verifyLayout(binaries, root, profileName = "windows") {
   const metadata = binaries["rust-build-meta"];
   assert.ok(
     typeof metadata?.["target-directory"] === "string" &&
@@ -427,7 +619,7 @@ export function verifyLayout(binaries, root) {
   if (root !== undefined)
     assert.equal(
       target,
-      normalize(path.join(root, "target")),
+      normalize(targetDirectory(root, archiveProfile(profileName))),
       "Archive target directory differs from checkout target",
     );
   assert.ok(
@@ -512,10 +704,10 @@ async function verifyMacDebugSymbols(
 
 export async function produce(
   directory,
-  { profile: profileName = "windows" } = {},
+  { profile: profileName = "windows", fixtureRuntime } = {},
 ) {
   const profile = archiveProfile(profileName);
-  const before = await identity(undefined, profile);
+  const before = await identity(undefined, profile, fixtureRuntime);
   const archive = path.join(directory, "workspace.tar.zst");
   assert.ok(!existsSync(archive), "Archive already exists");
   mkdirSync(directory, { recursive: true });
@@ -573,7 +765,7 @@ export async function produce(
     "--list-type",
     "binaries-only",
   ]);
-  verifyLayout(binaries, process.cwd());
+  verifyLayout(binaries, process.cwd(), profile.name);
   if (!profile.instrumented)
     await verifyMacDebugSymbols(binaries, process.cwd(), debugSymbols, probe);
   const binaryFile = path.join(directory, "producer-binaries.json");
@@ -621,10 +813,10 @@ export async function produce(
       path.join(directory, "feature-resolution.json"),
       metadata.resolve,
     );
-  verifyIdentity(before, await identity(undefined, profile));
+  verifyIdentity(before, await identity(undefined, profile, fixtureRuntime));
   const archiveSha256 = await fileHash(archive);
   writeJson(path.join(directory, "manifest.json"), {
-    schema: 1,
+    schema: manifestSchema(profile, fixtureRuntime),
     identity: before,
     archiveSha256,
     inventoryFiles: files,
@@ -652,18 +844,95 @@ export function consumerFailurePolicy(env = process.env) {
   return value === "1" ? "--fail-fast" : "--no-fail-fast";
 }
 
+// The extractor seam qualifies failure after real archive bytes have reached
+// disk. Production always uses the existing pinned Nextest list owner.
+export async function extractLinuxArchive(
+  archive,
+  root,
+  output,
+  evidence,
+  extract = list,
+) {
+  const target = targetDirectory(root, archiveProfile("linux-workspace"));
+  const parent = path.dirname(target);
+  mkdirSync(parent, { recursive: true });
+  const actualParent = realpathSync(parent);
+  assert.equal(
+    actualParent,
+    path.join(realpathSync(root), "target"),
+    "Linux target parent must not redirect through a symlink",
+  );
+  const evidenceRoot = realpathSync(output);
+  const contains = (ancestor, child) => {
+    const relative = path.relative(ancestor, child);
+    return (
+      relative === "" ||
+      (!relative.startsWith(`..${path.sep}`) &&
+        relative !== ".." &&
+        !path.isAbsolute(relative))
+    );
+  };
+  assert.ok(
+    !contains(evidenceRoot, actualParent) && !contains(actualParent, evidenceRoot),
+    "Linux runtime staging and evidence must not overlap",
+  );
+  assert.ok(
+    !existsSync(target),
+    "Consumer target contains prior compilation outputs",
+  );
+  const stage = mkdtempSync(path.join(parent, ".linux-archive-"));
+  let failure;
+  try {
+    const binaries = await extract(
+      [
+        "--archive-file",
+        archive,
+        "--extract-to",
+        stage,
+        "--list-type",
+        "binaries-only",
+      ],
+      evidence,
+    );
+    verifyLayout(binaries, root, "linux-workspace");
+    // Official archives unpack target/. Restore its contents at the original
+    // compile-time path; target remapping cannot rewrite embedded CARGO_BIN_EXE.
+    renameSync(path.join(stage, "target"), target);
+    return binaries;
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      rmSync(stage, { recursive: true, force: true });
+    } catch (error) {
+      if (failure)
+        throw new Error(
+          `${failure.message}; owned extraction cleanup failed: ${error.message}`,
+          { cause: failure },
+        );
+      throw error;
+    }
+  }
+}
+
 export async function consume(
   shard,
   directory,
   output,
-  { profile: profileName = "windows", manifestSha256, archiveSha256 } = {},
+  {
+    profile: profileName = "windows",
+    manifestSha256,
+    archiveSha256,
+    fixtureRuntime,
+  } = {},
 ) {
   const profile = archiveProfile(profileName);
   assert.ok(
     profile.partitions.includes(shard),
     `shard must be an integer from 1 through ${profile.partitions.length}`,
   );
-  if (!profile.instrumented) {
+  if (profile.name !== "windows") {
     requireDigest(manifestSha256);
     requireDigest(archiveSha256);
     assert.equal(
@@ -684,10 +953,17 @@ export async function consume(
     receipt: path.join(output, phase),
   });
   const manifest = readJson(path.join(directory, "manifest.json"));
-  assert.equal(manifest.schema, 1, "Unsupported archive manifest");
-  verifyIdentity(manifest.identity, await identity(evidence, profile));
+  assert.equal(
+    manifest.schema,
+    manifestSchema(profile, fixtureRuntime),
+    "Unsupported archive manifest",
+  );
+  verifyIdentity(
+    manifest.identity,
+    await identity(evidence, profile, fixtureRuntime),
+  );
   assert.deepEqual(manifest.scheduling, scheduling(profile));
-  if (!profile.instrumented)
+  if (profile.name !== "windows")
     assert.equal(
       manifest.archiveSha256,
       archiveSha256,
@@ -712,9 +988,13 @@ export async function consume(
   verifyPartition(expected[0], expected.slice(1), profile.partitions.length);
   // Never reuse producer build outputs accidentally: this proves archive-only execution.
   assert.ok(
-    profile.instrumented
-      ? !existsSync(path.join(process.cwd(), "target", "debug"))
-      : !existsSync(path.resolve("target")) ||
+    profile.name === "linux-workspace"
+      ? !existsSync(targetDirectory(process.cwd(), profile))
+      : profile.instrumented
+        ? !existsSync(
+            path.join(targetDirectory(process.cwd(), profile), "debug"),
+          )
+        : !existsSync(path.resolve("target")) ||
           readdirSync(path.resolve("target")).length === 0,
     "Consumer target contains prior compilation outputs",
   );
@@ -726,23 +1006,35 @@ export async function consume(
     shard,
     archiveSha256: manifest.archiveSha256,
   });
-  const binaries = await list(
-    [
-      "--archive-file",
-      archive,
-      "--extract-to",
-      process.cwd(),
-      "--list-type",
-      "binaries-only",
-    ],
-    evidence("extract"),
-  );
-  verifyLayout(binaries, process.cwd());
+  const binaries =
+    profile.name === "linux-workspace"
+      ? await extractLinuxArchive(
+          archive,
+          process.cwd(),
+          output,
+          evidence("extract"),
+        )
+      : await list(
+          [
+            "--archive-file",
+            archive,
+            "--extract-to",
+            process.cwd(),
+            "--list-type",
+            "binaries-only",
+          ],
+          evidence("extract"),
+        );
+  verifyLayout(binaries, process.cwd(), profile.name);
   if (!profile.instrumented)
     await verifyMacDebugSymbols(binaries, process.cwd(), manifest.debugSymbols);
   const binaryFile = path.join(output, "consumer-binaries.json");
   writeJson(binaryFile, binaries);
-  const metadataFile = path.resolve("target/nextest/cargo-metadata.json");
+  const metadataFile = path.join(
+    targetDirectory(process.cwd(), profile),
+    "nextest",
+    "cargo-metadata.json",
+  );
   const metadata = readJson(metadataFile);
   assert.equal(
     digest(canonical(metadata.resolve)),
@@ -755,7 +1047,7 @@ export async function consume(
     "--cargo-metadata",
     metadataFile,
     "--target-dir-remap",
-    path.resolve("target"),
+    targetDirectory(process.cwd(), profile),
   ];
   const listings = [await list(reuse, evidence("inventory-all"))];
   for (const index of profile.partitions)
@@ -787,7 +1079,7 @@ export async function consume(
       String(profile.testThreads),
       "--retries",
       "0",
-      profile.instrumented ? consumerFailurePolicy() : "--no-fail-fast",
+      profile.name === "windows" ? consumerFailurePolicy() : "--no-fail-fast",
       "--no-tests",
       "fail",
       ...(process.env.MESH_TALK_TEST_TIMING === "1"
@@ -826,12 +1118,14 @@ export async function consume(
       coverage,
     };
   }
-  verifyIdentity(
-    manifest.identity,
-    await identity((phase) => evidence(`final-${phase}`), profile),
+  const finalIdentity = await identity(
+    (phase) => evidence(`final-${phase}`),
+    profile,
+    fixtureRuntime,
   );
+  verifyIdentity(manifest.identity, finalIdentity);
   writeJson(path.join(output, "receipt.json"), {
-    schema: 1,
+    schema: manifestSchema(profile, fixtureRuntime),
     sourceSha: manifest.identity.sourceSha,
     runId: manifest.identity.runId,
     runAttempt: manifest.identity.runAttempt,
@@ -839,9 +1133,12 @@ export async function consume(
     archiveSha256: manifest.archiveSha256,
     manifestSha256: await fileHash(path.join(directory, "manifest.json")),
     ...coverageEvidence,
-    ...(!profile.instrumented
+    ...(profile.name !== "windows"
       ? {
-          identity: manifest.identity,
+          identity:
+            profile.name === "linux-workspace"
+              ? finalIdentity
+              : manifest.identity,
           featureResolutionSha256: manifest.featureResolutionSha256,
           inventoryFiles: manifest.inventoryFiles,
           selectedInventorySha256: await fileHash(
@@ -1034,12 +1331,15 @@ async function main(args) {
       path.resolve(values[2]),
     );
   else if (
-    mode === "produce-macos-remaining" &&
+    ["produce-macos-remaining", "produce-linux-workspace"].includes(mode) &&
     (values.length === 1 ||
       (values.length === 2 && values[1] === "--github-output"))
   ) {
     const result = await produce(path.resolve(values[0]), {
-      profile: "macos-remaining",
+      profile:
+        mode === "produce-linux-workspace"
+          ? "linux-workspace"
+          : "macos-remaining",
     });
     if (values.length === 2) {
       assert.ok(
@@ -1051,13 +1351,19 @@ async function main(args) {
         appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
       }
     }
-  } else if (mode === "consume-macos-remaining" && values.length === 5) {
+  } else if (
+    ["consume-macos-remaining", "consume-linux-workspace"].includes(mode) &&
+    values.length === 5
+  ) {
     await consume(
       Number(values[0]),
       path.resolve(values[1]),
       path.resolve(values[2]),
       {
-        profile: "macos-remaining",
+        profile:
+          mode === "consume-linux-workspace"
+            ? "linux-workspace"
+            : "macos-remaining",
         manifestSha256: values[3],
         archiveSha256: values[4],
       },
@@ -1082,7 +1388,7 @@ async function main(args) {
     console.log(JSON.stringify(result));
   } else
     throw new Error(
-      "Usage: windows-coverage.mjs produce ARTIFACT_DIR | consume SHARD ARTIFACT_DIR OUTPUT_DIR | produce-macos-remaining ARTIFACT_DIR [--github-output] | consume-macos-remaining SHARD ARTIFACT_DIR OUTPUT_DIR MANIFEST_SHA256 ARCHIVE_SHA256 | collect-macos-remaining METADATA_DIR RESULT_1_DIR RESULT_2_DIR MANIFEST_SHA256 ARCHIVE_SHA256",
+      "Usage: windows-coverage.mjs produce ARTIFACT_DIR | consume SHARD ARTIFACT_DIR OUTPUT_DIR | produce-macos-remaining ARTIFACT_DIR [--github-output] | consume-macos-remaining SHARD ARTIFACT_DIR OUTPUT_DIR MANIFEST_SHA256 ARCHIVE_SHA256 | produce-linux-workspace ARTIFACT_DIR [--github-output] | consume-linux-workspace SHARD ARTIFACT_DIR OUTPUT_DIR MANIFEST_SHA256 ARCHIVE_SHA256 | collect-macos-remaining METADATA_DIR RESULT_1_DIR RESULT_2_DIR MANIFEST_SHA256 ARCHIVE_SHA256",
     );
 }
 if (

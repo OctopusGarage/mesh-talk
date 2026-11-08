@@ -565,6 +565,13 @@ producer compilation, artifact transfer, consumer preparation and queue time
 alongside test execution; more shards alone can duplicate the dominant setup.
 Keep extracted runtimes outside uploaded evidence. Collect receipts, inventories
 and logs; do not upload another compiled binary copy from every consumer.
+This separation also applies to failed or interrupted extraction. Use an owned
+staging directory on the final target's filesystem, outside artifact roots, and
+retire only that directory through the extraction owner's cleanup path. Exercise
+rejection after real extraction and interrupted partial writes while preserving
+unrelated native build outputs. Record image
+rollout metadata separately from actual compiler/runtime compatibility; incidental
+image version changes must not reject otherwise identical compatible inputs.
 Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
 when recovering a failed attempt; do not mix a previous producer with new shards.
 
