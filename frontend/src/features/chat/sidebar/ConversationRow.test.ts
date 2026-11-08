@@ -127,3 +127,41 @@ it("conceals protected draft text and title while preserving the mention indicat
   expect(row.textContent).not.toContain("[Mentioned you]");
   expect(row.textContent).toContain("[Draft]");
 });
+
+it("opens the same action menu from the overflow button and the row context menu", async () => {
+  await render();
+  const trigger = host.querySelector<HTMLButtonElement>(
+    '[data-testid="conversation-actions-team"]',
+  )!;
+  await act(async () => trigger.click());
+  expect(document.querySelector('[role="menu"]')?.textContent).toContain(
+    "Rename",
+  );
+  expect(
+    document.querySelector('[data-testid="conversation-pin-team"]'),
+  ).not.toBeNull();
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  await act(async () =>
+    document
+      .querySelector('[role="menu"]')!
+      .dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+  );
+  await act(async () =>
+    host.querySelector('[role="group"]')!.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 20,
+        clientY: 20,
+      }),
+    ),
+  );
+  expect(
+    document.querySelector('[data-testid="conversation-rename-team"]'),
+  ).not.toBeNull();
+  expect(
+    document.querySelector('[data-testid="conversation-pin-team"]'),
+  ).not.toBeNull();
+});

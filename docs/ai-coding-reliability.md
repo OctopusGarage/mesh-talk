@@ -381,6 +381,15 @@ Process a late definite refusal without fabricating a protocol terminal state.
 Do not turn failed readback into an empty successful save or resend an accepted
 message because optional roster, preview or notification work failed.
 
+Keep inspection affordances separate from mutation permissions, and propagate
+the containing view's restrictions into nested inspectors. Opening a reader must
+not restore mutation authority. A bounded projection may omit existing data;
+follow its owner's pending/remainder state rather than treating an empty visible
+slice as an empty collection. The [reaction-summary contract](ARCHITECTURE.md),
+[MessageBubble regressions](../frontend/src/features/chat/MessageBubble.test.ts)
+and [inspector flows](../frontend/e2e/reaction-summaries.spec.ts) exercise these
+boundaries with incomplete inline rows and read-only contexts.
+
 **Evidence:** hold IPC unresolved beyond the observation deadline, attempt a
 duplicate action, then settle the original call with success and with refusal in
 separate cases. Switch sessions during the wait. Assert bounded UI observation,
@@ -425,7 +434,11 @@ Validate at the owning trust boundary before allocation and side effects, using
 existing frame, file, count, depth and byte limits. Preserve exact account/device
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
-do not remove backpressure to make a benchmark look faster.
+do not remove backpressure to make a benchmark look faster. Callback-to-stream
+adapters must reserve queue capacity before copying input. Closing admission must
+also revoke buffered input and pending output; closing only the producer still
+allows stale queued work to escape. The [BLE stream owner](../crates/mesh-talk-core/src/transport/ble.rs)
+covers saturation/recovery and shutdown revocation in `transport::ble::tests`.
 
 **Evidence:** test the limit and just beyond it, malformed or missing data,
 wrong-owner requests, saturation and recovery after capacity returns. Include

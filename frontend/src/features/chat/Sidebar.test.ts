@@ -447,8 +447,10 @@ it("keeps the owner rename dialog open until its original operation commits", as
         .click(),
     );
     await act(async () =>
-      [...document.body.querySelectorAll<HTMLButtonElement>("button")]
-        .find((button) => button.textContent?.trim() === "Rename")!
+      document.body
+        .querySelector<HTMLElement>(
+          '[data-testid="conversation-rename-group"]',
+        )!
         .click(),
     );
     const input = document.body.querySelector<HTMLInputElement>(

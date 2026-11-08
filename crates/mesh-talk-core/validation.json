@@ -2737,6 +2737,36 @@
       "escalation": [
         "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
       ]
+    },
+    {
+      "id": "core-native-ble-stream",
+      "paths": [
+        "crates/mesh-talk-core/src/transport/ble.rs",
+        "crates/mesh-talk-core/examples/bluetooth-rehearsal.rs",
+        "src-tauri/examples/bluetooth-radio.swift",
+        "src-tauri/examples/bluetooth-radio-tests.swift",
+        "src-tauri/examples/bluetooth-radio.plist",
+        "docs/native-bluetooth.md"
+      ],
+      "capability": {
+        "summary": "Bound native BLE streams and rehearse pinned Noise text exchange without changing production node routing.",
+        "guide": "docs/native-bluetooth.md",
+        "invariants": [
+          {
+            "name": "Bounded chunk admission and shutdown revoke queued bytes; native discovery never establishes identity or durable delivery.",
+            "reference": "docs/native-bluetooth.md#ownership-and-authentication"
+          }
+        ]
+      },
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["transport::ble"]
+        }
+      ],
+      "escalation": [
+        "Run cargo test -p mesh-talk-core --example bluetooth-rehearsal and swiftc -parse-as-library -typecheck src-tauri/examples/bluetooth-radio.swift and the radio-free batch regression in docs/native-bluetooth.md. Compile the helper with its privacy plist. Two physical macOS hosts must validate BLE-only pinned encrypted echo, identity mismatch, interruption, Bluetooth off/on and fresh-process reconnect. This is not production desktop routing acceptance."
+      ]
     }
   ],
   "prScenarios": [

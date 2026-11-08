@@ -1203,7 +1203,7 @@ export function ConversationView() {
           key={`${owner}:${authGeneration}:${receptionScope}:${key}:${reactionTarget.id}`}
           conversation={active}
           target={reactionTarget.id}
-          readOnly={readOnly}
+          readOnly={readOnly || !!exactContext}
           close={() => setReactionTarget(null)}
         />
       )}

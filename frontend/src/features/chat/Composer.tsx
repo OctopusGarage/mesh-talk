@@ -16,6 +16,7 @@ import {
   Smile,
   Sticker as StickerIcon,
   Camera,
+  ScanLine,
   Image as ImageIcon,
   Plus,
   Shield,
@@ -912,62 +913,74 @@ export function Composer({
                 setShowShot((v) => !v);
               }}
             >
-              <Camera className="h-4 w-4" />
+              <ScanLine className="h-4 w-4" />
             </Button>
           )}
-          {onAttach && (
-            <Button
-              variant="ghost"
-              size="icon"
-              disabled={!!protection}
-              data-testid="composer-attach"
-              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
-              title={t("composer.attach")}
-              aria-label={t("composer.attach")}
-              onClick={protection ? undefined : onAttach}
-            >
-              <Paperclip className="h-4 w-4" />
-            </Button>
-          )}
-          {onAttachDirectory && (
-            <Button
-              variant="ghost"
-              size="icon"
-              disabled={!!protection}
-              data-testid="composer-attach-directory"
-              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
-              title={t("composer.attachDirectory")}
-              aria-label={t("composer.attachDirectory")}
-              onClick={protection ? undefined : onAttachDirectory}
-            >
-              <FolderUp className="h-4 w-4" />
-            </Button>
-          )}
-          {onImage && (
-            <Button
-              variant="ghost"
-              size="icon"
-              data-testid="composer-image"
-              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
-              title={t("composer.image")}
-              aria-label={t("composer.image")}
-              onClick={onImage}
-            >
-              <ImageIcon className="h-4 w-4" />
-            </Button>
-          )}
-          {onCamera && (
-            <Button
-              variant="ghost"
-              size="icon"
-              data-testid="composer-camera"
-              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
-              title={t("cameraCapture.title")}
-              aria-label={t("cameraCapture.title")}
-              onClick={onCamera}
-            >
-              <Camera className="h-4 w-4" />
-            </Button>
+          {(onAttach || onImage || onCamera || onAttachDirectory) && (
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-testid="composer-attachments"
+                  className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
+                  title={t("composer.attach")}
+                  aria-label={t("composer.attach")}
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="start"
+                className="w-52 p-1.5"
+                data-composer-popover=""
+              >
+                {[
+                  {
+                    action: onImage,
+                    icon: ImageIcon,
+                    label: t("composer.image"),
+                    id: "composer-image",
+                    blocked: false,
+                  },
+                  {
+                    action: onCamera,
+                    icon: Camera,
+                    label: t("cameraCapture.title"),
+                    id: "composer-camera",
+                    blocked: false,
+                  },
+                  {
+                    action: onAttach,
+                    icon: Paperclip,
+                    label: t("composer.attach"),
+                    id: "composer-attach",
+                    blocked: !!protection,
+                  },
+                  {
+                    action: onAttachDirectory,
+                    icon: FolderUp,
+                    label: t("composer.attachDirectory"),
+                    id: "composer-attach-directory",
+                    blocked: !!protection,
+                  },
+                ]
+                  .filter((item) => item.action)
+                  .map(({ action, icon: Icon, label, id, blocked }) => (
+                    <Button
+                      key={id}
+                      variant="ghost"
+                      disabled={blocked}
+                      data-testid={id}
+                      className="h-10 w-full justify-start gap-3 px-3"
+                      onClick={action}
+                    >
+                      <Icon className="h-4 w-4 shrink-0" />
+                      {label}
+                    </Button>
+                  ))}
+              </PopoverContent>
+            </Popover>
           )}
           <Button
             variant="ghost"

@@ -882,6 +882,13 @@ infrastructure retry is justified, keep its limit, original failure and outcomes
 visible, and ensure repeating the operation is safe. Test retries still obey the
 owning suite policy.
 
+When a UI action moves into a menu, update the existing shared interaction helper
+and its callers before publication. Exercise the real entry point; retain
+functional, permission, focus and geometry assertions at the toolbar or popup
+boundary they describe. The
+[composer attachment helper](../frontend/e2e/helpers/session.ts) owns that shared
+interaction; forced visibility and dropped assertions do not qualify the new flow.
+
 Keep each observation inside a polling assertion nonwaiting when the assertion
 already owns readiness. A locator operation can wait for a virtualized row and
 consume the entire outer budget without producing one decode or geometry sample.

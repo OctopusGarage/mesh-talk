@@ -57,6 +57,15 @@ export async function revealComposerTools(page: Page) {
   }
 }
 
+export async function revealComposerAttachments(page: Page) {
+  await revealComposerTools(page);
+  const trigger = page.getByTestId("composer-attachments");
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+    await trigger.click();
+  }
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+}
+
 export async function seedThemeBeforeLoad(page: Page, theme: string) {
   if (!["light", "dark", "oled"].includes(theme))
     await seedMarketPacks(page, [theme]);
