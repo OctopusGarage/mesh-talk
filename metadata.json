@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WHC5E0YQ7QHR525E5WQ66F",
+  "strategy": "manual-commit",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/check-health.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/windows-workspace.yml",
+    "docs/ci-maintenance.md",
+    "scripts/diagnostics/ci-latency.test.mjs",
+    "scripts/diagnostics/health-workflow.test.mjs",
+    "scripts/diagnostics/repository-hygiene.test.mjs",
+    "scripts/diagnostics/standards-wiring.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 326571,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 7731456,
+    "output_tokens": 17418,
+    "api_call_count": 27,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 458,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 4,
+      "credentialed_uri": 0,
+      "entropy": 463,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
