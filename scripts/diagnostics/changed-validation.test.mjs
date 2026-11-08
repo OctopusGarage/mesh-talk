@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { toolVersionFixture } from "./test-fixtures/tool-versions.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { spawn, spawnSync } from "node:child_process";
@@ -455,6 +455,26 @@ const cli = fileURLToPath(
 // Their watchdog is only a deadlock bound, not a host-startup latency contract.
 const FUNCTIONAL_CLI_WATCHDOG_MS = 60_000;
 
+// Lifecycle fixtures execute a private scanner, independent of host tooling.
+function scannerFixture(f, env = isolatedEnv) {
+  const scanner = path.join(f.root, "target/bin/typos");
+  const receipt = path.join(f.root, "target/scanner-arguments.json");
+  f.write("target/bin/typos", `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(receipt)}, JSON.stringify(process.argv.slice(2)));\n`);
+  chmodSync(scanner, 0o755);
+  if (process.platform !== "win32") return {
+    ...env, PATH: `${path.dirname(scanner)}${path.delimiter}${env.PATH}`,
+  };
+  // Windows deliberately does not execute .cmd shims. Map only this fixture's
+  // scanner to a real Node child; keep the native process owner and all argv.
+  const preload = path.join(f.root, "target/scanner-preload.cjs");
+  f.write("target/scanner-preload.cjs", `const path=require('node:path');
+const separator=process.argv.indexOf('--');
+if(path.basename(process.argv[1] || '')==='stage.mjs' && process.argv[2]==='spelling' && separator>0 && process.argv[separator+1]==='typos') {
+  process.argv.splice(separator+1,1,process.execPath,${JSON.stringify(scanner)});
+}\n`);
+  return { ...env, NODE_OPTIONS: `${env.NODE_OPTIONS || ""} --import=${pathToFileURL(preload).href}`.trim() };
+}
+
 function commandFixture(t) {
   const f = repository(t, { automaticCleanup: false });
   const controller = new AbortController();
@@ -588,7 +608,7 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid }));
     phase = "start CLI";
     completion = execute([process.execPath, cli, "--checks", "--run", "--report", "target/validation/feedback/queued.json", ...(managed ? ["--managed"] : []), "--owner", "fixture", "--reason", "phase fixture"], {
-      cwd: f.root, env: toolVersions.env,
+      cwd: f.root, env: scannerFixture(f, toolVersions.env),
       signal: controller.signal,
       onSpawn: ownedPid => { pid = ownedPid; },
       onOutput: chunk => { output = (output + chunk.toString()).slice(-65536); },
@@ -651,6 +671,8 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     }
     assert.deepEqual(new Set((await readFile(toolVersions.probes, "utf8")).trim().split("\n")),
       new Set(["cargo", "rustc", "npm"]), "all canonical tool identities must still be queried");
+    assert.deepEqual(JSON.parse(await readFile(path.join(f.root, "target/scanner-arguments.json"), "utf8")),
+      ["--force-exclude", "--", "./scripts/fixture.test.mjs"]);
     phase = "assertions complete";
   },
 );
@@ -998,12 +1020,15 @@ test("cheap CLI runs actual syntax owner while keeping selected tests and heavy 
   f.write("scripts/fixture.test.mjs", "throw Error('must not execute the selected test'); // changed");
   mkdirSync(path.join(f.root, ".git/validation-resources/heavy"), { recursive: true });
   f.write(".git/validation-resources/heavy/owner.json", JSON.stringify({ pid: process.pid }));
-  const passed = await f.runCLI(["--cheap", "--json"]);
+  const scannerEnv = scannerFixture(f);
+  const passed = await f.runCLI(["--cheap", "--json"], { env: scannerEnv });
   assert.equal(passed.code, 0, passed.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(f.root, "target/scanner-arguments.json"), "utf8")),
+    ["--force-exclude", "--", ...discoverChanges(f.root, "HEAD").files.filter(file => !file.startsWith("target/")).map(file => `./${file}`)]);
   assert(JSON.parse(passed.stdout).node.includes("scripts/fixture.test.mjs"));
   assert.match(passed.stderr, /candidate acceptance remain pending/);
   f.write("scripts/fixture.test.mjs", "export const = ;");
-  const failed = await f.runCLI(["--cheap", "--json"]);
+  const failed = await f.runCLI(["--cheap", "--json"], { env: scannerEnv });
   assert.notEqual(failed.code, 0);
   assert.match(failed.stderr, /rejected syntax/);
 });

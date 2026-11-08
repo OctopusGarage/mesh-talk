@@ -831,6 +831,10 @@ When tool identity is outside the assertion, reuse the existing
 [tool-version fixture](../scripts/diagnostics/test-fixtures/tool-versions.mjs)
 and verify that its probes were actually consumed. Keep the real command,
 failure, cancellation and receipt assertions and their existing watchdogs.
+When adding a local check, inspect subprocess fixtures that invoke its owner.
+Supply unrelated external tools through private, observed fixture dependencies;
+do not depend on developer-installed tools or add scanner setup to every runner
+just to exercise scheduling. Keep real scanner acceptance in its existing job.
 Exercise interrupted log finalization as well as child retirement through the
 existing [process-owner controls](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
 Compare nested budgets before adding an outer subprocess timeout: several valid
