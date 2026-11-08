@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WX10KGR964K97TDK7MZGN0",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-08T06:20:28.672417Z",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "crates/mesh-talk-core/src/node/node_tests.rs",
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "232b6def33d6",
+  "checkpoint_transcript_start": 34365,
+  "transcript_lines_at_start": 34365,
+  "compact_transcript_start": 3991,
+  "token_usage": {
+    "input_tokens": 32238,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 10411520,
+    "output_tokens": 21242,
+    "api_call_count": 60,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 2048,
+    "layers": {
+      "betterleaks": 4,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 8,
+      "credentialed_uri": 0,
+      "entropy": 2049,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 8
+  }
+}
