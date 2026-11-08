@@ -260,7 +260,6 @@ The real-runner control derives both configured watchdogs, accelerates only thei
 duration, requires actual parked-case failure and subsequent-case execution, and
 verifies descendant retirement before removing its fixture.
 
-
 ## Reuse compatible work with verifiable inputs
 
 Prefer one producer for an expensive output when consumers need the same inputs
@@ -563,6 +562,39 @@ Both need compatible inputs and complete inventories, with isolation preserved.
 Archive reuse also requires the actual architecture/ABI and supported runtime
 binary lookup. An archive cannot rewrite executable paths embedded at compile
 time; validate a relocated fresh consumer before sharing builds across jobs.
+The optional `macos-remaining` profile in `scripts/ci/windows-coverage.mjs`
+requires identical absolute checkout and target paths for embedded CLI lookups.
+It selects every enabled default workspace target except exactly `mesh-talk`,
+with two hash partitions, four test workers, two compiler jobs, default ignored
+policy, no retries and no LLVM coverage instrumentation. Reject inherited LLVM
+activation, Rust flags/wrappers and unexpected target/build overrides; bind the
+accepted profile environment, compiler, source, configuration, resolved features
+and run attempt. Preserve the existing Windows eight serial instrumented shards.
+Trusted producer job outputs supply the manifest and archive hashes before
+consumer extraction. The producer API returns those hashes and the Rust version;
+only explicit CLI `--github-output` export writes GitHub outputs. The small
+metadata artifact contains `manifest.json`, `inventory-{0,1,2}.json` and
+`feature-resolution.json`; consumers also download `workspace.tar.zst`.
+The pure collector requires only that metadata, both selected inventories,
+receipts and execution logs, plus trusted current source/run/attempt and explicit
+successful native, producer and aggregate consumer job outcomes. It checks two
+distinct complete executions and their exact disjoint union without comparing
+its own Ubuntu platform/root to Darwin. Never upload consumer runtime binaries
+or invent LCOV for uninstrumented tests.
+
+Archive qualification must remove producer build outputs and inspect actual
+application stack frame file:line evidence separately from panic-header source
+locations. Successful binary execution alone does not prove diagnostics survived.
+Darwin unpacked line tables depend on compiler objects that official archives do
+not retain. The macOS profile generates only metadata-selected executable dSYM
+bundles with Apple `dsymutil` and includes them through official Nextest archive
+extras, keeping the line-table profile unchanged. Require the producer extraction
+probe and every consumer to verify the actual expected symbol inventory and
+bytes, since repository configuration can override lower-priority tool extras.
+The archive/manifest hashes bind these symbols. Retain a missing-bundle negative
+control in `scripts/ci/macos-remaining-cli.test.mjs`; do not archive the whole
+compiler cache. Measure symbol generation, added bytes and complete hosted
+compile/transfer/queue cost before claiming a speedup.
 
 Cancel superseded verification for the same candidate when safe, with concurrency
 groups that separate caller workflows, event streams and branches. Reusable Health

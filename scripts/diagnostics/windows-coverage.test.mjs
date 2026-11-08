@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -17,6 +25,10 @@ import {
   verifyTargets,
   validateProfilePath,
   verifyLayout,
+  archiveProfile,
+  macDebugSymbolPaths,
+  validateMacEnvironment,
+  collectMacRemaining,
 } from "../ci/windows-coverage.mjs";
 
 test("Windows execution partitions keep all eight native jobs directly required", () => {
@@ -474,4 +486,315 @@ test("legacy Windows cache compatibility overrides stay outside runtime executio
     /CARGO_TERM_COLOR: always|RUST_TEST_THREADS: ''/u,
   );
   assert.match(runtime, /cargo test --workspace --doc --locked/u);
+});
+
+test("macOS remaining profile is explicit and leaves Windows defaults intact", () => {
+  assert.deepEqual(archiveProfile().buildArgs, ["--workspace", "--locked"]);
+  const mac = archiveProfile("macos-remaining");
+  assert.deepEqual(mac.buildArgs, [
+    "--workspace",
+    "--exclude",
+    "mesh-talk",
+    "--locked",
+  ]);
+  assert.deepEqual(mac.partitions, [1, 2]);
+  assert.equal(mac.testThreads, 4);
+  assert.equal(mac.instrumented, false);
+  assert.throws(() => archiveProfile("other"), /profile/);
+});
+
+test("uninstrumented macOS archive rejects inherited compilation and target overrides", () => {
+  const root = process.cwd();
+  const env = {
+    CARGO_BUILD_JOBS: "2",
+    CARGO_INCREMENTAL: "0",
+    CARGO_PROFILE_DEV_DEBUG: "line-tables-only",
+    CARGO_PROFILE_TEST_DEBUG: "line-tables-only",
+    CARGO_TARGET_DIR: `${root}/target`,
+  };
+  validateMacEnvironment(env, root);
+  for (const key of [
+    "LLVM_PROFILE_FILE",
+    "CARGO_LLVM_COV_SHOW_ENV",
+    "__CARGO_LLVM_COV_RUSTFLAGS",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_TARGET",
+    "CARGO_BUILD_BUILD_DIR",
+    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+  ]) {
+    assert.throws(
+      () => validateMacEnvironment({ ...env, [key]: "inherited" }, root),
+      /environment|override/,
+    );
+  }
+  for (const [key, value] of [
+    ["CARGO_TARGET_DIR", `${root}/other`],
+    ["CARGO_BUILD_JOBS", "4"],
+    ["CARGO_PROFILE_TEST_DEBUG", "full"],
+  ])
+    assert.throws(
+      () => validateMacEnvironment({ ...env, [key]: value }, root),
+      /environment|target|jobs|debug/,
+    );
+});
+
+test("remaining target cohort excludes exactly Host and automatically includes new workspace packages", () => {
+  const packages = ["host", "remaining", "new"].map((id, index) => ({
+    id,
+    name: index === 0 ? "mesh-talk" : id,
+    targets: [{ name: id, kind: ["lib"], test: true }],
+  }));
+  const metadata = {
+    workspace_members: packages.map((pkg) => pkg.id),
+    packages,
+    resolve: { nodes: packages.map((pkg) => ({ id: pkg.id, features: [] })) },
+  };
+  const suite = (id) => ({ "package-id": id, kind: "lib", "binary-name": id });
+  const listing = {
+    "rust-suites": { remaining: suite("remaining"), new: suite("new") },
+  };
+  verifyTargets(listing, metadata, "macos-remaining");
+  assert.throws(
+    () =>
+      verifyTargets(
+        { "rust-suites": { remaining: suite("remaining") } },
+        metadata,
+        "macos-remaining",
+      ),
+    /target/,
+  );
+  assert.throws(
+    () =>
+      verifyTargets(
+        { "rust-suites": { ...listing["rust-suites"], host: suite("host") } },
+        metadata,
+        "macos-remaining",
+      ),
+    /target/,
+  );
+  assert.throws(
+    () =>
+      verifyTargets(
+        listing,
+        {
+          ...metadata,
+          packages: packages.slice(1),
+          workspace_members: ["remaining", "new"],
+        },
+        "macos-remaining",
+      ),
+    /Host/,
+  );
+});
+
+test("layout must match the original checkout target, not just internally consistent binary paths", () => {
+  const foreign = `${process.cwd()}/foreign/target`;
+  assert.throws(
+    () =>
+      verifyLayout(
+        {
+          "rust-build-meta": { "target-directory": foreign },
+          "rust-binaries": {
+            lib: { "binary-path": `${foreign}/debug/deps/unit` },
+          },
+        },
+        process.cwd(),
+      ),
+    /target/,
+  );
+});
+
+test("pure Mac collector anchors producer authority and rejects missing, duplicate, stale and partial receipts", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mac-collector-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hash = (value) => createHash("sha256").update(value).digest("hex");
+  const put = (directory, name, value) => {
+    const text = JSON.stringify(value);
+    writeFileSync(path.join(directory, name), text);
+    return hash(text);
+  };
+  const all = inventory(listing(["a", "b", "c", "d"]));
+  const shards = [
+    ["a", "b"],
+    ["c", "d"],
+  ].map((names) => inventory(listing(names)));
+  const inventoryFiles = Object.fromEntries(
+    [all, ...shards].map((rows, index) => [
+      `inventory-${index}.json`,
+      put(root, `inventory-${index}.json`, rows),
+    ]),
+  );
+  const identity = {
+    archiveProfile: "macos-remaining",
+    sourceSha: "a".repeat(40),
+    runId: "1",
+    runAttempt: "2",
+    platform: "darwin",
+    arch: "arm64",
+    root: "/darwin/source",
+    rustc: "rustc native",
+    cargo: "cargo native",
+    cargoConfigSha256: hash("cargo config"),
+    nextestConfigSha256: hash("nextest config"),
+    buildArgs: archiveProfile("macos-remaining").buildArgs,
+  };
+  const archiveSha256 = hash("archive bytes not present on collector");
+  const manifest = {
+    schema: 1,
+    identity,
+    archiveSha256,
+    inventoryFiles,
+    featureResolutionSha256: put(root, "feature-resolution.json", {
+      nodes: [],
+    }),
+    testCount: all.length,
+    runnableCount: 4,
+    scheduling: {
+      partitions: 2,
+      partition: "hash",
+      testThreads: 4,
+      retries: 0,
+      ignored: "default",
+    },
+  };
+  const manifestSha256 = put(root, "manifest.json", manifest);
+  const outputs = shards.map((rows, index) => {
+    const output = path.join(root, `result-${index}`);
+    mkdirSync(output);
+    const selectedInventorySha256 = put(
+      output,
+      "selected-inventory.json",
+      rows,
+    );
+    const events = rows
+      .filter((row) => row.selected)
+      .flatMap((row) =>
+        ["started", "ok"].map((event) =>
+          JSON.stringify({ type: "test", event, name: row.eventName }),
+        ),
+      )
+      .join("\n");
+    writeFileSync(path.join(output, "execution.jsonl"), events);
+    put(output, "receipt.json", {
+      schema: 1,
+      identity,
+      sourceSha: identity.sourceSha,
+      runId: "1",
+      runAttempt: "2",
+      shard: index + 1,
+      archiveSha256,
+      manifestSha256,
+      inventoryFiles,
+      featureResolutionSha256: manifest.featureResolutionSha256,
+      selectedInventorySha256,
+      executionSha256: hash(events),
+      executedTests: 2,
+      totalTests: all.length,
+      seconds: 0.1,
+    });
+    return output;
+  });
+  const trusted = {
+    manifestSha256,
+    archiveSha256,
+    sourceSha: identity.sourceSha,
+    runId: "1",
+    runAttempt: "2",
+    jobResults: {
+      native: "success",
+      producer: "success",
+      consumers: "success",
+    },
+  };
+  assert.equal(
+    (await collectMacRemaining(root, outputs, trusted)).executedTests,
+    4,
+  );
+  for (const field of [
+    "manifestSha256",
+    "archiveSha256",
+    "sourceSha",
+    "runId",
+    "runAttempt",
+  ])
+    await assert.rejects(
+      collectMacRemaining(root, outputs, {
+        ...trusted,
+        [field]: field.endsWith("Sha256") ? hash("wrong") : "wrong",
+      }),
+    );
+  for (const status of ["failure", "cancelled", "skipped", ""]) {
+    await assert.rejects(
+      collectMacRemaining(root, outputs, {
+        ...trusted,
+        jobResults: { ...trusted.jobResults, native: status },
+      }),
+      /job/,
+    );
+    await assert.rejects(
+      collectMacRemaining(root, outputs, {
+        ...trusted,
+        jobResults: { ...trusted.jobResults, consumers: status },
+      }),
+      /job/,
+    );
+  }
+  await assert.rejects(
+    collectMacRemaining(root, [outputs[0]], trusted),
+    /receipt/,
+  );
+  await assert.rejects(
+    collectMacRemaining(root, [outputs[0], outputs[0]], trusted),
+    /shard/,
+  );
+  const receipt = JSON.parse(
+    readFileSync(path.join(outputs[0], "receipt.json"), "utf8"),
+  );
+  for (const changed of [
+    { ...receipt, identity: { ...identity, rustc: "changed" } },
+    { ...receipt, coverageSha256: hash("fake LCOV") },
+    { ...receipt, executedTests: 1 },
+    { ...receipt, featureResolutionSha256: hash("wrong") },
+    { ...receipt, manifestSha256: hash("wrong") },
+  ]) {
+    put(outputs[0], "receipt.json", changed);
+    await assert.rejects(collectMacRemaining(root, outputs, trusted));
+  }
+  put(outputs[0], "receipt.json", receipt);
+  const eventsFile = path.join(outputs[0], "execution.jsonl");
+  const events = readFileSync(eventsFile, "utf8");
+  writeFileSync(eventsFile, events.split("\n").slice(0, -1).join("\n"));
+  await assert.rejects(
+    collectMacRemaining(root, outputs, trusted),
+    /execution/,
+  );
+  put(outputs[0], "receipt.json", {
+    ...receipt,
+    executionSha256: hash(readFileSync(eventsFile)),
+  });
+  await assert.rejects(
+    collectMacRemaining(root, outputs, trusted),
+    /execution/,
+  );
+});
+
+test("Mac debug bundles follow exactly selected executable metadata, including embedded CLI helpers", () => {
+  const root = process.cwd();
+  const target = `${root}/target`;
+  const binaries = {
+    "rust-build-meta": {
+      "target-directory": target,
+      "non-test-binaries": { pkg: [{ kind: "bin-exe", path: "debug/helper" }] },
+    },
+    "rust-binaries": { lib: { "binary-path": `${target}/debug/deps/unit` } },
+  };
+  assert.deepEqual(macDebugSymbolPaths(binaries, root), [
+    `${target}/debug/deps/unit`,
+    `${target}/debug/helper`,
+  ]);
+  binaries["rust-build-meta"]["non-test-binaries"].pkg[0].path = "../foreign";
+  assert.throws(() => macDebugSymbolPaths(binaries, root), /target/);
 });
