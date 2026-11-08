@@ -24,14 +24,14 @@ test("Linux coverage requires Linux and Health without waiting for desktop shard
 });
 
 test("portable acceptance and final UI gate reject every unsuccessful Linux or desktop result", () => {
-  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
-  for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop, scope\]/);
+  const env = { LINUX: "success", DESKTOP: "success", WINDOWS: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
+  for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop, desktop-windows, scope\]/);
   assert.match(job("portable-evidence"), /node scripts\/evals\/chromium-evidence\.mjs collect-artifacts/);
   assert.match(job("ui-gate"), /needs: \[linux, desktop,/);
   for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
     for (const desktop of ["success", "failure", "cancelled", "skipped", ""]) {
       const expected = linux === "success" && desktop === "success";
-      assert.equal(gate("Require all full Chromium shards", { LINUX: linux, DESKTOP: desktop }) === 0, expected);
+      assert.equal(gate("Require all full Chromium shards", { LINUX: linux, DESKTOP: desktop, WINDOWS: "success" }) === 0, expected);
       assert.equal(gate("Require complete selected UI matrices", { ...env, LINUX: linux, DESKTOP: desktop }) === 0, expected);
     }
   }
@@ -43,9 +43,9 @@ test("one reusable shard implementation retains platform-sized runners and all e
   assert.match(reusable, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(reusable, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
   assert.match(job("linux"), /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(job("desktop"), /- os: macos-26-intel\n            shards: '\[1,2,3,4,5,6,7,8\]'\n            total: 8/);
-  assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
-  assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 2);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
+  assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
+  assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 3);
   assert.ok(!root().includes("name: Run UI E2E"));
   assert.match(reusable, /node \.\.\/scripts\/ci\/ui-runner\.mjs --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\} --reporter=list,blob,json,\.\.\/scripts\/ci\/ui-runner\.mjs/);
   assert.match(reusable, /MESH_TALK_E2E_COVERAGE: \$\{\{ runner.os == 'Linux' && '1' \|\| '0' \}\}/);
@@ -84,8 +84,8 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /- os: macos-26-intel\n            shards: '\[1,2,3,4,5,6,7,8\]'\n            total: 8/);
-  assert.match(job("desktop"), /- os: windows-latest\n            shards: '\[1,2,3,4\]'\n            total: 4/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
+  assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
   assert.match(job("portable-shards"), /runs-on: macos-26-intel/);
   assert.match(job("portable"), /name: Portable UI \(macos-26-intel, webkit\)/);
   assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
@@ -99,6 +99,9 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
 test("desktop browser burst waits for Health and WebKit with bounded admission while Linux starts independently", () => {
   const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
   assert.match(job("desktop"), /needs: \[health, portable, scope\]/);
+  assert.match(job("desktop-windows"), /needs: \[health, scope\]/);
+  assert.doesNotMatch(job("desktop-windows"), /portable|max_parallel:/);
+  for (const name of ["desktop", "desktop-windows"]) assert.match(job(name), /if: needs.scope.outputs.full == 'true'/);
   assert.doesNotMatch(job("desktop"), /max_parallel:/, "desktop inherits the same four-slot owner without a Mac-specific Windows restriction");
   assert.match(reusable, /max_parallel:\n        type: number\n        default: 4/);
   assert.match(reusable, /max-parallel: \$\{\{ inputs.max_parallel \}\}/);
@@ -126,7 +129,7 @@ test("HTML presentation never substitutes for successful producer acceptance", (
   const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
   for (const producer of ["LINUX", "DESKTOP"]) {
     for (const result of ["failure", "cancelled", "skipped", ""]) {
-      assert.notEqual(gate("Require all full Chromium shards", { LINUX: "success", DESKTOP: "success", [producer]: result }), 0, `accepted ${producer} ${result}`);
+      assert.notEqual(gate("Require all full Chromium shards", { LINUX: "success", DESKTOP: "success", WINDOWS: "success", [producer]: result }), 0, `accepted ${producer} ${result}`);
     }
   }
   assert.notEqual(renderReports({ desktop: "success", platforms, renderExit: "1" }).status, 0);
@@ -192,14 +195,14 @@ test("Firefox core runs on ordinary candidates and the final gate requires its r
   assert.match(firefox, /timeout-minutes: 20/);
   assert.match(firefox, /EVAL_TIER:.*'extended' \|\| 'core'/);
   assert.match(firefox, /browser-report\.mjs.*'extended' \|\| 'core'/);
-  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
+  const env = { LINUX: "success", DESKTOP: "success", WINDOWS: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
   assert.equal(gate("Require complete selected UI matrices", env), 0);
   for (const EXTENDED of ["false", "true"]) for (const FIREFOX of ["failure", "cancelled", "skipped", ""]) {
     assert.notEqual(gate("Require complete selected UI matrices", { ...env, EXTENDED, FIREFOX, EXTENDED_CHROMIUM: EXTENDED === "true" ? "success" : "skipped" }), 0);
   }
 });
 
-function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0", discoveryFailure = false } = {}) {
+function renderReports({ linux = "success", desktop = "skipped", windows = desktop, platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0", discoveryFailure = false } = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-inventory-"));
   try {
     mkdirSync(path.join(directory, "frontend"));
@@ -216,12 +219,12 @@ function renderReports({ linux = "success", desktop = "skipped", platforms = ["u
     const script = `import {renderDownloadedReports} from ${JSON.stringify(module)};
       import {appendFileSync} from 'node:fs';
       try { await renderDownloadedReports('../target/ui-reports', '../target/ui-report-blobs',
-        {runAttempt:'3', linuxResult:process.env.LINUX_RESULT, desktopResult:process.env.DESKTOP_RESULT},
+        {runAttempt:'3', linuxResult:process.env.LINUX_RESULT, desktopResult:process.env.DESKTOP_RESULT, windowsResult:process.env.WINDOWS_RESULT},
         {merge:async(_directory,os)=>{appendFileSync(process.env.RENDERED,'playwright-report/'+os+'\\n');if(process.env.RENDER_EXIT!=='0')throw Error('renderer failed')}});
       } catch(error) { console.error(error.message); process.exitCode=1; }`;
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       cwd: path.join(directory, "frontend"), encoding: "utf8",
-      env: { ...process.env, LINUX_RESULT: linux, DESKTOP_RESULT: desktop, RENDERED: path.join(directory, "rendered"), RENDER_EXIT: renderExit },
+      env: { ...process.env, LINUX_RESULT: linux, DESKTOP_RESULT: desktop, WINDOWS_RESULT: windows, RENDERED: path.join(directory, "rendered"), RENDER_EXIT: renderExit },
     });
     let rendered = [];
     try { rendered = readFileSync(path.join(directory, "rendered"), "utf8").trim().split("\n"); } catch {}
@@ -274,3 +277,19 @@ test("the stable required WebKit check admits only both successful partitions", 
     assert.equal(result.status === 0, status === "success");
   }
 });
+
+ test("independent Windows acceptance rejects every non-success conclusion", () => {
+   const env = { LINUX:"success", DESKTOP:"success", WINDOWS:"success", COVERAGE:"success", PACKS:"success", CHROMIUM:"success", PORTABLE:"success", EXTENDED_CHROMIUM:"skipped", FIREFOX:"success", EXTENDED:"false" };
+   for (const WINDOWS of ["success", "failure", "cancelled", "skipped", "", "unknown"]) for (const name of ["Require all full Chromium shards", "Require complete selected UI matrices"]) assert.equal(gate(name, {...env, WINDOWS}) === 0, WINDOWS === "success");
+ });
+ test("independent desktop report conclusions preserve available diagnostics", () => {
+   assert.match(job("reports"), /WINDOWS_RESULT: \$\{\{ needs\.desktop-windows\.result \}\}/);
+   const windows = renderReports({desktop:"skipped", windows:"success", platforms:["ubuntu-24.04","windows-latest"]});
+   assert.equal(windows.status,0, windows.stderr);
+   assert.deepEqual(windows.rendered,["playwright-report/ubuntu-24.04","playwright-report/windows-latest"]);
+   const mac = renderReports({desktop:"success", windows:"skipped", platforms:["ubuntu-24.04","macos-26-intel"]});
+   assert.equal(mac.status,0, mac.stderr);
+   assert.deepEqual(mac.rendered,["playwright-report/ubuntu-24.04","playwright-report/macos-26-intel"]);
+   for (const windows of ["failure","cancelled"]) assert.equal(renderReports({windows, platforms:["ubuntu-24.04","windows-latest"]}).status,0);
+   for (const windows of ["", "unknown", "in_progress"]) assert.notEqual(renderReports({windows}).status,0);
+ });

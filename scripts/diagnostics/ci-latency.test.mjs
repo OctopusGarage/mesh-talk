@@ -343,8 +343,15 @@ test("full browser coverage remains on every desktop OS with bounded shards", ()
   const shardWorkflow = read("ui-shards.yml");
   const baseline = shardWorkflow.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(ui, /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(ui, /- os: macos-26-intel/);
-  assert.match(ui, /- os: windows-latest/);
+  assert.match(ui, /operating_systems: '\["macos-26-intel"\]'/);
+  assert.match(ui, /operating_systems: '\["windows-latest"\]'/);
+  const mac = ui.split("  desktop:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
+  const windows = ui.split("  desktop-windows:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
+  assert.match(mac, /needs: \[health, portable, scope\]/);
+  assert.doesNotMatch(mac, /windows-latest/);
+  assert.match(windows, /needs: \[health, scope\]/);
+  assert.doesNotMatch(windows, /portable|max_parallel:/);
+  assert.match(windows, /shards: '\[1,2,3,4\]'\n      shard_total: 4/);
   assert.match(baseline, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(baseline, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
   assert.match(baseline, /fail-fast: false/);
@@ -362,7 +369,7 @@ test("the stable UI gate requires coverage merged from all Linux shards", () => 
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
-  assert.match(ui, /needs: \[linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope\]/);
+  assert.match(ui, /needs: \[linux, desktop, desktop-windows, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope\]/);
   assert.match(ui, /COVERAGE: \$\{\{ needs.coverage.result \}\}/);
   assert.match(ui, /test "\$COVERAGE" = success/);
 });
@@ -383,11 +390,11 @@ test("direct checks replace redundant runner-backed summary gates", () => {
 });
 
 test("the final UI gate rejects failed, cancelled or missing required jobs", () => {
-  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
+  const env = { LINUX: "success", DESKTOP: "success", WINDOWS: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", env).status, 0);
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, REPORTS: "failure" }).status, 0, "HTML presentation is independent of test acceptance");
-  for (const job of ["LINUX", "DESKTOP", "COVERAGE", "PACKS", "CHROMIUM", "PORTABLE"]) {
-    for (const result of ["failure", "cancelled", "skipped", ""]) assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, [job]: result }).status, 0, `${job}=${result}`);
+  for (const job of ["LINUX", "DESKTOP", "WINDOWS", "COVERAGE", "PACKS", "CHROMIUM", "PORTABLE", "FIREFOX"]) {
+    for (const result of ["failure", "cancelled", "skipped", "", "unknown"]) assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, [job]: result }).status, 0, `${job}=${result}`);
   }
   assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true" }).status, 0);
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true", EXTENDED_CHROMIUM: "success", FIREFOX: "success" }).status, 0);

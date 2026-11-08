@@ -49,21 +49,20 @@ jobs:
     if: needs.scope.outputs.full == 'true'
     # Preserve native Mac admission; reuse the four-slot per-OS browser budget.
     needs: [health, portable, scope]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-26-intel
-            shards: '[1,2,3,4,5,6,7,8]'
-            total: 8
-          - os: windows-latest
-            shards: '[1,2,3,4]'
-            total: 4
     uses: ./.github/workflows/ui-shards.yml
     with:
-      operating_systems: ${{ format('["{0}"]', matrix.os) }}
-      shards: ${{ matrix.shards }}
-      shard_total: ${{ matrix.total }}
+      operating_systems: '["macos-26-intel"]'
+      shards: '[1,2,3,4,5,6,7,8]'
+      shard_total: 8
+
+  desktop-windows:
+    if: needs.scope.outputs.full == 'true'
+    needs: [health, scope]
+    uses: ./.github/workflows/ui-shards.yml
+    with:
+      operating_systems: '["windows-latest"]'
+      shards: '[1,2,3,4]'
+      shard_total: 4
 
   coverage:
     # This existing name is required by branch protection. It now certifies
@@ -137,7 +136,7 @@ jobs:
 
   portable-evidence:
     name: Chromium portable evidence
-    needs: [linux, desktop, scope]
+    needs: [linux, desktop, desktop-windows, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -155,9 +154,11 @@ jobs:
         env:
           LINUX: ${{ needs.linux.result }}
           DESKTOP: ${{ needs.desktop.result }}
+          WINDOWS: ${{ needs.desktop-windows.result }}
         run: |
           test "$LINUX" = success
           test "$DESKTOP" = success
+          test "$WINDOWS" = success
       - uses: actions/setup-node@v7.1.0
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
@@ -184,7 +185,7 @@ jobs:
   # remain mandatory artifacts on the test shards themselves.
   reports:
     name: Merged UI reports
-    needs: [linux, desktop, scope]
+    needs: [linux, desktop, desktop-windows, scope]
     if: ${{ !cancelled() && needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -207,6 +208,7 @@ jobs:
         env:
           LINUX_RESULT: ${{ needs.linux.result }}
           DESKTOP_RESULT: ${{ needs.desktop.result }}
+          WINDOWS_RESULT: ${{ needs.desktop-windows.result }}
         run: node ../scripts/evals/chromium-evidence.mjs render-artifacts ../target/ui-reports ../target/ui-report-blobs
       - uses: actions/upload-artifact@v7
         continue-on-error: true
@@ -438,7 +440,7 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope]
+    needs: [linux, desktop, desktop-windows, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
@@ -455,6 +457,7 @@ jobs:
         env:
           LINUX: ${{ needs.linux.result }}
           DESKTOP: ${{ needs.desktop.result }}
+          WINDOWS: ${{ needs.desktop-windows.result }}
           COVERAGE: ${{ needs.coverage.result }}
           PACKS: ${{ needs.packs.result }}
           CHROMIUM: ${{ needs.portable-evidence.result }}
@@ -465,6 +468,7 @@ jobs:
         run: |
           test "$LINUX" = success
           test "$DESKTOP" = success
+          test "$WINDOWS" = success
           test "$COVERAGE" = success
           test "$PACKS" = success
           test "$CHROMIUM" = success

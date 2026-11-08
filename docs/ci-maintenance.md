@@ -404,10 +404,13 @@ Preserve complete main-commit verification required by release consumers even
 when a PR has a separately validated docs-only path.
 
 The UI HTML collector follows the mandatory full-shard producers, independently
-of the optional extended-browser jobs. If Health prevents desktop shards from
-starting, their missing reports remain incomplete evidence. The collector checks
-all platform-specific current-attempt shards (eight macOS, four Linux/Windows); fixing the upstream failure and rerunning
-the selected producers supplies that evidence, rather than omitting those OSes.
+of the optional extended-browser jobs. Each OS uses its own producer conclusion:
+skipped producers omit only their own reports; missing or unknown conclusions
+fail. Failed or cancelled admitted producers still render available diagnostics
+before incomplete evidence fails. The collector checks all platform-specific
+current-attempt shards (eight macOS, four Linux/Windows); fixing the upstream
+failure and rerunning the selected producers supplies that evidence, rather than
+omitting those OSes.
 
 ## Documentation-only PR scope
 
@@ -472,7 +475,10 @@ durability, ordering and deadlines while qualifying the new hosted environment.
 
 Full Chromium uses eight macOS partitions and four each on Linux and Windows.
 Desktop browsers inherit the reusable workflow's four-slot per-OS limit; preserve
-Health and WebKit admission before that burst and the existing job watchdog.
+Health and WebKit admission before the macOS burst and the existing job watchdog.
+Windows has an independent caller gated by Health and scope, without waiting for
+unrelated macOS WebKit work. Portable and final acceptance still require explicit
+success from Linux, macOS and Windows; HTML presentation remains independent.
 Scope limits to the actual resource pool rather than applying a macOS restriction
 to Windows. Inspect late queued work after other native jobs finish; an overly
 small limit can leave capacity unused. Four macOS browser jobs leave nominal room
