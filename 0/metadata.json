@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WE986H4E3B0PTPBKQFENZC",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-08T02:02:51.685948Z",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/e2e-ui.yml",
+    "docs/ci-maintenance.md",
+    "scripts/diagnostics/chromium-evidence.test.mjs",
+    "scripts/diagnostics/ci-latency.test.mjs",
+    "scripts/diagnostics/ui-shard-orchestration.test.mjs",
+    "scripts/evals/chromium-evidence.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "232b6def33d6",
+  "checkpoint_transcript_start": 28179,
+  "transcript_lines_at_start": 28179,
+  "compact_transcript_start": 3245,
+  "token_usage": {
+    "input_tokens": 35617,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 5451008,
+    "output_tokens": 12830,
+    "api_call_count": 46,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 421,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 4,
+      "credentialed_uri": 0,
+      "entropy": 426,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 8
+  }
+}
