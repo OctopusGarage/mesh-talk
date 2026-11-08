@@ -20,22 +20,21 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 30404,
+    "input_tokens": 448,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 3471104,
-    "output_tokens": 6306,
-    "api_call_count": 36,
-    "subagent_tokens_complete": false
+    "cache_read_tokens": 222464,
+    "output_tokens": 394,
+    "api_call_count": 2
   },
   "redaction": {
-    "replacements": 2018,
+    "replacements": 2019,
     "layers": {
       "betterleaks": 4,
       "connection_string": 0,
       "credential_key": 0,
       "credential_value": 8,
       "credentialed_uri": 0,
-      "entropy": 2019,
+      "entropy": 2020,
       "key_context": 0,
       "provider_token": 0,
       "shell_stdin": 0
