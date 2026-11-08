@@ -81,7 +81,12 @@ test(
   { timeout: 180000 },
   async (t) => {
     const temporary = realpathSync(
-      mkdtempSync(path.join(tmpdir(), "mesh-linux-archive-")),
+      mkdtempSync(
+        path.join(
+          tmpdir(),
+          "mesh-linux-archive-'$(touch mesh-env-path-injected)-",
+        ),
+      ),
     );
     t.after(() => rmSync(temporary, { recursive: true, force: true }));
     const root = path.join(temporary, "source");
@@ -194,21 +199,26 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(art
       env.CI = process.env.CI;
       env.GITHUB_ACTIONS = process.env.GITHUB_ACTIONS;
     }
-    const run = (binary, args, environment = env, expected = 0) => {
-      const result = spawnSync(binary, args, {
-        cwd: root,
-        env: environment,
-        encoding: "utf8",
-        timeout: 90000,
-        maxBuffer: 32 * 1024 * 1024,
-      });
+    const resultFor = (result, expected, label) => {
       assert.equal(
         result.status,
         expected,
-        `${binary} ${args.join(" ")}\n${result.stdout}\n${result.stderr}\n${result.error ?? ""}`,
+        `${label}\n${result.stdout}\n${result.stderr}\n${result.error ?? ""}`,
       );
       return result;
     };
+    const run = (binary, args, environment = env, expected = 0) =>
+      resultFor(
+        spawnSync(binary, args, {
+          cwd: root,
+          env: environment,
+          encoding: "utf8",
+          timeout: 90000,
+          maxBuffer: 32 * 1024 * 1024,
+        }),
+        expected,
+        `${binary} ${args.join(" ")}`,
+      );
     run("cargo", ["generate-lockfile", "--offline"]);
     run("git", ["init", "--quiet"]);
     run("git", ["add", "."]);
@@ -251,14 +261,24 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(art
         MESH_SHARD: shard,
         CARGO_TARGET_DIR: target,
       };
-      return run(
-        "bash",
-        [
-          "-euc",
-          'coverage_environment="$(cargo llvm-cov show-env --sh)"\neval "$coverage_environment"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST" "$MESH_SHARD"',
-        ],
-        scoped,
+      // Literal interpreter program and ordinary Node/Cargo argv have distinct launches.
+      return resultFor(
+        spawnSync(
+          "bash",
+          [
+            "-euc",
+            'coverage_environment="$(cargo llvm-cov show-env --sh)"\neval "$coverage_environment"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST" "$MESH_SHARD"',
+          ],
+          {
+            cwd: root,
+            env: scoped,
+            encoding: "utf8",
+            timeout: 90000,
+            maxBuffer: 32 * 1024 * 1024,
+          },
+        ),
         expected,
+        `bash coverage phase ${mode}`,
       );
     };
     phase("produce", trustFile);
@@ -304,14 +324,28 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(art
     renameSync(target, path.join(temporary, "producer-target"));
     // Derive coverage settings again, with the producer outputs absent, exactly
     // as a separate consumer process does. No producer environment is retained.
-    const freshEnvironment = run("cargo", ["llvm-cov", "show-env", "--sh"], {
-      ...env,
-      CARGO_TARGET_DIR: target,
-    });
-    assert.ok(
-      freshEnvironment.stdout.includes(
-        `export CARGO_LLVM_COV_TARGET_DIR=${target}`,
+    const freshEnvironment = resultFor(
+      spawnSync(
+        "bash",
+        [
+          "-euc",
+          'coverage_environment="$(cargo llvm-cov show-env --sh)"\neval "$coverage_environment"\nprintf "%s" "$CARGO_LLVM_COV_TARGET_DIR"',
+        ],
+        {
+          cwd: root,
+          env: { ...env, CARGO_TARGET_DIR: target },
+          encoding: "utf8",
+          timeout: 90000,
+          maxBuffer: 32 * 1024 * 1024,
+        },
       ),
+      0,
+      "bash fresh coverage environment",
+    );
+    assert.equal(
+      freshEnvironment.stdout,
+      target,
+      "compare evaluated path, not shell serialization or quoting style",
     );
     assert.equal(
       existsSync(target),
@@ -570,6 +604,11 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(art
         "--untracked-files=normal",
       ]).stdout.trim(),
       "",
+    );
+    assert.equal(
+      existsSync(path.join(root, "mesh-env-path-injected")),
+      false,
+      "temporary paths must stay literal data",
     );
     t.diagnostic(
       process.platform === "linux"

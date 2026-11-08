@@ -2,7 +2,7 @@
 // Health's portable diagnostics intentionally do not require coverage tooling.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -108,7 +108,7 @@ test("Linux ignored archive qualification runs on GitHub Linux and local Darwin 
 test("real ignored archive preserves Cargo runtime, embedded CLI and ignored-only coverage without producer outputs", { timeout: 180000, skip: skipLinuxIgnoredArchive(process.platform, process.env) }, async t => {
   const { verifyArchivedBackendEvidence, collectLinuxWorkspace } = await import("../evals/backend-runner.mjs");
   assert.equal(typeof verifyArchivedBackendEvidence, "function");
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "mesh-ignored-archive-")));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "mesh-ignored-archive-'$(touch mesh-env-path-injected)-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of [".cargo", ".config", "empty-hooks", "host/src", "core/src", "core/tests", "integrations/src", "mcp/src"]) mkdirSync(join(root, dir), { recursive: true });
   const write = (name, value) => writeFileSync(join(root, name), value);
@@ -138,7 +138,7 @@ assert!(std::env::var_os("MESH_IGNORED_FAIL").is_none(),"actual ignored failure"
   write("driver.mjs", `import {produce,prepareArchive,consume} from ${JSON.stringify(new URL("./windows-coverage.mjs", import.meta.url).href)};
 import {runArchivedBackend,runCargo} from ${JSON.stringify(new URL("../evals/backend-runner.mjs", import.meta.url).href)};
 import assert from "node:assert/strict";
-import {writeFileSync,existsSync,mkdirSync,watch,readFileSync} from 'node:fs';
+import {writeFileSync,existsSync,mkdirSync,watch,readFileSync,readdirSync} from 'node:fs';
 const [mode,directory,output,trust]=process.argv.slice(2);
 const fixtureRuntime=process.platform==='linux'?undefined:{kind:'generic-archive-fixture',platform:process.platform,arch:process.arch,root:process.cwd(),qualification:'not-native-linux'};
 try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(directory,{profile:'linux-workspace',fixtureRuntime}))); else if(mode==='default') await consume(Number(process.env.MESH_DEFAULT_SHARD),directory,output,{...JSON.parse(trust),profile:'linux-workspace',fixtureRuntime}); else if(mode==='pre-aborted') {
@@ -147,13 +147,32 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(dir
  assert.equal(existsSync(output),false,'pre-aborted API must not create preparation output');
  assert.equal(existsSync(process.cwd()+'/target/llvm-cov-target'),false,'pre-aborted API must not extract');
  } else if(mode==='abort-extract') {
- mkdirSync(output,{recursive:true}); const controller=new AbortController();
- const watcher=watch(output,(_event,file)=>{if(String(file)==='progress.jsonl') {const rows=readFileSync(output+'/progress.jsonl','utf8').trim().split('\\n').filter(Boolean).map(JSON.parse);if(rows.some(row=>row.phase==='extract'&&row.event==='started'))controller.abort();}});
- try { await assert.rejects(runArchivedBackend(directory,output,{...JSON.parse(trust),fixtureRuntime,signal:controller.signal}),/interrupted/); } finally {watcher.close();}
+ mkdirSync(output,{recursive:true}); const controller=new AbortController(); let readyPid,readinessFailure;
+ assert.equal(process.env.MESH_EXTRACTION_READY,output+'/extraction-ready');
+ const observeReadiness=()=>{if(readyPid!==undefined)return;try {
+   if(!existsSync(process.env.MESH_EXTRACTION_READY))return;
+   const text=readFileSync(process.env.MESH_EXTRACTION_READY,'utf8').trim();const pid=Number(text);
+   assert.ok(Number.isSafeInteger(pid)&&pid>0&&String(pid)===text,'complete private readiness acknowledgment required');
+   readyPid=pid;controller.abort();
+ } catch(error) {readinessFailure=error;controller.abort(error);}};
+ const watcher=watch(output,(_event,file)=>{if(String(file)==='extraction-ready')observeReadiness();});
+ watcher.on('error',error=>{readinessFailure=error;controller.abort(error);});
+ const deadline=Number(process.env.MESH_FIXTURE_DEADLINE_MS);assert.ok(Number.isSafeInteger(deadline)&&deadline>Date.now());
+ // Safety only: reserve joined retirement inside the unchanged outer command budget.
+ const watchdog=setTimeout(()=>controller.abort(new Error('extraction readiness deadline')),Math.max(1,deadline-Date.now()-5000));
+ observeReadiness();
+ try { await assert.rejects(runArchivedBackend(directory,output,{...JSON.parse(trust),fixtureRuntime,signal:controller.signal}),/interrupted/); }
+ finally {clearTimeout(watchdog);watcher.close();}
+ if(readinessFailure)throw readinessFailure;
+ assert.ok(Number.isSafeInteger(readyPid),'missing actual materialization readiness must fail');
  const rows=readFileSync(output+'/progress.jsonl','utf8').trim().split('\\n').map(JSON.parse);
+ const owned=rows.filter(row=>row.phase==='extract'&&row.event==='spawned');
+ assert.equal(owned.length,1);assert.equal(owned[0].pid,readyPid,'readiness must name the actual live extraction command');
  assert.ok(rows.some(row=>row.phase==='extract'&&row.event==='closed'&&row.failed));
+ assert.throws(()=>process.kill(readyPid,0),{code:'ESRCH'},'parked owned command must retire before returning');
  assert.ok(!rows.some(row=>row.phase==='inventory-all'));
  assert.equal(existsSync(output+'/receipt.json'),false);assert.equal(existsSync(process.cwd()+'/target/llvm-cov-target'),false);
+ assert.equal(readdirSync(process.cwd()+'/target').filter(name=>name.startsWith('.linux-archive-')).length,0,'owned extraction stage must retire');
  } else if(mode==='loader-control') {
  const prepared=await prepareArchive(directory,output,{...JSON.parse(trust),profile:'linux-workspace',fixtureRuntime});
  const binary=Object.values(prepared.binaries['rust-binaries']).find(row=>row['binary-name']==='two_node_cli');
@@ -161,19 +180,63 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(dir
  assert.ok(result.code!==0,'actual dynamic fixture must fail without loader restoration'); assert.ok(!result.cleanupUnverified); assert.match(result.stderr,/Library not loaded|shared libraries|image not found|library not found/i);
  } else await runArchivedBackend(directory,output,{...JSON.parse(trust),fixtureRuntime}); } catch(error) { console.error(error.stack); process.exitCode=1; }
 `);
+  // Only cancellation qualification parks after actual runtime materialization.
+  mkdirSync(join(root,"controls"));
+  write("controls/cargo", `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${MESH_ABORT_EXTRACTION:-}" == 1 && "\${1:-}" == nextest && "\${2:-}" == list ]]; then
+    destination=''
+    previous=''
+    for argument in "$@"; do
+        if [[ "$previous" == --extract-to ]]; then destination="$argument"; fi
+        previous="$argument"
+    done
+    if [[ -n "$destination" ]]; then
+        "$MESH_ARCHIVE_REAL_CARGO" "$@"
+        test -f "$destination/target/debug/mesh-talk-node"
+        printf '%s\\n' "$$" > "$MESH_EXTRACTION_READY.tmp"
+        mv "$MESH_EXTRACTION_READY.tmp" "$MESH_EXTRACTION_READY"
+        exec "$MESH_ARCHIVE_NODE" -e 'setInterval(() => {}, 1000)'
+    fi
+fi
+exec "$MESH_ARCHIVE_REAL_CARGO" "$@"
+`);
+  chmodSync(join(root,"controls/cargo"),0o755);
+  const commandTimeoutMs=120000;
   const env = { ...process.env, CARGO_NET_OFFLINE: "true", CARGO_TERM_COLOR: "never", CARGO_PROFILE_DEV_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_DEBUG: "line-tables-only", MESH_ARCHIVE_NODE: process.execPath };
   for (const key of Object.keys(env)) if (/^(?:__)?CARGO_LLVM_COV/u.test(key) || ["LLVM_PROFILE_FILE", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CI", "GITHUB_ACTIONS"].includes(key)) delete env[key];
   env.RUSTFLAGS = "-C prefer-dynamic";
   if (process.platform === "linux") { env.CI = process.env.CI; env.GITHUB_ACTIONS = process.env.GITHUB_ACTIONS; }
-  const run = (binary, args, environment = env, status = 0) => {
-    const result = spawnSync(binary, args, { cwd: root, env: environment, encoding: "utf8", timeout: 120000, maxBuffer: 32 * 1024 * 1024 });
-    assert.equal(result.status, status, `${binary} ${args.join(" ")}\n${result.stdout}\n${result.stderr}\n${result.error ?? ""}`); return result;
+  const resultFor = (result, status, label) => {
+    assert.equal(
+      result.status,
+      status,
+      `${label}\n${result.stdout}\n${result.stderr}\n${result.error ?? ""}`,
+    );
+    return result;
   };
+  const run = (binary, args, environment = env, status = 0) =>
+    resultFor(
+      spawnSync(binary, args, {
+        cwd: root,
+        env: environment,
+        encoding: "utf8",
+        timeout: commandTimeoutMs,
+        maxBuffer: 32 * 1024 * 1024,
+      }),
+      status,
+      `${binary} ${args.join(" ")}`,
+    );
+  const actualCargo = run("which", ["cargo"]).stdout.trim();
   run("cargo", ["generate-lockfile", "--offline"]); run("git", ["init", "--quiet"]); run("git", ["add", "."]);
   run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=empty-hooks", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "test: ignored archive"]);
   Object.assign(env, { GITHUB_SHA: run("git", ["rev-parse", "HEAD"]).stdout.trim(), GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1" });
   const artifact = join(root, "target/archive"), trustFile = join(root, "target/trust.json"), target = join(root, "target/llvm-cov-target");
-  const phase = (mode, output, trust = "", environment = env, status = 0) => run("bash", ["-euc", 'coverage_environment="$(cargo llvm-cov show-env --sh)"\neval "$coverage_environment"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST"'], { ...environment, CARGO_TARGET_DIR: target, MESH_MODE: mode, MESH_ARTIFACT: artifact, MESH_OUTPUT: output, MESH_TRUST: trust }, status);
+  // Keep shell program text literal; ordinary tool argv never crosses this boundary.
+  const phase = (mode, output, trust = "", environment = env, status = 0) => resultFor(
+    spawnSync("bash", ["-euc", 'coverage_environment="$(cargo llvm-cov show-env --sh)"\neval "$coverage_environment"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST"'], { cwd: root, env: { ...environment, MESH_FIXTURE_DEADLINE_MS:String(Date.now()+commandTimeoutMs), CARGO_TARGET_DIR: target, MESH_MODE: mode, MESH_ARTIFACT: artifact, MESH_OUTPUT: output, MESH_TRUST: trust }, encoding: "utf8", timeout: commandTimeoutMs, maxBuffer: 32 * 1024 * 1024 }),
+    status, `bash coverage phase ${mode}`,
+  );
   phase("produce", trustFile);
   const trust = JSON.parse(readFileSync(trustFile, "utf8"));
   renameSync(target, join(root, "target/producer-output"));
@@ -191,7 +254,8 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(dir
     assert.ok(!existsSync(target), "generic local fixture must not qualify real CI");
   }
   phase("pre-aborted", join(root, "evidence/pre-aborted"), JSON.stringify(trust));
-  phase("abort-extract", join(root, "evidence/aborted-extraction"), JSON.stringify(trust));
+  const cancelledOutput=join(root,"evidence/aborted-extraction");
+  phase("abort-extract", cancelledOutput, JSON.stringify(trust), { ...env, PATH:`${join(root,"controls")}:${env.PATH}`, MESH_ARCHIVE_REAL_CARGO:actualCargo, MESH_ABORT_EXTRACTION:"1", MESH_EXTRACTION_READY:join(cancelledOutput,"extraction-ready") });
   phase("consume", join(root, "evidence/stale"), JSON.stringify(trust), { ...env, GITHUB_RUN_ATTEMPT: "2" }, 1);
   assert.ok(!existsSync(target));
   phase("consume", join(root, "evidence/missing-trust"), "{}", env, 1);
@@ -254,5 +318,6 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(dir
   assert.ok(!existsSync(join(failed, "receipt.json"))); const report = JSON.parse(readFileSync(join(failed, "report.json"), "utf8"));
   assert.deepEqual(Object.keys(report.suites), Object.keys(BACKEND_SUITES), "ordinary failures retain independent backend admission but reject later phases");
   assert.ok(Object.values(report.suites).every(row => !row.passed));
+  assert.equal(existsSync(join(root,"mesh-env-path-injected")),false,"temporary paths must stay literal data");
   t.diagnostic(process.platform === "linux" ? "Actual native Linux ignored archive/loader coverage qualified; full product qualification remains" : "Darwin archive/loader protocol only; Linux ABI/full product evidence remains unqualified");
 });

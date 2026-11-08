@@ -654,7 +654,10 @@ compile no Cargo targets. They install the producer's exact Rust version,
 matching LLVM tools, pinned prebuilt Nextest/llvm-cov and required Tauri runtime
 packages. `scripts/ci/linux-workspace.sh` independently captures a successful
 `cargo llvm-cov show-env --sh` before evaluation; failed environment discovery
-cannot admit execution. Keep `target/llvm-cov-target` and embedded CLI paths.
+cannot admit execution. Fixture shell phases use a dedicated literal interpreter
+launch; ordinary Node/Cargo argv stays on a separate boundary. Keep derived paths
+as quoted environment variables or argv entries, and exercise quotes, spaces and
+literal `$()` in test paths. Keep `target/llvm-cov-target` and embedded CLI paths.
 Default timing markers stay in each consumer's execution log; ignored backend
 markers stay in their original redacted suite logs. Each actual Linux execution
 runner retains crash setup/selftest, always-run collection and verified restoration.
@@ -784,7 +787,11 @@ and verify that its probes were actually consumed. Keep the real command,
 failure, cancellation and receipt assertions and their existing watchdogs.
 Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
-run cannot qualify an unbounded environmental dependency for later main runs.
+run cannot qualify an unbounded environmental dependency for later main runs. Asynchronous
+progress notifications are observations, not readiness barriers. Cancellation
+fixtures must bind readiness to still-live owned work after the required real
+materialization, then assert its retirement before later admission or cleanup;
+a bounded fallback may fail missing readiness but cannot manufacture a pass.
 
 Executable fixtures must own an independent copied image, not a hard link to
 the running test harness. Assert file identity before launch. After verified
