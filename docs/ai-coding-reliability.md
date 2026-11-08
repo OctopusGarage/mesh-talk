@@ -432,6 +432,18 @@ verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnosti
 and [cheap CI policy regressions](../scripts/diagnostics/ci-latency.test.mjs)
 protect this boundary; actual compiler fixtures still exercise native behavior.
 
+Bind executable probes to the owning package, target kind and complete test
+identity, and require exactly one runnable match. A matching binary basename is
+not authority: Cargo can emit library and binary targets with the same name,
+and metadata order can change. Assert the real probe executed its intended case;
+a zero-test success cannot establish a negative control. The reordered ambiguous
+metadata and archive-only missing-symbol controls in
+[macOS archive qualification](../scripts/ci/macos-remaining-cli.test.mjs) protect
+this boundary. Portable filesystem fixtures must construct native paths with the
+platform path owner while retaining exact identity and escape checks; the
+[archive diagnostics](../scripts/diagnostics/windows-coverage.test.mjs) own those
+controls. Local execution does not replace actual Windows qualification.
+
 Source-integrity fixtures must not ignore tool output that production leaves
 untracked. Keep generated evidence outside the source checkout and assert the
 checkout stays clean after real tool execution; also prove unrelated untracked

@@ -440,7 +440,7 @@ test("instrumented listing cannot emit profiles into source package directories"
 });
 
 test("archive layout is anchored exactly to the metadata v1 debug/deps directory", () => {
-  const target = `${process.cwd()}/target`;
+  const target = path.join(process.cwd(), "target");
   const metadata = (binary) => ({
     "rust-build-meta": {
       "target-directory": target,
@@ -448,18 +448,18 @@ test("archive layout is anchored exactly to the metadata v1 debug/deps directory
     },
     "rust-binaries": { lib: { "binary-path": binary } },
   });
-  verifyLayout(metadata(`${target}/debug/deps/unit`));
-  const example = metadata(`${target}/debug/examples/example`);
+  verifyLayout(metadata(path.join(target, "debug", "deps", "unit")));
+  const example = metadata(path.join(target, "debug", "examples", "example"));
   example["rust-binaries"].lib.kind = "example";
   verifyLayout(example);
   for (const binary of [
-    `${target}/custom-build/debug/deps/unit`,
-    `${target}/release/deps/unit`,
+    path.join(target, "custom-build", "debug", "deps", "unit"),
+    path.join(target, "release", "deps", "unit"),
     "relative/debug/deps/unit",
   ])
     assert.throws(() => verifyLayout(metadata(binary)), /layout/);
-  const separate = metadata(`${target}/debug/deps/unit`);
-  separate["rust-build-meta"]["build-directory"] = `${target}/separate`;
+  const separate = metadata(path.join(target, "debug", "deps", "unit"));
+  separate["rust-build-meta"]["build-directory"] = path.join(target, "separate");
   assert.throws(() => verifyLayout(separate), /separate build/);
 });
 
@@ -510,7 +510,7 @@ test("uninstrumented macOS archive rejects inherited compilation and target over
     CARGO_INCREMENTAL: "0",
     CARGO_PROFILE_DEV_DEBUG: "line-tables-only",
     CARGO_PROFILE_TEST_DEBUG: "line-tables-only",
-    CARGO_TARGET_DIR: `${root}/target`,
+    CARGO_TARGET_DIR: path.join(root, "target"),
   };
   validateMacEnvironment(env, root);
   for (const key of [
@@ -531,7 +531,7 @@ test("uninstrumented macOS archive rejects inherited compilation and target over
     );
   }
   for (const [key, value] of [
-    ["CARGO_TARGET_DIR", `${root}/other`],
+    ["CARGO_TARGET_DIR", path.join(root, "other")],
     ["CARGO_BUILD_JOBS", "4"],
     ["CARGO_PROFILE_TEST_DEBUG", "full"],
   ])
@@ -783,17 +783,17 @@ test("pure Mac collector anchors producer authority and rejects missing, duplica
 
 test("Mac debug bundles follow exactly selected executable metadata, including embedded CLI helpers", () => {
   const root = process.cwd();
-  const target = `${root}/target`;
+  const target = path.join(root, "target");
   const binaries = {
     "rust-build-meta": {
       "target-directory": target,
       "non-test-binaries": { pkg: [{ kind: "bin-exe", path: "debug/helper" }] },
     },
-    "rust-binaries": { lib: { "binary-path": `${target}/debug/deps/unit` } },
+    "rust-binaries": { lib: { "binary-path": path.join(target, "debug", "deps", "unit") } },
   };
   assert.deepEqual(macDebugSymbolPaths(binaries, root), [
-    `${target}/debug/deps/unit`,
-    `${target}/debug/helper`,
+    path.join(target, "debug", "deps", "unit"),
+    path.join(target, "debug", "helper"),
   ]);
   binaries["rust-build-meta"]["non-test-binaries"].pkg[0].path = "../foreign";
   assert.throws(() => macDebugSymbolPaths(binaries, root), /target/);

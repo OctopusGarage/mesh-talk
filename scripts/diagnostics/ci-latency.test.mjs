@@ -787,3 +787,25 @@ test("native workspace jobs retain their own builds, doctests and platform cover
   const windows = readFileSync(new URL("../../.github/workflows/windows-workspace.yml", import.meta.url), "utf8");
   for (const command of ["cargo test --workspace --doc --locked", "cargo build --workspace --locked", "cargo clippy --workspace --all-targets -- -D warnings", "windows-coverage.mjs consume", "fail_ci_if_error: true"]) assert.ok(windows.includes(command), command);
 });
+
+test("macOS browsers, Health and backend use Intel while Rust and native retain ARM", () => {
+  const ui = read("e2e-ui.yml");
+  const job = id => workflowJob(ui, id);
+  const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
+  const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
+  assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
+  assert.match(job("portable-shards"), /runs-on: macos-26-intel/);
+  assert.match(job("portable"), /name: Portable UI \(macos-26-intel, webkit\)/);
+  assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
+  assert.match(job("portable-evidence"), /chromium-evidence.mjs collect-artifacts/);
+  assert.match(job("reports"), /chromium-evidence.mjs render-artifacts/);
+  assert.match(health, /os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
+  assert.match(workflowJob(rust, "checks"), /runs-on: ubuntu-latest/);
+  for (const id of ["macos-native", "macos-remaining-build", "macos-remaining-tests"])
+    assert.match(workflowJob(rust, id), /runs-on: macos-latest/);
+  assert.match(workflowJob(rust, "checks-macos"), /runs-on: ubuntu-latest/);
+  assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
+  assert.match(workflowJob(read("e2e-backend.yml"), "backend-platform"), /os: \[windows-2022, macos-26-intel\]/);
+});

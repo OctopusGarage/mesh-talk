@@ -80,21 +80,6 @@ test("browser job budget reserves cleanup before dependency work and persists in
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("macOS browsers, Health and backend use Intel while Rust and native retain ARM", () => {
-  const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
-  const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
-  assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
-  assert.match(job("portable-shards"), /runs-on: macos-26-intel/);
-  assert.match(job("portable"), /name: Portable UI \(macos-26-intel, webkit\)/);
-  assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
-  assert.match(job("portable-evidence"), /chromium-evidence.mjs collect-artifacts/);
-  assert.match(job("reports"), /chromium-evidence.mjs render-artifacts/);
-  assert.match(health, /os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
-  assert.match(rust, /os: \[ubuntu-latest, macos-latest\]/);
-  assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
-});
 
 test("desktop browser burst waits for Health and WebKit with bounded admission while Linux starts independently", () => {
   const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");

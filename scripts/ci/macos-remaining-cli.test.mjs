@@ -25,6 +25,78 @@ const runner = fileURLToPath(
   new URL("./windows-coverage.mjs", import.meta.url),
 );
 const hash = (text) => createHash("sha256").update(text).digest("hex");
+function debugProbeBinary(binaries, inventory, packageId, name) {
+  const matches = Object.values(binaries["rust-binaries"]).filter(
+    (binary) =>
+      binary["package-id"] === packageId &&
+      binary.kind === "lib" &&
+      inventory.some(
+        (row) =>
+          row.id === `${binary["binary-id"]}::${name}` &&
+          row.selected &&
+          !row.ignored,
+      ),
+  );
+  assert.equal(
+    matches.length,
+    1,
+    "debug probe requires one exact runnable library case",
+  );
+  return matches[0];
+}
+
+test("debug probe selects the exact package, library and case regardless of metadata order", () => {
+  const lib = {
+    "package-id": "core",
+    kind: "lib",
+    "binary-id": "remaining-core",
+    "binary-path": "/target/debug/deps/remaining_core-lib",
+  };
+  const bin = {
+    ...lib,
+    kind: "bin",
+    "binary-id": "remaining-core::bin/remaining-core",
+    "binary-path": "/target/debug/deps/remaining_core-bin",
+  };
+  const foreign = { ...lib, "package-id": "other", "binary-id": "other" };
+  const inventory = [
+    { id: "remaining-core::case_11", selected: true, ignored: false },
+  ];
+  for (const rows of [
+    [bin, foreign, lib],
+    [lib, foreign, bin],
+  ])
+    assert.equal(
+      debugProbeBinary(
+        { "rust-binaries": Object.fromEntries(rows.map((row, i) => [i, row])) },
+        inventory,
+        "core",
+        "case_11",
+      ),
+      lib,
+    );
+  for (const rows of [
+    [],
+    [{ ...inventory[0], selected: false }],
+    [{ ...inventory[0], ignored: true }],
+  ])
+    assert.throws(
+      () =>
+        debugProbeBinary({ "rust-binaries": { lib } }, rows, "core", "case_11"),
+      /probe/,
+    );
+  assert.throws(
+    () =>
+      debugProbeBinary(
+        { "rust-binaries": { lib, duplicate: { ...lib } } },
+        inventory,
+        "core",
+        "case_11",
+      ),
+    /probe/,
+  );
+});
+
 test(
   "real macOS archive excludes Host and executes complete offline remaining targets at the original root",
   { timeout: 120000 },
@@ -346,21 +418,45 @@ test(
       "no-fail-fast must finish every selected real case after failure",
     );
     // Negative control separates actual stack line tables from the panic header.
-    const debugRow = manifest.debugSymbols.find((row) =>
-      /debug\/deps\/remaining_core-/u.test(row.binary),
+    const consumerBinaries = JSON.parse(
+      readFileSync(path.join(failed, "consumer-binaries.json"), "utf8"),
     );
-    assert.ok(debugRow);
-    const executable = path.join(root, "target", debugRow.binary);
+    const cargoMetadata = JSON.parse(
+      readFileSync(
+        path.join(root, "target", "nextest", "cargo-metadata.json"),
+        "utf8",
+      ),
+    );
+    const packages = cargoMetadata.packages.filter(
+      (pkg) => pkg.name === "remaining-core",
+    );
+    assert.equal(packages.length, 1);
+    const probeName = "case_11";
+    const probeBinary = debugProbeBinary(
+      consumerBinaries,
+      JSON.parse(readFileSync(path.join(artifact, "inventory-0.json"), "utf8")),
+      packages[0].id,
+      probeName,
+    );
+    const executable = probeBinary["binary-path"];
+    assert.equal(
+      manifest.debugSymbols.filter(
+        (row) => path.join(root, "target", row.binary) === executable,
+      ).length,
+      1,
+    );
     const bundle = `${executable}.dSYM`;
     const hiddenBundle = path.join(temporary, "hidden.dSYM");
     renameSync(bundle, hiddenBundle);
     const missingSymbols = run(
       executable,
-      ["case_11", "--exact", "--nocapture"],
+      [probeName, "--exact", "--nocapture"],
       { ...env, MESH_MAC_FAIL: "1", RUST_BACKTRACE: "1" },
       101,
       path.join(root, "core"),
     );
+    assert.match(missingSymbols.stdout, /running 1 test/u);
+    assert.match(missingSymbols.stdout, /1 failed;/u);
     assert.match(missingSymbols.stderr, /panicked at core\/src\/lib.rs:\d+/u);
     assert.doesNotMatch(
       missingSymbols.stderr.split("stack backtrace:")[1],
