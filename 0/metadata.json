@@ -1,0 +1,58 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WSCQS860CWJPCFBSA9ND99",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-08T05:17:09.179057Z",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/linux-workspace-consumer.yml",
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "scripts/ci/backend-coverage.test.mjs",
+    "scripts/ci/linux-workspace-cli.test.mjs",
+    "scripts/ci/linux-workspace.sh",
+    "scripts/ci/native-host-coverage.test.mjs",
+    "scripts/ci/runner-storage.mjs",
+    "scripts/ci/windows-coverage.mjs",
+    "scripts/ci/workspace-coverage.sh",
+    "scripts/diagnostics/ci-latency.test.mjs",
+    "scripts/diagnostics/runner-storage.test.mjs",
+    "scripts/diagnostics/windows-coverage.test.mjs",
+    "scripts/evals/backend-runner.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "232b6def33d6",
+  "checkpoint_transcript_start": 32452,
+  "transcript_lines_at_start": 32452,
+  "compact_transcript_start": 3759,
+  "token_usage": {
+    "input_tokens": 51107,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 16913408,
+    "output_tokens": 64318,
+    "api_call_count": 43,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 1998,
+    "layers": {
+      "betterleaks": 4,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 4,
+      "credentialed_uri": 0,
+      "entropy": 1999,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 8
+  }
+}
