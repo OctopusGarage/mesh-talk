@@ -77,6 +77,10 @@ checks new nonignored sources; PR creation checks the clean committed comparison
 Use Node 22, Bash and Python; install actionlint before changing workflows. No
 checker installs tools or contacts the network. Hook installation configures hooks
 without launching comprehensive health; request that gate explicitly.
+Run the configured spelling check on changed files before publication, and scan
+the repository when its configuration changes. Scope unavoidable external API
+spellings to their language and identifier; do not exclude a source tree or
+replace the API name to satisfy a prose checker.
 
 PR creation runs `make pr-check`'s cheap-check owner against its actual comparison
 base, rejects ownership blockers and checks applicable frontend patch coverage
