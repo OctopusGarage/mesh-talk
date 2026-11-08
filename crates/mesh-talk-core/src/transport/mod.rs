@@ -7,6 +7,7 @@
 //! thing over any async stream with length-prefixed framing.
 
 pub mod auth;
+pub mod ble;
 pub mod channel;
 pub mod handshake;
 /// Low-level socket plumbing (UDP discovery socket, multicast joins, dual-stack

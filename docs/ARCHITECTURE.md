@@ -2535,3 +2535,11 @@ establish independently trusted wall time or human identity.
 
 The [profile and verification guide](peer-trust.md) owns the complete lifecycle,
 resource limits, compatibility and delivery invariants.
+
+## Experimental native Bluetooth boundary
+
+The [native Bluetooth guide](native-bluetooth.md) owns the explicit two-host macOS
+rehearsal and its bounded adapter contract. It reuses device-bound Noise channels
+but is not part of production node discovery, routing or account presence. Native
+radio endpoints must not be represented by synthetic IP addresses; desktop
+integration must preserve the existing privacy and delivery owners.

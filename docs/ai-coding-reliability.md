@@ -410,7 +410,11 @@ Validate at the owning trust boundary before allocation and side effects, using
 existing frame, file, count, depth and byte limits. Preserve exact account/device
 bindings and path/consent checks. Display metadata and frontend validation are
 not authorization. Bound queues and retained retry state as well as active work;
-do not remove backpressure to make a benchmark look faster.
+do not remove backpressure to make a benchmark look faster. Callback-to-stream
+adapters must reserve queue capacity before copying input. Closing admission must
+also revoke buffered input and pending output; closing only the producer still
+allows stale queued work to escape. The [BLE stream owner](../crates/mesh-talk-core/src/transport/ble.rs)
+covers saturation/recovery and shutdown revocation in `transport::ble::tests`.
 
 **Evidence:** test the limit and just beyond it, malformed or missing data,
 wrong-owner requests, saturation and recovery after capacity returns. Include
