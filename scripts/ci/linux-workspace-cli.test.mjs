@@ -255,7 +255,7 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(art
         "bash",
         [
           "-euc",
-          'eval "$(cargo llvm-cov show-env --sh)"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST" "$MESH_SHARD"',
+          'coverage_environment="$(cargo llvm-cov show-env --sh)"\neval "$coverage_environment"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST" "$MESH_SHARD"',
         ],
         scoped,
         expected,
@@ -437,6 +437,50 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(art
         /\n\s+\d+: .*application_frame\n\s+at .*src\/lib.rs:\d+/u,
         "archive must retain actual ELF application stack file:line",
       );
+    if (process.platform === "linux") {
+      const binaries = JSON.parse(
+        readFileSync(path.join(failed, "consumer-binaries.json"), "utf8"),
+      );
+      const probes = Object.values(binaries["rust-binaries"]).filter(
+        (binary) =>
+          binary.kind === "lib" && binary["binary-id"] === "mesh-talk-core",
+      );
+      assert.equal(
+        probes.length,
+        1,
+        "ELF negative probe requires exact Core library target",
+      );
+      const stripped = path.join(temporary, "stripped-core");
+      copyFileSync(probes[0]["binary-path"], stripped);
+      run("objcopy", ["--strip-debug", stripped]);
+      const negative = spawnSync(
+        stripped,
+        ["case_0", "--exact", "--nocapture"],
+        {
+          cwd: path.join(root, "core"),
+          env: {
+            ...env,
+            MESH_LINUX_FAIL: "1",
+            RUST_BACKTRACE: "1",
+            LLVM_PROFILE_FILE: path.join(temporary, "elf-negative-%p.profraw"),
+          },
+          encoding: "utf8",
+          timeout: 15000,
+        },
+      );
+      assert.equal(negative.status, 101);
+      assert.match(negative.stdout, /1 failed/u);
+      assert.match(
+        negative.stderr,
+        /panicked at core\/src\/lib.rs:\d+/u,
+        "panic header must survive stripping",
+      );
+      assert.doesNotMatch(
+        negative.stderr.split("stack backtrace:")[1] ?? "",
+        /at .*src\/lib.rs:\d+/u,
+        "panic header alone must not qualify application stack lines",
+      );
+    }
     const selected = JSON.parse(
       readFileSync(path.join(failed, "selected-inventory.json"), "utf8"),
     );
@@ -657,4 +701,56 @@ test("partial Linux extraction stays outside evidence and retires only owned sta
       /evidence|overlap/i,
     );
   }
+});
+
+test("Linux coverage environment failure cannot be masked by eval or admit execution", async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "mesh-linux-env-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(path.join(root, "scripts/ci"), { recursive: true });
+  mkdirSync(path.join(root, "bin"));
+  const wrapper = path.join(root, "scripts/ci/linux-workspace.sh");
+  copyFileSync(new URL("./linux-workspace.sh", import.meta.url), wrapper);
+  writeFileSync(
+    path.join(root, "bin/cargo"),
+    '#!/usr/bin/env bash\ntouch "$MESH_ENV_CARGO"\nprintf "%s\\n" "export LLVM_PROFILE_FILE=invalid"\nexit 37\n',
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    path.join(root, "bin/node"),
+    '#!/usr/bin/env bash\ntouch "$MESH_ENV_EXECUTED"\n',
+    { mode: 0o755 },
+  );
+  const marker = path.join(root, "executed"),
+    cargoMarker = path.join(root, "cargo-invoked");
+  const environment = {
+    ...process.env,
+    PATH: `${path.join(root, "bin")}:${process.env.PATH}`,
+    MESH_ENV_EXECUTED: marker,
+    MESH_ENV_CARGO: cargoMarker,
+  };
+  for (const args of [[], ["unknown"]]) {
+    const invalid = spawnSync("bash", [wrapper, ...args], {
+      env: environment,
+      encoding: "utf8",
+    });
+    assert.equal(invalid.status, 2);
+    assert.match(invalid.stderr, /Usage:/u);
+    assert.equal(
+      existsSync(cargoMarker),
+      false,
+      "invalid mode must not invoke Cargo",
+    );
+    assert.equal(existsSync(marker), false);
+  }
+  const result = spawnSync(
+    "bash",
+    [wrapper, "produce", path.join(root, "archive")],
+    {
+      env: environment,
+      encoding: "utf8",
+    },
+  );
+  assert.equal(result.status, 37);
+  assert.equal(existsSync(cargoMarker), true);
+  assert.equal(existsSync(marker), false);
 });

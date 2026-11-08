@@ -808,7 +808,7 @@ export async function produce(
     files[name] = await fileHash(path.join(directory, name));
   }
   const featureResolutionSha256 = digest(canonical(metadata.resolve));
-  if (!profile.instrumented)
+  if (profile.name !== "windows")
     writeJson(
       path.join(directory, "feature-resolution.json"),
       metadata.resolve,
@@ -1184,11 +1184,32 @@ export async function consume(
 // Pure cross-platform collection: producer job outputs are authority, never this
 // collector's platform/root or an artifact's self-reported checksum.
 export async function collectMacRemaining(directory, outputs, trusted) {
+  return collectDefaultArchive(directory, outputs, trusted);
+}
+
+export async function collectDefaultArchive(
+  directory,
+  outputs,
+  trusted,
+  { profile: profileName = "macos-remaining" } = {},
+) {
+  const linux = profileName === "linux-workspace";
+  assert.ok(
+    linux || profileName === "macos-remaining",
+    "Unsupported collector profile",
+  );
+  if (trusted?.fixtureRuntime)
+    assert.ok(
+      linux && !process.env.CI && !process.env.GITHUB_ACTIONS,
+      "Generic archive collection cannot qualify CI",
+    );
   requireDigest(trusted?.manifestSha256);
   requireDigest(trusted?.archiveSha256);
   assert.deepEqual(
     trusted.jobResults,
-    { native: "success", producer: "success", consumers: "success" },
+    linux
+      ? { producer: "success", consumers: "success", ignored: "success" }
+      : { native: "success", producer: "success", consumers: "success" },
     "All native archive job results must be success",
   );
   assert.match(
@@ -1208,14 +1229,40 @@ export async function collectMacRemaining(directory, outputs, trusted) {
     "Trusted manifest digest mismatch",
   );
   const manifest = readJson(path.join(directory, "manifest.json"));
-  const profile = archiveProfile("macos-remaining");
-  assert.equal(manifest.schema, 1, "Unsupported archive manifest");
+  const profile = archiveProfile(profileName);
+  assert.equal(
+    manifest.schema,
+    linux ? (trusted.fixtureRuntime ? "linux-archive-fixture-v1" : 2) : 1,
+    "Unsupported archive manifest",
+  );
   assert.equal(
     manifest.identity.archiveProfile,
     profile.name,
     "Wrong archive profile",
   );
-  assert.equal(manifest.identity.platform, "darwin", "Wrong producer platform");
+  if (linux && !trusted.fixtureRuntime) {
+    assert.equal(
+      manifest.identity.platform,
+      "linux",
+      "Wrong producer platform",
+    );
+    assert.equal(manifest.identity.arch, "x64", "Wrong producer architecture");
+    assert.equal(
+      manifest.identity.runtime?.kind,
+      "native-linux",
+      "Linux collection requires native runtime evidence",
+    );
+    assert.equal(
+      manifest.identity.runtime.versionId,
+      "26.04",
+      "Wrong Linux runtime version",
+    );
+  } else if (!linux)
+    assert.equal(
+      manifest.identity.platform,
+      "darwin",
+      "Wrong producer platform",
+    );
   for (const key of ["sourceSha", "runId", "runAttempt"])
     assert.equal(manifest.identity[key], trusted[key], `Stale producer ${key}`);
   assert.equal(
@@ -1265,16 +1312,33 @@ export async function collectMacRemaining(directory, outputs, trusted) {
   const seen = new Set();
   for (const output of outputs) {
     const receipt = readJson(path.join(output, "receipt.json"));
-    assert.equal(receipt.schema, 1, "Unsupported consumer receipt");
+    assert.equal(
+      receipt.schema,
+      manifest.schema,
+      "Unsupported consumer receipt",
+    );
     assert.ok(
       profile.partitions.includes(receipt.shard) && !seen.has(receipt.shard),
       "Missing or duplicate consumer shard",
     );
     seen.add(receipt.shard);
-    assert.ok(
-      !("coverage" in receipt) && !("coverageSha256" in receipt),
-      "Uninstrumented receipt cannot claim coverage",
-    );
+    if (linux) {
+      const coverage = path.join(output, "coverage.lcov");
+      assert.equal(
+        await fileHash(coverage),
+        receipt.coverageSha256,
+        "Default coverage digest mismatch",
+      );
+      assert.deepEqual(
+        validateLcov(readFileSync(coverage, "utf8")),
+        receipt.coverage,
+        "Default coverage summary mismatch",
+      );
+    } else
+      assert.ok(
+        !("coverage" in receipt) && !("coverageSha256" in receipt),
+        "Uninstrumented receipt cannot claim coverage",
+      );
     verifyIdentity(manifest.identity, receipt.identity);
     for (const key of ["sourceSha", "runId", "runAttempt"])
       assert.equal(receipt[key], trusted[key], `Stale receipt ${key}`);

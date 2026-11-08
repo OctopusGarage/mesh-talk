@@ -1,0 +1,141 @@
+name: Linux workspace archive consumer
+on:
+  workflow_call:
+    inputs:
+      kind:
+        type: string
+        required: true
+      shard:
+        type: number
+        required: true
+      rust_version:
+        type: string
+        required: true
+      manifest_sha:
+        type: string
+        required: true
+      archive_sha:
+        type: string
+        required: true
+      full:
+        type: string
+        required: true
+      upstream_result:
+        type: string
+        required: true
+      diagnostic_timing:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  MESH_TALK_TEST_TIMING: ${{ inputs.diagnostic_timing && '1' || '0' }}
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ inputs.full }}
+          upstream_result: ${{ inputs.upstream_result }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          node-version: 22
+      - name: Prepare Ubuntu archive source
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
+      - name: Install native runtime and crash tools
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0t64 libayatana-appindicator3-1 librsvg2-2 libstdc++6 gdb
+      - name: Measure Linux consumer storage
+        id: storage
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: node scripts/ci/runner-storage.mjs --measure > "$RUNNER_TEMP/runner-storage.json"
+      - name: Preserve consumer storage measurement
+        if: ${{ steps.scope.outputs.full == 'true' && always() && steps.storage.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-storage-linux-${{ inputs.kind }}-${{ inputs.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-storage.json
+          retention-days: 14
+          if-no-files-found: error
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          toolchain: ${{ inputs.rust_version }}
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2.88.1
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
+      - name: Prepare and verify Linux native crash evidence
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: |
+          ulimit -c 262144
+          node scripts/ci/linux-crash-diagnostics.mjs setup
+          node scripts/ci/linux-crash-diagnostics.mjs selftest
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: linux-workspace-binaries-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-workspace-archive
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: linux-workspace-metadata-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-workspace-archive
+      - name: Execute the exact archive cohort
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          KIND: ${{ inputs.kind }}
+          SHARD: ${{ inputs.shard }}
+          MANIFEST_SHA: ${{ inputs.manifest_sha }}
+          ARCHIVE_SHA: ${{ inputs.archive_sha }}
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          case "$KIND" in
+            default) bash scripts/ci/linux-workspace.sh default "$SHARD" "$RUNNER_TEMP/linux-workspace-archive" "$RUNNER_TEMP/linux-workspace-results" "$MANIFEST_SHA" "$ARCHIVE_SHA" ;;
+            ignored) test "$SHARD" = 0; bash scripts/ci/linux-workspace.sh ignored "$RUNNER_TEMP/linux-workspace-archive" "$RUNNER_TEMP/linux-workspace-results" "$MANIFEST_SHA" "$ARCHIVE_SHA" ;;
+            *) echo 'Invalid Linux cohort' >&2; exit 2 ;;
+          esac
+      - name: Preserve default execution evidence
+        if: ${{ steps.scope.outputs.full == 'true' && always() && inputs.kind == 'default' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-default-results-${{ inputs.shard }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-workspace-results/
+          retention-days: 14
+          if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
+      - name: Preserve Linux backend evaluation evidence
+        if: ${{ steps.scope.outputs.full == 'true' && always() && inputs.kind == 'ignored' }}
+        uses: actions/upload-artifact@v7
+        with:
+          # Historical compatibility identity; the sealed manifest owns actual ABI.
+          name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-workspace-results/
+          retention-days: 14
+          if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
+      - name: Collect Linux native crash evidence and retire its storage
+        if: ${{ steps.scope.outputs.full == 'true' && always() }}
+        run: node scripts/ci/linux-crash-diagnostics.mjs collect
+      - name: Preserve Linux native crash diagnostics
+        if: ${{ steps.scope.outputs.full == 'true' && always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-crash-linux-${{ inputs.kind }}-${{ inputs.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-crash-diagnostics/reports/
+          retention-days: 14
+          if-no-files-found: warn

@@ -61,7 +61,7 @@ test("nextest security minimum and every CI installer follow the version owner",
     config.match(/^nextest-version = "([^"]+)"$/mu)?.[1],
     versions.nextest,
   );
-  for (const file of ["ci.yml", "windows-workspace.yml", "mutants.yml"]) {
+  for (const file of ["ci.yml", "windows-workspace.yml", "linux-workspace-consumer.yml", "mutants.yml"]) {
     const source = readFileSync(
       new URL(`../../.github/workflows/${file}`, import.meta.url),
       "utf8",

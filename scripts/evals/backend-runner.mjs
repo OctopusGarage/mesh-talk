@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { prepareArchive, verifyPreparedArchive, validateLcov } from "../ci/windows-coverage.mjs";
+import { prepareArchive, verifyPreparedArchive, validateLcov, collectDefaultArchive, verifyIdentity } from "../ci/windows-coverage.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
@@ -205,7 +205,7 @@ export function verifyArchivedBackendEvidence(directory, output, trusted) {
   const receipt = JSON.parse(readFileSync(join(output, "receipt.json")));
   assert.equal(receipt.schema, manifest.schema); assert.equal(receipt.kind, "linux-ignored");
   assert.equal(receipt.channelRedaction, "recognizable-passwords-v1", "Ignored channel redaction contract missing");
-  assert.deepEqual(receipt.identity, manifest.identity, "Ignored source/compiler/runtime identity mismatch");
+  verifyIdentity(manifest.identity, receipt.identity);
   for (const key of ["archiveSha256", "manifestSha256"]) assert.equal(receipt[key], trusted[key]);
   assert.equal(receipt.adapterSha256, executableHash(fileURLToPath(import.meta.url)), "Ignored adapter source changed");
   assert.equal(receipt.featureResolutionSha256, manifest.featureResolutionSha256);
@@ -239,7 +239,53 @@ export function verifyArchivedBackendEvidence(directory, output, trusted) {
   return receipt;
 }
 
-// This API is deliberately inactive in hosted workflows until native acceptance.
+// Collect default and ignored cohorts through their existing strict owners.
+export async function collectLinuxWorkspace(
+  directory,
+  outputs,
+  ignoredOutput,
+  trusted,
+) {
+  const defaults = await collectDefaultArchive(directory, outputs, trusted, {
+    profile: "linux-workspace",
+  });
+  const ignored = verifyArchivedBackendEvidence(
+    directory,
+    ignoredOutput,
+    trusted,
+  );
+  const report = JSON.parse(
+    readFileSync(join(ignoredOutput, "report.json"), "utf8"),
+  );
+  assert.equal(report.schema, 1);
+  assert.equal(report.sourceSha, trusted.sourceSha);
+  assert.equal(
+    report.platform,
+    trusted.fixtureRuntime ? ignored.identity.platform : "linux",
+  );
+  assert.equal(report.native, !trusted.fixtureRuntime);
+  assert.equal(report.mocked, false);
+  assert.ok(!report.failure && !report.failures, "Backend report failed");
+  assert.deepEqual(
+    Object.keys(report.suites),
+    Object.keys(BACKEND_SUITES),
+    "Backend report lost its original four suites",
+  );
+  for (const target of Object.keys(BACKEND_SUITES)) {
+    const {
+      stdoutSha256: _stdout,
+      stderrSha256: _stderr,
+      outputTruncated: _truncated,
+      ...expected
+    } = ignored.suites[target];
+    assert.deepEqual(
+      report.suites[target],
+      expected,
+      "Backend report differs from verified ignored execution",
+    );
+  }
+  return { ...defaults, ignoredTests: ignored.executedTests };
+}
 export async function runArchivedBackend(directory, output, options = {}) {
   const prepared = await prepareArchive(directory, output, { ...options, profile: "linux-workspace" });
   const executionSuites = {};
@@ -318,7 +364,18 @@ async function main() {
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  if (process.argv[2] === "--validate-large-folder" && process.argv.length === 4) {
+  if (process.argv[2] === "--archive" || process.argv[2] === "--collect-linux") {
+    try {
+      const [mode, ...args] = process.argv.slice(2);
+      if (mode === "--archive") {
+        assert.equal(args.length, 4, "Usage: --archive ARCHIVE_DIR OUTPUT_DIR MANIFEST_SHA ARCHIVE_SHA");
+        await runArchivedBackend(resolve(args[0]), resolve(args[1]), { manifestSha256: args[2], archiveSha256: args[3] });
+      } else {
+        assert.equal(args.length, 6, "Usage: --collect-linux METADATA_DIR DEFAULT_1_DIR DEFAULT_2_DIR IGNORED_DIR MANIFEST_SHA ARCHIVE_SHA");
+        console.log(JSON.stringify(await collectLinuxWorkspace(resolve(args[0]), args.slice(1, 3).map(value=>resolve(value)), resolve(args[3]), { manifestSha256: args[4], archiveSha256: args[5], sourceSha: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, jobResults: { producer: process.env.MESH_LINUX_PRODUCER_RESULT, consumers: process.env.MESH_LINUX_CONSUMERS_RESULT, ignored: process.env.MESH_LINUX_IGNORED_RESULT } })));
+      }
+    } catch(error) { console.error(error.stack); process.exitCode=1; }
+  } else if (process.argv[2] === "--validate-large-folder" && process.argv.length === 4) {
     validateBackendOutput(await readFile(process.argv[3], "utf8"), [LARGE_FOLDER_SCENARIO], { allowFiltered: true });
     console.log("Large-folder acceptance: 1 real scenario passed");
   } else {

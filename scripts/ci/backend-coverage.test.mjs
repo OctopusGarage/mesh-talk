@@ -26,8 +26,8 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
     assert.deepEqual(args.slice(args.indexOf("--") + 1), ["--exact", "--ignored", "--test-threads=1"]);
     return args;
   };
-  const folderArgs = folderCommand("ci.yml");
   const nativeFolderArgs = folderCommand("e2e-backend.yml");
+  const folderArgs = ["llvm-cov", "test", "--no-report", ...nativeFolderArgs.slice(1)];
   assert.deepEqual(folderArgs.slice(0, 3), ["llvm-cov", "test", "--no-report"]);
   assert.equal(nativeFolderArgs[0], "test");
   assert.deepEqual(folderArgs.slice(3), nativeFolderArgs.slice(1));
@@ -66,13 +66,13 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*large_folder_truth/m, "the separate ignored integration target must contribute coverage");
 });
 
-test("large-folder workflow commands preserve stdout evidence and actual Cargo failure", { skip: process.platform === "win32" }, t => {
+test("standalone large-folder workflow preserves stdout evidence and actual Cargo failure", { skip: process.platform === "win32" }, t => {
   const root = mkdtempSync(join(tmpdir(), "mesh-folder-streams-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "bin"));
   mkdirSync(join(root, "backend-eval-results"));
   writeFileSync(join(root, "bin/cargo"), "#!/usr/bin/env bash\nprintf 'diagnostic-prefix' >&2\nprintf '%s\\n' 'test large_directory_enqueue_uses_compact_manifest_instead_of_frame_error ... ok' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'\nexit \"$MESH_FIXTURE_CARGO_EXIT\"\n", { mode: 0o755 });
-  for (const workflowName of ["ci.yml", "e2e-backend.yml"]) {
+  for (const workflowName of ["e2e-backend.yml"]) {
     const workflow = readFileSync(new URL(`../../.github/workflows/${workflowName}`, import.meta.url), "utf8");
     const step = workflow.split(/^      - /m).find(value => value.includes("--test large_directory_enqueue "));
     const block = step.split("        run: |\n")[1].replace(/^          /gm, "");
@@ -106,7 +106,7 @@ test("Linux ignored archive qualification runs on GitHub Linux and local Darwin 
 // Same official archive as default consumers; direct libtest execution supplies
 // original Cargo-shaped stdout, not a synthesized Nextest report.
 test("real ignored archive preserves Cargo runtime, embedded CLI and ignored-only coverage without producer outputs", { timeout: 180000, skip: skipLinuxIgnoredArchive(process.platform, process.env) }, async t => {
-  const { verifyArchivedBackendEvidence } = await import("../evals/backend-runner.mjs");
+  const { verifyArchivedBackendEvidence, collectLinuxWorkspace } = await import("../evals/backend-runner.mjs");
   assert.equal(typeof verifyArchivedBackendEvidence, "function");
   const root = realpathSync(mkdtempSync(join(tmpdir(), "mesh-ignored-archive-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -173,7 +173,7 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(dir
   run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=empty-hooks", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "test: ignored archive"]);
   Object.assign(env, { GITHUB_SHA: run("git", ["rev-parse", "HEAD"]).stdout.trim(), GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1" });
   const artifact = join(root, "target/archive"), trustFile = join(root, "target/trust.json"), target = join(root, "target/llvm-cov-target");
-  const phase = (mode, output, trust = "", environment = env, status = 0) => run("bash", ["-euc", 'eval "$(cargo llvm-cov show-env --sh)"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST"'], { ...environment, CARGO_TARGET_DIR: target, MESH_MODE: mode, MESH_ARTIFACT: artifact, MESH_OUTPUT: output, MESH_TRUST: trust }, status);
+  const phase = (mode, output, trust = "", environment = env, status = 0) => run("bash", ["-euc", 'coverage_environment="$(cargo llvm-cov show-env --sh)"\neval "$coverage_environment"\n"$MESH_ARCHIVE_NODE" driver.mjs "$MESH_MODE" "$MESH_ARTIFACT" "$MESH_OUTPUT" "$MESH_TRUST"'], { ...environment, CARGO_TARGET_DIR: target, MESH_MODE: mode, MESH_ARTIFACT: artifact, MESH_OUTPUT: output, MESH_TRUST: trust }, status);
   phase("produce", trustFile);
   const trust = JSON.parse(readFileSync(trustFile, "utf8"));
   renameSync(target, join(root, "target/producer-output"));
@@ -210,6 +210,25 @@ try { if(mode==='produce') writeFileSync(output,JSON.stringify(await produce(dir
 
   const authority = { ...trust, sourceSha: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT, fixtureRuntime: process.platform === "linux" ? undefined : { qualification: "not-native-linux" } };
   assert.equal(verifyArchivedBackendEvidence(artifact, output, authority).executedTests, 12);
+  const fullAuthority={...authority,jobResults:{producer:"success",consumers:"success",ignored:"success"}};
+  const defaultOutputs=[1,2].map(shard=>join(root,`evidence/default-${shard}`));
+  assert.equal((await collectLinuxWorkspace(artifact,defaultOutputs,output,fullAuthority)).ignoredTests,12);
+  for(const field of ["producer","consumers","ignored"]) for(const status of ["failure","cancelled","skipped",""]) await assert.rejects(collectLinuxWorkspace(artifact,defaultOutputs,output,{...fullAuthority,jobResults:{...fullAuthority.jobResults,[field]:status}}));
+  await assert.rejects(collectLinuxWorkspace(artifact,[defaultOutputs[0],defaultOutputs[0]],output,fullAuthority));
+  await assert.rejects(collectLinuxWorkspace(artifact,defaultOutputs,output,{...fullAuthority,runAttempt:"2"}));
+  const defaultCoverage=join(defaultOutputs[0],"coverage.lcov"),defaultBytes=readFileSync(defaultCoverage);
+  writeFileSync(defaultCoverage,"corrupted");await assert.rejects(collectLinuxWorkspace(artifact,defaultOutputs,output,fullAuthority));writeFileSync(defaultCoverage,defaultBytes);
+  const defaultReceipt=join(defaultOutputs[0],"receipt.json"),defaultReceiptBytes=readFileSync(defaultReceipt);
+  rmSync(defaultReceipt);await assert.rejects(collectLinuxWorkspace(artifact,defaultOutputs,output,fullAuthority));writeFileSync(defaultReceipt,defaultReceiptBytes);
+  const ignoredCoverage=join(output,"coverage.lcov"),ignoredBytes=readFileSync(ignoredCoverage);
+  rmSync(ignoredCoverage);await assert.rejects(collectLinuxWorkspace(artifact,defaultOutputs,output,fullAuthority));writeFileSync(ignoredCoverage,ignoredBytes);
+  await assert.rejects(collectLinuxWorkspace(artifact,defaultOutputs,output,{...fullAuthority,manifestSha256:"0".repeat(64)}));
+  if(process.platform!=="linux") {
+    const rejected=run(process.execPath,[fileURLToPath(new URL("../evals/backend-runner.mjs",import.meta.url)),"--collect-linux",artifact,...defaultOutputs,output,trust.manifestSha256,trust.archiveSha256],{...env,MESH_LINUX_PRODUCER_RESULT:"success",MESH_LINUX_CONSUMERS_RESULT:"success",MESH_LINUX_IGNORED_RESULT:"success"},1);
+    assert.match(rejected.stderr,/Unsupported archive manifest/u,"production collection must reject generic local fixture schema");
+  }
+  const originalReport=readFileSync(join(output,"report.json"));writeFileSync(join(output,"report.json"),"{}");await assert.rejects(collectLinuxWorkspace(artifact,defaultOutputs,output,fullAuthority));writeFileSync(join(output,"report.json"),originalReport);
+
   const originalReceipt = readFileSync(join(output,"receipt.json"),"utf8");
   for (const change of [r=>r.identity.runAttempt="2",r=>r.executedTests=0,r=>r.suites.two_node_cli.cleanupUnverified=true,r=>r.suites.two_node_cli.outputTruncated=true,r=>r.suites.two_node_cli.exitCode=37,r=>delete r.suites.bridge_cross_lan]) {
     const changed=JSON.parse(originalReceipt);change(changed);writeFileSync(join(output,"receipt.json"),JSON.stringify(changed));

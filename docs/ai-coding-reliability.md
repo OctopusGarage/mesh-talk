@@ -457,7 +457,13 @@ success. Stage under an owned directory on the destination filesystem, retire it
 in the extraction owner's cleanup path, and preserve unrelated build outputs.
 The [Linux archive fixture](../scripts/ci/linux-workspace-cli.test.mjs) rejects
 extraction after real binary materialization and checks diagnostics stay free of
-runtime binaries; successful-path cleanup alone does not prove this boundary.
+runtime binaries; successful-path cleanup alone does not prove this boundary. Bind archive-only application stack
+file:line evidence separately from panic-header locations; Linux qualification
+strips a copied ELF's debug sections as a negative control. Environment discovery
+must return successfully before evaluating shell exports. The Linux wrapper
+failure control rejects a real nonzero discovery status before admitting any
+consumer, while strict aggregate collection retains every original default and
+ignored receipt and genuine coverage cohort.
 
 Source-integrity fixtures must not ignore tool output that production leaves
 untracked. Keep generated evidence outside the source checkout and assert the

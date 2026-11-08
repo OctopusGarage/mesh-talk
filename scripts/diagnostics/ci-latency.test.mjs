@@ -17,7 +17,7 @@ const workflowJob = (source, id) => source.split(`  ${id}:\n`)[1]?.split(/^  [a-
 
 test("documentation scope retains every required matrix identity and guards expensive steps", () => {
   const required = {
-    "ci.yml": ["checks", "checks-macos"],
+    "ci.yml": ["checks", "checks-linux", "checks-macos"],
     "windows-workspace.yml": ["build", "tests"],
     "check-health.yml": ["platform", "source"],
     "e2e-backend.yml": ["backend-platform"],
@@ -81,15 +81,31 @@ test("docs eligibility is recomputed locally and never fabricates provider or te
   assert.doesNotMatch(read("codeql.yml"), /docs-scope|ci-scope|paths-ignore/u);
 });
 
-test("Linux coverage uploads one final accumulated report after ignored-case validation", () => {
-  const ci = read("ci.yml");
-  assert.match(step(ci, "Test + coverage (Linux)"), /workspace-coverage\.sh linux --defer-report/u);
-  const final = step(ci, "Large-folder enqueue regression (Linux)");
-  const validation = final.indexOf("node scripts/evals/backend-runner.mjs --validate-large-folder");
-  assert.ok(validation >= 0 && validation < final.indexOf("cargo llvm-cov report"));
-  assert.equal((ci.match(/cargo llvm-cov report --lcov --output-path src-tauri\/lcov\.info/gu) || []).length, 1);
-  assert.match(step(ci, "Upload coverage to Codecov"), /^          files: src-tauri\/lcov\.info$/mu);
-  assert.doesNotMatch(ci, /e2e-lcov\.info/u);
+test("Linux archives preserve the sole native cache writer and strict required aggregate", () => {
+  const ci=read("ci.yml"), producer=workflowJob(ci,"checks"), aggregate=workflowJob(ci,"checks-linux");
+  assert.match(producer,/name: Linux native archive producer/u);
+  assert.match(producer,/shared-key: workspace-checks-checks/u);
+  assert.match(producer,/save-if: \$\{\{ github.ref == 'refs\/heads\/main' \}\}/u);
+  for(const command of ["cargo clippy --workspace --all-targets -- -D warnings","cargo build --workspace --locked","cargo test --workspace --doc --locked","linux-workspace-cli.test.mjs","backend-coverage.test.mjs"]) assert.ok(producer.includes(command),command);
+  assert.ok(producer.indexOf("linux-workspace-cli.test.mjs")<producer.indexOf("linux-workspace.sh produce"));
+  assert.match(aggregate,/name: checks \(ubuntu-latest\)/u);
+  assert.match(aggregate,/needs: \[scope, checks, linux-default-tests, linux-ignored-tests\]/u);
+  assert.match(aggregate,/timeout-minutes: 15/u);assert.match(producer,/timeout-minutes: 90/u);
+  const guard=step(aggregate,"Require every actual Linux lane before collection");
+  assert.ok(guard); assert.ok(aggregate.indexOf("Require every actual Linux lane")<aggregate.indexOf("uses: actions/download-artifact@"));
+  assert.match(step(aggregate,"Upload coverage to Codecov"),/files:.*linux-default-results-1\/coverage.lcov.*linux-default-results-2\/coverage.lcov.*backend-eval-results\/coverage.lcov/u);
+  const upload=step(aggregate,"Upload coverage to Codecov");
+  assert.ok(upload.includes("name: workspace-ubuntu-latest-"));assert.match(upload,/fail_ci_if_error: true/u);
+  assert.match(upload,/if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(!\(github\.event_name == 'pull_request' && github\.base_ref == 'dev' && github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'\)\) \}\}/u);
+
+  const consumer=read("linux-workspace-consumer.yml");
+  assert.ok(consumer.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
+  assert.doesNotMatch(consumer,/rust-cache|npm ci|npm run build|cargo (?:build|test|clippy)|frontend\//u);
+  assert.match(consumer,/timeout-minutes: 90/u);
+  for(const text of ["needs.checks.outputs.rustVersion","linux-workspace-consumer.yml"]) assert.ok(ci.includes(text));
+  for(const text of ["llvm-tools-preview","libwebkit2gtk-4.1-0","gdb","linux-crash-diagnostics.mjs setup","linux-crash-diagnostics.mjs selftest","linux-crash-diagnostics.mjs collect","runner-storage.mjs --measure"]) assert.ok(consumer.includes(text),text);
+  assert.match(consumer,/backend-core-ubuntu-24.04-\$\{\{ github.run_attempt \}\}/u);
+  assert.doesNotMatch(ci,/workspace-coverage.sh linux --defer-report|--test large_directory_enqueue/u);
 });
 
 test("Codecov action and downloaded CLI versions are pinned independently", () => {
@@ -195,6 +211,7 @@ test("only auxiliary diagnostic transport is optional; acceptance artifacts stay
   const optional = {
     "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
     "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-", "macos-remaining-producer-log-"],
+    "linux-workspace-consumer.yml": ["native-crash-linux-", "runner-storage-"],
     "sanitizers.yml": ["runner-storage-"],
     "mutants.yml": ["runner-storage-"],
     "hidden-contacts-native.yml": ["runner-storage-"],
@@ -451,7 +468,7 @@ test("CI runs release workflow diagnostics only through the shared glob", () => 
 });
 
 test("Windows builds once then requires eight complete serial archive partitions", () => {
-  assert.match(workflowJob(read("ci.yml"), "checks"), /name: checks \(ubuntu-latest\)/);
+  assert.match(workflowJob(read("ci.yml"), "checks-linux"), /name: checks \(ubuntu-latest\)/);
   assert.match(read("ci.yml"), /uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
   const windows = read("windows-workspace.yml");
   assert.match(windows, /needs: build/);
@@ -628,7 +645,7 @@ test("macOS archives start independently and retain the complete native Host own
   const consumers = workflowJob(ci, "macos-remaining-tests");
   const collector = workflowJob(ci, "checks-macos");
   for (const block of [linux, native, producer]) assert.match(block, /^    needs: \[scope\]$/mu);
-  assert.match(linux, /name: checks \(ubuntu-latest\)/u);
+  assert.match(linux, /name: Linux native archive producer/u);
   assert.doesNotMatch(linux, /matrix:|needs:.*macos/u);
   assert.match(native, /runs-on: macos-latest/u);
   assert.match(native, /needs\.scope\.outputs\.full == 'true'/u);
@@ -666,6 +683,8 @@ test("macOS archives start independently and retain the complete native Host own
   assert.match(producer, /save-if: false/u);
   assert.match(native, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/u);
   assert.match(collector, /name: checks \(macos-latest\)/u);
+  assert.match(collector,/timeout-minutes: 15/u);
+  for(const lane of [native,producer,consumers]) assert.match(lane,/timeout-minutes: 90/u);
   assert.match(collector, /runs-on: ubuntu-latest/u);
   assert.match(collector, /needs: \[scope, macos-native, macos-remaining-build, macos-remaining-tests\]/u);
   assert.doesNotMatch(collector, /macos-remaining-binaries|rust-toolchain|rust-cache|receipt\.json.*write/u);
@@ -744,48 +763,39 @@ test("Codecov receives the frontend and Rust coverage produced by CI", () => {
   assert.ok(step, "the Codecov upload step must exist");
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   assert.match(health, /files: frontend\/coverage\/lcov\.info/, "Health publishes current frontend coverage");
-  assert.match(step, /files:.*src-tauri\/lcov\.info/, "Rust coverage must remain part of the upload");
+  assert.match(step, /files:.*linux-default-results-1\/coverage.lcov.*linux-default-results-2\/coverage.lcov.*backend-eval-results\/coverage.lcov/, "all three genuine Rust coverage cohorts must upload");
 });
 
 test("native workspace jobs retain their own builds, doctests and platform coverage", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const job = id => workflow.split(`  ${id}:\n`)[1]?.split(/^  [a-z][\w-]*:\n/m)[0];
-  const step = (block, name) => block.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
-  for (const [id, os, label, command] of [
-    ["checks", "ubuntu-latest", "Linux", "linux --defer-report"],
-    ["macos-native", "macos-latest", "macOS", "macos-host"],
-  ]) {
-    const block = job(id);
-    assert.ok(block, id);
-    assert.match(block, new RegExp(`runs-on: ${os}`, "u"));
-    assert.match(block, /shell: bash/u);
-    assert.doesNotMatch(block, /matrix:/u);
-    const install = step(block, "Install cargo-llvm-cov and cargo-nextest");
-    assert.match(install, /if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}/u);
+  const workflow=read("ci.yml");
+  for(const [id,os] of [["checks","ubuntu-latest"],["macos-native","macos-latest"]]) {
+    const block=workflowJob(workflow,id);
+    assert.match(block,new RegExp(`runs-on: ${os}`,"u"));assert.match(block,/shell: bash/u);assert.doesNotMatch(block,/matrix:/u);
+    const install=step(block,"Install cargo-llvm-cov and cargo-nextest");
+    assert.match(install,/if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}/u);
     assert.ok(install.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
-    for (const [name, expected] of [["Clippy", "cargo clippy --workspace --all-targets -- -D warnings"], ["Build workspace", "cargo build --workspace --locked"]]) {
-      const boundary = step(block, name);
-      assert.ok(boundary.includes(expected));
-      assert.match(boundary, /working-directory: src-tauri/u);
-      assert.match(boundary, /if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}/u);
-      assert.ok(block.indexOf("name: Build frontend") < block.indexOf(`name: ${name}`));
+    for(const [name,command] of [["Clippy","cargo clippy --workspace --all-targets -- -D warnings"],["Build workspace","cargo build --workspace --locked"]]) {
+      const boundary=step(block,name);assert.ok(boundary.includes(command));
+      assert.match(boundary,/working-directory: src-tauri/u);assert.match(boundary,/steps.scope.outputs.full == 'true'/u);
+      assert.ok(block.indexOf("name: Build frontend")<block.indexOf(`name: ${name}`));
     }
-    const pass = step(block, `Test + coverage (${label})`);
-    assert.match(pass, /working-directory: src-tauri/u);
-    assert.match(pass, /shell: bash/u);
-    assert.ok(pass.includes(`bash ../scripts/ci/workspace-coverage.sh ${command}`));
-    assert.doesNotMatch(pass, /run_coverage|cargo llvm-cov/u);
-    assert.deepEqual([...block.matchAll(/cargo test --workspace([^\n]*)/gu)].map(match => match[1].trim()), [id === "checks" ? "--doc --locked" : "--doc"], "preserve separate doctests without repeating default targets");
-    if (id === "macos-native") assert.match(pass, /RUST_TEST_THREADS: 4\n          NEXTEST_TEST_THREADS: 4/u);
-    const upload = step(block, "Upload coverage to Codecov");
-    assert.match(upload, /^          files: ['"]?src-tauri\/lcov\.info['"]?$/mu);
-    assert.ok(upload.includes(`name: workspace-${os}-`));
-    assert.match(upload, /if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(!\(github\.event_name == 'pull_request' && github\.base_ref == 'dev' && github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'\)\) \}\}/u);
-    assert.match(upload, /fail_ci_if_error: true/u);
-    assert.doesNotMatch(upload, /frontend\/coverage|matrix\.os/u);
+    assert.deepEqual([...block.matchAll(/cargo test --workspace([^\n]*)/gu)].map(match=>match[1].trim()),[id==="checks"?"--doc --locked":"--doc"],"native doctests must remain without a duplicate default execution");
   }
-  const windows = readFileSync(new URL("../../.github/workflows/windows-workspace.yml", import.meta.url), "utf8");
-  for (const command of ["cargo test --workspace --doc --locked", "cargo build --workspace --locked", "cargo clippy --workspace --all-targets -- -D warnings", "windows-coverage.mjs consume", "fail_ci_if_error: true"]) assert.ok(windows.includes(command), command);
+  const linux=workflowJob(workflow,"checks");
+  assert.match(step(linux,"Produce sealed Linux workspace archive"),/linux-workspace.sh produce/u);
+  assert.doesNotMatch(linux,/workspace-coverage.sh linux|name: Upload coverage to Codecov/u);
+  const mac=workflowJob(workflow,"macos-native"),pass=step(mac,"Test + coverage (macOS)");
+  assert.match(pass,/working-directory: src-tauri/u);assert.match(pass,/shell: bash/u);
+  assert.match(pass,/bash \.\.\/scripts\/ci\/workspace-coverage.sh macos-host/u);
+  assert.doesNotMatch(pass,/run_coverage|cargo llvm-cov/u);
+  assert.match(pass,/RUST_TEST_THREADS: 4\n          NEXTEST_TEST_THREADS: 4/u);
+  const upload=step(mac,"Upload coverage to Codecov");
+  assert.match(upload,/^          files: ['"]?src-tauri\/lcov\.info['"]?$/mu);
+  assert.ok(upload.includes("name: workspace-macos-latest-"));
+  assert.match(upload,/if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(!\(github\.event_name == 'pull_request' && github\.base_ref == 'dev' && github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'\)\) \}\}/u);
+  assert.match(upload,/fail_ci_if_error: true/u);assert.doesNotMatch(upload,/frontend\/coverage|matrix\.os/u);
+  const windows=read("windows-workspace.yml");
+  for(const command of ["cargo test --workspace --doc --locked","cargo build --workspace --locked","cargo clippy --workspace --all-targets -- -D warnings","windows-coverage.mjs consume","fail_ci_if_error: true"]) assert.ok(windows.includes(command),command);
 });
 
 test("macOS browsers, Health and backend use Intel while Rust and native retain ARM", () => {
@@ -808,4 +818,16 @@ test("macOS browsers, Health and backend use Intel while Rust and native retain 
   assert.match(workflowJob(rust, "checks-macos"), /runs-on: ubuntu-latest/);
   assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);
   assert.match(workflowJob(read("e2e-backend.yml"), "backend-platform"), /os: \[windows-2022, macos-26-intel\]/);
+});
+
+
+test("Linux full-scope aggregate rejects unsuccessful or missing lanes before downloads", () => {
+  const collector=workflowJob(read("ci.yml"),"checks-linux");
+  const values={PRODUCER_RESULT:"success",CONSUMERS_RESULT:"success",IGNORED_RESULT:"success"};
+  assert.equal(runGate("ci.yml","Require every actual Linux lane before collection",values).status,0);
+  for(const variable of Object.keys(values)) for(const status of ["failure","cancelled","skipped","unknown",""]) assert.notEqual(runGate("ci.yml","Require every actual Linux lane before collection",{...values,[variable]:status}).status,0);
+  assert.match(collector,/collect-linux .*"\$MANIFEST_SHA" "\$ARCHIVE_SHA"/u);
+  assert.doesNotMatch(collector,/linux-workspace-binaries|rust-toolchain|rust-cache/u);
+  for(const value of ["PRODUCER","CONSUMERS","IGNORED"]) assert.ok(collector.includes(`MESH_LINUX_${value}_RESULT`));
+  for(const lane of ["linux-default-tests","linux-ignored-tests"]) assert.match(workflowJob(read("ci.yml"),lane),/needs: \[scope, checks\]/u);
 });

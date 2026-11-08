@@ -58,6 +58,20 @@ async function availableBytes(root) {
   return usage.bavail * usage.bsize;
 }
 
+// Consumers observe capacity without repeating the producer's SDK cleanup.
+export async function measureRunnerStorage({
+  root = "/",
+  env = process.env,
+  platform = process.platform,
+} = {}) {
+  await assertHostedUbuntu({ root, env, platform });
+  return {
+    rootAvailableBytes: await availableBytes(root),
+    workspaceAvailableBytes: await availableBytes(env.GITHUB_WORKSPACE || root),
+    temporaryAvailableBytes: await availableBytes(env.RUNNER_TEMP || root),
+  };
+}
+
 export async function prepareRunnerStorage({
   root = "/",
   env = process.env,
@@ -97,10 +111,23 @@ if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  if (process.argv.length !== 3 || process.argv[2] !== "--prepare") {
-    throw new Error("Usage: sudo node scripts/ci/runner-storage.mjs --prepare");
+  if (
+    process.argv.length !== 3 ||
+    !["--prepare", "--measure"].includes(process.argv[2])
+  ) {
+    throw new Error(
+      "Usage: sudo node scripts/ci/runner-storage.mjs --prepare | node scripts/ci/runner-storage.mjs --measure",
+    );
   }
-  if (process.getuid?.() !== 0)
+  if (process.argv[2] === "--prepare" && process.getuid?.() !== 0)
     throw new Error("Runner storage preparation requires sudo");
-  console.log(JSON.stringify(await prepareRunnerStorage(), null, 2));
+  console.log(
+    JSON.stringify(
+      await (process.argv[2] === "--prepare"
+        ? prepareRunnerStorage()
+        : measureRunnerStorage()),
+      null,
+      2,
+    ),
+  );
 }

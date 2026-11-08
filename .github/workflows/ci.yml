@@ -35,11 +35,15 @@ jobs:
     uses: ./.github/workflows/ci-scope.yml
 
   checks:
-    name: checks (ubuntu-latest)
+    name: Linux native archive producer
     if: ${{ !cancelled() }}
     needs: [scope]
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      manifestSha256: ${{ steps.archive.outputs.manifestSha256 }}
+      archiveSha256: ${{ steps.archive.outputs.archiveSha256 }}
+      rustVersion: ${{ steps.archive.outputs.rustVersion }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,14 +53,6 @@ jobs:
         with:
           full: ${{ needs.scope.outputs.full }}
           upstream_result: ${{ needs.scope.result }}
-      - name: Report documentation-only coverage through Codecov
-        if: steps.scope.outputs.full == 'false'
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          version: v11.3.2
-          run_command: empty-upload
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
@@ -129,7 +125,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         # These fixtures launch real Cargo/rustc processes and share this job's
         # package cache. Give each compiler contract exclusive execution.
-        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs scripts/ci/linux-workspace-cli.test.mjs
 
       - name: Prepare and verify Linux native crash evidence
         if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
@@ -162,48 +158,34 @@ jobs:
         working-directory: src-tauri
         run: cargo build --workspace --locked
 
-      # Linux keeps its existing complete accumulated coverage and backend evidence.
-      - name: Test + coverage (Linux)
-        if: ${{ steps.scope.outputs.full == 'true' }}
-        working-directory: src-tauri
-        shell: bash
-        run: bash ../scripts/ci/workspace-coverage.sh linux --defer-report
-
       - name: Workspace doctests (Linux)
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: cargo test --workspace --doc --locked
 
-      - name: Multi-process core evidence and coverage (Linux)
+      - name: Produce sealed Linux workspace archive
+        id: archive
         if: ${{ steps.scope.outputs.full == 'true' }}
-        shell: bash
-        env:
-          EVAL_SOURCE_SHA: ${{ github.sha }}
-          EVAL_OUTPUT_DIR: ${{ runner.temp }}/backend-eval-results
-          EVAL_COVERAGE: "1"
-        run: |
-          node scripts/evals/backend-runner.mjs
-          cargo llvm-cov --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
-
-      - name: Large-folder enqueue regression (Linux)
+        run: bash scripts/ci/linux-workspace.sh produce "$RUNNER_TEMP/linux-workspace-archive" --github-output
+      - name: Preserve Linux binary archive
         if: ${{ steps.scope.outputs.full == 'true' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          large_folder_status=0
-          cargo llvm-cov test --no-report --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 2> "$RUNNER_TEMP/backend-eval-results/large-folder.stderr.log" | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log" || large_folder_status=$?
-          cat "$RUNNER_TEMP/backend-eval-results/large-folder.stderr.log" >&2
-          if (( large_folder_status != 0 )); then exit "$large_folder_status"; fi
-          node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
-          cargo llvm-cov report --lcov --output-path src-tauri/lcov.info
-
-      - name: Preserve Linux backend evaluation evidence
-        if: ${{ steps.scope.outputs.full == 'true' && (always()) }}
         uses: actions/upload-artifact@v7
         with:
-          name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/backend-eval-results/
-          if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
+          name: linux-workspace-binaries-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-workspace-archive/workspace.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Preserve Linux archive metadata
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-workspace-metadata-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/linux-workspace-archive/manifest.json
+            ${{ runner.temp }}/linux-workspace-archive/inventory-*.json
+            ${{ runner.temp }}/linux-workspace-archive/feature-resolution.json
           retention-days: 14
+          if-no-files-found: error
 
       - name: Collect Linux native crash evidence and retire its storage
         if: ${{ steps.scope.outputs.full == 'true' && (always() && runner.os == 'Linux') }}
@@ -214,20 +196,113 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: native-crash-linux-${{ github.run_attempt }}
+          name: native-crash-linux-producer-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-crash-diagnostics/reports/
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Upload test timing diagnostics
-        if: ${{ steps.scope.outputs.full == 'true' && (always() && env.MESH_TALK_TEST_TIMING == '1') }}
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-timing-ubuntu-latest-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mesh-talk-test-timing.log
-          if-no-files-found: warn
 
+
+  linux-default-tests:
+    name: Linux default tests (${{ matrix.shard }}/2)
+    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.scope.outputs.full == 'true' && needs.checks.result == 'success' }}
+    needs: [scope, checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    uses: ./.github/workflows/linux-workspace-consumer.yml
+    with:
+      kind: default
+      shard: ${{ matrix.shard }}
+      rust_version: ${{ needs.checks.outputs.rustVersion }}
+      manifest_sha: ${{ needs.checks.outputs.manifestSha256 }}
+      archive_sha: ${{ needs.checks.outputs.archiveSha256 }}
+      full: ${{ needs.scope.outputs.full }}
+      upstream_result: ${{ needs.scope.result }}
+      diagnostic_timing: ${{ inputs.diagnostic_timing || false }}
+
+  linux-ignored-tests:
+    name: Linux ignored acceptance
+    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.scope.outputs.full == 'true' && needs.checks.result == 'success' }}
+    needs: [scope, checks]
+    uses: ./.github/workflows/linux-workspace-consumer.yml
+    with:
+      kind: ignored
+      shard: 0
+      rust_version: ${{ needs.checks.outputs.rustVersion }}
+      manifest_sha: ${{ needs.checks.outputs.manifestSha256 }}
+      archive_sha: ${{ needs.checks.outputs.archiveSha256 }}
+      full: ${{ needs.scope.outputs.full }}
+      upstream_result: ${{ needs.scope.result }}
+      diagnostic_timing: ${{ inputs.diagnostic_timing || false }}
+
+  checks-linux:
+    name: checks (ubuntu-latest)
+    if: ${{ !cancelled() }}
+    needs: [scope, checks, linux-default-tests, linux-ignored-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
+      - name: Report documentation-only coverage through Codecov
+        if: steps.scope.outputs.full == 'false'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          version: v11.3.2
+          run_command: empty-upload
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+      - name: Require every actual Linux lane before collection
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          PRODUCER_RESULT: ${{ needs.checks.result }}
+          CONSUMERS_RESULT: ${{ needs.linux-default-tests.result }}
+          IGNORED_RESULT: ${{ needs.linux-ignored-tests.result }}
+        run: |
+          test "$PRODUCER_RESULT" = success
+          test "$CONSUMERS_RESULT" = success
+          test "$IGNORED_RESULT" = success
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: linux-workspace-metadata-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-workspace-metadata
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: linux-default-results-1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-default-results-1
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: linux-default-results-2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/linux-default-results-2
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backend-eval-results
+      - name: Collect exact Linux default and ignored execution
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          MESH_LINUX_PRODUCER_RESULT: ${{ needs.checks.result }}
+          MESH_LINUX_CONSUMERS_RESULT: ${{ needs.linux-default-tests.result }}
+          MESH_LINUX_IGNORED_RESULT: ${{ needs.linux-ignored-tests.result }}
+          MANIFEST_SHA: ${{ needs.checks.outputs.manifestSha256 }}
+          ARCHIVE_SHA: ${{ needs.checks.outputs.archiveSha256 }}
+        run: node scripts/evals/backend-runner.mjs --collect-linux "$RUNNER_TEMP/linux-workspace-metadata" "$RUNNER_TEMP/linux-default-results-1" "$RUNNER_TEMP/linux-default-results-2" "$RUNNER_TEMP/backend-eval-results" "$MANIFEST_SHA" "$ARCHIVE_SHA"
       - name: Upload coverage to Codecov
         if: ${{ steps.scope.outputs.full == 'true' && (!(github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.user.login == 'dependabot[bot]')) }}
         # Dependabot PRs to dev cannot read the Actions CODECOV_TOKEN secret.
@@ -236,7 +311,7 @@ jobs:
         with:
           version: v11.3.2
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: src-tauri/lcov.info
+          files: ${{ runner.temp }}/linux-default-results-1/coverage.lcov,${{ runner.temp }}/linux-default-results-2/coverage.lcov,${{ runner.temp }}/backend-eval-results/coverage.lcov
           name: workspace-ubuntu-latest-${{ github.run_attempt }}
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
@@ -474,7 +549,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [scope, macos-native, macos-remaining-build, macos-remaining-tests]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

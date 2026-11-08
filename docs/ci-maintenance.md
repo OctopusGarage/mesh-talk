@@ -515,6 +515,11 @@ artifact overhead as well as execution. More shards can increase queueing and
 runner minutes; more workers per machine can increase memory pressure, port
 exhaustion and test interference. Review the product of platform, architecture,
 browser, feature and shard dimensions before expanding a matrix.
+Inspect actual worker-scoped options and test-group assignment as well as case
+counts: tracing modes can produce distinct worker groups and uneven tails.
+Shuffle may reorder work only after shard allocation; verify its actual effect
+before treating it as rebalancing. Preserve required trace evidence and evaluate
+the complete DAG under the global runner quota.
 For a wall-time target, calculate both the dependency critical path and the
 aggregate runner work divided by the constrained pool's available slots.
 Scheduling alone cannot beat that capacity bound; added shard setup consumes
@@ -612,7 +617,8 @@ not weaken either partition's failure semantics. The existing required
 `checks (macos-latest)` identity collects on Ubuntu only after actual native,
 producer and aggregate consumer success. Documentation scope independently
 revalidates its cheap required check without manufacturing execution receipts.
-Linux retains its direct complete accumulated coverage and backend-evidence flow.
+Linux retains complete instrumented default and ignored coverage through the
+shared archive flow below.
 
 Preserve the old `workspace-checks-checks` shared dependency-cache cohort without
 an additional job key on Ubuntu, native macOS and the remaining producer. Restore
@@ -631,8 +637,53 @@ existing job watchdogs. Measure producer compilation, symbol packaging, transfer
 queues, consumer tails and aggregate runner minutes on the same source. The
 historical roughly 47-minute serial macOS lane may move into the high twenties
 before queues; that is a hypothesis, not a thirty-minute acceptance guarantee.
-Linux's roughly 46-minute lane remains a separate critical path, and historical
-macOS aggregate work alone exceeds thirty minutes at five-runner capacity.
+The historical roughly 46-minute Linux lane is the archive comparison baseline;
+macOS aggregate work also consumes the shared five-runner capacity.
+
+Linux keeps the existing `checks` job ID and `workspace-checks-checks` cache
+cohort as its sole main-only native/instrumented cache writer. The producer runs
+all native lint, production workspace/frontend builds, syntax checks, doctests
+and real compiler/crash contracts. Native Linux default-archive and ignored
+adapter fixtures gate the product archive. One full instrumented workspace
+archive then admits two four-worker default partitions and one serial ignored
+consumer. Windows remains eight serial consumers; macOS remains two
+uninstrumented remaining-workspace consumers plus native Host coverage.
+
+The Linux consumers restore no Rust cache, install no frontend dependencies and
+compile no Cargo targets. They install the producer's exact Rust version,
+matching LLVM tools, pinned prebuilt Nextest/llvm-cov and required Tauri runtime
+packages. `scripts/ci/linux-workspace.sh` independently captures a successful
+`cargo llvm-cov show-env --sh` before evaluation; failed environment discovery
+cannot admit execution. Keep `target/llvm-cov-target` and embedded CLI paths.
+Default timing markers stay in each consumer's execution log; ignored backend
+markers stay in their original redacted suite logs. Each actual Linux execution
+runner retains crash setup/selftest, always-run collection and verified restoration.
+Consumer jobs use the storage owner's read-only `--measure` mode without repeating the producer's SDK cleanup; inspect actual space, archive and diagnostic
+image usage before changing storage policy.
+
+The required `checks (ubuntu-latest)` aggregate independently revalidates scope.
+Full scope requires actual producer, default-matrix and ignored success before
+mandatory downloads. Both pure Linux and macOS aggregates use fifteen-minute infrastructure
+watchdogs for receipt/LCOV transfer, validation and upload. Producer/consumer
+ninety-minute watchdogs and all product case budgets remain unchanged. It reuses the shared default receipt collector and existing
+backend ignored validator with trusted producer hashes and current source/run/
+attempt. The original four-suite backend report, all eight backend scenarios,
+complete inventory-owned Bridge ignored subset and exact large-folder case
+remain required. The ignored artifact is uploaded once under the historical
+`backend-core-ubuntu-24.04-ATTEMPT` compatibility name; the sealed runtime identity
+owns actual ABI. Native Ubuntu version, architecture, glibc, runtime packages,
+compiler and profile remain authoritative; incidental image version is retained
+as provenance rather than an additional compatibility restriction.
+
+Two default LCOV reports and the separate ignored report represent genuine
+execution cohorts. Validate every hash and coverage summary before uploading all
+three through the required Linux Codecov owner. This trades the former serial
+report for parallel execution with three report/setup costs; a single raw-profile
+collector would need the compiler, executable archive and profiles again. Measure
+producer compilation, all report costs, transfer, queue delay and runner minutes
+in the complete same-source hosted DAG, including the five-Mac admission limit.
+Local archive mechanics and isolated durations do not establish full native Host
+linkage, Linux ELF diagnostics or a thirty-minute complete CI result.
 
 Trusted producer job outputs supply the manifest and archive hashes before
 consumer extraction. The producer API returns those hashes and the Rust version;
