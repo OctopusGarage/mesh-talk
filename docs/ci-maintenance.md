@@ -531,6 +531,16 @@ a runner has no test result; preserve its infrastructure failure separately.
 UI coverage and reports require one complete attempt, so recover that workflow
 as a whole when an unallocated producer prevents its current-attempt evidence.
 
+ASan owns one reviewed dated nightly in the sanitizer workflow environment.
+The producer installs that exact toolchain with `rust-src` once, verifies its
+installed manifest date against the declaration and fingerprints `rustc` and
+Cargo through that explicit toolchain before restoring the existing cache cohort.
+Do not resolve a floating nightly or infer the compiler from an active default:
+calendar changes otherwise invalidate reusable dependencies without source changes.
+Upgrade this CI toolchain dependency through a reviewed PR with the full native
+Linux union and real clean/use-after-free controls on all eight runners; a local
+stable archive-protocol fixture does not qualify instrumentation or a cache hit.
+
 ASan compiles its core library once into an official Nextest archive, then runs
 eight serial partitions. Runners 1–6 use Nextest `hash:ID/6`, excluding the
 four exact reserved test names owned by `scripts/ci/asan.mjs`. Runner 7 executes

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -233,4 +235,58 @@ test("ASan compiles once and binds every consumer to the current producer archiv
     assert.match(part, /MESH_ASAN_MANIFEST_SHA256: \$\{\{ needs.cohort.outputs.manifest_sha256 \}\}/u);
   }
   assert.match(workflow, /MESH_ASAN_BUILD_RESULT: \$\{\{ needs.cohort.result \}\}/u);
+});
+
+
+test("ASan cohort CLI binds every Rust probe to the declared dated toolchain before exporting outputs", t => {
+  const root = temporary(t);
+  const pin = identity.toolchain;
+  const bin = path.join(root, "toolchain/bin");
+  const manifest = path.join(root, "toolchain/lib/rustlib/multirust-channel-manifest.toml");
+  mkdirSync(bin, { recursive: true }); mkdirSync(path.dirname(manifest), { recursive: true });
+  const probes = path.join(root, "probes.jsonl");
+  const outputs = path.join(root, "outputs");
+  const fake = path.join(root, "rustup.cjs");
+  writeFileSync(fake, String.raw`const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_PROBES, JSON.stringify(args) + '\n');
+if (process.env.FIXTURE_TOOL_FAILURE === (args[0] === 'which' ? 'which' : args[2])) process.exitCode = 9;
+else if (args[0] === 'which') console.log(process.env.FIXTURE_RUSTC);
+else if (args[0] === 'run') console.log(args[2] + ' exact compiler fixture');
+else process.exitCode = 9;
+`);
+  const preload = path.join(root, "preload.cjs");
+  writeFileSync(preload, `const cp = require('node:child_process'); const spawn = cp.spawn;
+cp.spawn = function(binary, args, options) { return binary === 'rustup' ? spawn(process.execPath, [process.env.FIXTURE_RUSTUP, ...args], options) : spawn(binary, args, options); };
+require('node:module').syncBuiltinESMExports();`);
+  const run = (overrides = {}) => {
+    rmSync(outputs, { force: true }); rmSync(probes, { force: true });
+    const env = { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`, MESH_ASAN_TOOLCHAIN: pin, GITHUB_OUTPUT: outputs, FIXTURE_RUSTUP: fake, FIXTURE_PROBES: probes, FIXTURE_RUSTC: path.join(bin, "rustc"), ...overrides };
+    for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+    return spawnSync(process.execPath, [fileURLToPath(owner), "cohort"], { env, encoding: "utf8", timeout: 15000 });
+  };
+  writeFileSync(manifest, `date="${pin.slice(8)}"\n[pkg.rust]\n`);
+  const good = run();
+  assert.equal(good.status, 0, good.stderr);
+  assert.deepEqual(readFileSync(probes, "utf8").trim().split("\n").map(JSON.parse), [["which", "--toolchain", pin, "rustc"], ["run", pin, "rustc", "-vV"], ["run", pin, "cargo", "-vV"]]);
+  assert.equal(readFileSync(outputs, "utf8"), `toolchain=${pin}\nrustc=${hash("rustc exact compiler fixture")}\ncargo=${hash("cargo exact compiler fixture")}\n`);
+  for (const overrides of [{ MESH_ASAN_TOOLCHAIN: undefined }, { MESH_ASAN_TOOLCHAIN: "nightly" }, { MESH_ASAN_TOOLCHAIN: "nightly-2026-02-30" }, ... ["which", "rustc", "cargo"].map(FIXTURE_TOOL_FAILURE => ({ FIXTURE_TOOL_FAILURE })), { GITHUB_OUTPUT: undefined }]) {
+    const failed = run(overrides); assert.notEqual(failed.status, 0, failed.stdout); assert.ok(!existsSync(outputs), "failure must not publish a cohort");
+  }
+  writeFileSync(manifest, 'date="2026-11-03"\n');
+  assert.notEqual(run().status, 0); assert.ok(!existsSync(outputs));
+  rmSync(manifest);
+  assert.notEqual(run().status, 0); assert.ok(!existsSync(outputs));
+});
+
+test("ASan producer installs the declared reviewed nightly once before strict cohort validation and cache restore", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
+  assert.match(workflow, /^  MESH_ASAN_TOOLCHAIN: nightly-\d{4}-\d{2}-\d{2}$/mu);
+  const producer = workflow.split("  cohort:\n")[1].split("  shards:\n")[0];
+  assert.equal(producer.match(/uses: dtolnay\/rust-toolchain@nightly/gu)?.length, 1);
+  assert.match(producer, /toolchain: \$\{\{ env.MESH_ASAN_TOOLCHAIN \}\}\n          components: rust-src/u);
+  assert.ok(producer.indexOf("components: rust-src") < producer.indexOf("asan.mjs cohort"));
+  assert.ok(producer.indexOf("asan.mjs cohort") < producer.indexOf("Swatinem/rust-cache"));
+  assert.match(producer, /shared-key: sanitizers-shards/u);
+  for (const [key, value] of [["RUSTFLAGS", "-Zsanitizer=address"], ["RUSTDOCFLAGS", "-Zsanitizer=address"], ["ASAN_OPTIONS", "detect_leaks=1"], ["RUST_TEST_THREADS", "1"]]) assert.ok(workflow.includes(`  ${key}: "${value}"`));
 });

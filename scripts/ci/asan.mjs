@@ -169,12 +169,14 @@ export async function reuseArchive(directory, outputDirectory, identity, options
 async function output(binary, args) { return (await runLogged(args, { binary })).trim(); }
 
 async function cohort() {
-  const rustc = await output("rustup", ["which", "--toolchain", "nightly", "rustc"]);
-  const manifest = path.resolve(path.dirname(rustc), "../lib/rustlib/multirust-channel-manifest.toml");
-  const toolchain = nightlyFromManifest(readFileSync(manifest, "utf8"));
-  const rustcSha256 = hash(await output("rustup", ["run", "nightly", "rustc", "-vV"]));
-  const cargoSha256 = hash(await output("rustup", ["run", "nightly", "cargo", "-vV"]));
+  const toolchain = process.env.MESH_ASAN_TOOLCHAIN;
+  assert.match(toolchain ?? "", /^nightly-\d{4}-\d{2}-\d{2}$/u, "ASan requires a declared dated nightly toolchain");
   assert.ok(process.env.GITHUB_OUTPUT, "Cohort output requires GITHUB_OUTPUT");
+  const rustc = await output("rustup", ["which", "--toolchain", toolchain, "rustc"]);
+  const manifest = path.resolve(path.dirname(rustc), "../lib/rustlib/multirust-channel-manifest.toml");
+  assert.equal(nightlyFromManifest(readFileSync(manifest, "utf8")), toolchain, "Installed nightly manifest differs from declared toolchain");
+  const rustcSha256 = hash(await output("rustup", ["run", toolchain, "rustc", "-vV"]));
+  const cargoSha256 = hash(await output("rustup", ["run", toolchain, "cargo", "-vV"]));
   appendFileSync(process.env.GITHUB_OUTPUT, `toolchain=${toolchain}\nrustc=${rustcSha256}\ncargo=${cargoSha256}\n`);
   console.log(`ASan cohort: ${toolchain} (${rustcSha256})`);
 }
