@@ -444,6 +444,14 @@ platform path owner while retaining exact identity and escape checks; the
 [archive diagnostics](../scripts/diagnostics/windows-coverage.test.mjs) own those
 controls. Local execution does not replace actual Windows qualification.
 
+Read transient browser state with one nonwaiting DOM snapshot when an outer
+assertion already owns readiness. Attachment waits nested inside that assertion
+can exhaust its budget before any decode or geometry observation. The
+[media-scroll fixture](../frontend/e2e/media-scroll.spec.ts) establishes visible
+preparation before releasing media and checks an absent row through a snapshot-only
+observer; retain its exact geometry and cache assertions. Keep independent
+negative controls outside the journey's active retention window.
+
 Keep extracted runtimes outside diagnostic artifact roots on failure as well as
 success. Stage under an owned directory on the destination filesystem, retire it
 in the extraction owner's cleanup path, and preserve unrelated build outputs.

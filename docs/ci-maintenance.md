@@ -794,11 +794,14 @@ owning suite policy.
 
 Keep each observation inside a polling assertion nonwaiting when the assertion
 already owns readiness. A locator operation can wait for a virtualized row and
-consume the entire outer budget without producing one geometry sample. Inspect
-the trace to distinguish missing samples from unequal values; use one browser-side
-DOM snapshot for transient geometry, treating an absent row as pending. Preserve
-exact geometry and cache assertions, and exercise the absent-row control rather
-than extending the deadline. The media-scroll remount regression owns this case.
+consume the entire outer budget without producing one decode or geometry sample.
+Inspect the trace to distinguish missing samples from unequal values; use one
+browser-side DOM snapshot, treating an absent row as pending. Establish visible
+fixture preparation before releasing held media bytes and starting decode checks.
+Preserve exact geometry and cache assertions, and exercise the absent-row control
+with a snapshot-only observer rather than extending the deadline. The media-scroll
+remount regression owns this case. Run independent adversarial sampler controls
+after the cache-remount journey, so they cannot consume its retention window.
 
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the
