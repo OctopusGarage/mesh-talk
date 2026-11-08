@@ -143,8 +143,11 @@ unpolled timer alone. This includes the explicit account File result/retry rigs:
 existing independent peer owner for source, requester, recipient and the launched
 fresh sibling, keeping inactive retry phases and every byte/manifest assertion.
 Release fault helpers before joining hosts, and preserve body failure after
-actual retirement. A shared-reactor timeout does not by itself prove starvation
-caused that historical failure. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+actual retirement. Each online sender needs its normal delivery recovery owner
+and an advertised address bound to its real listener. Local acceptance followed
+by one best-effort flush cannot prove recovery after a transient exchange failure.
+The [fresh-handshake and own-copy controls](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+exercise recovery of the same accepted message without resending; the latter
 holds both sibling workers after its durable copy completes and requires target
 confirmation while they remain held; unrelated devices cannot share that stall.
 
@@ -161,6 +164,11 @@ when empty, so verified `forcedRetirement` alone does not mean work leaked or a
 successful test failed. Preserve the actual exit status and error, cancellation,
 timeout and cleanup-verification results. The empty-job owner control and UI
 runner outcome controls exercise that distinction.
+
+Keep cancellation attached through owned log finalization. After command
+closure, cancel unfinished log publication through the stream owner; partial
+logs fail independently of the original exit status. Still join process-group
+cleanup or verify the helper receipt: log closure cannot certify retirement.
 
 POSIX process-group retirement proves only that group. A browser framework may
 launch its web server in another group; use the actual tool's teardown protocol
@@ -645,6 +653,10 @@ A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
 the actual condition on a transition, retaining the original deadline and bounded
 fallback. A snapshot taken after timeout is diagnostic evidence, not success.
+
+A bounded positive observer may keep waiting on the owning API's explicit pending
+state. Match only that state; storage, authorization and unexpected failures stay
+fatal. Preserve the original deadline and exact outcome assertions.
 
 An offline fixture that needs prompt connection failure must own and observe
 actual transport closure; reserving a TCP port does not guarantee refusal or

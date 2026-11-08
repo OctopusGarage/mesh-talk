@@ -9411,6 +9411,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let a1_port = a1_listener.local_addr().unwrap().port();
     let a2_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a2_port = a2_listener.local_addr().unwrap().port();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
 
     let a1_roster = Arc::new(Mutex::new(Roster::default()));
     add_account_peer(
@@ -9426,7 +9428,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         &bob,
         &bob_account,
         "Bob",
-        4000,
+        bob_port,
         &a1.public().user_id(),
     );
     let a2_roster = Arc::new(Mutex::new(Roster::default()));
@@ -9597,10 +9599,16 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     // synchronous maintenance turn with either simulated application.
     let mut a1_peer = None;
     let mut a2_peer = None;
+    let mut bob_peer = None;
     let outcome = Box::pin(std::panic::AssertUnwindSafe(async {
     let mut source = IndependentPeerRuntime::start_multithreaded(Arc::clone(&a1_node), a1_listener).await;
     source.launch();
     a1_peer = Some(source);
+    // Bob is online when sending this DM. Local acceptance plus one best-effort
+    // flush is insufficient: its actual host owns recovery after a failed round.
+    let mut sender = IndependentPeerRuntime::start_multithreaded(Arc::clone(&bob_node), bob_listener).await;
+    sender.launch();
+    bob_peer = Some(sender);
     phase("incoming_dm_send_begin");
     bob_node
         .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
@@ -10357,6 +10365,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             .catch_unwind()
             .await
             .err();
+    }
+    if let Some(sender) = bob_peer.take() {
+        let stopped = std::panic::AssertUnwindSafe(sender.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
     }
     phase("source_abort_begin");
     if let Some(source) = a1_peer.take() {

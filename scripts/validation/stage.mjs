@@ -214,7 +214,7 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
     const child = spawn(argv[0], argv.slice(1), { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== "win32" && !nestedGroup && detached });
     const forward = (chunk, channel) => { output.write(chunk); onOutput(chunk, channel); };
     child.stdout?.on("data", chunk => forward(chunk, "stdout")); child.stderr?.on("data", chunk => forward(chunk, "stderr"));
-    output.on("error", failure => { error = failure.message; failureKind = "failed"; abort(); });
+    output.on("error", failure => { error ||= failure.message; failureKind = "failed"; abort(); });
     child.on("error", failure => { error = failure.message; failureKind = ["ENOENT", "EACCES"].includes(failure.code) ? "unavailable" : "failed"; });
     let cleanup;
     const abort = () => {
@@ -261,8 +261,14 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
         abort();
       });
     });
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
+    let finalizingOutput = false;
+    const cancelLog = () => {
+      if (finalizingOutput && !output.writableFinished && !output.destroyed)
+        output.destroy(Error("Command log finalization cancelled"));
+    };
+    const cancel = () => { cancelLog(); abort(); };
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
     const retireAfterExit = () => {
       // Only this owner created the child's group. Nested commands share a
       // live supervisor/sibling group; its final outer stage owns retirement.
@@ -274,7 +280,11 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
           forcedRetirement = true;
           abort();
         } catch (failure) {
-          if (failure.code !== "ESRCH") {
+          if (failure.code === "ESRCH") {
+            // Retain kernel absence as terminal ownership evidence. Later log
+            // cancellation must not signal a potentially reused group identity.
+            cleanup = Promise.resolve();
+          } else {
             error ||= "Command descendant retirement could not be verified";
             failureKind ||= "failed";
             abort();
@@ -311,12 +321,14 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
       clearTimeout(drainTimer);
       await publication;
       retireAfterExit();
+      finalizingOutput = true;
+      if (signal?.aborted) cancelLog();
       await new Promise(done => output.end(failure => {
         if (failure) { error ||= failure.message; failureKind ||= "failed"; abort(); }
         done();
       }));
       await cleanup;
-      signal?.removeEventListener("abort", abort);
+      signal?.removeEventListener("abort", cancel);
       resolve({ code: signal?.aborted ? 130 : error ? 1 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified, forcedRetirement, exitCode: code, signal: childSignal });
     });
   });

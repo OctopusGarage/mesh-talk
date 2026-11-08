@@ -61,11 +61,18 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
     // artifact contract even when resolution proves no helper can be admitted.
     if (logPath) {
       const output = createLogStream(logPath);
-      await new Promise(resolve => {
-        const failed = failure => { result.error = failure.message; result.failureKind = "failed"; resolve(); };
-        output.on("error", failed);
-        output.end(failure => { if (failure) failed(failure); else resolve(); });
-      });
+      const cancelLog = () => {
+        if (!output.writableFinished && !output.destroyed) output.destroy(Error("Command log finalization cancelled"));
+      };
+      signal?.addEventListener("abort", cancelLog, { once: true });
+      try {
+        await new Promise(resolve => {
+          const failed = failure => { result.error = failure.message; result.failureKind = "failed"; resolve(); };
+          output.on("error", failed);
+          if (signal?.aborted) cancelLog();
+          output.end(failure => { if (failure) failed(failure); else resolve(); });
+        });
+      } finally { signal?.removeEventListener("abort", cancelLog); }
     }
     return result;
   }
@@ -95,13 +102,21 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
     child.stdin.on("error", () => { /* Missing retirement receipt fails closed. */ });
     const closed = new Promise(resolve => child.on("close", (code, helperSignal) => resolve({ code, helperSignal })));
     child.stdin.write(`${JSON.stringify({ app, args: command.slice(1).map(String), environment: entries.map(([name, value]) => `${name}=${value}`), cwd, receipt, nonce })}\n`);
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
+    let finalizingOutput = false;
+    const cancelLog = () => {
+      if (finalizingOutput && !output.writableFinished && !output.destroyed)
+        output.destroy(Error("Command log finalization cancelled"));
+    };
+    const cancel = () => { cancelLog(); abort(); };
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
     const status = await closed;
     ownerClosed = true;
     clearTimeout(abortTimer);
-    signal?.removeEventListener("abort", abort);
-    await new Promise(resolve => output.end(error => { failure ||= error?.message; resolve(); }));
+    finalizingOutput = true;
+    if (signal?.aborted) cancelLog();
+    try { await new Promise(resolve => output.end(error => { failure ||= error?.message; resolve(); })); }
+    finally { signal?.removeEventListener("abort", cancel); }
     let record;
     try { record = JSON.parse(await readFile(receipt, "utf8")); } catch { /* Unknown retirement retains the owner's leases. */ }
     const result = record?.schema === 1 && record.nonce === nonce ? record.result : undefined;

@@ -749,6 +749,8 @@ request identity, immutable control state and the lifetime of the actual task.
 Historical logs or a previously authenticated request do not prove that a live
 request has entered the required phase. Keep cancellation, task joining and
 cleanup correct on success, failure and panic.
+Keep the owning API's pending/error distinction in bounded observers; see the
+[failure-evidence rules](ai-coding-reliability.md#r10-evidence-that-exercises-the-failure).
 When key ordering determines the scenario, use deterministic noncolliding fixture
 identities and check actual signed keys or cursors; random IDs can exercise only
 the easier path. Preserve real signing, publication and receipt assertions.
@@ -792,16 +794,17 @@ the original offline/online cuts and observation budgets, and join actual work
 before profile reuse on success and failure. A timer sharing a synchronously
 stalled reactor provides no independent watchdog; isolate device scheduling
 rather than extending timeouts or assigning one shared reactor more workers.
-Keep the genuine held-worker delivery control alongside reconnect acceptance.
-Separating accept and maintenance loops does not move direct observer queries,
-public sends or their caller-owned idle-expiry tasks onto those device runtimes;
-those paths can still stall the observer's timer. Local fixture success does not
-establish the historical Windows lock, complete watchdog independence or native
-platform qualification.
+Include actual sender recovery and bound advertised listeners, not only recipient
+loops and a best-effort send. Keep the genuine held-worker delivery control
+alongside reconnect acceptance. [Reactor ownership](ai-coding-reliability.md#r02-thread-and-scheduler-progress)
+also explains why direct observer work remains a watchdog limitation. Local
+fixture success does not establish a historical lock cause or native qualification.
 When tool identity is outside the assertion, reuse the existing
 [tool-version fixture](../scripts/diagnostics/test-fixtures/tool-versions.mjs)
 and verify that its probes were actually consumed. Keep the real command,
 failure, cancellation and receipt assertions and their existing watchdogs.
+Exercise interrupted log finalization as well as child retirement through the
+existing [process-owner controls](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
 Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
 run cannot qualify an unbounded environmental dependency for later main runs. Asynchronous
