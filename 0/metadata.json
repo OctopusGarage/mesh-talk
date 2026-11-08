@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WD02MSWGF4GARH88DH656X",
+  "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-08T01:40:25.21017Z",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "docs/ci-maintenance.md",
+    "scripts/ci/backend-coverage.test.mjs",
+    "scripts/ci/native-host-coverage.test.mjs",
+    "scripts/ci/workspace-coverage.sh",
+    "scripts/diagnostics/ci-latency.test.mjs"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "232b6def33d6",
+  "checkpoint_transcript_start": 26692,
+  "transcript_lines_at_start": 26692,
+  "compact_transcript_start": 3072,
+  "token_usage": {
+    "input_tokens": 266198,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 91004928,
+    "output_tokens": 179965,
+    "api_call_count": 437,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 394,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 4,
+      "credentialed_uri": 0,
+      "entropy": 396,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 8
+  }
+}
