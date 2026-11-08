@@ -7,6 +7,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { reservedCohorts } from "./asan.mjs";
 import { versions } from "./windows-coverage.mjs";
 
 const driver = `import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
@@ -41,6 +42,8 @@ if (mode === "run") {
  await runPartition(1, path.join(root, "changed"), { ...await reuse("changed"), identity: archiveIdentity(), afterExecution: async () => { throw Error("final identity changed"); } });
 } else if (mode === "changed-producer") {
  await produceArchive(path.join(root, "changed-producer"), { buildArgs, identity, afterBuild: async () => { throw Error("producer identity changed"); } });
+} else if (mode === "invalid-producer") {
+ await produceArchive(path.join(root, process.env.MESH_ASAN_INVALID_OUTPUT), { buildArgs, identity });
 } else if (mode === "wrong-source") {
  await reuseArchive(archiveDirectory, path.join(root, "wrong-source"), { ...archiveIdentity(), source: "wrong-source" });
 } else if (mode === "verify-archive") {
@@ -78,7 +81,13 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   writeFileSync(path.join(root, "Cargo.toml"), '[package]\nname="asan-protocol-fixture"\nversion="0.0.0"\nedition="2024"\n[workspace]\n');
   writeFileSync(path.join(root, "Cargo.lock"), 'version = 4\n[[package]]\nname = "asan-protocol-fixture"\nversion = "0.0.0"\n');
   const cases = Array.from({ length: 32 }, (_, index) => `#[test] fn case_${index}() { if let Some(path) = std::env::var_os("MESH_ASAN_PROTOCOL_FAIL") { match std::fs::OpenOptions::new().write(true).create_new(true).open(path) { Ok(_) => panic!("intentional protocol failure"), Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (), Err(error) => panic!("failure sentinel: {error}") } } assert_eq!(std::env::var("RUST_TEST_THREADS").unwrap(), "1"); assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some()); }`).join("\n");
-  writeFileSync(path.join(root, "src/lib.rs"), `${cases}\n#[test] #[ignore] fn ignored() { panic!("default ignored cases must not run"); }\n`);
+  const reserved = `mod node { mod account_documents { mod tests {
+    #[test] fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required_members() {}
+    mod inventory_causality { #[test] fn group_inventory_directory_known_unavailable_source_can_be_acknowledged_by_another_source() {} }
+    #[test] fn group_control_unavailable_obsolete_cache_cannot_orphan_a_large_negative_head() {}
+    #[test] fn group_control_normal_authorization_history_growth_keeps_bounded_current_heads() {}
+  } } }`;
+  writeFileSync(path.join(root, "src/lib.rs"), `${reserved}\n${cases}\n#[test] #[ignore] fn ignored() { panic!("default ignored cases must not run"); }\n`);
   // --lib must not silently expand into bin/integration targets.
   writeFileSync(path.join(root, "tests/must_not_run.rs"), '#[test] fn integration() { panic!("ASan is core lib only"); }\n');
   mkdirSync(path.join(root, "signal-smoke/src"), { recursive: true });
@@ -92,10 +101,13 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
   const run = (mode, environment = env) => spawnSync(process.execPath, [path.join(root, "driver.mjs"), path.join(root, "scripts/ci/asan.mjs"), root, mode], { cwd: root, env: environment, encoding: "utf8", timeout: 90000, maxBuffer: 16 * 1024 * 1024 });
   const accepted = run("run");
   assert.equal(accepted.status, 0, `${accepted.error ?? ""}\n${accepted.stdout}\n${accepted.stderr}`);
-  assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 33, executedTests: 32, ignoredTests: 1, shards: 8 });
+  assert.deepEqual(JSON.parse(readFileSync(path.join(root, "summary.json"))), { totalTests: 37, executedTests: 36, ignoredTests: 1, shards: 8 });
   for (const shard of [1, 2, 3, 4, 5, 6, 7, 8]) {
     const evidence = path.join(root, "evidence", String(shard));
     const files = readdirSync(evidence, { withFileTypes: true });
+    const selectedNames = JSON.parse(readFileSync(path.join(evidence, "selected.json"))).filter(row => row.selected).map(row => row.eventName.split("$")[1]);
+    if (shard <= 6) assert.ok(selectedNames.every(name => !reservedCohorts.flat().includes(name)), "reserved cases must leave the hash runners");
+    else assert.deepEqual(selectedNames.sort(), [...reservedCohorts[shard - 7]].sort(), "reserved runner must execute exactly its fixed cohort");
     assert.ok(files.every(entry => entry.isFile()), "execution evidence must not contain extracted runtime directories");
     for (const name of ["receipt.json", "full.json", "selected.json", "execution.jsonl"]) assert.ok(files.some(entry => entry.name === name), `missing required evidence: ${name}`);
     assert.ok(!files.some(entry => entry.name === "binaries.json"), "binary metadata belongs outside execution evidence");
@@ -115,6 +127,21 @@ test("real pinned Nextest preserves the full default-lib union and rejects faile
     assert.equal(rejected.status, 1);
     assert.match(rejected.stderr, message);
     writeFileSync(filename, original);
+  }
+  const fixtureSource = path.join(root, "src/lib.rs");
+  const originalSource = readFileSync(fixtureSource, "utf8");
+  const reservedFunction = reservedCohorts[0][0].split("::").at(-1);
+  for (const [kind, transformed] of [
+    ["renamed", originalSource.replace(reservedFunction, `${reservedFunction}_renamed`)],
+    ["ignored", originalSource.replace(`#[test] fn ${reservedFunction}`, `#[test] #[ignore] fn ${reservedFunction}`)],
+  ]) {
+    writeFileSync(fixtureSource, transformed);
+    const output = `invalid-producer-${kind}`;
+    const rejected = run("invalid-producer", { ...env, MESH_ASAN_INVALID_OUTPUT: output });
+    assert.equal(rejected.status, 1, rejected.stderr);
+    assert.match(rejected.stderr, /ASan reserved test/u);
+    assert.ok(!existsSync(path.join(root, output, "archive.json")), "invalid reserved inventory must not seal");
+    writeFileSync(fixtureSource, originalSource);
   }
   const changedProducer = run("changed-producer");
   assert.equal(changedProducer.status, 1);

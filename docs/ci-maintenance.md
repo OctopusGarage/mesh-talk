@@ -515,7 +515,17 @@ UI coverage and reports require one complete attempt, so recover that workflow
 as a whole when an unallocated producer prevents its current-attempt evidence.
 
 ASan compiles its core library once into an official Nextest archive, then runs
-eight serial partitions. The producer seals the complete default inventory and
+eight serial partitions. Runners 1–6 use Nextest `hash:ID/6`, excluding the
+four exact reserved test names owned by `scripts/ci/asan.mjs`. Runner 7 executes
+the long canonical inventory payload case alone; runner 8 executes the known
+unavailable directory-source acknowledgment, obsolete negative-cache head and
+normal authorization-history growth cases. These fixed cohorts balance measured
+outliers without another timing database. List and run use identical selectors;
+full discovery remains unfiltered. Before sealing and before execution, the owner
+requires every reserved name exactly once and default runnable, rejecting name
+drift, duplicates and ignored cases. Preserve the complete strict union when
+changing cohorts; compare actual instrumented timings before reconsidering them.
+The producer seals the complete default inventory and
 source/compiler/config/platform identity. Trusted job outputs bind both the
 manifest and archive digests; consumers reject mismatches before extraction and
 compare the extracted inventory before execution. Each runner retains the same

@@ -9,6 +9,24 @@ import { fileURLToPath } from "node:url";
 import { command as runLogged, inventory, verifyPartition, verifyExecution, versions } from "./windows-coverage.mjs";
 
 const partitions = [1, 2, 3, 4, 5, 6, 7, 8];
+// Fixed measured outliers, not a timing database. Names must remain exact and
+// default runnable in the full archive inventory before sealing or execution.
+export const reservedCohorts = Object.freeze([
+  Object.freeze(["node::account_documents::tests::group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required_members"]),
+  Object.freeze([
+    "node::account_documents::tests::inventory_causality::group_inventory_directory_known_unavailable_source_can_be_acknowledged_by_another_source",
+    "node::account_documents::tests::group_control_unavailable_obsolete_cache_cannot_orphan_a_large_negative_head",
+    "node::account_documents::tests::group_control_normal_authorization_history_growth_keeps_bounded_current_heads",
+  ]),
+]);
+const exactTests = names => names.map(name => `test(=${name})`).join(" or ");
+export function verifyReservedInventory(full) {
+  for (const name of reservedCohorts.flat()) {
+    const matches = full.filter(row => row.eventName.slice(row.eventName.indexOf("$") + 1) === name);
+    assert.equal(matches.length, 1, `ASan reserved test missing or ambiguous: ${name}`);
+    assert.ok(matches[0].selected && !matches[0].ignored, `ASan reserved test is not default runnable: ${name}`);
+  }
+}
 const target = "x86_64-unknown-linux-gnu";
 const config = ".config/nextest-asan.toml";
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -30,13 +48,14 @@ export function nightlyFromManifest(text) {
 export function partitionArgs(mode, buildArgs, shard) {
   assert.ok(["list", "run"].includes(mode), "Invalid ASan command mode");
   assert.ok(shard === undefined || partitions.includes(shard), "Invalid ASan partition");
-  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard ? ["--partition", `hash:${shard}/${partitions.length}`] : []), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
+  return ["nextest", mode, ...buildArgs, "--config-file", path.resolve(config), "--user-config-file", "none", "--profile", "default", ...(shard === undefined ? [] : shard <= 6 ? ["--partition", `hash:${shard}/6`, "-E", `not (${exactTests(reservedCohorts.flat())})`] : ["-E", `(${exactTests(reservedCohorts[shard - 7])})`]), ...(mode === "list" ? ["--message-format", "json"] : ["--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", "--message-format", "libtest-json-plus", "--message-format-version", "0.1"])];
 }
 
 export function verifyAsanUnion(bundles, expected) {
   assert.equal(bundles.length, partitions.length, "Expected exactly eight ASan partitions");
   assert.deepEqual(bundles.map(bundle => bundle.receipt.shard).sort(), partitions, "Duplicate or missing ASan partition");
   const full = bundles[0].full;
+  verifyReservedInventory(full);
   for (const bundle of bundles) {
     const { receipt, selected, execution } = bundle;
     assert.equal(receipt.schema, 1, "Unsupported ASan receipt");
@@ -66,6 +85,7 @@ export async function runPartition(shard, directory, { buildArgs, identity, expe
   const run = (mode, index, phase) => runLogged([...cargoPrefix, ...partitionArgs(mode, buildArgs, index)], { env: { ...env, RUST_TEST_THREADS: "1", NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1" }, receipt: path.join(directory, phase), progress: path.join(directory, "progress.jsonl"), phase, liveStdout: mode === "run" });
   const full = inventory(JSON.parse(await run("list", undefined, "inventory-all")));
   if (expectedInventory) assert.deepEqual(full, expectedInventory, "ASan archive inventory differs from producer");
+  verifyReservedInventory(full);
   const selected = inventory(JSON.parse(await run("list", shard, "inventory-selected")));
   assert.ok(full.every(row => row.selected === !row.ignored), "ASan full inventory has hidden filters");
   assert.deepEqual(selected.map(({ selected: _selected, ...row }) => row), full.map(({ selected: _selected, ...row }) => row), "ASan partition inventory drift");
@@ -112,6 +132,7 @@ export async function produceArchive(directory, { buildArgs, identity, cargoPref
     const full = inventory(JSON.parse(await runLogged([...cargoPrefix, ...partitionArgs("list", reuse)], { env })));
     assert.ok(full.some(row => row.selected), "Empty ASan producer inventory");
     assert.ok(full.every(row => row.selected === !row.ignored), "ASan archive has hidden filters");
+    verifyReservedInventory(full);
     await afterBuild();
     const manifest = { schema: 1, identity: buildIdentity(identity), archiveSha256: await fileHash(archive), fullSha256: digest(full), full };
     write(path.join(directory, "archive.json"), manifest);
@@ -133,6 +154,7 @@ export async function verifyArchive(directory, identity) {
   assert.equal(await fileHash(path.join(directory, "core.tar.zst")), identity.archive.sha256, "ASan archive digest mismatch");
   assert.equal(digest(manifest.full), manifest.fullSha256, "ASan producer inventory digest mismatch");
   assert.ok(manifest.full.some(row => row.selected) && manifest.full.every(row => row.selected === !row.ignored), "Invalid ASan producer inventory");
+  verifyReservedInventory(manifest.full);
   return manifest;
 }
 
