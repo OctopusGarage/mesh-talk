@@ -1,0 +1,33 @@
+调研一下，PWA可以通过蓝牙或者airdrop之类的方式局域网发现或者发消息吗，这样可以作为现有udp广播方案的一种可选替代？
+
+---
+
+你查一下bitchat，为什么可以通过蓝牙，来发现和通信的，调研一下这个app
+
+---
+
+那你继续全面优化一下吧
+
+---
+
+推进原生蓝牙发现与通信
+
+---
+
+好
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"有两台 Mac","question":"后续 BLE-only 真机验证需要两台独立设备。你目前能用于测试的设备组合是什么？（当前实现先支持两台 macOS；iPhone／Android 需要另外的原生适配。）","questionItemId":"[\"request_user_input_async\",\"call_adc20846f1ec4d6a8578b280f2e171b3\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"mac2015, ssh过去","question":"第二台 Mac 的 SSH 地址是什么（例如 user@hostname）？如果未开启远程登录，也可以说明，我会准备两端手动运行步骤。","questionItemId":"[\"request_user_input_async\",\"call_3fe0abaf1a5a43239b8c2d6f38326f3b\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+提交推送吧

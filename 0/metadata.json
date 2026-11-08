@@ -1,0 +1,59 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6X25FJYN12785RYZQ3545D0",
+  "session_id": "01a1b9d6-e428-7a40-a439-f43aa7acb8c4",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-08T07:50:07.804718Z",
+  "branch": "fix/chat-composer-tools",
+  "checkpoints_count": 6,
+  "save_step_count": 1,
+  "files_touched": [
+    "crates/mesh-talk-core/examples/bluetooth-rehearsal.rs",
+    "crates/mesh-talk-core/src/transport/mod.rs",
+    "crates/mesh-talk-core/validation.json",
+    "docs/ARCHITECTURE.md",
+    "docs/README.md",
+    "docs/ai-coding-reliability.md",
+    "docs/native-bluetooth.md",
+    "src-tauri/examples/bluetooth-radio-tests.swift",
+    "src-tauri/examples/bluetooth-radio.swift"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "1f325ca44ada",
+  "checkpoint_transcript_start": 378,
+  "transcript_lines_at_start": 378,
+  "compact_transcript_start": 63,
+  "token_usage": {
+    "input_tokens": 311667,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 24934656,
+    "output_tokens": 49683,
+    "api_call_count": 164,
+    "subagent_tokens": {
+      "input_tokens": 185313,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 5154688,
+      "output_tokens": 17644,
+      "api_call_count": 117
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 5089,
+    "layers": {
+      "betterleaks": 2,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 3,
+      "credentialed_uri": 0,
+      "entropy": 5084,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 11
+  }
+}
