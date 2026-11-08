@@ -513,8 +513,12 @@ frontend state before navigation; a later settings response must not silently
 remove the capability under test. The call-readiness fixture owns that setup.
 For saved reading positions, exhausting bounded animation-frame polling does not
 prove geometry is ready: retain the conversation-owned target and resume on
-geometry changes, cancelling observers on cleanup and reader intent. The viewport
-unit regression supplies geometry only after the polling window.
+geometry changes, cancelling observers on cleanup and reader intent. Keep one
+owner for automatic scroll correction, including library subscriptions that can
+retain navigation across later measurements; a second writer can override valid
+reader input even when the application owner rejects it. The viewport unit
+regressions cover delayed geometry and insertion/resize pinning under reader intent;
+real browser media scenarios qualify the virtualizer interaction.
 
 Raw storage injection in concurrency fixtures must publish through the normal
 owner notification before requiring a peer's unrelated scope to settle. Preserve

@@ -394,9 +394,7 @@ export function ConversationView() {
     n: number;
     applyIf?: () => boolean;
   } | null>(null);
-  // `showJump` reveals the jump-to-bottom button whenever the user has scrolled up.
-  // Virtuoso's `followOutput` only sticks to the newest message while already at the
-  // bottom, so reading history is never interrupted by an inbound message.
+  // The viewport owns live-edge intent and reveals navigation while reading history.
   useEffect(() => {
     setReply(null);
     setPrefill(null);
@@ -790,11 +788,6 @@ export function ConversationView() {
             alignToBottom
             // Start pinned to the newest message (chat opens at the bottom).
             initialTopMostItemIndex={viewport.initialIndex}
-            // Stick to the bottom on new messages only while the user is already there
-            // (preserves scroll position when reading history / prepending older items).
-            followOutput={(isAtBottom) =>
-              !exactContext && isAtBottom ? "auto" : false
-            }
             atBottomStateChange={viewport.atBottomStateChange}
             rangeChanged={({ startIndex }) => viewport.rangeChanged(startIndex)}
             onScroll={viewport.onScroll}

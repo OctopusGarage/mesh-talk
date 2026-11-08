@@ -152,8 +152,11 @@ publish a URL. Protected reveals keep the default per-mount URL lifecycle and
 never opt into ordinary-media reuse.
 
 `useConversationViewport.ts` owns reader anchors and live-edge intent alongside
-Virtuoso's variable-height measurements. Pending user scroll input prevents old
-anchors from writing `scrollTop` during insertions or resize callbacks. Explicit
+Virtuoso's variable-height measurements. Its guarded mutation and resize callbacks
+are the sole automatic live-edge writer; do not add a competing `followOutput`
+subscription that can retain navigation after reader input. Pending user scroll
+input prevents old anchors from writing `scrollTop` during insertions or resize
+callbacks. Explicit
 navigation to the latest message clears earlier momentum intent so delayed row
 measurements keep following the live edge. Existing message keys remain the
 virtual row identities. Browser scenarios cover stable
