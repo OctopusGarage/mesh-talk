@@ -823,7 +823,7 @@ export function MessageBubble({
         )}
 
         {/* reaction chips */}
-        {(reactions.length > 0 || onMoreReactions) && (
+        {reactions.length > 0 && (
           <div
             className={cn("mt-1 flex flex-wrap gap-1", mine && "justify-end")}
           >
@@ -858,9 +858,12 @@ export function MessageBubble({
               <button
                 type="button"
                 onClick={onMoreReactions}
-                className="rounded-full border border-border px-2 py-0.5 text-xs hover:bg-muted"
+                aria-label={t("message.reactionsMore")}
+                title={t("message.reactionsMore")}
+                disabled={readOnly}
+                className="flex h-7 w-7 items-center justify-center rounded-full border border-border hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {t("message.reactionsMore")}
+                <SmilePlus className="h-3.5 w-3.5" />
               </button>
             )}
           </div>
