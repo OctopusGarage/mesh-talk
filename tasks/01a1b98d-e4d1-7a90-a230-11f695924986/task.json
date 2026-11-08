@@ -1,0 +1,12 @@
+{
+  "tool_use_id": "01a1b98d-e4d1-7a90-a230-11f695924986",
+  "agent_id": "01a1b98d-e4d1-7a90-a230-11f695924986",
+  "token_usage": {
+    "input_tokens": 559160,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 8624384,
+    "output_tokens": 17934,
+    "api_call_count": 47
+  },
+  "completed_at": "2026-11-08T13:44:33.989902+08:00"
+}
