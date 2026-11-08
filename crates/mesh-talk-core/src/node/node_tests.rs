@@ -9784,8 +9784,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let delivery_work = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let delivery_trace_started = std::time::Instant::now();
     let delivery_trace_omitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let replay_expected = Arc::new(Mutex::new(None::<String>));
-    let replay_offered_erased = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let replay_revisions = Arc::new(Mutex::new((None::<u64>, None::<u64>)));
+    let replay_changed = Arc::new(tokio::sync::Notify::new());
     for (label, current, peer) in [
         ("source", &a1_node, a2_node.identity.public()),
         ("sibling", &a2_node, a1_node.identity.public()),
@@ -9793,15 +9793,26 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         let trace = delivery_trace.clone();
         let work = delivery_work.clone();
         let omitted = delivery_trace_omitted.clone();
-        let replay_expected = replay_expected.clone();
-        let replay_offered_erased = replay_offered_erased.clone();
+        let replay_revisions = replay_revisions.clone();
+        let replay_changed = replay_changed.clone();
         *current.account_client_test_hook.lock().unwrap() =
             Some(Arc::new(move |observed, phase| {
-                if label == "sibling"
-                    && observed == peer
-                    && replay_expected.lock().unwrap().as_ref() == Some(&phase)
-                {
-                    replay_offered_erased.store(true, std::sync::atomic::Ordering::Release);
+                if label == "sibling" && observed == peer {
+                    if let Some(receipt) = phase.strip_prefix("history_channel_committed revision=")
+                        && let Some((revision, record)) = receipt.split_once(' ')
+                        && record == format!("channel={} event={}", hex::encode(channel.as_bytes()), old_channel_id.to_hex())
+                    {
+                        let revision: u64 = revision.parse().expect("owner emits a policy revision");
+                        let mut seen = replay_revisions.lock().unwrap();
+                        seen.0 = Some(seen.0.map_or(revision, |old| old.max(revision)));
+                        replay_changed.notify_one();
+                    }
+                    if let Some(revision) = phase.strip_prefix("history_sweep_committed revision=") {
+                        let revision: u64 = revision.parse().expect("owner emits a policy revision");
+                        let mut seen = replay_revisions.lock().unwrap();
+                        seen.1 = Some(seen.1.map_or(revision, |old| old.max(revision)));
+                        replay_changed.notify_one();
+                    }
                 }
                 if observed != peer
                     || !(phase.starts_with("dial_")
@@ -9988,18 +9999,30 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     }
     new_channel_delivery.expect("new channel messages still arrive");
     phase("erase_recheck_begin");
-    // Observe an actual fresh source replay, not elapsed time or an unchanged
-    // digest response. Keep both the real commit and query on the peer reactor.
+    // Reset through the public policy owner: its new revision retires old
+    // workers and clears their digest/cursor before a canonical fresh sweep.
     let replay_node = a2_node.clone();
-    let replay_source = a2_node.routing_peer(&a1_node.user_id()).unwrap();
-    let expected = replay_expected.clone();
+    let revisions = replay_revisions.clone();
+    let changed = replay_changed.clone();
     let permit = a2_node.runtime_work.admit().unwrap();
     let mut replay = a2_peer.as_ref().unwrap().runtime_handle().spawn(permit.track(async move {
-        *expected.lock().unwrap() = Some(format!(
-            "history_channel_committed task={:?} channel={} event={}",
-            tokio::task::try_id(), hex::encode(channel.as_bytes()), old_channel_id.to_hex()
-        ));
-        replay_node.replay_account_history_for_test(&replay_source).await?;
+        let previous = replay_node.device_sync_policy_snapshot().1;
+        replay_node.set_device_sync_category(crate::node::SyncCategory::History, false)?;
+        replay_node.set_device_sync_category(crate::node::SyncCategory::History, true)?;
+        let revision = replay_node.device_sync_policy_snapshot().1;
+        assert!(revision > previous, "real policy reset must advance its revision");
+        loop {
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let (offered, completed) = *revisions.lock().unwrap();
+            if completed == Some(revision) {
+                assert_eq!(offered, Some(revision),
+                    "fresh sweep must offer the exact erased payload before terminal commit");
+                break;
+            }
+            notified.await;
+        }
         loop {
             match replay_node.channel_history(channel, 10) {
                 Ok(history) => return Ok::<_, NodeError>(history),
@@ -10009,21 +10032,26 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }));
-    let history = match tokio::time::timeout_at(
+    let completed = tokio::time::timeout_at(
         new_delivery_deadline + Duration::from_secs(11), &mut replay
-    ).await {
+    ).await;
+    if !matches!(&completed, Ok(Ok(Ok(_)))) {
+        eprintln!("linked replay failure revisions={:?} work={:?} omitted={} phases={:?}",
+            replay_revisions.lock().unwrap(), delivery_work.lock().unwrap(),
+            delivery_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            delivery_trace.lock().unwrap());
+    }
+    let history = match completed {
         Ok(result) => result.expect("owned replay task must finish").expect("linked erase replay and observation must succeed"),
         Err(_) => {
-            // Cancellation does not abandon an admitted blocking commit: the
-            // existing peer retirement below also drains its actual work owner.
+            // Cancellation still joins the fixture task; peer retirement below
+            // drains the coordinator's actual admitted blocking commits.
             replay.abort();
             let retired = replay.await;
             assert!(retired.is_ok() || retired.is_err_and(|error| error.is_cancelled()));
             panic!("linked erase replay is readable within the existing delivery and observation window");
         }
     };
-    assert!(replay_offered_erased.load(std::sync::atomic::Ordering::Acquire),
-        "fresh replay must offer the exact erased channel payload and await its real commit");
     let history: Vec<_> = history.into_iter().filter(|entry| entry.file.is_none()).collect();
     assert_eq!(
         history.len(),

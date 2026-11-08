@@ -2553,26 +2553,6 @@ impl Node {
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::node) async fn replay_account_history_for_test(
-        self: &Arc<Self>,
-        peer: &PeerRecord,
-    ) -> Result<(), NodeError> {
-        let mut cursor = None;
-        loop {
-            let (next, _, _) = self
-                .pull_account_history_page(peer, cursor, [0; 32])
-                .await?;
-            let Some(next) = next else { return Ok(()) };
-            if cursor.is_some_and(|previous| next <= previous) {
-                return Err(NodeError::Channel(
-                    "fixture history replay cursor did not advance".into(),
-                ));
-            }
-            cursor = Some(next);
-        }
-    }
-
     async fn pull_account_history_page(
         self: &Arc<Self>,
         peer: &PeerRecord,
@@ -2801,8 +2781,8 @@ impl Node {
                         for (conversation, event) in offered_channels {
                             self.trace_account_client(&peer.public, || {
                                 format!(
-                                    "history_channel_committed task={:?} channel={} event={}",
-                                    tokio::task::try_id(),
+                                    "history_channel_committed revision={} channel={} event={}",
+                                    revision,
                                     hex::encode(conversation),
                                     hex::encode(event)
                                 )
@@ -3685,6 +3665,10 @@ impl Node {
                                 Ok((next, digest, version)) => {
                                     status.legacy_file_metadata = version == AccountSyncVersion::V1;
                                     let history_complete = state.complete_page(next, digest);
+                                    #[cfg(test)]
+                                    if history_complete {
+                                        self.trace_account_client(&peer.public, || format!("history_sweep_committed revision={revision}"));
+                                    }
                                     if history_complete && !favorites_pending && !favorites_waiting { status.phase = SyncPhase::UpToDate; }
                                     else { continuation |= !history_complete; }
                                     if let Some(error) = &state.favorite_error {

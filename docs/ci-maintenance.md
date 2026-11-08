@@ -846,6 +846,9 @@ prove the erased record was offered again and all pages were applied before
 checking that it remains absent. A successful page, unchanged-digest response or
 unrelated worker notification does not prove a complete replay. Keep deadlines
 as failure bounds, and retain ownership and joins for admitted work on timeout.
+Request that work through its existing coordinator and observe its publication
+revision and terminal completion. A second hand-driven page loop can race the
+normal worker and bypass its serialization, recovery and cancellation contract.
 Give counterfactual source copies their own Cargo target directory. Relative
 package paths can collide across copies and reuse a mutated test executable;
 the canonical candidate must never consume a negative control's build output.
