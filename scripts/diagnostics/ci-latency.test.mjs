@@ -81,6 +81,17 @@ test("docs eligibility is recomputed locally and never fabricates provider or te
   assert.doesNotMatch(read("codeql.yml"), /docs-scope|ci-scope|paths-ignore/u);
 });
 
+test("Linux coverage uploads one final accumulated report after ignored-case validation", () => {
+  const ci = read("ci.yml");
+  assert.match(step(ci, "Test + coverage (Linux)"), /workspace-coverage\.sh linux --defer-report/u);
+  const final = step(ci, "Large-folder enqueue regression (Linux)");
+  const validation = final.indexOf("node scripts/evals/backend-runner.mjs --validate-large-folder");
+  assert.ok(validation >= 0 && validation < final.indexOf("cargo llvm-cov report"));
+  assert.equal((ci.match(/cargo llvm-cov report --lcov --output-path src-tauri\/lcov\.info/gu) || []).length, 1);
+  assert.match(step(ci, "Upload coverage to Codecov"), /^          files: src-tauri\/lcov\.info$/mu);
+  assert.doesNotMatch(ci, /e2e-lcov\.info/u);
+});
+
 test("Codecov action and downloaded CLI versions are pinned independently", () => {
   let uploads = 0;
   for (const file of ["ci.yml", "check-health.yml", "windows-workspace.yml", "e2e-ui.yml"]) {

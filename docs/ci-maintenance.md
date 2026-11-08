@@ -221,8 +221,11 @@ requiring evidence on passing jobs; a producer skipped by an upstream failure
 must not create a second missing-artifact error.
 
 The [workspace coverage owner](../scripts/ci/workspace-coverage.sh) owns native
-partition commands, timing pipelines and report generation; workflow steps pass
-only the platform. Actual-tool failure controls verify both platform branches.
+partition commands, timing pipelines and report generation. Linux CI defers its
+interim report until default and ignored backend cases have passed validation,
+then generates and uploads one accumulated report. Avoid uploading an earlier
+subset together with its final superset. Standalone and macOS reporting remain
+immediate; actual-tool controls verify accumulation and both failure paths.
 
 Keep complete tests distinct from duplicate instrumentation. macOS instruments
 Host for its native desktop/updater branches, then runs every remaining default

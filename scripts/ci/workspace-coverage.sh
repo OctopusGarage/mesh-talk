@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 # Run from src-tauri (or a fixture workspace); preserve each platform's cohort.
 set -e -o pipefail
+usage() {
+    echo "Usage: workspace-coverage.sh linux [--defer-report] | macos" >&2
+    exit 2
+}
 case "${1:-}" in
     linux|macos) platform="$1" ;;
-    *) echo "Usage: workspace-coverage.sh linux|macos" >&2; exit 2 ;;
+    *) usage ;;
+esac
+defer_report=0
+case "$#" in
+    1) ;;
+    2)
+        [ "$platform" = linux ] && [ "$2" = --defer-report ] || usage
+        defer_report=1
+        ;;
+    *) usage ;;
 esac
 if [ "$platform" = linux ]; then
     ulimit -c 262144
@@ -44,7 +57,9 @@ run_coverage() {
             run_phase remaining cargo nextest run --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
         then :; else return "$?"; fi
     fi
-    run_phase report cargo llvm-cov report --lcov --output-path lcov.info
+    if [ "$defer_report" = 0 ]; then
+        run_phase report cargo llvm-cov report --lcov --output-path lcov.info
+    fi
 }
 if [ "${MESH_TALK_TEST_TIMING:-0}" = 1 ]; then
     run_coverage 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"

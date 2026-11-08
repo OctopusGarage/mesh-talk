@@ -2,7 +2,7 @@
 // Health's portable diagnostics intentionally do not require coverage tooling.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +44,8 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
     return result.stdout;
   };
   run(["generate-lockfile", "--offline"]);
-  assert.match(run(["llvm-cov", "--lib", "--locked", "--lcov", "--output-path", "unit.lcov"]), /1 passed; 0 failed/);
+  assert.match(run(["llvm-cov", "--lib", "--locked", "--no-report"]), /1 passed; 0 failed/);
+  assert.equal(existsSync(join(root, "lcov.info")), false, "unit execution must defer the only completed report");
   const output = run(backendCargoArgs("two_node_cli", true));
   validateBackendOutput(output, BACKEND_SUITES.two_node_cli);
   const folderOutput = run(folderArgs);
@@ -55,8 +56,11 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
   writeFileSync(logPath, folderOutput);
   const validator = spawnSync(process.execPath, [fileURLToPath(new URL("../evals/backend-runner.mjs", import.meta.url)), "--validate-large-folder", logPath], { encoding: "utf8" });
   assert.equal(validator.status, 0, validator.stderr);
-  run(["llvm-cov", "report", "--lcov", "--output-path", "result.lcov"]);
-  const coverage = readFileSync(join(root, "result.lcov"), "utf8");
+  assert.equal(existsSync(join(root, "lcov.info")), false, "both ignored passes must accumulate without an interim report");
+  run(["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"]);
+  const coverage = readFileSync(join(root, "lcov.info"), "utf8");
+  for (const line of [1, 2, 3])
+    assert.match(coverage, new RegExp(`^DA:${line},[1-9]\\d*`, "m"), `source line ${line} must retain real hits`);
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*normal_truth/m, "earlier workspace coverage must survive the ignored pass");
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*ignored_truth/m, "ignored backend execution must contribute coverage");
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*large_folder_truth/m, "the separate ignored integration target must contribute coverage");

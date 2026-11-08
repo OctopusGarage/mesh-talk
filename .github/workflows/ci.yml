@@ -192,7 +192,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
         working-directory: src-tauri
         shell: bash
-        run: bash ../scripts/ci/workspace-coverage.sh linux
+        run: bash ../scripts/ci/workspace-coverage.sh linux --defer-report
 
       - name: Workspace doctests (Linux)
         if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
@@ -219,7 +219,7 @@ jobs:
           cat "$RUNNER_TEMP/backend-eval-results/large-folder.stderr.log" >&2
           if (( large_folder_status != 0 )); then exit "$large_folder_status"; fi
           node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
-          cargo llvm-cov report --lcov --output-path src-tauri/e2e-lcov.info
+          cargo llvm-cov report --lcov --output-path src-tauri/lcov.info
 
       - name: Preserve Linux backend evaluation evidence
         if: ${{ steps.scope.outputs.full == 'true' && (always() && matrix.os == 'ubuntu-latest') }}
@@ -261,7 +261,7 @@ jobs:
         with:
           version: v11.3.2
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ${{ matrix.os == 'ubuntu-latest' && 'src-tauri/lcov.info,src-tauri/e2e-lcov.info' || 'src-tauri/lcov.info' }}
+          files: src-tauri/lcov.info
           name: workspace-${{ matrix.os }}-${{ github.run_attempt }}
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true

@@ -76,6 +76,28 @@ test("native workspace coverage bounds both complete partitions with Nextest", (
   assert.ok(commands.includes("run: cargo test --workspace --doc --locked"));
 });
 
+test("workspace coverage defers only the report and rejects unsupported options", t => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-deferred-coverage-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "bin"));
+  writeFileSync(join(root, "bin/cargo"), '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$RUNNER_TEMP/commands"\nif [ "$2" = report ]; then touch lcov.info; fi\n', { mode: 0o755 });
+  const run = args => spawnSync("bash", [helper, ...args], {
+    cwd: root, encoding: "utf8",
+    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, RUNNER_TEMP: root, MESH_TALK_TEST_TIMING: "0" },
+  });
+  const deferred = run(["linux", "--defer-report"]);
+  assert.equal(deferred.status, 0, deferred.stderr);
+  assert.equal(existsSync(join(root, "lcov.info")), false, "deferred unit execution must not publish a completed report");
+  assert.equal(readFileSync(join(root, "commands"), "utf8").trim().split("\n").length, 2);
+  for (const args of [["linux", "--unknown"], ["linux", "--defer-report", "extra"], ["linux", "extra"], ["macos", "--defer-report"]]) {
+    const invalid = run(args);
+    assert.equal(invalid.status, 2, `${args}: ${invalid.stderr}`);
+  }
+  const immediate = run(["linux"]);
+  assert.equal(immediate.status, 0, immediate.stderr);
+  assert.equal(existsSync(join(root, "lcov.info")), true);
+});
+
 test("native Host isolation preserves default targets, accumulated coverage and real failure", (t) => {
   const root = mkdtempSync(join(tmpdir(), "mesh-native-host-coverage-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -231,10 +253,13 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     return result.stdout + result.stderr;
   };
   run(["generate-lockfile", "--offline"]);
-  const hostOutput = run(host);
-  assert.match(hostOutput, /4 tests run: 4 passed, 1 skipped/u);
-  const restOutput = run(rest);
-  assert.match(restOutput, /4 tests run: 4 passed, 1 skipped/u);
+  const deferred = spawnSync("bash", [helper, "linux", "--defer-report"], {
+    cwd: root, env: { ...env, MESH_TALK_TEST_TIMING: "0", RUNNER_TEMP: root },
+    encoding: "utf8", timeout: 120_000,
+  });
+  assert.equal(deferred.status, 0, `${deferred.error ?? ""}\n${deferred.stdout}\n${deferred.stderr}`);
+  assert.equal((deferred.stdout + deferred.stderr).match(/4 tests run: 4 passed, 1 skipped/gu)?.length, 2);
+  assert.equal(existsSync(join(root, "lcov.info")), false, "the actual deferred CLI must not produce a completed report");
   run(["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"]);
   // llvm-cov intentionally excludes examples/ and tests/ from its default report.
   // Each example therefore calls its own library sentinel, so a real hit proves
@@ -288,7 +313,8 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     "macOS must execute Core normally while Linux/Windows own its full instrumented coverage",
   );
   const linuxBlock = "linux";
-  for (const block of [blockMac, linuxBlock]) {
+  for (const block of [blockMac, linuxBlock, "linux-deferred"]) {
+    const blockArgs = block === "linux-deferred" ? ["linux", "--defer-report"] : [block];
     rmSync(join(root, "lcov.info"), { recursive: true, force: true });
     writeFileSync(join(root, "lcov.info"), "previous report");
     for (const failure of ["HOST", "CORE", "BOTH"]) {
@@ -296,9 +322,9 @@ test("native Host isolation preserves default targets, accumulated coverage and 
         rmSync(join(root, "lcov.info"));
         const marker = join(
           root,
-          `rest-${block === blockMac ? "mac" : "linux"}-${failure}-${timing}`,
+          `rest-${block}-${failure}-${timing}`,
         );
-        const failedPartition = spawnSync("bash", [helper, block], {
+        const failedPartition = spawnSync("bash", [helper, ...blockArgs], {
           cwd: root,
           env: {
             ...env,
@@ -365,11 +391,12 @@ test("native Host isolation preserves default targets, accumulated coverage and 
         writeFileSync(join(root, "lcov.info"), "previous report");
       }
     }
+    if (block === "linux-deferred") continue;
     for (const timing of ["0", "1"]) {
       rmSync(join(root, "lcov.info"), { recursive: true, force: true });
       // A real report destination failure must fail even after both suites pass.
       mkdirSync(join(root, "lcov.info"));
-      const reportFailure = spawnSync("bash", [helper, block], {
+      const reportFailure = spawnSync("bash", [helper, ...blockArgs], {
         cwd: root,
         env: { ...env, MESH_TALK_TEST_TIMING: timing, RUNNER_TEMP: root },
         encoding: "utf8",
