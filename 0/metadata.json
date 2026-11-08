@@ -3,7 +3,7 @@
   "checkpoint_id": "01M6XDAJ4GHBWG74QKZXJDS441",
   "session_id": "01a1b054-fe0d-76c1-a45c-4726d155f0fa",
   "strategy": "manual-commit",
-  "created_at": "2026-11-08T11:05:17.797865Z",
+  "created_at": "2026-11-08T11:05:32.560998Z",
   "branch": "perf/ci-critical-path",
   "checkpoints_count": 3,
   "files_touched": [
@@ -23,16 +23,15 @@
   "agent": "Codex",
   "model": "gpt-6.1-sol",
   "turn_id": "f2277e2d5def",
-  "checkpoint_transcript_start": 39773,
-  "transcript_lines_at_start": 39773,
-  "compact_transcript_start": 4651,
+  "checkpoint_transcript_start": 40640,
+  "transcript_lines_at_start": 40640,
+  "compact_transcript_start": 4738,
   "token_usage": {
-    "input_tokens": 105610,
+    "input_tokens": 764,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 19159680,
-    "output_tokens": 90218,
-    "api_call_count": 87,
-    "subagent_tokens_complete": false
+    "cache_read_tokens": 222592,
+    "output_tokens": 275,
+    "api_call_count": 3
   },
   "redaction": {
     "replacements": 2133,
