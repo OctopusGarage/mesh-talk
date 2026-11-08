@@ -113,13 +113,11 @@ jobs:
           shared-key: workspace-checks-checks
           cache-on-failure: true
 
-      - name: Install frontend dependencies and check standards
+      - name: Install frontend dependencies
         if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         run: |
           npm ci --prefix frontend
-          node scripts/validation/standards.mjs
-          node scripts/check-repository-hygiene.mjs
 
       - name: Install cargo-llvm-cov and cargo-nextest
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -280,13 +278,11 @@ jobs:
           shared-key: workspace-checks-checks
           cache-on-failure: true
 
-      - name: Install frontend dependencies and check standards
+      - name: Install frontend dependencies
         if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         run: |
           npm ci --prefix frontend
-          node scripts/validation/standards.mjs
-          node scripts/check-repository-hygiene.mjs
 
       - name: Install cargo-llvm-cov and cargo-nextest
         if: ${{ steps.scope.outputs.full == 'true' }}

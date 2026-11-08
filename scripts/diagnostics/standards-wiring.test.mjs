@@ -69,29 +69,21 @@ test(
   },
 );
 
-test("CI checks standards after dependency setup and before building frontend", () => {
-  const workflow = readFileSync(resolve(".github/workflows/ci.yml"), "utf8");
-  const step = workflow
-    .split(/^      - /m)
-    .find((value) =>
-      value.startsWith(
-        "name: Install frontend dependencies and check standards\n",
-      ),
-    );
-  assert.ok(
-    step,
-    "standards must be a required step in the existing platform checks",
-  );
-  assert.match(step, /shell: bash/);
-  assert.ok(
-    step.indexOf("npm ci --prefix frontend") <
-      step.indexOf("node scripts/validation/standards.mjs"),
-  );
-  assert.ok(
-    workflow.indexOf(
-      "name: Install frontend dependencies and check standards",
-    ) < workflow.indexOf("name: Build frontend"),
-  );
+test("Health Linux owns full-source standards after dependencies", () => {
+  const workflow = readFileSync(resolve(".github/workflows/check-health.yml"), "utf8");
+  const platform = workflow.split("  platform:\n")[1].split("  source:\n")[0];
+  const steps = platform.split(/^      - /m);
+  const gate = steps.find(value => value.startsWith("name: Check full-source standards and hygiene\n"));
+  assert.ok(gate, "full-source standards must have one canonical Health gate");
+  assert.match(gate, /if: \$\{\{ steps\.scope\.outputs\.full == 'true' && \(runner\.os == 'Linux'\) \}\}/u);
+  assert.match(gate, /run: \|\n          node scripts\/validation\/standards\.mjs\n          node scripts\/check-repository-hygiene\.mjs/u);
+  assert.match(platform, /node-version: '22'/u);
+  assert.match(platform, /shell: bash/u);
+  assert.ok(platform.indexOf("uses: actions/setup-node@") < platform.indexOf("name: Install frontend dependencies"));
+  const install = steps.findIndex(value => value.startsWith("name: Install frontend dependencies\n"));
+  assert.match(steps[install], /working-directory: frontend\n        run: npm ci/u);
+  assert.equal(steps[install + 1], gate);
+  assert.equal((platform.match(/node scripts\/validation\/standards\.mjs/gu) ?? []).length, 1);
 });
 
 test("composition owners retain conservative unit selections and mandatory browser boundaries", async () => {

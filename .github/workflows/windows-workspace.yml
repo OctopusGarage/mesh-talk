@@ -79,12 +79,10 @@ jobs:
           workspaces: . -> target
           shared-key: workspace-checks-checks
           cache-on-failure: true
-      - name: Frontend dependencies and structural checks
+      - name: Install frontend dependencies
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: |
           npm ci --prefix frontend
-          node scripts/validation/standards.mjs
-          node scripts/check-repository-hygiene.mjs
       - uses: taiki-e/install-action@v2.87.31
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:

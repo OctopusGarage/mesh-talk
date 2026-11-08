@@ -58,6 +58,17 @@ instead of a native Windows absolute path. Exercise each boundary on its platfor
 Keep live source/release checks immediately before each publication boundary;
 those protect against changed state and are not redundant setup checks.
 
+Consolidate pure checks only when their immutable candidate, scope and inputs are
+identical. Health's full-scope Linux portable job owns source standards and Git
+index hygiene after frontend dependency setup; documentation scope retains its
+independent source gate. Real checker portability fixtures still run on every
+Health platform. Native CI alone supplies partial acceptance: the protected
+current-source Health check in the UI workflow and the complete release source
+check closure remain necessary. Keep checks at distinct candidate, artifact,
+trust or runtime boundaries, including archive producer and consumer identity and
+cleanliness checks. Removing repeated source invocations does not establish a
+hosted speedup; measure runner cost and latency separately.
+
 The [syntax owner](../scripts/validation/syntax.mjs) parses changed Node, Bash and
 Python sources without executing them or writing Python caches, and invokes
 `actionlint` for changed workflows. Pre-commit selects staged paths but checks
