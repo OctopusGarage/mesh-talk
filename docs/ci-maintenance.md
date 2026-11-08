@@ -862,6 +862,11 @@ them. Universal local selections must not include a file whose entire suite is
 skipped on other hosts; preserve the nonempty-test guard and explicit native
 escalation instead. Keep workflow wiring assertions in the cheap CI policy
 owner, separate from the underlying tool's filesystem/compiler regressions.
+Environment-specific cases must also distinguish unsupported local environments
+from broken CI configuration. Skip only the new unsupported case, retain the
+file's other checks, and declare its native escalation. A declared GitHub Linux
+run must reach strict environment validation even when required image inputs are
+missing; never turn that misconfiguration into a skip or fabricate hosted inputs.
 
 After pushing, observe the actual hosted candidate until the relevant jobs finish.
 Compare before and after setup time, test time, required-check latency and runner

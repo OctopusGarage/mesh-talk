@@ -916,22 +916,15 @@ export async function extractLinuxArchive(
   }
 }
 
-export async function consume(
-  shard,
+// Shared archive admission for default partitions and the separate ignored owner.
+// Returns actual extracted metadata only after the existing complete checks.
+export async function prepareArchive(
   directory,
   output,
-  {
-    profile: profileName = "windows",
-    manifestSha256,
-    archiveSha256,
-    fixtureRuntime,
-  } = {},
+  { profile: profileName = "windows", manifestSha256, archiveSha256, fixtureRuntime, signal } = {},
 ) {
+  signal?.throwIfAborted();
   const profile = archiveProfile(profileName);
-  assert.ok(
-    profile.partitions.includes(shard),
-    `shard must be an integer from 1 through ${profile.partitions.length}`,
-  );
   if (profile.name !== "windows") {
     requireDigest(manifestSha256);
     requireDigest(archiveSha256);
@@ -941,6 +934,7 @@ export async function consume(
       "Trusted manifest digest mismatch",
     );
   }
+  signal?.throwIfAborted();
   mkdirSync(output, { recursive: true });
   const progress = path.join(output, "progress.jsonl");
   assert.ok(
@@ -948,6 +942,7 @@ export async function consume(
     "Consumer output already contains a prior attempt",
   );
   const evidence = (phase) => ({
+    signal,
     progress,
     phase,
     receipt: path.join(output, phase),
@@ -986,6 +981,7 @@ export async function consume(
     expected.push(readJson(path.join(directory, name)));
   }
   verifyPartition(expected[0], expected.slice(1), profile.partitions.length);
+  signal?.throwIfAborted();
   // Never reuse producer build outputs accidentally: this proves archive-only execution.
   assert.ok(
     profile.name === "linux-workspace"
@@ -998,14 +994,6 @@ export async function consume(
           readdirSync(path.resolve("target")).length === 0,
     "Consumer target contains prior compilation outputs",
   );
-  writeJson(path.join(output, "expected-inventory.json"), expected[shard]);
-  writeJson(path.join(output, "input-identity.json"), {
-    sourceSha: manifest.identity.sourceSha,
-    runId: manifest.identity.runId,
-    runAttempt: manifest.identity.runAttempt,
-    shard,
-    archiveSha256: manifest.archiveSha256,
-  });
   const binaries =
     profile.name === "linux-workspace"
       ? await extractLinuxArchive(
@@ -1065,6 +1053,43 @@ export async function consume(
     expected,
     "Consumer partition differs from producer inventory",
   );
+  return { directory, output, profile, fixtureRuntime, manifest, manifestSha256: await fileHash(path.join(directory, "manifest.json")), expected, observed, listings, binaries, metadata, reuse, evidence };
+}
+
+export async function verifyPreparedArchive(prepared) {
+  const { directory, profile, fixtureRuntime, manifest, evidence } = prepared;
+  verifyIdentity(manifest.identity, await identity(phase => evidence(`final-${phase}`), profile, fixtureRuntime));
+  assert.equal(await fileHash(path.join(directory, "workspace.tar.zst")), manifest.archiveSha256, "Archive changed during execution");
+  assert.equal(await fileHash(path.join(directory, "manifest.json")), prepared.manifestSha256, "Manifest changed during execution");
+}
+
+export async function consume(
+  shard,
+  directory,
+  output,
+  {
+    profile: profileName = "windows",
+    manifestSha256,
+    archiveSha256,
+    fixtureRuntime,
+    signal,
+  } = {},
+) {
+  const profile = archiveProfile(profileName);
+  assert.ok(
+    profile.partitions.includes(shard),
+    `shard must be an integer from 1 through ${profile.partitions.length}`,
+  );
+  const prepared = await prepareArchive(directory, output, { profile: profileName, manifestSha256, archiveSha256, fixtureRuntime, signal });
+  const { manifest, observed, reuse, evidence, expected } = prepared;
+  writeJson(path.join(output, "expected-inventory.json"), expected[shard]);
+  writeJson(path.join(output, "input-identity.json"), {
+    sourceSha: manifest.identity.sourceSha,
+    runId: manifest.identity.runId,
+    runAttempt: manifest.identity.runAttempt,
+    shard,
+    archiveSha256: manifest.archiveSha256,
+  });
   writeJson(path.join(output, "selected-inventory.json"), observed[shard]);
   const started = performance.now();
   const events = await command(

@@ -155,3 +155,108 @@ test("backend execution failures remain primary when machine stdout is unavailab
     for (const record of recorded) { assert.equal(record.passed, false); assert.match(record.failure, expected); }
   }
 });
+
+// The archive adapter consumes actual libtest text through the existing owner.
+// These controls exercise selection and evidence independently of real LLVM tools.
+async function archivedFixture(t) {
+  const { mkdtempSync, realpathSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { BACKEND_SUITES, LARGE_FOLDER_SCENARIO } = await import('../evals/backend-runner.mjs');
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'backend-archive-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = path.join(root, 'target/llvm-cov-target');
+  const cwd = path.join(root, 'core');
+  const rustLibDir = path.join(root, 'rust/lib');
+  for (const directory of [path.join(target,'debug/deps'),cwd,rustLibDir]) mkdirSync(directory,{recursive:true});
+  const helper = path.join(target,'debug/mesh-talk-node'); writeFileSync(helper,'helper',{mode:0o755});
+  const suites = {...BACKEND_SUITES,bridge_cross_lan:['bridge_a','bridge_b'],large_directory_enqueue:[LARGE_FOLDER_SCENARIO,'unrelated_folder']};
+  const listing = {'rust-suites':{},'test-count':0}; const binaries = {'rust-build-meta':{'target-directory':target,'linked-paths':[],'non-test-binaries':{core:[{name:'mesh-talk-node',kind:'bin-exe',path:'debug/mesh-talk-node'}]}},'rust-binaries':{}};
+  const full = [];
+  for(const [name,names] of Object.entries(suites)) {
+    const id=`core::${name}`, binaryPath=path.join(target,'debug/deps',name); writeFileSync(binaryPath,'libtest',{mode:0o755});
+    listing['rust-suites'][id]={'binary-id':id,'package-id':'core','package-name':'mesh-talk-core','binary-name':name,kind:'test',status:'listed',testcases:Object.fromEntries(names.map(n=>[n,{kind:'test',ignored:true,'filter-match':{status:'mismatch',reason:'ignored'}}]))};
+    binaries['rust-binaries'][id]={'binary-id':id,'package-id':'core','binary-name':name,kind:'test','binary-path':binaryPath};
+    for(const n of names) full.push({id:`${id}::${n}`,eventName:`mesh-talk-core::${name}$${n}`,ignored:true,selected:false});
+    listing['test-count']+=names.length;
+  }
+  for (const name of ['bridge_cross_lan','large_directory_enqueue']) {
+    const id=`core::${name}`, test='default_case';
+    listing['rust-suites'][id].testcases[test]={kind:'test',ignored:false,'filter-match':{status:'matches'}};
+    listing['test-count']++;
+    full.push({id:`${id}::${test}`,eventName:`mesh-talk-core::${name}$${test}`,ignored:false,selected:true});
+  }
+  const env={LLVM_PROFILE_FILE:path.join(target,'profiles/%m-%p.profraw')};
+  const prepared={manifest:{identity:{root,targetDirectory:target,instrumentationEnvironment:env}},listings:[listing],observed:[full],binaries,metadata:{packages:[{id:'core',name:'mesh-talk-core',version:'1.2.3',authors:['Author'],manifest_path:path.join(cwd,'Cargo.toml'),targets:Object.keys(suites).map(name=>({name,kind:['test']}))}]}};
+  return {prepared,env,rustLibDir,root,target,cwd,helper};
+}
+
+test('archived ignored plan resolves original executables, complete bridge inventory and exact folder selection before admission', async t=>{
+  const {archivedBackendPlan,BACKEND_SUITES,LARGE_FOLDER_SCENARIO}=await import('../evals/backend-runner.mjs');
+  const fixture=await archivedFixture(t);
+  const plan=archivedBackendPlan(fixture.prepared,fixture);
+  assert.deepEqual(plan.map(s=>s.target),[...Object.keys(BACKEND_SUITES),'bridge_cross_lan','large_directory_enqueue']);
+  assert.deepEqual(plan[4].expected,['bridge_a','bridge_b']);
+  assert.equal(plan[4].allowFiltered,true);
+  assert.equal(plan[5].allowFiltered,true);
+  assert.deepEqual(plan[5].expected,[LARGE_FOLDER_SCENARIO]);
+  assert.deepEqual(plan[5].args,[LARGE_FOLDER_SCENARIO,'--exact','--ignored','--test-threads=1']);
+  for(const item of plan){assert.equal(item.cwd,fixture.cwd);assert.equal(item.env.CARGO_MANIFEST_DIR,fixture.cwd);assert.equal(item.env.CARGO_PKG_VERSION,'1.2.3');assert.equal(item.env['CARGO_BIN_EXE_mesh-talk-node'],fixture.helper);assert.equal(item.env.RUST_TEST_THREADS,'4');assert.equal(item.env.LLVM_PROFILE_FILE,fixture.env.LLVM_PROFILE_FILE);}
+});
+
+test('archived ignored plan fails closed for missing, foreign, duplicate and changed ignored inventories',async t=>{
+  const {archivedBackendPlan}=await import('../evals/backend-runner.mjs');
+  assert.equal(typeof archivedBackendPlan,'function');
+  const fixture=await archivedFixture(t);
+  for(const change of [
+    p=>delete p.binaries['rust-binaries']['core::two_node_cli'],
+    p=>p.binaries['rust-binaries'].duplicate=p.binaries['rust-binaries']['core::two_node_cli'],
+    p=>p.binaries['rust-binaries']['core::two_node_cli']['binary-path']='/foreign/test',
+    p=>p.listings[0]['rust-suites']['core::two_node_cli'].testcases.extra={ignored:true},
+    p=>p.listings[0]['rust-suites']['core::bridge_cross_lan'].testcases={},
+    p=>p.listings[0]['rust-suites']['core::two_node_cli'].testcases.two_cli_nodes_exchange_a_dm.ignored=false,
+  ]){const prepared=structuredClone(fixture.prepared);change(prepared);assert.throws(()=>archivedBackendPlan(prepared,fixture));}
+  assert.throws(()=>archivedBackendPlan(fixture.prepared,{...fixture,env:{LLVM_PROFILE_FILE:'/foreign/profiles'}}));
+});
+
+test('backend command forwards package cwd without changing stdout evidence',async t=>{
+  const {runCargo}=await import('../evals/backend-runner.mjs');
+  const fixture=await archivedFixture(t);
+  const result=await runCargo('two_node_cli',{command:[process.execPath,'-e','console.log(process.cwd())'],cwd:fixture.cwd});
+  assert.equal(result.code,0);assert.equal(result.stdout.trim(),fixture.cwd);assert.equal(result.outputTruncated,false);
+});
+
+test('archived backend retains raw stdout validation, failure precedence and original phase admission',async t=>{
+  const {archivedBackendPlan,evaluateArchivedBackend,BACKEND_SUITES}=await import('../evals/backend-runner.mjs');
+  const fixture=await archivedFixture(t),plan=archivedBackendPlan(fixture.prepared,fixture);
+  const expected=Object.fromEntries(plan.map(item=>[item.target,item.expected]));
+  const good=target=>({code:0,...capturedOutput(suiteOutput(expected[target]))});
+  const attempted=[];
+  const success=await evaluateArchivedBackend(plan,async(target,options)=>{attempted.push(target);assert.equal(options.cwd,fixture.cwd);assert.deepEqual(options.command,[plan.find(row=>row.target===target).binary,...plan.find(row=>row.target===target).args]);return good(target);});
+  assert.deepEqual(success.failures,[]);assert.deepEqual(attempted,plan.map(item=>item.target));
+  for(const variant of [
+    target=>({...good(target),stdout:''}),
+    target=>({...good(target),outputTruncated:true}),
+    target=>({...good(target),stdout:suiteOutput([])}),
+    target=>({...good(target),code:37,stdout:undefined}),
+    target=>({...good(target),failure:'original timeout',stdout:undefined}),
+    target=>({...good(target),cancelled:true,stdout:undefined}),
+    target=>({...good(target),cleanupUnverified:true,stdout:undefined}),
+  ]) {
+    const tried=[];const result=await evaluateArchivedBackend(plan,async target=>{tried.push(target);return variant(target);});
+    assert.ok(result.failures.length);assert.ok(result.failures.every(failure=>!/TypeError/u.test(failure)));
+    const stop=variant('two_node_cli');assert.deepEqual(tried,stop.cancelled||stop.cleanupUnverified?['two_node_cli']:Object.keys(BACKEND_SUITES));
+    if(stop.code===37) assert.match(result.failures[0],/Backend suite failed/u);
+    if(stop.failure) assert.match(result.failures[0],/original timeout/u);
+  }
+});
+
+test('pre-aborted ignored archive API admits no preparation output or authority probes',async t=>{
+  const {runArchivedBackend}=await import('../evals/backend-runner.mjs');
+  const {mkdtempSync,existsSync,rmSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+  const root=mkdtempSync(join(tmpdir(),'backend-pre-aborted-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const controller=new AbortController(),reason=new Error('pre-aborted before archive admission');controller.abort(reason);
+  const output=join(root,'unadmitted');
+  await assert.rejects(runArchivedBackend(join(root,'no-archive'),output,{signal:controller.signal}),error=>error===reason);
+  assert.equal(existsSync(output),false);
+});
