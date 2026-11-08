@@ -7656,12 +7656,9 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
         )
         .unwrap();
     let parents = owner.log.lock().unwrap().heads(&group).unwrap();
-    for seq in 3..=4099 {
-        owner
-            .log
-            .lock()
-            .unwrap()
-            .append(Event::new(
+    let events: Vec<_> = (3..=4099)
+        .map(|seq| {
+            Event::new(
                 &owner.identity,
                 group,
                 seq,
@@ -7670,9 +7667,69 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
                 seq,
                 EventKind::ChannelOwnerTransfer,
                 owner.user_id().into_bytes(),
-            ))
+            )
+        })
+        .collect();
+    let expected_heads: std::collections::HashSet<_> =
+        events.iter().map(|event| event.id).collect();
+    assert_eq!(events.len(), 4097);
+    assert_eq!(expected_heads.len(), 4097);
+    // Check retained identities through the index, without repeating the
+    // signature verification already performed by append_on and channel replay.
+    let corpus_ids = |repository: &crate::eventlog::repository::EventRepository| {
+        let mut ids = std::collections::HashSet::new();
+        let mut cursor = None;
+        loop {
+            let page = repository
+                .ids_page(
+                    &group,
+                    cursor.as_ref(),
+                    crate::eventlog::repository::pages::PageBudget::default(),
+                )
+                .unwrap();
+            for id in page.items {
+                assert!(ids.insert(id), "duplicate retained event identity");
+            }
+            cursor = page.next;
+            if cursor.is_none() {
+                return ids;
+            }
+        }
+    };
+    let expected_corpus = {
+        // No observer runs between these fixture appends. Preserve normal
+        // per-event validation and indices, but commit their preparation once.
+        // Keep the production lock order and release both guards before replay.
+        let log = owner.log.lock().unwrap();
+        let repository = log.repository().unwrap();
+        let mut expected_corpus = corpus_ids(repository);
+        let original_count = expected_corpus.len();
+        expected_corpus.extend(expected_heads.iter().copied());
+        assert_eq!(expected_corpus.len(), original_count + 4097);
+        owner
+            .storage
+            .participant_database()
+            .unwrap()
+            .transaction(|tx| {
+                for event in &events {
+                    assert_eq!(
+                        repository.append_on(tx, event)?,
+                        crate::eventlog::AppendOutcome::Appended
+                    );
+                }
+                Ok(())
+            })
             .unwrap();
-    }
+        assert_eq!(
+            log.heads(&group)
+                .unwrap()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            expected_heads
+        );
+        assert_eq!(corpus_ids(repository), expected_corpus);
+        expected_corpus
+    };
     owner.process_channel(group);
     settle_group_metadata(&owner, group);
     let negative = group_control_source_document(&owner, group);
@@ -7714,6 +7771,12 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
         &account,
         DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
     );
+    {
+        let log = owner.log.lock().unwrap();
+        let retained = corpus_ids(log.repository().unwrap());
+        assert_eq!(retained.len(), expected_corpus.len() + 2);
+        assert!(expected_corpus.is_subset(&retained));
+    }
     let current = group_control_source_document(&owner, group);
     assert!(
         current.meta.revision > negative.meta.revision,
