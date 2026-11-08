@@ -331,7 +331,7 @@ test("CI caches the workspace output and retains native lint and build coverage"
 test("health owns fast checks without repeating Rust or browser suites", () => {
   const health = read("check-health.yml");
   assert.doesNotMatch(health, /bash scripts\/check-health\.sh|cargo (?:build|clippy|test)|npx playwright|src-tauri\/target/);
-  for (const command of ["npm run format:check", "npm run lint", "npm run typecheck", "audit-ci", "cargo fmt --all -- --check", "cargo deny check", "cargo machete", "shellcheck", "actionlint", "typos"]) assert.ok(health.includes(command), command);
+  for (const command of ["npm run format:check", "npm run lint", "npm run typecheck", "npm run audit:ci", "cargo fmt --all -- --check", "cargo deny check", "cargo machete", "shellcheck", "actionlint", "typos"]) assert.ok(health.includes(command), command);
   assert.match(health, /matrix:\n        os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
   const ci = read("ci.yml");
   assert.match(step(health, "Build retention safeguards (all platforms)"), /python3 -m unittest discover -s scripts -p test_build_retention.py -v/);
@@ -596,4 +596,25 @@ test("Nextest fixture acceleration changes only its owned profile", () => {
     assert.throws(() => replaceNextestProfileText(config, "absent", policy, ""), /expected one Nextest profile/u);
     assert.throws(() => replaceNextestProfileText(config, "default", "absent policy", ""), /expected one replacement/u);
   }
+});
+
+
+test("frontend audits share the lockfile-installed tool and policy", () => {
+  const frontend = name => JSON.parse(readFileSync(new URL(`../../frontend/${name}`, import.meta.url), "utf8"));
+  const manifest = frontend("package.json"), lock = frontend("package-lock.json");
+  assert.equal(manifest.devDependencies["audit-ci"], "7.1.0");
+  assert.equal(lock.packages[""].devDependencies["audit-ci"], manifest.devDependencies["audit-ci"]);
+  const tool = lock.packages["node_modules/audit-ci"];
+  assert.equal(tool.version, manifest.devDependencies["audit-ci"]);
+  assert.equal(tool.integrity, "sha512-PjjEejlST57S/aDbeWLic0glJ8CNl/ekY3kfGFPMrPkmuaYaDKcMH0F9x9yS9Vp6URhuefSCubl/G0Y2r6oP0g==");
+  assert.equal(manifest.scripts["audit:ci"], "audit-ci --config audit-ci.json");
+  const audit = step(read("check-health.yml"), "Audit frontend dependencies");
+  assert.match(audit, /working-directory: frontend\n        run: npm run audit:ci\n/u);
+  const local = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
+  assert.match(local, /if ! npm run audit:ci --prefix frontend; then/u);
+  for (const source of [audit, local]) assert.doesNotMatch(source, /npx[^\n]*audit-ci|npm (?:exec|install)[^\n]*audit-ci/u);
+  assert.deepEqual(frontend("audit-ci.json"), {
+    "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
+    high: true, allowlist: [], "report-type": "summary",
+  });
 });

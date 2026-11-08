@@ -312,6 +312,10 @@ release downloads to a reviewed digest and execute the installed version check.
 Compiling tools with `go install` or `cargo install` is recurring setup
 work; retain source installation only when the required tool has no suitable
 trusted binary or the test explicitly validates its build.
+A lockfile does not protect an unpinned `npx` download. Install Node-based
+verification tools from the committed lockfile and reuse their owning npm script
+in CI and local checks. Frontend audits use `npm run audit:ci` with the existing
+`frontend/audit-ci.json` policy.
 
 Build twice consecutively with identical source, profile, features and environment.
 Inspect unexpected second-build work before enlarging caches or runner counts:

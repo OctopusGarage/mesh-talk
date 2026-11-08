@@ -361,19 +361,13 @@ if [ "$FAST" != "1" ]; then
 
 # Check for security vulnerabilities (Node.js)
 print_status "success" "Checking for Node.js security vulnerabilities..."
-if ! command_exists npx; then
-    print_status "error" "npx not found. Please install Node.js: https://nodejs.org/"
-    exit 1
-fi
-
 # BLOCKING: audit-ci fails on high/critical npm advisories (threshold + allowlist in
 # frontend/audit-ci.json), so a vulnerable dependency can't be introduced silently. Fix the
 # dependency or allowlist a known/unfixable advisory in audit-ci.json before committing.
-if ! { cd frontend && npx --yes audit-ci --config audit-ci.json; }; then
+if ! npm run audit:ci --prefix frontend; then
     print_status "error" "Security vulnerabilities (high/critical) found in Node.js dependencies. Fix them or allowlist a known advisory in frontend/audit-ci.json."
     exit 1
 fi
-cd ..
 
 # The documentation MCP has its own pinned dependency graph.
 if ! npm audit --prefix tools/help --audit-level=high; then

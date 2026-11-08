@@ -78,7 +78,7 @@ jobs:
       - name: Audit frontend dependencies
         if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         working-directory: frontend
-        run: npx --yes audit-ci --config audit-ci.json
+        run: npm run audit:ci
 
       - name: Validate public help and MCP
         if: ${{ steps.scope.outputs.full == 'true' }}
