@@ -967,39 +967,66 @@ impl Node {
         if announce.public() != *public || !announce.verify() {
             return Err(TransportError::IdentityMismatch);
         }
-        let group_member = self
-            .group_member(public)
-            .map_err(|error| TransportError::Io(io::Error::other(error)))?
-            || self.group_departure_peer(public);
+        let direct_route_allowed = |state: &PrivacyState| {
+            !state.policy.snapshot().invisible
+                || announce.account_id().is_some_and(|account| {
+                    account == self.account_id() || state.policy.allows(&account)
+                })
+        };
+        let group_allowed = || {
+            self.group_member(public)
+                .map(|member| member || self.group_departure_peer(public))
+                .map_err(|error| TransportError::Io(io::Error::other(error)))
+        };
+        let needs_group = {
+            let guard = self
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned");
+            guard
+                .as_ref()
+                .is_some_and(|state| !direct_route_allowed(state))
+        };
+        let mut group_member = if needs_group {
+            Some(group_allowed()?)
+        } else {
+            None
+        };
         #[cfg(test)]
         if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
             hook();
         }
-        {
-            let mut state = self
+        loop {
+            let mut guard = self
                 .privacy
                 .state
                 .write()
                 .expect("privacy lock not poisoned");
-            if let Some(state) = state.as_mut() {
-                if announce.account_id().is_some() {
-                    state
-                        .proofs
-                        .record(announce)
-                        .map_err(|_| TransportError::AdmissionDenied)?;
-                }
-                if !state.policy.snapshot().invisible
-                    || announce
-                        .account_id()
-                        .is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
-                    || group_member
-                {
-                    state
-                        .routes
-                        .record(public, ip)
-                        .map_err(|_| TransportError::AdmissionDenied)?;
-                }
+            let Some(state) = guard.as_mut() else {
+                break;
+            };
+            let direct = direct_route_allowed(state);
+            if !direct && group_member.is_none() {
+                // Policy may have tightened since the read above. Query current
+                // membership without the privacy guard, then recheck the owner.
+                drop(guard);
+                group_member = Some(group_allowed()?);
+                continue;
             }
+            if announce.account_id().is_some() {
+                state
+                    .proofs
+                    .record(announce)
+                    .map_err(|_| TransportError::AdmissionDenied)?;
+            }
+            if direct || group_member.unwrap_or(false) {
+                state
+                    .routes
+                    .record(public, ip)
+                    .map_err(|_| TransportError::AdmissionDenied)?;
+            }
+            break;
         }
         self.observe_sibling_availability(public);
         let mut roster = self.roster.lock().expect("roster lock not poisoned");

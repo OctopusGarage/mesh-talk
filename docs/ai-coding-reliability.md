@@ -118,6 +118,14 @@ guards and revalidate before atomic publication. Keep critical sections small
 without splitting a transaction or permitting stale side effects. Replacing a
 mutex with an async mutex alone does not repair ownership or lock order.
 
+Evaluate authoritative cheap decisions before expensive fallback work. An exact
+accepted identity binding or direct current policy grant must not first scan
+unrelated history to establish an alternative grant. If policy can change,
+recheck at the write owner; release its guard before obtaining missing fallback
+evidence. The [privacy admission tests](../crates/mesh-talk-core/src/node/privacy_runtime_tests.rs)
+require real certified-sibling SessionReady while unrelated histories are held,
+and exercise policy tightening with and without genuine shared-group authority.
+
 Check that the UI event loop, accept loop and control scheduler can still make
 progress while the worker is paused. Offloading a scan does not help other
 branches of a scheduler if that scheduler still waits for the entire scan inside
@@ -888,6 +896,11 @@ responsive hit areas. Do not replace `matchMedia` with a JavaScript mock. The
 state loss, actual CSS target sizes and a real tap through that same owner.
 A negative control must observe the capability it removes; disabling touch does
 not require every host to become hover-capable or shrink its CSS targets.
+
+Before holding unrelated work in a full-host regression, observe the listener's
+actual accept admission. Spawning a child is not proof it has been polled; work
+in a scheduler-local slot may remain unavailable to other workers. Keep startup
+readiness separate from the measured held-work progress condition.
 
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an

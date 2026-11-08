@@ -4002,3 +4002,234 @@ fn fresh_one_off_routes_lead_and_signed_ports_supersede_cached_ports() {
     assert!(candidates.contains(&replacement));
     assert!(!candidates.contains(&old));
 }
+
+#[tokio::test]
+async fn certified_sibling_session_ready_ignores_unrelated_held_history() {
+    use super::super::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
+    use super::super::test_support::IndependentPeerRuntime;
+    use crate::identity::account::Account;
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let mut peers = Vec::new();
+    for name in ["source", "client"] {
+        let path = directory.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let (tx, _) = mpsc::unbounded_channel();
+        let (ctx, _) = mpsc::unbounded_channel();
+        let (ftx, _) = mpsc::unbounded_channel();
+        let peer = Node::open_with_account(
+            DeviceIdentity::generate(),
+            Account::from_secret_bytes(account.secret_bytes()),
+            Arc::new(Mutex::new(crate::discovery::Roster::default())),
+            tx,
+            ctx,
+            ftx,
+            &path.join("messages.log"),
+            &path.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        peer.configure_privacy(
+            &path,
+            "pw",
+            &peer.signed_announce(name, 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        peer.set_invisible(true).await.unwrap();
+        let unrelated = DeviceIdentity::generate();
+        peer.create_channel("Unrelated", vec![unrelated.public()])
+            .await
+            .unwrap();
+        peers.push(peer);
+    }
+    let source = peers[0].clone();
+    let client = peers[1].clone();
+    let phases = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let mut host_ready = Vec::new();
+    for (label, node) in [("source", &source), ("client", &client)] {
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        host_ready.push(ready_rx);
+        let ready = Mutex::new(Some(ready));
+        let phases = phases.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            {
+                let mut phases = phases.lock().unwrap();
+                if phases.len() == 64 {
+                    phases.pop_front();
+                }
+                phases.push_back(format!("{label}: {phase}"));
+            }
+            if phase.starts_with("responder_admission_acquired_accept_begin")
+                && let Some(ready) = ready.lock().unwrap().take()
+            {
+                let _ = ready.send(());
+            }
+        }));
+    }
+    for (local, remote) in [(&source, &client), (&client, &source)] {
+        local
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(super::super::account_devices::AccountDevice {
+                public: remote.identity.public(),
+                certificate: account.certify(&remote.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        assert!(local.certified_sibling(&remote.identity.public()));
+        local
+            .privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&remote.signed_announce("Sibling", 1234))
+            .unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    client.roster.lock().unwrap().update(
+        &source.signed_announce("Source", address.port()),
+        address.ip(),
+        &client.user_id(),
+    );
+    let peer = client.routing_peer(&source.user_id()).unwrap();
+    let mut owner = IndependentPeerRuntime::start_multithreaded(source.clone(), listener).await;
+    owner.launch();
+    let client_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client_owner =
+        IndependentPeerRuntime::start_multithreaded(client.clone(), client_listener).await;
+    client_owner.launch();
+    // Qualify that each full host has polled its real listener before blocking
+    // history. A newly spawned LIFO child need not run before its parent yields.
+    for ready in host_ready {
+        tokio::time::timeout(DEADLINE, ready)
+            .await
+            .expect("full host must poll its inbound listener before the hold")
+            .unwrap();
+    }
+    // Both actual log guards are owned by admitted blocking work. The test's
+    // independent reactor observes progress; cleanup releases before host joins.
+    let mut releases = Vec::new();
+    let mut workers = Vec::new();
+    for node in [&source, &client] {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let held = node.clone();
+        workers.push(node.runtime_work.admit().unwrap().spawn_blocking(move || {
+            let _log = held.log.lock().unwrap();
+            entered.send(()).unwrap();
+            let _ = released.recv();
+        }));
+        releases.push(release);
+        entered_rx.await.unwrap();
+    }
+    let client_task = client.clone();
+    let exchange = client_owner.runtime_handle().spawn(async move {
+        client_task
+            .begin_account_exchange(
+                &peer,
+                AccountSyncVersion::V2,
+                AccountHistoryFrame::Wake {
+                    account_id: client_task.account_id(),
+                    epoch: [1; 16],
+                    revision: 1,
+                },
+            )
+            .await
+    });
+    let mut exchange = exchange;
+    let mut joined = false;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let exchange = tokio::time::timeout(Duration::from_secs(2), &mut exchange)
+            .await
+            .expect("real Noise and SessionReady must finish while unrelated history is held");
+        joined = true;
+        drop(exchange.unwrap().unwrap());
+    })
+    .catch_unwind()
+    .await;
+    if outcome.is_err() {
+        eprintln!(
+            "held-history phases before release: {:?}",
+            phases.lock().unwrap()
+        );
+    }
+    drop(releases);
+    for worker in workers {
+        drop(worker.await.unwrap());
+    }
+    if !joined {
+        exchange.abort();
+        let _ = exchange.await;
+    }
+    owner.stop().await;
+    client_owner.stop().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn remember_peer_rechecks_stricter_policy_and_fresh_group_fallback() {
+    for shared_group in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local");
+        let (local, _) = node(&path);
+        let (remote, _) = node(&dir.path().join("remote"));
+        local
+            .configure_privacy(
+                &path,
+                "pw",
+                &local.signed_announce("Local", 1),
+                Arc::new(DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+        if shared_group {
+            local
+                .create_channel("Shared", vec![remote.identity.public()])
+                .await
+                .unwrap();
+            assert!(local.group_member(&remote.identity.public()).unwrap());
+        }
+        let changed = local.clone();
+        *local.remember_peer_hook.lock().unwrap() = Some(Box::new(move || {
+            changed
+                .privacy
+                .state
+                .write()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .policy
+                .set_invisible(true)
+                .unwrap();
+        }));
+        let proof = remote.signed_announce("Remote", 1234);
+        local
+            .remember_peer_with_visibility(
+                &remote.identity.public(),
+                Some(&proof),
+                Ipv4Addr::LOCALHOST.into(),
+                false,
+            )
+            .unwrap();
+        let guard = local.privacy.state.read().unwrap();
+        let state = guard.as_ref().unwrap();
+        assert!(state.proofs.accepts_binding(&proof));
+        assert_eq!(
+            state
+                .routes
+                .routes()
+                .iter()
+                .any(|(public, _)| public == &remote.identity.public()),
+            shared_group,
+            "stricter current policy needs fresh group authority for routes"
+        );
+        assert!(local.roster.lock().unwrap().peers().is_empty());
+    }
+}

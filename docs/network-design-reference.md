@@ -2870,6 +2870,15 @@ entries are capped at 256, expire after sixty seconds, and bind the actual
 authenticated endpoint, full identity and privacy generation. A successful
 negotiation clears that endpoint's negative entry.
 
+Authenticated admission skips group-history fallback when the exact binding is
+already accepted or current direct policy grants the route. Genuine binding
+transitions and group-based grants retain their original proof checks. A policy
+change is rechecked by the final write owner; missing group evidence is obtained
+without its guard. Unrelated held history must not delay certified-sibling
+SessionReady under those direct grants. Negotiation timeouts retain their public
+error and log only a static stage (checkout, authenticated dial, request write or
+ready wait) and elapsed time, without peer or content metadata.
+
 Identity-only Noise sessions from unconfigured legacy peers may reuse completed
 generic sync rounds when a current signed announcement names the exact same Ed25519
 and X25519 identity, carries no account certificate, and has no post-office role.
