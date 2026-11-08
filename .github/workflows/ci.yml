@@ -35,17 +35,10 @@ jobs:
     uses: ./.github/workflows/ci-scope.yml
 
   checks:
+    name: checks (ubuntu-latest)
     if: ${{ !cancelled() }}
     needs: [scope]
-    strategy:
-      fail-fast: false
-      # Windows uses the reusable single-build archive workflow below. Linux
-      # and macOS retain complete workspace tests; macOS instruments Host only.
-      # Keep compute-heavy protocol tests on Apple Silicon. Desktop browser
-      # admission separately waits for Health/WebKit and bounds its fan-out.
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ needs.scope.outputs.full == 'true' && matrix.os || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,7 +50,7 @@ jobs:
           full: ${{ needs.scope.outputs.full }}
           upstream_result: ${{ needs.scope.result }}
       - name: Report documentation-only coverage through Codecov
-        if: steps.scope.outputs.full == 'false' && matrix.os == 'ubuntu-latest'
+        if: steps.scope.outputs.full == 'false'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           version: v11.3.2
@@ -94,7 +87,7 @@ jobs:
 
       # Tauri v2 system libraries (Linux only).
       - name: Install Tauri system dependencies (Linux)
-        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -117,7 +110,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: . -> target
-          key: workspace-checks
+          shared-key: workspace-checks-checks
           cache-on-failure: true
 
       - name: Install frontend dependencies and check standards
@@ -171,35 +164,19 @@ jobs:
         working-directory: src-tauri
         run: cargo build --workspace --locked
 
-      # Linux/Windows own complete instrumented workspace coverage. macOS keeps
-      # desktop-specific Host coverage (including native updater policy) and runs
-      # every remaining workspace target normally, avoiding a duplicate costly
-      # instrumented Core test build. No platform repeats its test suite.
-      - name: Test + coverage (macOS)
-        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os != 'ubuntu-latest') }}
-        working-directory: src-tauri
-        shell: bash
-        env:
-          RUST_TEST_THREADS: 4
-          NEXTEST_TEST_THREADS: 4
-        run: |
-          bash ../scripts/ci/workspace-coverage.sh macos
-          # llvm-cov runs Host; Nextest runs the remaining default targets.
-          # Stable Rust doctests retain their original separate check.
-          cargo test --workspace --doc
-
+      # Linux keeps its existing complete accumulated coverage and backend evidence.
       - name: Test + coverage (Linux)
-        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: src-tauri
         shell: bash
         run: bash ../scripts/ci/workspace-coverage.sh linux --defer-report
 
       - name: Workspace doctests (Linux)
-        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: cargo test --workspace --doc --locked
 
       - name: Multi-process core evidence and coverage (Linux)
-        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
+        if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         env:
           EVAL_SOURCE_SHA: ${{ github.sha }}
@@ -210,7 +187,7 @@ jobs:
           cargo llvm-cov --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
 
       - name: Large-folder enqueue regression (Linux)
-        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
+        if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         run: |
           set -o pipefail
@@ -222,7 +199,7 @@ jobs:
           cargo llvm-cov report --lcov --output-path src-tauri/lcov.info
 
       - name: Preserve Linux backend evaluation evidence
-        if: ${{ steps.scope.outputs.full == 'true' && (always() && matrix.os == 'ubuntu-latest') }}
+        if: ${{ steps.scope.outputs.full == 'true' && (always()) }}
         uses: actions/upload-artifact@v7
         with:
           name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
@@ -249,7 +226,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: test-timing-${{ matrix.os }}-${{ github.run_attempt }}
+          name: test-timing-ubuntu-latest-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mesh-talk-test-timing.log
           if-no-files-found: warn
 
@@ -262,9 +239,293 @@ jobs:
           version: v11.3.2
           token: ${{ secrets.CODECOV_TOKEN }}
           files: src-tauri/lcov.info
-          name: workspace-${{ matrix.os }}-${{ github.run_attempt }}
+          name: workspace-ubuntu-latest-${{ github.run_attempt }}
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
+
+  macos-native:
+    name: macOS native Host
+    if: ${{ !cancelled() && needs.scope.outputs.full == 'true' }}
+    needs: [scope]
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Rust toolchain
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - name: Cache Rust build
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: . -> target
+          shared-key: workspace-checks-checks
+          cache-on-failure: true
+
+      - name: Install frontend dependencies and check standards
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        shell: bash
+        run: |
+          npm ci --prefix frontend
+          node scripts/validation/standards.mjs
+          node scripts/check-repository-hygiene.mjs
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        uses: taiki-e/install-action@v2.88.1
+        with:
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
+
+      - name: Verify coverage accumulation with the actual tool
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        # These fixtures launch real Cargo/rustc processes and share this job's
+        # package cache. Give each compiler contract exclusive execution.
+        run: node --test --test-concurrency=1 scripts/ci/backend-coverage.test.mjs scripts/ci/native-host-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/linux-crash-diagnostics.test.mjs scripts/ci/macos-remaining-cli.test.mjs
+
+      - name: Build frontend
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        working-directory: frontend
+        run: npm run build
+
+      - name: Check built JavaScript for macOS 12 WKWebView
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        working-directory: frontend
+        run: npm run check:build-syntax
+
+      # Keep native lint, production builds and complete tests on every OS.
+      - name: Clippy
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build workspace
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        working-directory: src-tauri
+        run: cargo build --workspace --locked
+
+      # Native Host coverage is independent of the remaining-workspace archive.
+      - name: Test + coverage (macOS)
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        working-directory: src-tauri
+        shell: bash
+        env:
+          RUST_TEST_THREADS: 4
+          NEXTEST_TEST_THREADS: 4
+        run: |
+          bash ../scripts/ci/workspace-coverage.sh macos-host
+          # The independent archive lane owns every remaining default target.
+          # Stable Rust doctests retain their original separate check.
+          cargo test --workspace --doc
+
+      - name: Upload test timing diagnostics
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && env.MESH_TALK_TEST_TIMING == '1') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timing-macos-latest-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mesh-talk-test-timing.log
+          if-no-files-found: warn
+
+      - name: Upload coverage to Codecov
+        if: ${{ steps.scope.outputs.full == 'true' && (!(github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.user.login == 'dependabot[bot]')) }}
+        # Dependabot PRs to dev cannot read the Actions CODECOV_TOKEN secret.
+        # Their tests still run; only the unauthenticated upload is skipped.
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          version: v11.3.2
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: src-tauri/lcov.info
+          name: workspace-macos-latest-${{ github.run_attempt }}
+          # Branch protection requires codecov/patch; surface upload failures in CI too.
+          fail_ci_if_error: true
+
+  macos-remaining-build:
+    name: macOS remaining archive
+    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.scope.outputs.full == 'true' }}
+    needs: [scope]
+    runs-on: macos-latest
+    timeout-minutes: 90
+    outputs:
+      archiveSha256: ${{ steps.archive.outputs.archiveSha256 }}
+      manifestSha256: ${{ steps.archive.outputs.manifestSha256 }}
+      rustVersion: ${{ steps.archive.outputs.rustVersion }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      # Preserve the old matrix cache cohort. Only the native lane writes it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-checks-checks
+          workspaces: . -> target
+          save-if: false
+      - uses: taiki-e/install-action@v2.88.1
+        with:
+          tool: cargo-nextest@0.9.150
+      - name: Produce sealed remaining workspace archive
+        id: archive
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/ci/windows-coverage.mjs produce-macos-remaining "$RUNNER_TEMP/macos-remaining-archive" --github-output 2>&1 | tee "$RUNNER_TEMP/macos-remaining-producer.log"
+      - name: Preserve raw producer diagnostics
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-remaining-producer-log-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-producer.log
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: Upload transient test binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-remaining-binaries-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-archive/workspace.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload sealed small metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-remaining-metadata-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/macos-remaining-archive/manifest.json
+            ${{ runner.temp }}/macos-remaining-archive/inventory-0.json
+            ${{ runner.temp }}/macos-remaining-archive/inventory-1.json
+            ${{ runner.temp }}/macos-remaining-archive/inventory-2.json
+            ${{ runner.temp }}/macos-remaining-archive/feature-resolution.json
+          retention-days: 14
+          if-no-files-found: error
+
+  macos-remaining-tests:
+    name: macOS remaining tests (${{ matrix.shard }}/2)
+    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.scope.outputs.full == 'true' && needs.macos-remaining-build.result == 'success' }}
+    needs: [scope, macos-remaining-build]
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ needs.macos-remaining-build.outputs.rustVersion }}
+      - uses: taiki-e/install-action@v2.88.1
+        with:
+          tool: cargo-nextest@0.9.150
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-remaining-binaries-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-archive
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-remaining-metadata-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-archive
+      - name: Execute validated four-worker partition
+        env:
+          CARGO_BUILD_JOBS: '2'
+          RUST_TEST_THREADS: '4'
+          MANIFEST_SHA: ${{ needs.macos-remaining-build.outputs.manifestSha256 }}
+          ARCHIVE_SHA: ${{ needs.macos-remaining-build.outputs.archiveSha256 }}
+          SHARD: ${{ matrix.shard }}
+        run: node scripts/ci/windows-coverage.mjs consume-macos-remaining "$SHARD" "$RUNNER_TEMP/macos-remaining-archive" "$RUNNER_TEMP/macos-remaining-results" "$MANIFEST_SHA" "$ARCHIVE_SHA"
+      - name: Preserve receipts and raw execution diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-remaining-results-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-results/
+          retention-days: 14
+          if-no-files-found: ${{ job.status == 'success' && 'error' || 'ignore' }}
+
+  checks-macos:
+    name: checks (macos-latest)
+    if: ${{ !cancelled() }}
+    needs: [scope, macos-native, macos-remaining-build, macos-remaining-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
+      - name: Require every actual macOS lane before collection
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          NATIVE_RESULT: ${{ needs.macos-native.result }}
+          PRODUCER_RESULT: ${{ needs.macos-remaining-build.result }}
+          CONSUMERS_RESULT: ${{ needs.macos-remaining-tests.result }}
+        run: |
+          test "$NATIVE_RESULT" = success
+          test "$PRODUCER_RESULT" = success
+          test "$CONSUMERS_RESULT" = success
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: macos-remaining-metadata-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-metadata
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: macos-remaining-results-1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-results-1
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: macos-remaining-results-2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-remaining-results-2
+      - name: Collect exact current-attempt execution union
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          MESH_MACOS_NATIVE_RESULT: ${{ needs.macos-native.result }}
+          MESH_MACOS_PRODUCER_RESULT: ${{ needs.macos-remaining-build.result }}
+          MESH_MACOS_CONSUMERS_RESULT: ${{ needs.macos-remaining-tests.result }}
+          MANIFEST_SHA: ${{ needs.macos-remaining-build.outputs.manifestSha256 }}
+          ARCHIVE_SHA: ${{ needs.macos-remaining-build.outputs.archiveSha256 }}
+        run: node scripts/ci/windows-coverage.mjs collect-macos-remaining "$RUNNER_TEMP/macos-remaining-metadata" "$RUNNER_TEMP/macos-remaining-results-1" "$RUNNER_TEMP/macos-remaining-results-2" "$MANIFEST_SHA" "$ARCHIVE_SHA"
 
   windows:
     if: ${{ !cancelled() }}

@@ -210,9 +210,11 @@ cannot replace the actual work owner's acknowledgment. See
 [actual work ownership](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
 
 Stop an already failed candidate before starting another expensive compilation
-partition. Linux/macOS native testing finishes all selected Host cases, then
-admits the remaining complete workspace only if Host passed. Both partitions
-still have to pass before reporting coverage; per-partition terminal result
+partition. Linux and standalone macOS coverage commands finish all selected Host
+cases, then admit the remaining complete workspace only if Host passed. Both
+partitions still have to pass before their combined report. Hosted macOS uses
+independent Host-only and archived remaining-workspace lanes instead; its required
+collector accepts only when every lane succeeds. Per-partition terminal result
 collection, independent matrix jobs, default targets and zero retries remain
 unchanged. The existing actual-tool coverage regression checks Host rejection,
 remaining-partition rejection, successful coverage accumulation, timing pipelines
@@ -228,11 +230,12 @@ subset together with its final superset. Standalone and macOS reporting remain
 immediate; actual-tool controls verify accumulation and both failure paths.
 
 Keep complete tests distinct from duplicate instrumentation. macOS instruments
-Host for its native desktop/updater branches, then runs every remaining default
-workspace target with pinned Nextest without coverage instrumentation. Linux and
+Host for its native desktop/updater branches and runs every remaining default
+workspace target with pinned Nextest without coverage instrumentation. Hosted
+lanes run independently; the standalone command retains Host-first sequencing. Linux and
 Windows retain full instrumented workspace coverage. This removes the separate
 instrumented Core test build on Apple Silicon; it does not claim full macOS Core
-line coverage. The actual-tool regression executes both workflow blocks, requires
+line coverage. The actual-tool regressions execute both coverage modes and real archive consumers, require
 all default targets and the Core execution marker, proves a clean macOS report
 retains Host hits without a Core test cohort, and keeps both partition failures,
 report failures, timing pipelines and process termination controls. All platform
@@ -562,7 +565,7 @@ Both need compatible inputs and complete inventories, with isolation preserved.
 Archive reuse also requires the actual architecture/ABI and supported runtime
 binary lookup. An archive cannot rewrite executable paths embedded at compile
 time; validate a relocated fresh consumer before sharing builds across jobs.
-The optional `macos-remaining` profile in `scripts/ci/windows-coverage.mjs`
+The hosted `macos-remaining` profile in `scripts/ci/windows-coverage.mjs`
 requires identical absolute checkout and target paths for embedded CLI lookups.
 It selects every enabled default workspace target except exactly `mesh-talk`,
 with two hash partitions, four test workers, two compiler jobs, default ignored
@@ -570,6 +573,39 @@ policy, no retries and no LLVM coverage instrumentation. Reject inherited LLVM
 activation, Rust flags/wrappers and unexpected target/build overrides; bind the
 accepted profile environment, compiler, source, configuration, resolved features
 and run attempt. Preserve the existing Windows eight serial instrumented shards.
+Hosted CI admits the remaining-workspace producer immediately after full scope,
+in parallel with the native Host lane. Two archive consumers depend only on scope
+and that producer; they do not wait for Host, Health or WebKit. The native lane
+retains all-target Clippy, ordinary production workspace compilation, workspace
+doctests, frontend preparation, native real-tool fixtures and Host-only coverage.
+The standalone `workspace-coverage.sh macos` command still runs Host first and
+admits the remaining partition only after Host succeeds; hosted parallelism does
+not weaken either partition's failure semantics. The existing required
+`checks (macos-latest)` identity collects on Ubuntu only after actual native,
+producer and aggregate consumer success. Documentation scope independently
+revalidates its cheap required check without manufacturing execution receipts.
+Linux retains its direct complete accumulated coverage and backend-evidence flow.
+
+Preserve the old `workspace-checks-checks` shared dependency-cache cohort without
+an additional job key on Ubuntu, native macOS and the remaining producer. Restore
+before setting the archive step's two-compiler limit or any new profile overrides.
+The native macOS lane is the sole main-branch writer of that macOS cache because
+its ordinary full-workspace build and doctests own the dependency union; the
+remaining producer restores only, and consumers restore no Cargo cache. A matching
+configured key is not evidence of a hosted cache hit. Keep already-compressed
+binary archives in separate one-day artifacts with compression disabled; retain
+small metadata and execution diagnostics separately. Producer hashes and the exact
+Rust version are trusted job outputs, not values recovered from downloaded files.
+
+Additional macOS jobs share the existing five-runner capacity with native,
+backend and browser work. Preserve browser readiness/admission gates and the
+existing job watchdogs. Measure producer compilation, symbol packaging, transfer,
+queues, consumer tails and aggregate runner minutes on the same source. The
+historical roughly 47-minute serial macOS lane may move into the high twenties
+before queues; that is a hypothesis, not a thirty-minute acceptance guarantee.
+Linux's roughly 46-minute lane remains a separate critical path, and historical
+macOS aggregate work alone exceeds thirty minutes at five-runner capacity.
+
 Trusted producer job outputs supply the manifest and archive hashes before
 consumer extraction. The producer API returns those hashes and the Rust version;
 only explicit CLI `--github-output` export writes GitHub outputs. The small

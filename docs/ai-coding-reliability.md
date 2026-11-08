@@ -538,7 +538,13 @@ protocol fixtures and their missing/duplicate/failed-receipt controls. ASan
 compilation reuse must bind the source, platform, compiler and archive/manifest
 digests through trusted producer outputs. Reject changed bytes and inventories
 before running archived tests; fresh-consumer controls must prove execution
-without producer build outputs. Retain real instrumentation checks on each runner.
+without producer build outputs. Successful executable exit does not prove that
+failure diagnostics survived relocation. Preserve the selected runtime and debug
+artifacts, and require actual application stack frame file:line evidence after
+removing producer outputs; a panic header alone is insufficient. Retain the
+missing-symbol negative control in the existing
+[archive fixture](../scripts/ci/macos-remaining-cli.test.mjs) and the
+[CI archive contract](ci-maintenance.md). Retain real instrumentation checks on each runner.
 
 A total functional browser-case watchdog is not a product performance SLA.
 Trace the failed interval: when several individually successful cold-load,

@@ -282,7 +282,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     }
   assert.match(
     workflow,
-    /bash \.\.\/scripts\/ci\/workspace-coverage\.sh macos/u,
+    /bash \.\.\/scripts\/ci\/workspace-coverage\.sh macos-host\n/u,
   );
   assert.match(
     workflow,

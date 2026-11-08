@@ -17,7 +17,7 @@ const workflowJob = (source, id) => source.split(`  ${id}:\n`)[1]?.split(/^  [a-
 
 test("documentation scope retains every required matrix identity and guards expensive steps", () => {
   const required = {
-    "ci.yml": ["checks"],
+    "ci.yml": ["checks", "checks-macos"],
     "windows-workspace.yml": ["build", "tests"],
     "check-health.yml": ["platform", "source"],
     "e2e-backend.yml": ["backend-platform"],
@@ -68,7 +68,7 @@ test("docs eligibility is recomputed locally and never fabricates provider or te
   assert.match(action, /working-directory: \$\{\{ github.workspace \}\}/u);
   assert.doesNotMatch(action, /continue-on-error|checks: write|statuses: write|npm ci|rust-cache/u);
   const empty = step(read("ci.yml"), "Report documentation-only coverage through Codecov");
-  assert.match(empty, /steps\.scope\.outputs\.full == 'false' && matrix\.os == 'ubuntu-latest'/u);
+  assert.match(empty, /steps\.scope\.outputs\.full == 'false'/u);
   assert.match(empty, /run_command: empty-upload/u);
   assert.match(empty, /version: v11\.3\.2/u);
   assert.match(empty, /fail_ci_if_error: true/u);
@@ -102,7 +102,7 @@ test("Codecov action and downloaded CLI versions are pinned independently", () =
       uploads++;
     }
   }
-  assert.equal(uploads, 5);
+  assert.equal(uploads, 6);
 });
 
 test("browser and native dependency installation use the same Linux-only preparation", async () => {
@@ -194,7 +194,7 @@ test("browser and native dependency installation use the same Linux-only prepara
 test("only auxiliary diagnostic transport is optional; acceptance artifacts stay mandatory", () => {
   const optional = {
     "check-health.yml": ["health-diagnostics-", "frontend-coverage-"],
-    "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-"],
+    "ci.yml": ["runner-storage-", "native-crash-linux-", "test-timing-", "macos-remaining-producer-log-"],
     "sanitizers.yml": ["runner-storage-"],
     "mutants.yml": ["runner-storage-"],
     "hidden-contacts-native.yml": ["runner-storage-"],
@@ -451,7 +451,7 @@ test("CI runs release workflow diagnostics only through the shared glob", () => 
 });
 
 test("Windows builds once then requires eight complete serial archive partitions", () => {
-  assert.match(read("ci.yml"), /os: \[ubuntu-latest, macos-latest\]/);
+  assert.match(workflowJob(read("ci.yml"), "checks"), /name: checks \(ubuntu-latest\)/);
   assert.match(read("ci.yml"), /uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
   const windows = read("windows-workspace.yml");
   assert.match(windows, /needs: build/);
@@ -617,4 +617,102 @@ test("frontend audits share the lockfile-installed tool and policy", () => {
     "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
     high: true, allowlist: [], "report-type": "summary",
   });
+});
+
+
+test("macOS archives start independently and retain the complete native Host owner", () => {
+  const ci = read("ci.yml");
+  const linux = workflowJob(ci, "checks");
+  const native = workflowJob(ci, "macos-native");
+  const producer = workflowJob(ci, "macos-remaining-build");
+  const consumers = workflowJob(ci, "macos-remaining-tests");
+  const collector = workflowJob(ci, "checks-macos");
+  for (const block of [linux, native, producer]) assert.match(block, /^    needs: \[scope\]$/mu);
+  assert.match(linux, /name: checks \(ubuntu-latest\)/u);
+  assert.doesNotMatch(linux, /matrix:|needs:.*macos/u);
+  assert.match(native, /runs-on: macos-latest/u);
+  assert.match(native, /needs\.scope\.outputs\.full == 'true'/u);
+  for (const command of ["cargo clippy --workspace --all-targets -- -D warnings", "cargo build --workspace --locked", "cargo test --workspace --doc", "npm ci --prefix frontend", "npm run build", "npm run check:build-syntax", "node scripts/validation/standards.mjs", "node scripts/check-repository-hygiene.mjs"]) assert.ok(native.includes(command), command);
+  assert.match(native, /workspace-coverage\.sh macos-host\n/u);
+  assert.doesNotMatch(native, /workspace-coverage\.sh macos\n/u);
+  const fixture = step(native, "Verify coverage accumulation with the actual tool");
+  for (const file of ["backend-coverage", "native-host-coverage", "rust-profile", "linux-crash-diagnostics", "macos-remaining-cli"]) assert.ok(fixture.includes(`scripts/ci/${file}.test.mjs`), file);
+  assert.match(fixture, /--test-concurrency=1/u);
+  assert.ok(native.indexOf("tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150") < native.indexOf("scripts/ci/macos-remaining-cli.test.mjs"));
+  assert.equal((ci.match(/scripts\/ci\/macos-remaining-cli.test.mjs/gu) ?? []).length, 1);
+  assert.match(consumers, /^    needs: \[scope, macos-remaining-build\]$/mu);
+  assert.match(consumers, /fail-fast: false[\s\S]*shard: \[1, 2\]/u);
+  for (const block of [producer, consumers]) {
+    assert.match(block, /runs-on: macos-latest/u);
+    assert.match(block, /node-version: 22/u);
+    assert.match(block, /tool: cargo-nextest@0\.9\.150/u);
+    assert.doesNotMatch(block, /cache: npm|npm ci|npm run|llvm-cov|llvm-tools|cargo clippy|cargo build|cargo test|frontend/u);
+    assert.match(block, /CARGO_BUILD_JOBS: '2'/u);
+    assert.match(block, /CARGO_INCREMENTAL: '0'/u);
+    assert.doesNotMatch(block, /CARGO_TARGET_DIR|RUSTFLAGS/u);
+  }
+  assert.match(producer, /produce-macos-remaining "\$RUNNER_TEMP\/macos-remaining-archive" --github-output/u);
+  for (const output of ["rustVersion", "manifestSha256", "archiveSha256"]) assert.ok(producer.includes(`${output}: \${{ steps.archive.outputs.${output} }}`));
+  assert.ok(consumers.includes("toolchain: ${{ needs.macos-remaining-build.outputs.rustVersion }}"));
+  assert.match(consumers, /RUST_TEST_THREADS: '4'/u);
+  assert.doesNotMatch(consumers, /rust-cache|cargo install/u);
+  assert.match(consumers, /consume-macos-remaining .*"\$MANIFEST_SHA" "\$ARCHIVE_SHA"/u);
+  for (const block of [linux, native, producer]) {
+    assert.match(block, /shared-key: workspace-checks-checks/u);
+    assert.doesNotMatch(block, /^          key:/mu);
+    const cache = block.split("uses: Swatinem/rust-cache@v2")[0];
+    assert.doesNotMatch(cache, /CARGO_BUILD_JOBS|CARGO_TARGET_DIR|RUST_TEST_THREADS/u);
+  }
+  assert.match(producer, /save-if: false/u);
+  assert.match(native, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/u);
+  assert.match(collector, /name: checks \(macos-latest\)/u);
+  assert.match(collector, /runs-on: ubuntu-latest/u);
+  assert.match(collector, /needs: \[scope, macos-native, macos-remaining-build, macos-remaining-tests\]/u);
+  assert.doesNotMatch(collector, /macos-remaining-binaries|rust-toolchain|rust-cache|receipt\.json.*write/u);
+  assert.match(collector, /collect-macos-remaining .*"\$MANIFEST_SHA" "\$ARCHIVE_SHA"/u);
+  for (const [variable, job] of [["NATIVE", "macos-native"], ["PRODUCER", "macos-remaining-build"], ["CONSUMERS", "macos-remaining-tests"]]) assert.ok(collector.includes(`MESH_MACOS_${variable}_RESULT: \${{ needs.${job}.result }}`));
+  assert.equal((ci.match(/run_command: empty-upload/gu) ?? []).length, 1);
+});
+
+test("macOS full-scope readiness rejects every unsuccessful native, producer or aggregate result", () => {
+  const collector = workflowJob(read("ci.yml"), "checks-macos");
+  const guard = step(collector, "Require every actual macOS lane before collection");
+  const command = guard.split("        run: |\n")[1].replace(/^          /gmu, "");
+  assert.ok(collector.indexOf("Require every actual macOS lane") < collector.indexOf("uses: actions/download-artifact@"));
+  for (const result of ["failure", "cancelled", "skipped", "unknown", ""]) {
+    for (const variable of ["NATIVE_RESULT", "PRODUCER_RESULT", "CONSUMERS_RESULT"]) {
+      const env = { ...process.env, NATIVE_RESULT: "success", PRODUCER_RESULT: "success", CONSUMERS_RESULT: "success", [variable]: result };
+      assert.notEqual(spawnSync("bash", ["-e", "-c", command], { env }).status, 0, `${variable}=${result}`);
+    }
+  }
+  assert.equal(spawnSync("bash", ["-e", "-c", command], { env: { ...process.env, NATIVE_RESULT: "success", PRODUCER_RESULT: "success", CONSUMERS_RESULT: "success" } }).status, 0);
+});
+
+
+test("macOS archives separate transient binaries from strict current-attempt evidence", () => {
+  const ci = read("ci.yml");
+  const producer = workflowJob(ci, "macos-remaining-build");
+  const consumers = workflowJob(ci, "macos-remaining-tests");
+  const collector = workflowJob(ci, "checks-macos");
+  const binary = step(producer, "Upload transient test binaries");
+  assert.match(binary, /path: \$\{\{ runner\.temp \}\}\/macos-remaining-archive\/workspace\.tar\.zst/u);
+  assert.match(binary, /compression-level: 0/u);
+  assert.match(binary, /retention-days: 1\n/u);
+  const metadata = step(producer, "Upload sealed small metadata");
+  for (const file of ["manifest.json", "inventory-0.json", "inventory-1.json", "inventory-2.json", "feature-resolution.json"]) assert.ok(metadata.includes(file));
+  assert.doesNotMatch(metadata, /workspace\.tar|target\/|dSYM/u);
+  assert.match(metadata, /if-no-files-found: error/u);
+  const diagnostics = step(producer, "Preserve raw producer diagnostics");
+  assert.match(diagnostics, /if: \$\{\{ always\(\) \}\}/u);
+  assert.match(diagnostics, /continue-on-error: true/u);
+  assert.match(step(producer, "Produce sealed remaining workspace archive"), /set -o pipefail[\s\S]*2>&1 \| tee/u);
+  const receipts = step(consumers, "Preserve receipts and raw execution diagnostics");
+  assert.match(receipts, /if: \$\{\{ always\(\) \}\}/u);
+  assert.match(receipts, /path: \$\{\{ runner\.temp \}\}\/macos-remaining-results\//u);
+  assert.doesNotMatch(receipts, /target\/|dSYM|workspace\.tar/u);
+  for (const block of [producer, consumers, collector]) {
+    for (const artifact of block.matchAll(/^          name: macos-remaining-.*$/gmu)) assert.ok(artifact[0].includes("${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"), artifact[0]);
+    assert.doesNotMatch(block, /^        run:.*\$\{\{ needs\./mu, "trusted outputs must enter shell through environment");
+  }
+  assert.equal((collector.match(/uses: actions\/download-artifact@/gu) ?? []).length, 3);
 });
