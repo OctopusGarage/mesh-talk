@@ -849,6 +849,11 @@ as failure bounds, and retain ownership and joins for admitted work on timeout.
 Request that work through its existing coordinator and observe its publication
 revision and terminal completion. A second hand-driven page loop can race the
 normal worker and bypass its serialization, recovery and cancellation contract.
+Capture immutable precondition evidence before admitting an operation that can
+invalidate it. Published projections may legitimately become pending during a
+commit; a post-admission read cannot prove the operation's initial role. Wait on
+the existing preparation owner within the original setup deadline and fail
+unexpected errors instead of retrying the whole operation.
 Give counterfactual source copies their own Cargo target directory. Relative
 package paths can collide across copies and reuse a mutated test executable;
 the canonical candidate must never consume a negative control's build output.
