@@ -1,0 +1,46 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6WGX70T1H6ACGZ8R2NXHRTH",
+  "strategy": "manual-commit",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "scripts/ci/native-host-coverage.test.mjs",
+    "scripts/diagnostics/ci-latency.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 22531,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 7123328,
+    "output_tokens": 33582,
+    "api_call_count": 26,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 452,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 4,
+      "credentialed_uri": 0,
+      "entropy": 457,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
