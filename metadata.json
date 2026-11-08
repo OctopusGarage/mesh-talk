@@ -1,0 +1,52 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6XDAJ4GHBWG74QKZXJDS441",
+  "strategy": "manual-commit",
+  "branch": "perf/ci-critical-path",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/gitleaks.yml",
+    ".github/workflows/linux-workspace-consumer.yml",
+    ".github/workflows/mutants.yml",
+    ".github/workflows/sanitizers.yml",
+    ".github/workflows/windows-workspace.yml",
+    "docs/ci-maintenance.md",
+    "scripts/ci-gitleaks.sh",
+    "scripts/diagnostics/ci-gitleaks.test.mjs",
+    "scripts/diagnostics/health-workflow.test.mjs",
+    "scripts/diagnostics/windows-coverage.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 105610,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 19159680,
+    "output_tokens": 90218,
+    "api_call_count": 87,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 2133,
+    "layers": {
+      "betterleaks": 5,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 8,
+      "credentialed_uri": 0,
+      "entropy": 2133,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
