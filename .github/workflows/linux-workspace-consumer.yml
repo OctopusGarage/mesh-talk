@@ -80,6 +80,7 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
+          fallback: none
       - name: Prepare and verify Linux native crash evidence
         if: ${{ steps.scope.outputs.full == 'true' }}
         run: |

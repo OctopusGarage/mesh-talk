@@ -92,9 +92,10 @@ jobs:
           # Preserve the compatible cache prefix after moving compilation jobs.
           shared-key: sanitizers-shards
       - name: Install pinned Nextest
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest@0.9.150
+          fallback: none
       - name: Verify pinned ASan archive protocol
         run: node --test scripts/ci/asan-cli.test.mjs
       - name: Compile and seal the ASan core archive once
@@ -141,9 +142,10 @@ jobs:
           toolchain: ${{ needs.cohort.outputs.toolchain }}
           components: rust-src
       - name: Install pinned Nextest
-        uses: taiki-e/install-action@v2.87.31
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest@0.9.150
+          fallback: none
       - name: Download the current compiled ASan archive
         uses: actions/download-artifact@v8
         with:

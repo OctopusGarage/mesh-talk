@@ -120,6 +120,7 @@ jobs:
         uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
+          fallback: none
 
       - name: Verify coverage accumulation with the actual tool
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -364,6 +365,7 @@ jobs:
         uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.150
+          fallback: none
 
       - name: Verify coverage accumulation with the actual tool
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -455,6 +457,7 @@ jobs:
       - uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest@0.9.150
+          fallback: none
       - name: Produce sealed remaining workspace archive
         id: archive
         env:
@@ -519,6 +522,7 @@ jobs:
       - uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest@0.9.150
+          fallback: none
       - uses: actions/download-artifact@v8
         with:
           name: macos-remaining-binaries-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

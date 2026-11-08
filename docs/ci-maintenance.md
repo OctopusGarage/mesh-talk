@@ -322,6 +322,18 @@ Download pinned prebuilt development tools through the existing installer where
 available. Verify support in the repository-pinned installer version; an unknown
 tool can select an unintended source-build or registry fallback. Bind direct
 release downloads to a reviewed digest and execute the installed version check.
+Keep installer revisions compatible with the pinned tools in every producer and
+consumer; disable source-build fallback for managed prebuilt tools. Otherwise a
+download failure can start an unrelated compilation under inherited sanitizer
+flags instead of reporting the setup failure.
+Check the installed host architecture as well as its version: fallback discovery
+can select a different architecture across otherwise identical archive consumers.
+Preserve producer/consumer identity checks instead of accepting that mismatch.
+When no supported installer exists, keep download logic in its owning script.
+Use the provider's supported asset API, bound transport attempts, verify the
+reviewed digest before extraction and preserve the scanner's exit status.
+Integrity failures must not trigger another source or unverified execution; see
+the [Gitleaks owner](../scripts/ci-gitleaks.sh) and its behavioral controls.
 Compiling tools with `go install` or `cargo install` is recurring setup
 work; retain source installation only when the required tool has no suitable
 trusted binary or the test explicitly validates its build.

@@ -15,7 +15,13 @@ test("health installs source scanners while Gitleaks owns the full-history scan"
   assert.match(workflow, /tool: cargo-deny,cargo-machete,typos-cli,shellcheck/);
   const secrets = readFileSync(new URL("../../.github/workflows/gitleaks.yml", import.meta.url), "utf8");
   assert.match(secrets, /fetch-depth: 0/);
-  assert.match(secrets, /GITLEAKS_VERSION: 8\.30\.1/);
+  assert.match(secrets, /run: bash scripts\/ci-gitleaks\.sh/u);
+  assert.match(secrets, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+  assert.doesNotMatch(secrets, /curl|tar -xz/u);
+  const scanner = readFileSync(new URL("../ci-gitleaks.sh", import.meta.url), "utf8");
+  assert.match(scanner, /readonly version='8\.30\.1'/u);
+  assert.match(scanner, /readonly digest='[a-f0-9]{64}'/u);
+  assert.match(scanner, /"\$scanner" git \. --config \.gitleaks\.toml --redact -v/u);
   assert.match(workflow, /https:\/\/github\.com\/rhysd\/actionlint\/releases\/download\/v1\.7\.12\/actionlint_1\.7\.12_linux_amd64\.tar\.gz/);
   assert.match(workflow, /8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8/);
   assert.match(workflow, /sha256sum --check/);

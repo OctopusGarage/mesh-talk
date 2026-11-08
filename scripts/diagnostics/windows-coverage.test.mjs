@@ -61,7 +61,7 @@ test("nextest security minimum and every CI installer follow the version owner",
     config.match(/^nextest-version = "([^"]+)"$/mu)?.[1],
     versions.nextest,
   );
-  for (const file of ["ci.yml", "windows-workspace.yml", "linux-workspace-consumer.yml", "mutants.yml"]) {
+  for (const file of ["ci.yml", "windows-workspace.yml", "linux-workspace-consumer.yml", "sanitizers.yml", "mutants.yml"]) {
     const source = readFileSync(
       new URL(`../../.github/workflows/${file}`, import.meta.url),
       "utf8",
@@ -74,6 +74,15 @@ test("nextest security minimum and every CI installer follow the version owner",
       pins.every((pin) => pin === versions.nextest),
       `${file} nextest installer drift`,
     );
+    const installers = source.split(/^      - /mu).filter((block) =>
+      /uses: taiki-e\/install-action@/u.test(block) && /tool: .*cargo-nextest@/u.test(block));
+    assert.equal(installers.length, pins.length, `${file} must retain managed prebuilt installers`);
+    for (const installer of installers) {
+      assert.match(installer, /uses: taiki-e\/install-action@v2\.88\.1\b/u,
+        `${file} installer must support the owned tool version`);
+      assert.match(installer, /^          fallback: none$/mu,
+        `${file} must not compile host tools under test instrumentation`);
+    }
   }
 });
 
