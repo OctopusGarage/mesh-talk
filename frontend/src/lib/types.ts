@@ -387,8 +387,10 @@ export interface AppSettings {
   notifications: boolean;
   /** Remembered default folder received files save into ("" = always prompt). */
   download_dir: string;
-  /** "Stay signed in": persist the password in the OS keychain to auto-unlock next launch. */
+  /** Save credentials for automatic sign-in using this installation’s storage policy. */
   stay_signed_in: boolean;
+  /** macOS: verify identity before restoring a saved login; defaults to true. */
+  startup_verification: boolean;
   /** The username to auto-login next launch (backend-managed; not set from the UI). */
   last_user: string | null;
   /** Keep chat history for at most this many days (0 = forever); older messages are erased. */

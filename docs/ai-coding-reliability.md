@@ -754,7 +754,9 @@ owner. Inheriting the real runner's owner marker can terminate the enclosing
 validation instead of only the synthetic command. The
 [process-owner fixture](../scripts/diagnostics/windows-process-owner.test.mjs)
 checks both the retained output-limit failure and successful enclosing supervisor
-through an actual nested execution.
+through an actual nested execution. When an assertion parses a child test report,
+select its reporter explicitly; terminal detection must not change the machine
+contract between TAP and human-readable output.
 
 Executable process fixtures must copy their image and assert independent file
 identity; a hard link aliases the live harness outside the child process owner.
@@ -767,6 +769,16 @@ different evidence. A stack sample or total suite duration alone does not prove
 one test is deadlocked. Inspect the active operation, its duration and the actual
 wait dependencies. Preserve required assertions when fixing flaky setup; do not
 hide a failure with retries, larger sleeps, skipped tests or weaker selectors.
+
+Saved-login verification controls must select a complete credential policy, including
+failed-login cleanup and migration compensation. A mock that skips biometric reads
+does not prove the OS will not ask to authorize a changed application binary. The
+[desktop credential owner](../src-tauri/src/session_store.rs) and
+[startup policy](../src-tauri/src/settings/startup.rs) keep convenience recovery away
+from Keychain on success and failure. Their controls cover stale local passwords,
+retired writes and locking during provider replacement; native acceptance additionally
+requires two packaged builds with different code identities. Verify actual prompts,
+not merely the absence of an explicit authentication call.
 
 Record the tested source, command, environment, count and outcome. Reassess
 consumers after merging new callers or changing a shared helper. Static scans,

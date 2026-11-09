@@ -8,6 +8,7 @@ import {
   localAgentAccess,
   type LocalAgentAccess,
 } from "@/lib/api/localAgentAccess";
+import { isMacOverlay } from "@/lib/platform";
 import { errorMessage } from "@/lib/error";
 import { HiddenContactsDialog } from "../HiddenContactsDialog";
 import { SettingsRow, SettingsSection, SELECT_CLASS } from "./primitives";
@@ -167,6 +168,30 @@ export function SecuritySettings({
             />
           }
         />
+        {isMacOverlay() && (
+          <SettingsRow
+            id="setting-startup-verification"
+            icon={<KeyRound className="h-4 w-4" />}
+            title={t("settings.startupVerification")}
+            desc={
+              <>
+                {t("settings.startupVerificationDesc")}
+                <p className="mt-1">{t("settings.startupVerificationLocal")}</p>
+                <p className="mt-1">{t("settings.scopeComputer")}</p>
+              </>
+            }
+            control={
+              <Switch
+                id="setting-startup-verification"
+                checked={s.startup_verification ?? true}
+                disabled={c.saving || !s.stay_signed_in}
+                onCheckedChange={(on) =>
+                  void c.update({ startup_verification: on }, "privacy")
+                }
+              />
+            }
+          />
+        )}
       </SettingsSection>
       <SettingsSection title={t("settings.sections.clipboard")}>
         <SettingsRow

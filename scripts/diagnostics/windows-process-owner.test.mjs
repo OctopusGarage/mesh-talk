@@ -591,7 +591,7 @@ test("an output-limit control cannot cancel its enclosing validation supervisor"
     ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "", NODE_TEST_CONTEXT: undefined,
   });
   const result = spawnSync(process.execPath, [stage, "stream-control", "--result", output, "--", process.execPath,
-    "--test", `--test-name-pattern=^${caseName}$`, fileURLToPath(import.meta.url)], {
+    "--test", "--test-reporter=tap", `--test-name-pattern=^${caseName}$`, fileURLToPath(import.meta.url)], {
     cwd: root,
     // This synthetic supervisor owns the expected cancellation, independently
     // of the real runner executing this regression.

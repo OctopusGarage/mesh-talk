@@ -1746,13 +1746,17 @@
             "reference": "docs/privacy-controls.md#verify-sensitive-operations"
           },
           {
+            "name": "The macOS startup verification toggle is installation-local, depends on saved login, and displays only acknowledged credential-policy changes without altering app-lock settings.",
+            "reference": "docs/privacy-controls.md#startup-verification"
+          },
+          {
             "name": "Device-linking authentication precedes sync expansion and source code display waits for snapshot preparation.",
             "reference": "docs/privacy-controls.md#verify-sensitive-operations"
           }
         ]
       },
       "escalation": [
-        "Exercise nested Settings/Backup/password dialogs, Escape/focus restoration and pending-operation cancellation in browser; real macOS device-owner and Windows/Linux password verification require native evidence."
+        "Exercise nested Settings/Backup/password dialogs, Escape/focus restoration and pending-operation cancellation in browser; real macOS device-owner and Windows/Linux password verification require native evidence. Exercise startup verification enabled/disabled on macOS, including replacement with a different application build; component mocks do not prove native credential migration or absence of Keychain prompts."
       ]
     },
     {

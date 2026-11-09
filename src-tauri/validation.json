@@ -1389,6 +1389,44 @@
           }
         ]
       }
+    },
+    {
+      "id": "desktop-startup-verification",
+      "paths": [
+        "src-tauri/src/settings/startup.rs",
+        "src-tauri/src/session_store/local.rs",
+        "src-tauri/src/session_store.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/settings.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "settings::startup::tests::",
+            "startup_verification_defaults",
+            "startup_verification_off_stale_local_login",
+            "startup_verification_cancel_preserves_saved_session",
+            "session_store::local::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Switch macOS cold saved-login verification independently of automatic sign-in using explicitly consented private local recovery.",
+        "guide": "docs/privacy-controls.md#startup-verification",
+        "invariants": [
+          {
+            "name": "Convenience mode never reads Keychain; switching acknowledges durable destination credentials under exact session authority and protected mode removes local recovery.",
+            "reference": "docs/privacy-controls.md#startup-verification"
+          }
+        ]
+      },
+      "escalation": [
+        "Require two packaged macOS builds with distinct code hashes: convenience-mode restart and update must restore without Keychain or device-owner prompts; protected-mode startup and cancellation must retain manual recovery. Mocks do not prove native prompt behavior."
+      ],
+      "consumers": [
+        "frontend-sensitive-operations"
+      ]
     }
   ],
   "prScenarios": [
@@ -1446,6 +1484,19 @@
       ],
       "browser": ["e2e/google-drive-backup.spec.ts", "e2e/recovery.spec.ts"],
       "native": ["host"]
+    },
+    {
+      "id": "desktop-startup-verification-native",
+      "paths": [
+        "src-tauri/src/settings/startup.rs",
+        "src-tauri/src/session_store/local.rs"
+      ],
+      "browser": [
+        "e2e/privacy.spec.ts"
+      ],
+      "native": [
+        "darwin"
+      ]
     }
   ]
 }

@@ -413,7 +413,11 @@ async fn apply_cancellable<R: tauri::Runtime>(
                         &handle, &settings, &user, &password, authorize,
                     );
                     if previous_login != user.login_name() {
-                        crate::session_store::clear(&previous_login);
+                        crate::session_store::clear_with_policy(
+                            &previous_login,
+                            settings.get().startup_verification,
+                        )
+                        .map_err(CommandError::Io)?;
                     }
                     status
                 })

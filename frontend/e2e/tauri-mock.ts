@@ -705,6 +705,7 @@ export const test = base.extend<{ mockCallsEnabled: boolean }>({
         notifications: true,
         download_dir: "/home/tester/Downloads",
         stay_signed_in: true,
+        startup_verification: true,
         last_user: null as string | null,
         retention_days: 0,
         calls_enabled: callsEnabled,

@@ -3352,6 +3352,7 @@ dependencies = [
 name = "mesh-talk"
 version = "0.4.5"
 dependencies = [
+ "aes-gcm 0.11.1",
  "ashpd",
  "base64 0.23.1",
  "block2 0.6.2",
@@ -3372,6 +3373,7 @@ dependencies = [
  "objc2-local-authentication",
  "objc2-user-notifications",
  "rand",
+ "rand_core 0.6.4",
  "raw-window-handle",
  "rcgen",
  "reqwest",

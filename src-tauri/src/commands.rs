@@ -333,6 +333,17 @@ pub async fn auto_login<R: tauri::Runtime>(
     let Some(username) = settings.last_user else {
         return Ok(None);
     };
+    #[cfg(any(test, target_os = "macos"))]
+    if settings.startup_verification {
+        // Startup verification is explicit and independent of Keychain ACL prompts.
+        // Cancel means manual sign-in; do not erase a valid remembered credential.
+        if crate::app_lock::authenticate_startup(&app_state)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+    }
     #[cfg(test)]
     if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
         let _ = entered.send("auto-login-entry");
@@ -352,7 +363,7 @@ pub async fn auto_login<R: tauri::Runtime>(
         {
             return None;
         }
-        crate::session_store::load(&credential_user)
+        crate::session_store::load_with_policy(&credential_user, settings.startup_verification)
     })
     .await
     .unwrap_or_else(|error| {
@@ -408,6 +419,7 @@ pub async fn auto_login<R: tauri::Runtime>(
                 settings_state.inner().clone(),
                 entry_generation,
                 Some(username),
+                Some(settings.startup_verification),
             )
             .await?;
             Ok(None)
@@ -435,6 +447,7 @@ pub async fn clear_saved_session<R: tauri::Runtime>(
         settings_state.inner().clone(),
         generation,
         username,
+        None,
     )
     .await
 }
@@ -445,6 +458,7 @@ async fn forget_saved_session_owned<R: tauri::Runtime>(
     settings: crate::settings::SettingsState,
     generation: u64,
     username: Option<String>,
+    startup_policy: Option<bool>,
 ) -> CommandResult<()> {
     let auth = app.auth_operation.clone().lock_owned().await;
     tokio::task::spawn_blocking(move || {
@@ -455,14 +469,21 @@ async fn forget_saved_session_owned<R: tauri::Runtime>(
             .unwrap_or(false);
         if current {
             if let Some(username) = username {
-                forget_logged_out(&handle, &settings, &username);
+                if startup_policy == Some(false) {
+                    crate::settings::record_last_user(&handle, &settings, None);
+                    crate::session_store::clear_with_policy(&username, false)
+                        .map_err(CommandError::Io)?;
+                } else {
+                    forget_logged_out(&handle, &settings, &username);
+                }
             } else {
                 crate::settings::record_last_user(&handle, &settings, None);
             }
         }
+        Ok(())
     })
     .await
-    .map_err(|_| CommandError::Service("Saved-login cleanup worker stopped".into()))
+    .map_err(|_| CommandError::Service("Saved-login cleanup worker stopped".into()))?
 }
 
 /// After the caller commits a saved-login preference change, transfer its auth
@@ -532,8 +553,14 @@ pub(crate) fn persist_saved_login_checked<R: tauri::Runtime>(
     mut authorize: impl FnMut(&mut dyn FnMut() -> CommandResult<()>) -> CommandResult<()>,
 ) -> CommandResult<SavedSessionStatus> {
     authorize(&mut || Ok(()))?;
-    let requested = settings.get().stay_signed_in;
-    let stored = requested && crate::session_store::save(user.login_name(), raw_password);
+    let policy = settings.get();
+    let requested = policy.stay_signed_in;
+    let stored = requested
+        && crate::session_store::save_with_policy(
+            user.login_name(),
+            raw_password,
+            policy.startup_verification,
+        );
     let mut status = SavedSessionStatus::Failed;
     let committed = authorize(&mut || {
         status = if !settings.get().stay_signed_in {
@@ -558,7 +585,8 @@ pub(crate) fn persist_saved_login_checked<R: tauri::Runtime>(
         if settings.get().last_user.as_deref() == Some(user.login_name()) {
             crate::settings::record_last_user(handle, settings, None);
         }
-        crate::session_store::clear(user.login_name());
+        crate::session_store::clear_with_policy(user.login_name(), policy.startup_verification)
+            .map_err(CommandError::Io)?;
     }
     committed?;
     Ok(status)
@@ -2217,6 +2245,63 @@ mod tests {
         let runtime = fixture.node.0.blocking_write();
         assert_eq!(runtime.as_ref().unwrap().user_id(), original_device);
         assert_eq!(runtime.as_ref().unwrap().restart_password(), " password-a ");
+    }
+
+    #[test]
+    fn startup_verification_cancel_preserves_saved_session_for_manual_recovery() {
+        let fixture = AuthFixture::new("startup-cancel");
+        logout_impl(&fixture.app_state).unwrap();
+        fixture.settings.deactivate();
+        fixture
+            .app_state
+            .app_lock()
+            .set_identity_verifier(|| Err(CommandError::Authentication("cancelled".into())));
+        assert_eq!(
+            invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(fixture.app_state.session().get().is_none());
+        assert_eq!(
+            fixture.settings.get().last_user.as_deref(),
+            Some(fixture.alice.as_str())
+        );
+        assert!(crate::session_store::load(&fixture.alice).is_some());
+    }
+
+    #[test]
+    fn startup_verification_off_stale_local_login_never_touches_keychain() {
+        let fixture = AuthFixture::new("local-stale-startup");
+        logout_impl(&fixture.app_state).unwrap();
+        fixture.settings.deactivate();
+        let mut settings = fixture.settings.get();
+        settings.startup_verification = false;
+        fixture.settings.set(settings);
+        assert!(crate::session_store::save_with_policy(
+            &fixture.alice,
+            "obsolete",
+            false
+        ));
+        fixture
+            .app_state
+            .app_lock()
+            .set_identity_verifier(|| panic!("OFF startup asked for identity verification"));
+        for operation in ["load", "save", "clear"] {
+            crate::session_store::before_next_io(
+                &fixture.alice,
+                operation,
+                Box::new(|| panic!("OFF startup accessed Keychain")),
+            );
+        }
+        assert_eq!(
+            invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(fixture.settings.get().last_user.is_none());
+        assert!(crate::session_store::load_with_policy(&fixture.alice, false).is_none());
+        // Teardown legitimately cleans both providers; consume the native hooks.
+        for operation in ["load", "save", "clear"] {
+            crate::session_store::before_next_io(&fixture.alice, operation, Box::new(|| {}));
+        }
     }
 
     #[test]

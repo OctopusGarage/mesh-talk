@@ -28,6 +28,38 @@ Agent authorization may be temporary or continuous. Its expiry and renewal
 rules, and the content-free recent activity view, are owned by the
 [local agent guide](bot-integrations.md#lifecycle-and-authority).
 
+## Startup verification
+
+On macOS, **Settings → Privacy & security → Verify at startup** controls automatic
+sign-in independently of **Stay signed in**. It defaults on, including after
+upgrading an older installation. When on, a cold automatic sign-in asks for Touch
+ID or the Mac login password. Cancelling returns to manual sign-in without deleting
+the remembered credential. Reloading an already unlocked window does not repeat it.
+
+Turn it off to restore the saved session without startup verification, including
+after replacing the app with an update. This mode stores an encrypted login
+credential and its random encryption key together in the private application data
+directory (`saved-sessions/`), with user-only filesystem permissions. It protects
+against plaintext disclosure and access by other ordinary system users; it does
+not isolate credentials from other processes running as the same user, an
+administrator, or a copy of the complete recovery file. This preference stays on
+this computer and is never synchronized through account preferences.
+
+Changing the mode requires an unlocked signed-in session and one identity
+verification for that change. The backend migrates the credential from the active
+session; it does not need to read the previous Keychain entry when turning startup
+verification off. A failed migration does not acknowledge the new setting.
+Turning verification back on saves protected credentials and removes local
+recovery before acknowledging the protected mode. Old Keychain entries may remain
+until sign-out; convenience startup never reads them or falls back to them.
+
+Turning **Stay signed in** off prevents automatic sign-in in either mode and
+withdraws the remembered login before credential cleanup. Signing out removes
+both kinds of saved credential. Idle locking, hidden-window locking and sensitive
+operation verification keep their separate settings and authorization rules.
+Native cross-update behavior must be verified with two packaged builds; mock
+credential providers and browser tests cannot certify macOS prompt behavior.
+
 ## Verify sensitive operations
 
 Mesh-Talk requires fresh identity verification before weakening device privacy

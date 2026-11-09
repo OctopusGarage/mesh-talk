@@ -44,6 +44,7 @@ const initial: AppSettings = {
   notifications: true,
   download_dir: "",
   stay_signed_in: false,
+  startup_verification: true,
   last_user: null,
   retention_days: 0,
   calls_enabled: false,
