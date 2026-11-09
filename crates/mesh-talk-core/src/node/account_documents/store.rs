@@ -162,7 +162,18 @@ thread_local! {
     static INVENTORY_BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+// Caller scheduling qualification only: no payload, permission or custody.
+// Direct get() always reads and verifies durable bytes. Hits never renew expiry.
+struct OperationPublication {
+    meta: AccountDocumentMeta,
+    projection: [u8; 32],
+    repair_at: std::time::Instant,
+}
+const MAX_OPERATION_PUBLICATIONS: usize = 128;
+const OPERATION_PUBLICATION_REPAIR: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 pub(in crate::node) struct AccountDocumentStore {
+    operation_publications: BTreeMap<AccountDocumentKey, OperationPublication>,
     // Account-scoped presentation facts only; never memoize live authorization.
     intrinsic_cache: BTreeMap<AccountDocumentKey, IntrinsicCacheEntry>,
     intrinsic_cache_bytes: usize,
@@ -316,6 +327,7 @@ impl AccountDocumentStore {
         let journal_bytes =
             INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
         let mut store = Self {
+            operation_publications: BTreeMap::new(),
             intrinsic_cache: BTreeMap::new(),
             intrinsic_cache_bytes: 0,
             #[cfg(test)]
@@ -458,6 +470,64 @@ impl AccountDocumentStore {
     #[cfg(test)]
     pub(super) fn compact_next_for_test(&mut self) {
         self.records = self.current.len().saturating_mul(2).saturating_add(32);
+    }
+    pub(super) fn operation_publication_unchanged(
+        &mut self,
+        meta: Option<&AccountDocumentMeta>,
+        projection: [u8; 32],
+        verified: Option<[u8; 32]>,
+    ) -> bool {
+        let Some(meta) = meta else {
+            return false;
+        };
+        if verified != Some(meta.content_hash) || meta.tombstone {
+            self.operation_publications.remove(&meta.key);
+            return false;
+        }
+        self.operation_publications
+            .get(&meta.key)
+            .is_some_and(|entry| {
+                entry.meta == *meta
+                    && entry.projection == projection
+                    && std::time::Instant::now() < entry.repair_at
+            })
+    }
+    pub(super) fn remember_operation_publication(
+        &mut self,
+        meta: AccountDocumentMeta,
+        projection: [u8; 32],
+    ) {
+        if !matches!(
+            meta.key,
+            AccountDocumentKey::GroupOperation { .. }
+                | AccountDocumentKey::GroupLegacyOperation { .. }
+        ) {
+            return;
+        }
+        if !self.operation_publications.contains_key(&meta.key)
+            && self.operation_publications.len() >= MAX_OPERATION_PUBLICATIONS
+            && let Some(oldest) = self
+                .operation_publications
+                .iter()
+                .min_by_key(|(_, entry)| entry.repair_at)
+                .map(|(key, _)| key.clone())
+        {
+            self.operation_publications.remove(&oldest);
+        }
+        self.operation_publications.insert(
+            meta.key.clone(),
+            OperationPublication {
+                meta,
+                projection,
+                repair_at: std::time::Instant::now() + OPERATION_PUBLICATION_REPAIR,
+            },
+        );
+    }
+    #[cfg(test)]
+    pub(super) fn expire_operation_publications_for_test(&mut self) {
+        for entry in self.operation_publications.values_mut() {
+            entry.repair_at = std::time::Instant::now();
+        }
     }
     pub(super) fn meta(&self, key: &AccountDocumentKey) -> Option<AccountDocumentMeta> {
         self.current.get(key).cloned()
@@ -1754,6 +1824,79 @@ mod tests {
         assert_eq!(store.meta(&meta.key).as_ref(), Some(&next));
         assert!(store.control_head(&next, &public).is_some());
         assert!(store.intrinsic_cache.contains_key(&meta.key));
+    }
+
+    #[test]
+    fn operation_publication_eviction_expiry_and_reopen_restore_normal_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let make = |n| {
+            AccountDocumentMeta::new(
+                &account,
+                "00".repeat(16),
+                AccountDocumentKey::GroupOperation {
+                    channel: format!("{n:064x}"),
+                    source_device: "00".repeat(16),
+                },
+                1,
+                b"metadata-only qualification",
+                false,
+            )
+        };
+        let first = make(0);
+        store.remember_operation_publication(first.clone(), [1; 32]);
+        let deadline = store.operation_publications[&first.key].repair_at;
+        assert!(store.operation_publication_unchanged(
+            Some(&first),
+            [1; 32],
+            Some(first.content_hash)
+        ));
+        assert_eq!(
+            store.operation_publications[&first.key].repair_at, deadline,
+            "hits cannot renew the repair deadline"
+        );
+        assert!(!store.operation_publication_unchanged(
+            Some(&first),
+            [2; 32],
+            Some(first.content_hash)
+        ));
+        let mut changed = first.clone();
+        changed.revision += 1;
+        assert!(!store.operation_publication_unchanged(
+            Some(&changed),
+            [1; 32],
+            Some(first.content_hash)
+        ));
+        assert!(!store.operation_publication_unchanged(Some(&first), [1; 32], None));
+        store.remember_operation_publication(first.clone(), [1; 32]);
+        for n in 1..=MAX_OPERATION_PUBLICATIONS {
+            store.remember_operation_publication(make(n), [1; 32]);
+        }
+        assert!(
+            !store.operation_publication_unchanged(Some(&first), [1; 32], Some(first.content_hash)),
+            "eviction must require normal publication work"
+        );
+        assert_eq!(
+            store.operation_publications.len(),
+            MAX_OPERATION_PUBLICATIONS
+        );
+        let last = make(MAX_OPERATION_PUBLICATIONS);
+        store.expire_operation_publications_for_test();
+        assert!(!store.operation_publication_unchanged(
+            Some(&last),
+            [1; 32],
+            Some(last.content_hash)
+        ));
+        drop(store);
+        let mut reopened =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        assert!(!reopened.operation_publication_unchanged(
+            Some(&last),
+            [1; 32],
+            Some(last.content_hash)
+        ));
     }
 
     #[test]

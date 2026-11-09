@@ -1332,7 +1332,12 @@ Ordinary and legacy operation-document publishers own their per-Node unit
 ordering gate. Each group pass takes it before capturing the journal projection
 and retains it through signed store merge, with no caller-held journal, document,
 membership or delivery guard. The unit contains no durable payload, so recovering
-its poison does not recover or bypass a poisoned journal or store. No gate spans
+its poison does not recover or bypass a poisoned journal or store.
+The document store retains at most 128 runtime-only operation-publication
+qualifications containing exact metadata, a projection fingerprint and a fixed
+five-minute repair deadline. Publishers compare fresh projections and current
+verified-own-head evidence before body access. These contain no document bodies
+or authority; explicit consumers retain durable integrity checks. No gate spans
 network work; invitation preparation precedes its admitted blocking local commit.
 
 Authenticated body-free sibling invalidations remain active independently of

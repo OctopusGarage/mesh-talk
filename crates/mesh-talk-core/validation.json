@@ -3003,7 +3003,8 @@
         "crates/mesh-talk-core/src/storage/database.rs",
         "crates/mesh-talk-core/src/storage/database/work_clock.rs",
         "crates/mesh-talk-core/src/storage/database/selection_work.rs",
-        "crates/mesh-talk-core/src/eventlog/repository/selection/export.rs"
+        "crates/mesh-talk-core/src/eventlog/repository/selection/export.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
       ],
       "rust": [
         {
@@ -3096,6 +3097,10 @@
           },
           {
             "name": "Four scoped upload slots preserve unfinished preparation across cancelled rounds. Two independent bounded receive-only owners never acquire history views and permit incoming processing under bulk saturation. New bulk scopes defer under productive saturation; completed or empty owners are preferred for eviction, and privacy-generation changes or 30 seconds without actual progress permit reclamation. Acquiring and validating do not renew progress; contended entries do not block unrelated admission. Evicted selection destruction occurs outside global cache admission.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Channel queue-only writes cannot invalidate settled consent work; account/source/reopen changes retain ordinary fences, closed SQL purposes cannot mutate each other, and absent/duplicate queue operations preserve cached read plans.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]

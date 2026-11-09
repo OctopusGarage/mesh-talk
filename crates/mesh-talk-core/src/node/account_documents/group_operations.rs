@@ -242,6 +242,10 @@ impl Node {
                 #[cfg(test)]
                 owner_phase("store_lock_acquired_read_begin");
                 let previous = store.meta(&key);
+                let fingerprint = projection.fingerprint();
+                if store.operation_publication_unchanged(previous.as_ref(), fingerprint, verified) {
+                    continue;
+                }
                 let old = store.get(&key).ok().flatten().and_then(|document| {
                     // The input owner already verified these exact bytes. Reuse
                     // that fact only for this device's own publication; changed,
@@ -259,8 +263,11 @@ impl Node {
                 });
                 if old
                     .as_ref()
-                    .is_some_and(|old| old.projection.fingerprint() == projection.fingerprint())
+                    .is_some_and(|old| old.projection.fingerprint() == fingerprint)
                 {
+                    if let Some(meta) = previous {
+                        store.remember_operation_publication(meta, fingerprint);
+                    }
                     continue;
                 }
                 let Some(revision) = previous.map_or(Some(1), |meta| meta.revision.checked_add(1))
@@ -288,7 +295,10 @@ impl Node {
                 }
                 #[cfg(test)]
                 owner_phase("frame_end_merge_begin");
-                let changed = store.merge(meta, &payload);
+                let changed = store.merge(meta.clone(), &payload);
+                if changed.is_ok() {
+                    store.remember_operation_publication(meta, fingerprint);
+                }
                 #[cfg(test)]
                 owner_phase("merge_end");
                 changed
@@ -462,6 +472,20 @@ mod input_tests {
             channel: hex::encode(group.as_bytes()),
             source_device: source.user_id(),
         };
+        // Settle the exact already-verified ordinary and legacy heads before
+        // measuring the real unchanged publication path.
+        source.publish_account_group_operations();
+        source.publish_account_group_legacy_operations();
+        let body_reads = source.account_documents.lock().unwrap().body_read_count();
+        for _ in 0..16 {
+            source.publish_account_group_operations();
+            source.publish_account_group_legacy_operations();
+        }
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count(),
+            body_reads,
+            "unchanged publication must compare exact scheduling metadata before loading encrypted document blobs"
+        );
         let before = source.account_documents.lock().unwrap().meta(&key).unwrap();
         operations::take_frame_decode_counts_for_test();
         source.publish_account_group_operations();
@@ -475,6 +499,19 @@ mod input_tests {
             unchanged,
             [0, 0],
             "unchanged locally verified publication must not repeat signed-reference verification under the document lock"
+        );
+        let before_repair = source.account_documents.lock().unwrap().body_read_count();
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .expire_operation_publications_for_test();
+        source.publish_account_group_operations();
+        source.publish_account_group_legacy_operations();
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count(),
+            before_repair + 2,
+            "sparse repair must re-read both ordinary and legacy durable heads"
         );
         // A new process has no verified-input witness: it must authenticate the
         // durable rows again rather than trusting a stored local-looking key.
@@ -511,6 +548,33 @@ mod input_tests {
         source.publish_account_group_operations();
         source.publish_account_group_legacy_operations();
         assert_eq!(operations::take_frame_decode_counts_for_test(), [0, 0]);
+        // A producer qualification is not a payload cache: explicit reads must
+        // still report lost/corrupt storage, and sparse repair must retry a
+        // failed durable publication rather than acknowledge it as settled.
+        let current = source.account_documents.lock().unwrap().meta(&key).unwrap();
+        {
+            let mut store = source.account_documents.lock().unwrap();
+            store.remove_blob_for_test(current.content_hash);
+            store.expire_operation_publications_for_test();
+            store.fail_index_for_test(true);
+        }
+        assert!(source.account_document(&key).is_err());
+        source.publish_account_group_operations();
+        assert_eq!(
+            source.account_documents.lock().unwrap().meta(&key).as_ref(),
+            Some(&current)
+        );
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .fail_index_for_test(false);
+        source.publish_account_group_operations();
+        let repaired = source.account_document(&key).unwrap().unwrap();
+        assert!(repaired.meta.revision > current.revision);
+        assert!(
+            OperationFrame::decode(repaired.payload(), &account.public().ed25519_pub).is_some()
+        );
     }
 
     fn put_head(reader: &Node, author: &Node, value: u8, revision: u64, legacy: bool) {

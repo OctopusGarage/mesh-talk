@@ -8,6 +8,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 pub(super) enum Purpose {
     Selection,
     TransportHint,
+    ChannelScheduling,
 }
 impl Purpose {
     fn tables(self) -> &'static [&'static [u8]] {
@@ -23,6 +24,7 @@ impl Purpose {
                 b"participant_sync_receipts",
                 b"participant_sync_export_work",
             ],
+            Self::ChannelScheduling => &[b"channel_runtime_work"],
             Self::TransportHint => &[
                 b"opaque_checkpoints",
                 b"opaque_wrapper_ids",
@@ -43,7 +45,7 @@ unsafe extern "C" fn authorize(
     if context.is_null() {
         return ffi::SQLITE_DENY;
     }
-    // SAFETY: install supplies one of two immutable program-lifetime statics;
+    // SAFETY: install supplies one of the immutable program-lifetime statics;
     // SQLite retains no borrowed connection or transaction in this context.
     let purpose = unsafe { *(context.cast::<Purpose>()) };
     match action {
@@ -82,9 +84,11 @@ impl Guard {
     pub(super) fn install(connection: &Connection, purpose: Purpose) -> Result<Self, LogError> {
         static SELECTION: Purpose = Purpose::Selection;
         static TRANSPORT_HINT: Purpose = Purpose::TransportHint;
+        static CHANNEL_SCHEDULING: Purpose = Purpose::ChannelScheduling;
         let policy_context = match purpose {
             Purpose::Selection => &SELECTION,
             Purpose::TransportHint => &TRANSPORT_HINT,
+            Purpose::ChannelScheduling => &CHANNEL_SCHEDULING,
         } as *const Purpose;
         // SAFETY: connection is live and exclusively locked by the owner. This
         // owner has no other authorizer. SQLite expires previously prepared

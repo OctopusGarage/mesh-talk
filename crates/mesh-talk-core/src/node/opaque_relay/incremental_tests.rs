@@ -210,6 +210,15 @@ async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
             .put_checkpoint(b"independent-mailbox-progress", b"transport-progress")
             .unwrap()
     );
+    // Scheduling a separate channel and retiring its queue entry changes no
+    // retained source or consent authority for this settled mailbox.
+    let scheduling_only = ConversationId::new([0xe7; 32]);
+    node.channel_checkpoints
+        .queue_runtime(scheduling_only)
+        .unwrap();
+    node.channel_checkpoints
+        .finish_runtime(scheduling_only, None)
+        .unwrap();
     super::super::file_consent::offered_observations::reset();
     let (_, custody, _) = counted_scope_exchange(
         &node,

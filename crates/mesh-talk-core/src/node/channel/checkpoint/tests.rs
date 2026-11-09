@@ -3125,3 +3125,61 @@ fn channel_completed_causal_cut_failed_construction_remains_retryable() {
     assert!(same.contains_event(target).unwrap());
     assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
 }
+
+#[test]
+fn runtime_scheduling_keeps_work_hints_and_quiet_cached_plans_but_reopen_invalidates() {
+    let fixture = Fixture::new(0);
+    let db = fixture.store.profile.database();
+    let before = db.work_hint_stamp().unwrap();
+    let raw = db.main_write_stamp().unwrap().unwrap();
+    fixture.store.queue_runtime(fixture.channel).unwrap();
+    assert!(!raw.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+    assert_eq!(db.work_hint_stamp().unwrap(), before);
+    let prepare = |reset| {
+        db.read(|c| {
+            let mut q = c.prepare_cached("SELECT count(*) FROM channel_runtime_work")?;
+            let _: i64 = q.query_row([], |r| r.get(0))?;
+            Ok(if reset {
+                q.reset_status(rusqlite::StatementStatus::RePrepare)
+            } else {
+                q.get_status(rusqlite::StatementStatus::RePrepare)
+            })
+        })
+        .unwrap()
+    };
+    prepare(true);
+    for _ in 0..8 {
+        fixture.store.queue_runtime(fixture.channel).unwrap();
+    }
+    assert_eq!(prepare(false), 0, "queued no-ops cannot expire cached SQL");
+    fixture.store.finish_runtime(fixture.channel, None).unwrap();
+    assert_eq!(db.work_hint_stamp().unwrap(), before);
+    prepare(true);
+    for _ in 0..8 {
+        assert!(!fixture.store.finish_runtime(fixture.channel, None).unwrap());
+    }
+    assert_eq!(
+        prepare(false),
+        0,
+        "absent completions cannot expire cached SQL"
+    );
+    fixture.project();
+    fixture.store.finish_runtime(fixture.channel, None).unwrap();
+    let mut stale = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    stale.revision += 1;
+    assert!(matches!(
+        fixture.store.finish_runtime(fixture.channel, Some(&stale)),
+        Err(LogError::StaleCursor)
+    ));
+    let before_reopen = db.work_hint_stamp().unwrap();
+    fixture.store.begin_runtime_reopen().unwrap();
+    assert_ne!(
+        db.work_hint_stamp().unwrap(),
+        before_reopen,
+        "runtime owner/source changes remain conservative fences"
+    );
+}

@@ -2665,13 +2665,13 @@ policy generations. An owner-qualified runtime work clock observes the current p
 version and non-reset dirty-page write count under its exclusive connection
 mutex. Default writes, including legacy mutations through read closures, remain
 conservative invalidations. The owner acknowledges only the write interval of
-an explicitly guarded disposable selection or transport-hint transaction; preceding
+an explicitly guarded disposable selection, transport-hint or channel-scheduling transaction; preceding
 ordinary writes are observed first under the same guard. SQLite authorization
 allows that transaction to read current authority and use TEMP scratch, but write
 MAIN only through the purpose's closed table set. Selection work owns its nine
 `participant_sync_*` selection/progress tables; optional transport-hint work owns
 `opaque_checkpoints`, `opaque_wrapper_ids` and `opaque_checkpoint_usage` only.
-Neither purpose can write the other's tables. Other MAIN writes, including trigger side effects and previously cached
+Channel scheduling owns `channel_runtime_work` only; account, source and reopen-owner changes retain their ordinary fence. The three purposes cannot write each other's tables. Other MAIN writes, including trigger side effects and previously cached
 statements, are rejected and rolled back. Schema/kind backfill, events, controls, receipts and other business facts
 retain the default fence. A transport checkpoint is not an authoritative delivery
 receipt: saving another mailbox's cursor must not force settled consent offers

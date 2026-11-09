@@ -84,7 +84,18 @@ impl ChannelCheckpointStore {
         })
     }
     pub(in crate::node) fn queue_runtime(&self, channel: ConversationId) -> Result<(), LogError> {
-        self.profile.database().transaction(|c| {
+        let queued = self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                [channel.as_bytes().as_slice()],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })?;
+        if queued {
+            return Ok(());
+        }
+        self.profile.database().channel_scheduling_transaction(|c| {
             self.check_account_on(c)?;
             queue_on(c, channel)
         })
@@ -94,7 +105,23 @@ impl ChannelCheckpointStore {
         channel: ConversationId,
         source: Option<&ChannelSource>,
     ) -> Result<bool, LogError> {
-        self.profile.database().transaction(|c| {
+        // Preserve source/account errors even for absent work. Read-only no-ops
+        // must not install an authorizer and expire cached statement plans.
+        let queued = self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            if let Some(source) = source {
+                self.check_source_on(c, source)?;
+            }
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                [channel.as_bytes().as_slice()],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })?;
+        if !queued {
+            return Ok(false);
+        }
+        self.profile.database().channel_scheduling_transaction(|c| {
             self.check_account_on(c)?;
             if let Some(source) = source {
                 self.check_source_on(c, source)?;

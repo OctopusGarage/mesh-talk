@@ -609,6 +609,15 @@ impl EncryptedDatabase {
     ) -> Result<T, LogError> {
         self.transaction_with_purpose(Some(selection_work::Purpose::TransportHint), operation)
     }
+    /// Channel queue scheduling only; source, account and generation tables
+    /// remain ordinary conservative work fences. This never grants authority.
+    #[track_caller]
+    pub(crate) fn channel_scheduling_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_purpose(Some(selection_work::Purpose::ChannelScheduling), operation)
+    }
     #[track_caller]
     fn transaction_with_purpose<T>(
         &self,
@@ -1051,6 +1060,90 @@ mod tests {
         assert_ne!(db.work_hint_stamp().unwrap(), Some(prior));
         assert_eq!(body(&db), "real change");
     }
+    #[test]
+    fn channel_scheduling_guard_preserves_business_owner_and_cross_purpose_fences() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE channel_runtime_work(channel TEXT PRIMARY KEY,opened INTEGER,reopening INTEGER); CREATE TABLE channel_runtime_owner(value INTEGER); INSERT INTO channel_runtime_owner VALUES(1)")?;
+            Ok(())
+        }).unwrap();
+        let before = db.work_hint_stamp().unwrap();
+        db.channel_scheduling_transaction(|c| {
+            c.execute("INSERT INTO channel_runtime_work VALUES('a',1,0)", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.work_hint_stamp().unwrap(), before);
+        for sql in [
+            "UPDATE channel_runtime_owner SET value=2",
+            "INSERT INTO participant_sync_progress VALUES(1,'denied')",
+            "CREATE TABLE forbidden(value INTEGER)",
+        ] {
+            assert!(
+                db.channel_scheduling_transaction(|c| {
+                    c.execute_batch(sql)?;
+                    Ok(())
+                })
+                .is_err()
+            );
+        }
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        db.read(|c| {
+            c.prepare_cached("UPDATE messages SET body=?1")?
+                .execute([SECRET])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            db.channel_scheduling_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                c.prepare_cached("UPDATE messages SET body=?1")?
+                    .execute(["denied"])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(
+            db.read(|c| Ok(
+                c.query_row("SELECT count(*) FROM channel_runtime_work", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+            1
+        );
+        db.transaction(|c| { c.execute_batch("CREATE TRIGGER scheduling_cannot_mutate_owner AFTER DELETE ON channel_runtime_work BEGIN UPDATE channel_runtime_owner SET value=2; END")?; Ok(()) }).unwrap();
+        assert!(
+            db.channel_scheduling_transaction(|c| {
+                c.execute("DELETE FROM channel_runtime_work", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        let prior = db.work_hint_stamp().unwrap();
+        db.transaction(|c| {
+            c.execute("UPDATE channel_runtime_owner SET value=3", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.channel_scheduling_transaction(|_| Ok(())).unwrap();
+        assert_ne!(db.work_hint_stamp().unwrap(), prior);
+    }
+
     #[test]
     fn selection_work_guard_rejects_cached_business_writes_and_trigger_side_effects() {
         let directory = tempfile::tempdir().unwrap();

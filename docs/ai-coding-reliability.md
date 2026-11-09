@@ -950,6 +950,15 @@ owned failure deadlines remain necessary; a failed pass is not completion.
 The [local publication regressions](../crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs)
 count actual body reads and cover profile/proof/control changes, in-flight
 invalidation, failed writes and timer-driven recovery without periodic peer polls.
+Comparing unchanged publication after loading its encrypted old payload is still
+repeated work. Ordinary/legacy operation publishers qualify at most 128 runtime
+metadata/projection pairs under the exact verified own-head hash, with a
+nonrenewable five-minute repair deadline. Current projection authority is still
+evaluated before reuse; changed heads, missing verification and expiry re-read.
+The [operation publication regression](../crates/mesh-talk-core/src/node/account_documents/group_operations.rs)
+counts body reads as well as signatures and exercises repair and replacement.
+Explicit document reads continue to authenticate durable bytes; this scheduling
+qualification never serves a payload or grants permission.
 
 Callback-to-stream
 adapters must reserve queue capacity before copying input. Closing admission must
