@@ -1420,6 +1420,9 @@ impl Node {
                     .as_ref()
                     .is_some_and(|old| *old != remote && !own_creation);
             if changed || (page.reset && !own_creation) {
+                if state(p).receipt.completed.is_some() {
+                    self.observe_mailbox_work(reason::COMPLETION_REMOTE_CLEARED, None);
+                }
                 state_mut(p).receipt.completed = None;
                 let mut entry = state(p).lease.0.lock().expect("upload entry");
                 entry.rank = -1;
@@ -1593,6 +1596,24 @@ impl Node {
             let owner = self.sync_store(&p.recipient);
             let store = owner.lock().expect("projection");
             let stamp = store.history_sync_stamp(&conv)?;
+            // Exactly one reason per evaluated completion miss. This only
+            // observes existing predicates; unknown evidence still fails closed.
+            let completion_miss = match (state(p).receipt.completed.as_ref(), stamp.as_ref()) {
+                (None, _) => Some(reason::COMPLETION_MISSING),
+                (Some(_), None) => Some(reason::COMPLETION_STAMP_UNKNOWN),
+                (Some(completed), Some(stamp)) if &completed.local != stamp => {
+                    Some(reason::COMPLETION_LOCAL_CHANGED)
+                }
+                (Some(completed), Some(_))
+                    if state(p).remote.as_ref() != Some(&completed.remote) =>
+                {
+                    Some(reason::COMPLETION_REMOTE_CHANGED)
+                }
+                (Some(_), Some(_)) => None,
+            };
+            if let Some(reason) = completion_miss {
+                self.observe_mailbox_work(reason, None);
+            }
             if stamp.as_ref().is_some_and(|stamp| {
                 state(p)
                     .receipt

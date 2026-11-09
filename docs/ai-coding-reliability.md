@@ -748,6 +748,16 @@ The [forwarding owner](message-forwarding.md#source-admission-and-lifecycle) tes
 signed rename that needs preparation, plus dissolution and same-user/different-key
 controls that must never produce a message or send receipt.
 
+An asynchronous prepare/commit API must revisit mutable prerequisites after
+expensive staging yields. A later synchronous commit allowance cannot finish an
+arbitrary intervening control tail. Recheck cheap expiry and caller admission
+before resuming the existing bounded preparation owner; check expiry again after
+that await and preserve final atomic authorization. The
+[channel file staging regression](../crates/mesh-talk-core/src/node/files.rs)
+commits a real signed rename tail during chunk progress and requires exactly one
+manifest; the sidecar recovery regression retains ordinary/protected acceptance
+and rejects any authorization after its durable WAL commit.
+
 Account for reentrant store subscribers and callbacks that can retire an owner
 synchronously during publication. Lock once when combining sensitive proof and
 revision checks. If a guard must be released around preparation, reacquire it and

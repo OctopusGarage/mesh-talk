@@ -1847,16 +1847,25 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     a.trace_account_client(&sibling.identity.public(), || "fixture_after_send".into());
     let event = a.channel_history(channel, 10).unwrap()[0].id;
     if external_online {
-        assert!(
-            bob.channel_history(channel, 10)
-                .unwrap()
-                .iter()
-                .any(|row| row.id == event)
-        );
+        // Sender acceptance is not receiver projection completion. Its actual
+        // independent host owns reception; share the existing cold setup bound
+        // with the exact durable-have observation before withdrawing the holder.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                match bob.channel_history(channel, 10) {
+                    Ok(rows) if rows.iter().any(|row| row.id == event) => break,
+                    Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                    Err(error) => panic!("holder history preparation failed: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the live holder must project the exact sent event before going offline");
         // A successful send does not promise a completed durable-have probe.
         // Establish the exact receipt while its real holder is still online;
         // the independent post-stop eight-second observations start afterward.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let confirmed = wait_custody_source_count(&a, channel, event, 1, deadline).await;
         if confirmed.is_err() {
             eprintln!(

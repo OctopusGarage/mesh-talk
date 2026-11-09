@@ -2422,8 +2422,10 @@ pub(in crate::node) mod tests {
                 .run_accept_loop(reference_listener.take().unwrap()),
         ));
         let kind = input.operation().kind();
-        // Require actual completed mandatory scopes from the final topology,
-        // independently of unrelated optional-lane aggregate progress.
+        // Require actual completed Control comparisons from the final topology.
+        // Directory carries inventory/hostnames; its independent continuation
+        // cannot qualify or block this signed GroupControl operation. The exact
+        // role, old Member provenance and both capabilities are checked below.
         let documents_ready = |node: &Node, peer: &Node, direction: usize| {
             let public = peer.identity.public();
             let exact_protocol = node
@@ -2436,7 +2438,7 @@ pub(in crate::node) mod tests {
                 .routing_peer(&peer.user_id())
                 .is_some_and(|route| route.public == public);
             let settled = settled_scopes.lock().unwrap()[direction];
-            exact_protocol && exact_route && settled.into_iter().all(|complete| complete)
+            exact_protocol && exact_route && settled[0]
         };
         let readiness = || {
             let role_ready = match reference.account_group_access(group) {

@@ -3001,7 +3001,7 @@ async fn accepted_channel_file_sidecar_failure_recovers_same_identity_and_protec
             let mut checks = 0;
             let mut authorize = |accept: &mut dyn FnMut() -> Result<(), NodeError>| {
                 checks += 1;
-                if checks <= 2 {
+                if checks <= 3 {
                     accept()
                 } else {
                     Err(NodeError::Authorization(
@@ -3033,7 +3033,7 @@ async fn accepted_channel_file_sidecar_failure_recovers_same_identity_and_protec
             };
             let (id, file) =
                 accepted.expect("durable acceptance must not become a retryable rejection");
-            assert_eq!(checks, 2, "no authorization after WAL acceptance");
+            assert_eq!(checks, 3, "no authorization after WAL acceptance");
             let history = node.channel_history(channel, 10).unwrap();
             assert_eq!(history.len(), 1, "pending WAL card remains visible");
             assert_eq!(history[0].id, id);
@@ -3102,7 +3102,7 @@ async fn accepted_channel_file_sidecar_failure_recovers_same_identity_and_protec
 
 #[tokio::test]
 async fn channel_file_authorization_rejects_before_staging_or_wal_acceptance() {
-    for reject_at in [1, 2] {
+    for reject_at in [1, 2, 3] {
         let dir = tempfile::tempdir().unwrap();
         let proof = Announce::new_with_account(
             &DeviceIdentity::generate(),

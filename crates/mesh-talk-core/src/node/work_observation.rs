@@ -29,7 +29,7 @@ const RECENT_IDS: usize = 4096;
 #[derive(Default)]
 struct ChurnObservation {
     counts: [u64; 32],
-    queries: [u64; 24],
+    queries: [u64; 28],
     recent: HashSet<(ConversationId, EventId)>,
     fifo: VecDeque<(ConversationId, EventId)>,
     repeats: u64,
@@ -129,6 +129,11 @@ pub(in crate::node) mod reason {
     pub const FILE_WAITING: usize = 52;
     pub const FILE_PREPARING: usize = 53;
     pub const FILE_ALLOWED: usize = 54;
+    pub const COMPLETION_MISSING: usize = 55;
+    pub const COMPLETION_STAMP_UNKNOWN: usize = 56;
+    pub const COMPLETION_LOCAL_CHANGED: usize = 57;
+    pub const COMPLETION_REMOTE_CHANGED: usize = 58;
+    pub const COMPLETION_REMOTE_CLEARED: usize = 59;
     pub const OUTER: usize = 0;
     pub const OPEN_FAILED: usize = 1;
     pub const IDENTITY_HANDLED: usize = 2;
@@ -354,10 +359,12 @@ impl Node {
                             .ok(),
                     )
                 });
+                // Keep both counter families and their observation age in one
+                // bounded record: file rotation can discard preceding rows.
                 emit_info(
                     log::logger(),
                     format_args!(
-                        "query_work counts={:?} labels=stamp_unknown,metadata_hit,metadata_miss,metadata_evicted,view_new,view_absent,scope_miss,stamp_miss,view_invalid,view_reused,view_retained,consent_hit,consent_main_changed,consent_policy_changed,consent_remote_changed,consent_floor_changed,consent_expired,consent_absent,consent_learned,consent_prepare_moved,file_waiting,file_preparing,file_allowed,reserved entries={:?} privacy={} projection={} file_scopes={:?} proofs={:?} controls={:?} device_policy={} hot_views_and_consent_hints={:?} profile_sql_observer_and_total_changes={:?}",
+                        "query_work counts={:?} labels=stamp_unknown,metadata_hit,metadata_miss,metadata_evicted,view_new,view_absent,scope_miss,stamp_miss,view_invalid,view_reused,view_retained,consent_hit,consent_main_changed,consent_policy_changed,consent_remote_changed,consent_floor_changed,consent_expired,consent_absent,consent_learned,consent_prepare_moved,file_waiting,file_preparing,file_allowed,completion_missing,completion_stamp_unknown,completion_local_changed,completion_remote_changed,completion_remote_cleared entries={:?} privacy={} projection={} file_scopes={:?} proofs={:?} controls={:?} device_policy={} hot_views_and_consent_hints={:?} profile_sql_observer_and_total_changes={:?} mailbox_counts={:?} mailbox_recent={} mailbox_repeats={} age_ms={}",
                         queries,
                         entries,
                         self.privacy
@@ -371,7 +378,11 @@ impl Node {
                         controls,
                         self.device_sync_policy_snapshot().1,
                         hot_len,
-                        profile_sql
+                        profile_sql,
+                        counts,
+                        recent,
+                        repeats,
+                        age_ms
                     ),
                 );
             }
@@ -425,6 +436,10 @@ mod tests {
     #[test]
     fn churn_observation_bounds_exact_fifo_and_keeps_cumulative_classes() {
         let mut observation = ChurnObservation::default();
+        for class in reason::COMPLETION_MISSING..=reason::COMPLETION_REMOTE_CLEARED {
+            observation.record(class, None);
+        }
+        assert_eq!(&observation.queries[23..], &[1; 5]);
         let mailbox = ConversationId::new([1; 32]);
         let first = EventId::new([0; 32]);
         observation.record(0, Some((mailbox, first)));

@@ -1090,6 +1090,13 @@ impl Node {
             );
         }
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        // Staging yielded while writing immutable chunks. Current group changes
+        // may exceed the final synchronous admission turn's budget; finish them
+        // through the existing async owner before attempting atomic acceptance.
+        // A retired caller must not start that extra preparation work.
+        authorize(&mut || Ok(()))?;
+        self.await_channel_metadata(channel).await?;
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         let id = self.enqueue_channel_payload_if(
             channel,
             crate::expiry::wrap(
@@ -2227,6 +2234,57 @@ mod indexed_file_payload_tests {
             node.read_media_preview(ConversationId::new([0; 32]))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn channel_file_send_prepares_changes_committed_during_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, _) = retained_file(directory.path(), 1);
+        let channel = node.create_channel("Before staging", vec![]).await.unwrap();
+        let path = directory.path().join("staged.bin");
+        std::fs::write(&path, b"staged content").unwrap();
+        let writer = node.clone();
+        let rows = crate::eventlog::sync::network::PreparationBudget::default().rows + 1;
+        let file = node
+            .send_file_channel_progress(channel, &path, FileKind::File, move |progress| {
+                if progress.done == progress.total {
+                    // The production progress callback runs after its chunk
+                    // append released the log. Real signed owner controls now
+                    // exceed one synchronous admission turn's row allowance.
+                    for index in 0..rows {
+                        writer
+                            .append_event(
+                                channel,
+                                EventKind::ChannelRename,
+                                format!("Staging change {index}").into_bytes(),
+                            )
+                            .unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("async file send must finish changed metadata after staging");
+        assert_eq!(
+            node.channels
+                .lock()
+                .unwrap()
+                .state(&channel)
+                .unwrap()
+                .name(),
+            format!("Staging change {}", rows - 1)
+        );
+        let log = node.log.lock().unwrap();
+        assert_eq!(
+            log.events(&channel)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == EventKind::FileManifest)
+                .count(),
+            1,
+            "one staged invocation must commit exactly one manifest"
+        );
+        drop(log);
+        assert!(node.file_progress(file).unwrap().unwrap().done > 0);
     }
 
     #[test]

@@ -10142,6 +10142,37 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    if incoming_source_history.len() != 1 {
+        let conversation = dm_conversation_id(
+            &a1_node.identity.public(),
+            &bob_node.identity.public(),
+        );
+        // One failure-only witness distinguishes missing transport acceptance
+        // from retained ciphertext whose transcript projection is still cold.
+        let source_messages = a1_node
+            .log
+            .lock()
+            .unwrap()
+            .count_kind(&conversation, EventKind::Message);
+        let sender_messages = bob_node
+            .log
+            .lock()
+            .unwrap()
+            .count_kind(&conversation, EventKind::Message);
+        let sender_history = bob_node.account_history(&alice_account.account_id(), 10);
+        let delivery = sender_history.as_ref().ok().and_then(|rows| {
+            rows.iter()
+                .find(|row| row.text == b"while A2 was offline")
+                .map(|row| bob_node.delivery_status(row.id))
+        });
+        eprintln!(
+            "linked incoming timeout elapsed_ms={} source_messages={source_messages:?} sender_messages={sender_messages:?} delivery={delivery:?} source_route={} sender_route={} source_history_error={:?}",
+            fixture_started.elapsed().as_millis(),
+            a1_node.routing_peer(&bob_node.user_id()).is_some(),
+            bob_node.routing_peer(&a1_node.user_id()).is_some(),
+            dm_texts(&a1_node).err(),
+        );
+    }
     assert_eq!(incoming_source_history.len(), 1);
     assert!(dm_texts(&a2_node).unwrap().is_empty());
 

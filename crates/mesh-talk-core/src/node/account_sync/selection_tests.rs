@@ -6797,10 +6797,12 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
     let terminal_generation = Arc::new(AtomicU64::new(0));
     let (consumed, consumption) = tokio::sync::oneshot::channel();
     let consumed = std::sync::Mutex::new(Some(consumed));
+    let terminal_witness = Arc::new(std::sync::Mutex::new(None::<String>));
     *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let held = held.clone();
         let handoff_generation = handoff_generation.clone();
         let terminal_generation = terminal_generation.clone();
+        let terminal_witness = terminal_witness.clone();
         move |_, event| {
             if let Some(record) = event.strip_prefix("attachment_stale_terminal ") {
                 let values: std::collections::HashMap<_, _> = record
@@ -6811,6 +6813,9 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
                 if generation == terminal_generation.load(Ordering::SeqCst)
                     && let Some(sender) = consumed.lock().unwrap().take()
                 {
+                    // Retain one bounded causal record independently of the
+                    // channel, so timeout evidence identifies the missing phase.
+                    *terminal_witness.lock().unwrap() = Some(record.chars().take(512).collect());
                     sender
                         .send((
                             generation,
@@ -6842,6 +6847,12 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
     }));
     let server = tokio::spawn(source.clone().run_accept_loop(listener));
     let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    let source_status = || {
+        receiver
+            .device_sync_status()
+            .into_iter()
+            .find(|status| status.device_id == source.user_id())
+    };
     let preparation = tokio::time::timeout(Duration::from_secs(5), ready).await;
     let result = if matches!(preparation, Ok(Ok(()))) {
         let original_generation = terminal_generation.load(Ordering::SeqCst);
@@ -6856,10 +6867,7 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
             // releasing its predecessor's terminal result. The old active task
             // retains this peer's attachment slot until that release.
             while handoff_generation.load(Ordering::SeqCst) <= original_generation
-                || !receiver
-                    .device_sync_status()
-                    .iter()
-                    .any(|status| status.pending_attachments == 1)
+                || !source_status().is_some_and(|status| status.pending_attachments == 1)
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -6870,11 +6878,16 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
         Err("attachment did not reach the held terminal")
     };
     release.send(()).unwrap();
+    let mut recovery_phase = "terminal consumption";
+    let mut last_status = None;
     let recovered = tokio::time::timeout(Duration::from_secs(5), async {
         let record = consumption.await?;
+        recovery_phase = "replacement WaitingForFiles";
         loop {
-            let status = receiver.device_sync_status().remove(0);
-            if status.pending_attachments == 1 && status.phase == SyncPhase::WaitingForFiles {
+            last_status = source_status();
+            if last_status.as_ref().is_some_and(|status| {
+                status.pending_attachments == 1 && status.phase == SyncPhase::WaitingForFiles
+            }) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -6882,6 +6895,16 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
         Ok::<_, tokio::sync::oneshot::error::RecvError>(record)
     })
     .await;
+    if recovered.is_err() {
+        eprintln!(
+            "held attachment timeout phase={recovery_phase} old_generation={} published_generation={} witness={:?} last_status={:?} current_status={:?}",
+            terminal_generation.load(Ordering::SeqCst),
+            handoff_generation.load(Ordering::SeqCst),
+            terminal_witness.lock().unwrap(),
+            last_status,
+            source_status(),
+        );
+    }
     worker.abort();
     server.abort();
     let _ = worker.await;

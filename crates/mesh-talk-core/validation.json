@@ -2519,6 +2519,8 @@
             "node::file_completion::",
             "file_retention_",
             "indexed_file_payload_tests",
+            "node::delivery_runtime_tests::accepted_channel_file_sidecar_failure_recovers_same_identity_and_protection",
+            "node::delivery_runtime_tests::channel_file_authorization_rejects_before_staging_or_wal_acceptance",
             "node::opaque_relay::",
             "retained_relay_file_exchange_rechecks_signed_consent_and_relay_role",
             "relay_file_worker_preserves_progress_across_slow_mailbox_exchanges",
