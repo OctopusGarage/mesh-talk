@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6ZZJMSJPXN8AZPCTTFPDNK1",
+  "session_id": "01a1be97-0d48-7111-bccf-88861361630f",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-09T11:02:32.665137Z",
+  "branch": "fix/rmcp-advisory-rollout",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.lock"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "3b40b084ba25",
+  "checkpoint_transcript_start": 4154,
+  "transcript_lines_at_start": 4154,
+  "compact_transcript_start": 542,
+  "token_usage": {
+    "input_tokens": 96223,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 39272064,
+    "output_tokens": 43010,
+    "api_call_count": 240,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 855,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 857,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 3
+  }
+}
