@@ -55,6 +55,25 @@ test("private pack pending index upgrades durable edits and avoids acknowledged 
     const store = usePacks.getState();
     store.setScope("pending-test", "account", "session");
     const migrated = await store.pendingChanges();
+    // Pending payload reads are intentionally limited to one row. Inspect index
+    // keys separately to prove every legacy edit migrated without cloning assets.
+    const migratedIds = await new Promise<IDBValidKey[]>((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction("packs", "readonly");
+        const keys = tx.objectStore("packs").index("pendingSync").getAllKeys(1);
+        tx.oncomplete = () => {
+          db.close();
+          resolve(keys.result);
+        };
+        tx.onabort = () => {
+          db.close();
+          reject(tx.error);
+        };
+      };
+    });
     const version = { revision: 1, writer_device: "device", content_hash: [1] };
     await store.acknowledge("edit", 2, version);
     const stale = await store.pendingChanges();
@@ -79,7 +98,7 @@ test("private pack pending index upgrades durable edits and avoids acknowledged 
     const reopened = await store.pendingChanges();
     IDBObjectStore.prototype.getAll = original;
     return {
-      migrated: migrated.map((row: { id: string }) => row.id).sort(),
+      migrated: migratedIds.sort(),
       tombstone: migrated.find((row: { id: string }) => row.id === "deleted")
         ?.archive,
       stale: stale.length,
@@ -94,8 +113,8 @@ test("private pack pending index upgrades durable edits and avoids acknowledged 
   expect(result).toEqual({
     migrated: ["deleted", "edit"],
     tombstone: null,
-    stale: 2,
-    failed: 2,
+    stale: 1,
+    failed: 1,
     rejected: true,
     empty: 0,
     other: 0,
