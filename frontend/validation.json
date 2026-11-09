@@ -22,7 +22,7 @@
         ]
       },
       "escalation": [
-        "Run e2e/memory.spec.ts with real pointer and native button keyboard activation. Browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
+        "Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
       ]
     },
     {

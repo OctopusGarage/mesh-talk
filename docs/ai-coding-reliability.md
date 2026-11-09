@@ -468,6 +468,9 @@ not globally unique text. Test the same valid value in an unrelated profile and
 verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnostics/test-fixtures/nextest.mjs)
 and [cheap CI policy regressions](../scripts/diagnostics/ci-latency.test.mjs)
 protect this boundary; actual compiler fixtures still exercise native behavior.
+For scanner false positives, validate the exact path/value combination with the
+real pinned scanner and retain detecting controls for another path, expression
+and credential-shaped value. Keep exceptions in the [scanner owner](../.gitleaks.toml).
 
 Bind executable probes to the owning package, target kind and complete test
 identity, and require exactly one runnable match. A matching binary basename is
@@ -495,11 +498,14 @@ focus and unread checks; a slow locator operation is not proof of absent rows.
 
 For repeated lifecycle or memory churn, distinguish cumulative input-driver waits
 from the invariant being measured. The [memory guardrail](../frontend/e2e/memory.spec.ts)
-keeps a pointer round and final pointer navigation, then activates the same native
-buttons with Enter for repeated replacement. Require the exact active destination
-and loaded history; retain the original churn count, history size, watchdog and
-DOM bound. Do not replace UI activation with direct store mutations. An injected
-extra-bubble negative control must still fail the bound. Successful progress before
+keeps a trusted pointer round and final pointer navigation, then activates the
+same DOM buttons through one browser-side journey for repeated replacement.
+Require each exact visible active destination and loaded history, with bounded
+readiness observers that retire their timers and callbacks. Retain the original
+churn count, history size, watchdog and DOM bound. Do not replace UI activation
+with direct store mutations; repeated DOM activation does not qualify trusted
+input latency. An injected extra-bubble negative control must still fail the bound.
+Successful progress before
 a timeout does not establish why an individual driver operation was slow.
 
 Keep extracted runtimes outside diagnostic artifact roots on failure as well as
@@ -704,6 +710,10 @@ projection between polls. The existing `ready_history` owner in
 `StaleCursor` as pending and distinguishes a ready empty history; its storage and
 authorization controls remain fatal. Keep the real checkpoint invalidation and
 linked-device reconnect controls alongside those classification tests.
+The source's positive message observation uses the same pending-state owner;
+source readiness and sibling delivery share the original delivery deadline.
+Timeout diagnostics retain pending/error results instead of unwrapping another
+history query and masking the primary failure.
 
 An offline fixture that needs prompt connection failure must own and observe
 actual transport closure; reserving a TCP port does not guarantee refusal or

@@ -338,6 +338,11 @@ Use the provider's supported asset API, bound transport attempts, verify the
 reviewed digest before extraction and preserve the scanner's exit status.
 Integrity failures must not trigger another source or unverified execution; see
 the [Gitleaks owner](../scripts/ci-gitleaks.sh) and its behavioral controls.
+Classify generic-key matches against their actual source expression before
+adding an exception. The [scanner configuration](../.gitleaks.toml) combines an
+exact fixture path and exact public-field expression with `AND`; the same value
+elsewhere, another expression and a credential-shaped value in that file must
+still be detected by the pinned scanner. Preserve full-history scanning.
 Compiling tools with `go install` or `cargo install` is recurring setup
 work; retain source installation only when the required tool has no suitable
 trusted binary or the test explicitly validates its build.
@@ -960,10 +965,12 @@ does not establish a missing-row defect or identify the source of driver latency
 
 The [memory guardrail](../frontend/e2e/memory.spec.ts) retains its seeded history,
 25 complete conversation rounds, original watchdog and rendered-bubble ceiling.
-Exercise a real pointer round, then use native button keyboard activation for
-repeated churn, with visible rows, exact active destinations and loaded-history
-assertions. This isolates repeated store/list replacement from cumulative pointer
-stability and scrolling waits without invoking a store action directly. Preserve
+Exercise a trusted pointer round, then activate the same DOM buttons through one
+browser-side journey for repeated churn, with visible rows, exact active
+destinations and loaded-history assertions after every activation. Retire each
+bounded readiness observer's timer and callback. This isolates store/list
+replacement from repeated driver round trips without invoking a store action
+directly; the repeated phase does not qualify trusted-input latency. Preserve
 the final pointer navigation and DOM bound; a deliberate extra-bubble control
 must still fail. This fixture does not measure pointer latency or prove the cause
 of hosted driver stalls.
