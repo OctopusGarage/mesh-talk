@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6ZEDFRSXF5JNV4H4P48NKM8",
+  "strategy": "manual-commit",
+  "branch": "fix/trusted-main-dev-promotion",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "docs/quality-gates.md",
+    "scripts/diagnostics/patch-coverage.test.mjs",
+    "scripts/diagnostics/pr-main-promotion.test.mjs",
+    "scripts/patch-coverage.mjs",
+    "scripts/pr-platform/main-promotion.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1732,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1289344,
+    "output_tokens": 2960,
+    "api_call_count": 4
+  },
+  "redaction": {
+    "replacements": 9,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 9,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
