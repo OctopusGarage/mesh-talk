@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M719G427F89H1GRFS4CZ6Q33",
+  "session_id": "01a1c0d1-d1fb-74d3-9b41-9cf66b3d8ba0",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-09T23:15:10.422004Z",
+  "branch": "fix/pr-explicit-validation-owners",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "scripts/create-pr.sh",
+    "scripts/diagnostics/create-pr.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "7bfdbc59a998",
+  "checkpoint_transcript_start": 4052,
+  "transcript_lines_at_start": 4052,
+  "compact_transcript_start": 545,
+  "token_usage": {
+    "input_tokens": 115220,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 26998912,
+    "output_tokens": 36296,
+    "api_call_count": 230,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 55,
+    "layers": {
+      "betterleaks": 5,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 5,
+      "credentialed_uri": 0,
+      "entropy": 52,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 3
+  }
+}
