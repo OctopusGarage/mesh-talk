@@ -34,6 +34,13 @@ jobs:
   scope:
     uses: ./.github/workflows/ci-scope.yml
 
+  dependencies:
+    needs: [scope]
+    if: needs.scope.outputs.profile == 'help' || needs.scope.outputs.profile == 'frontend'
+    uses: ./.github/workflows/dependency-acceptance.yml
+    with:
+      profile: ${{ needs.scope.outputs.profile }}
+
   checks:
     name: Linux native archive producer
     if: ${{ !cancelled() }}
@@ -241,7 +248,7 @@ jobs:
   checks-linux:
     name: checks (ubuntu-latest)
     if: ${{ !cancelled() }}
-    needs: [scope, checks, linux-default-tests, linux-ignored-tests]
+    needs: [scope, dependencies, checks, linux-default-tests, linux-ignored-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -253,8 +260,19 @@ jobs:
         with:
           full: ${{ needs.scope.outputs.full }}
           upstream_result: ${{ needs.scope.result }}
-      - name: Report documentation-only coverage through Codecov
+      - name: Require selected dependency acceptance
         if: steps.scope.outputs.full == 'false'
+        env:
+          PROFILE: ${{ steps.scope.outputs.profile }}
+          DEPENDENCIES: ${{ needs.dependencies.result }}
+        run: |
+          if [ "$PROFILE" = docs ]; then
+            test "$DEPENDENCIES" = skipped
+          else
+            test "$DEPENDENCIES" = success
+          fi
+      - name: Report documentation-only coverage through Codecov
+        if: steps.scope.outputs.full == 'false' && steps.scope.outputs.profile == 'docs'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           version: v11.3.2
@@ -611,3 +629,21 @@ jobs:
       upstream_result: ${{ needs.scope.result }}
       diagnostic_timing: ${{ inputs.diagnostic_timing || false }}
     secrets: inherit
+
+  verify:
+    name: verify
+    needs: [scope, checks-linux, checks-macos, windows]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && github.base_ref == 'dev' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete current-source acceptance
+        env:
+          SCOPE: ${{ needs.scope.result }}
+          LINUX: ${{ needs.checks-linux.result }}
+          MACOS: ${{ needs.checks-macos.result }}
+          WINDOWS: ${{ needs.windows.result }}
+        run: |
+          test "$SCOPE" = success
+          test "$LINUX" = success
+          test "$MACOS" = success
+          test "$WINDOWS" = success

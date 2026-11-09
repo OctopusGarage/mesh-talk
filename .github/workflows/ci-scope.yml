@@ -3,8 +3,11 @@ name: Select CI scope
 on:
   workflow_call:
     outputs:
+      profile:
+        description: Exact-source acceptance profile
+        value: ${{ jobs.select.outputs.profile }}
       full:
-        description: Full verification is required unless this exact PR merge contains only inert documentation.
+        description: Full verification is required unless this exact PR merge qualifies for scoped acceptance.
         value: ${{ jobs.select.outputs.full }}
 
 permissions:
@@ -16,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      profile: ${{ steps.scope.outputs.profile }}
       full: ${{ steps.scope.outputs.full }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

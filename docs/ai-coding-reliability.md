@@ -782,6 +782,15 @@ eligibility after failure and ineligibility after cancellation. Follow the
 [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
 and keep unresolved native, cross-platform and stress obligations explicit.
 
+Dependency verification scope must bind identity to the actual tested merge and
+consumer boundary, not only a bot author or version label. Independently revalidate
+reduced profiles and require every selected producer's terminal success. External
+coverage publication is a separate permission boundary from test execution; never
+make missing bot credentials look like a product regression. The
+[CI maintenance owner](ci-maintenance.md#dependabot-development-acceptance) and
+`ci-docs-scope.test.mjs` / `ci-latency.test.mjs` own exact-source, mixed/native,
+lockfile and failed/cancelled/missing-result controls.
+
 ## Review record
 
 For applicable risks, make these answers reviewable in the PR or task result:

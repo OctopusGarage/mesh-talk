@@ -440,7 +440,7 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [linux, desktop, desktop-windows, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope]
+    needs: [linux, desktop, desktop-windows, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, health, scope]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
@@ -452,6 +452,11 @@ jobs:
         with:
           full: ${{ needs.scope.outputs.full }}
           upstream_result: ${{ needs.scope.result }}
+      - name: Require scoped source and health acceptance
+        if: steps.scope.outputs.full == 'false'
+        env:
+          HEALTH: ${{ needs.health.result }}
+        run: test "$HEALTH" = success
       - name: Require complete selected UI matrices
         if: ${{ steps.scope.outputs.full == 'true' }}
         env:

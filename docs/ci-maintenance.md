@@ -1024,3 +1024,47 @@ Keep this review proportional: a documentation-only change needs applicable
 formatting, links and structural checks, not a new build benchmark. Rules should
 be enforceable through existing contracts and diagnostics where practical;
 adding this guide does not create a scheduled job or another required check.
+
+## Dependabot development acceptance
+
+The existing exact-merge scope owner, `scripts/ci/docs-scope.mjs`, also admits
+isolated npm dependency profiles for same-repository Dependabot bot PRs targeting
+`dev`. Both manifests and lockfiles must already exist as regular files. Only
+version changes to existing dependency entries qualify; scripts, overrides,
+metadata, additions/removals, mixed paths, unmatched lockfile roots and changed
+Tauri bindings retain full verification. Lockfile-only updates currently retain
+full verification because their consumer boundary has not been qualified.
+
+The `help` profile runs the public help/MCP tests, build and high-severity audit.
+The `frontend` profile runs complete unit coverage, lint/types, production build,
+built-JavaScript syntax checks, audit, Chromium theme/layout regressions and the
+WebKit portable suite. The selected npm workflow independently checks its profile
+against the actual merge. The Linux CI collector requires its success; failure,
+cancellation, missing output or unexpected skipping cannot qualify. The legacy
+`dev` required `verify` context collects the actual platform results. UI matrices
+outside these profiles report not applicable, rather than pretending to execute.
+Health retains source ownership/hygiene checks, without unrelated Rust or help
+security scans blocking an isolated npm update.
+
+Cargo, Actions and native binding updates retain complete acceptance. Main PRs,
+merge groups, pushes, schedules, manual runs and release-source checks retain
+full verification, apart from the separately qualified prose-only main PR rule.
+The direct main/release check policy is unchanged. Do not classify by actor,
+branch name, SemVer label or PR title alone. The existing real-Git scope controls
+and CI policy fixtures own positive profiles, source/identity rejection and
+failed/cancelled/missing selected-check evidence.
+
+Automatic merge additionally requires verified Dependabot metadata for npm
+minor/patch updates in these two directories, no Tauri dependency and no reported
+maintainer change. Other updates have automatic merge disabled and require manual
+review. The privileged metadata workflow never executes PR source; merge enablement
+is bound to the event head. Coverage uploads requiring unavailable Dependabot
+credentials remain excluded; tests and retained local artifacts are independent
+of external coverage publication.
+
+Deploy this policy through a reviewed main change, then align `dev` through a
+reviewed integration before refreshing its dependency PRs. Existing `dev`
+workflows cannot acquire fixes from main automatically. Preserve current required
+checks; any protection migration uses its existing owner. Measure selected hosted
+jobs after rollout, recording source, first failures, runner/setup/test time and
+cache conditions. Local policy success is not a hosted latency or native claim.

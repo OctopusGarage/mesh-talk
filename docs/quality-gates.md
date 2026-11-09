@@ -68,10 +68,14 @@ qualify. Main pushes, merge groups, schedules and manual runs retain complete
 execution. Release consumers require checks from the owning successful trusted
 main-push workflow suite, never PR-only scope decisions.
 
-Branch protection requires direct execution checks instead of runner-backed
+Main branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
-release policy and replacement mapping. Source and all platform checks are
-individually required; Windows requires its build producer and all archive
+release policy and replacement mapping. Development-only dependency profiles use the
+[exact-merge CI scope owner](ci-maintenance.md#dependabot-development-acceptance)
+and retain the existing `dev` required `verify` compatibility context, whose Linux
+producer requires actual selected npm acceptance. That exception cannot authorize
+main or release acceptance. Source and all platform checks are
+individually required for main; Windows requires its build producer and all archive
 consumers. Release acceptance uses the same direct names plus its main-only
 checks, including ASan and mutation-runner acceptance. A newer failed, pending or
 missing check still rejects the exact source. Stable repeats this strict check
