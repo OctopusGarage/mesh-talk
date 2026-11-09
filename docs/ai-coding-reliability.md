@@ -156,6 +156,15 @@ of the unrelated guard or operation. Release the pause and verify the final data
 See the attachment preparation and document-scheduler regressions in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs).
 
+Async discovery observers must use the existing owned asynchronous peer-cache
+snapshot and preserve persistence errors. The synchronous desktop convenience
+snapshot writes storage and converts errors to an empty roster; polling it can
+block the observer's reactor or misreport failed persistence as discovery latency.
+The [account-login fixture](../src-tauri/src/shared_account_login/tests.rs) retains
+its single signed loopback probe and original deadline, and a real cache-path
+failure must preserve the cache API's error chain rather than time out. This
+control proves error visibility, not the cause of an earlier hosted timeout.
+
 ## R03: Actual work owns its lifetime
 
 Consume the canonical process owner's result contract rather than deriving a new

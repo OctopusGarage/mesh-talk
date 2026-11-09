@@ -927,6 +927,14 @@ infrastructure retry is justified, keep its limit, original failure and outcomes
 visible, and ensure repeating the operation is safe. Test retries still obey the
 owning suite policy.
 
+Keep asynchronous fixture discovery observations on the existing owned async
+peer-cache API. A synchronous convenience snapshot can perform disk writes and
+hide a cache failure behind an empty roster. The account-login fixture retains
+one signed probe and its original five-second discovery budget, while a real
+cache-path failure must surface the cache API's error chain before that deadline.
+Retain the core cache writer's cancellation/profile-lease controls. A successful
+rerun does not identify the mechanism of a previous missing-peer timeout.
+
 When a UI action moves into a menu, update the existing shared interaction helper
 and its callers before publication. Exercise the real entry point; retain
 functional, permission, focus and geometry assertions at the toolbar or popup
