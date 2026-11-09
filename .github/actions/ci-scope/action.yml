@@ -1,5 +1,5 @@
 name: Verify CI scope
-description: Revalidate documentation eligibility against the actual checked-out PR merge.
+description: Revalidate scoped acceptance eligibility against the actual checked-out PR merge.
 inputs:
   full:
     description: Expected selection; true conservatively runs everything, false must be independently proved, auto selects.
@@ -8,6 +8,9 @@ inputs:
     description: The selector must have succeeded; missing or failed selection never permits skipped work.
     default: success
 outputs:
+  profile:
+    description: Independently validated full, docs, help or frontend acceptance.
+    value: ${{ steps.scope.outputs.profile }}
   full:
     description: Whether this source requires full product verification.
     value: ${{ steps.scope.outputs.full }}

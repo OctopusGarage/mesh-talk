@@ -460,6 +460,8 @@
         ".github/actions/ci-scope/",
         ".github/workflows/ci-scope.yml",
         "scripts/ci/docs-scope.mjs",
+        ".github/workflows/dependency-acceptance.yml",
+        ".github/workflows/dependabot-auto-merge.yml",
         "scripts/diagnostics/ci-docs-scope.test.mjs"
       ],
       "node": [

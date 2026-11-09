@@ -675,7 +675,13 @@ fallback. A snapshot taken after timeout is diagnostic evidence, not success.
 
 A bounded positive observer may keep waiting on the owning API's explicit pending
 state. Match only that state; storage, authorization and unexpected failures stay
-fatal. Preserve the original deadline and exact outcome assertions.
+fatal. Preserve the original deadline and exact outcome assertions. Prior readiness
+is not a lease: live sibling attachment recovery can invalidate a canonical history
+projection between polls. The existing `ready_history` owner in
+[`node_tests.rs`](../crates/mesh-talk-core/src/node/node_tests.rs) preserves
+`StaleCursor` as pending and distinguishes a ready empty history; its storage and
+authorization controls remain fatal. Keep the real checkpoint invalidation and
+linked-device reconnect controls alongside those classification tests.
 
 An offline fixture that needs prompt connection failure must own and observe
 actual transport closure; reserving a TCP port does not guarantee refusal or
@@ -781,6 +787,23 @@ and block its replacement in the concurrency group. The
 eligibility after failure and ineligibility after cancellation. Follow the
 [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
 and keep unresolved native, cross-platform and stress obligations explicit.
+
+Dependency verification scope must bind identity to the actual tested merge and
+consumer boundary, not only a bot author or version label. Independently revalidate
+reduced profiles and require every selected producer's terminal success. External
+coverage publication is a separate permission boundary from test execution; never
+make missing bot credentials look like a product regression. The
+[CI maintenance owner](ci-maintenance.md#dependabot-development-acceptance) and
+`ci-docs-scope.test.mjs` / `ci-latency.test.mjs` own exact-source, mixed/native,
+lockfile and failed/cancelled/missing-result controls.
+
+Native failure evidence must include the actual release logger, not only captured
+stdout. The [native capture owner](../scripts/diagnostics/native-capture.mjs) reads
+bounded private file-log tails only after child retirement, preserves the original
+failure when diagnostics are unavailable and rejects linked paths. Its filesystem
+controls retain quotas, current-log priority and cutoff redaction. A responsive
+failure screenshot or generic IPC timeout alone cannot identify a backend lock or
+startup error; keep missing evidence distinct from a confirmed mechanism.
 
 ## Review record
 

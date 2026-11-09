@@ -45,7 +45,7 @@ test("documentation scope retains every required matrix identity and guards expe
           "Install pinned prebuilt workflow scanner", "Source and supply-chain policy",
         ].some(name => work.startsWith(`name: ${name}\n`));
         if (commonSource) {
-          assert.doesNotMatch(work, /^        if:/mu, "portable source/security checks remain applicable to documentation");
+          assert.match(work, /steps\.scope\.outputs\.profile == 'docs'/u, "source/security checks remain applicable to documentation");
           assert.doesNotMatch(work, /cargo (?:build|test|clippy)|npm run test|playwright/u);
           continue;
         }
@@ -89,7 +89,7 @@ test("Linux archives preserve the sole native cache writer and strict required a
   for(const command of ["cargo clippy --workspace --all-targets -- -D warnings","cargo build --workspace --locked","cargo test --workspace --doc --locked","linux-workspace-cli.test.mjs","backend-coverage.test.mjs"]) assert.ok(producer.includes(command),command);
   assert.ok(producer.indexOf("linux-workspace-cli.test.mjs")<producer.indexOf("linux-workspace.sh produce"));
   assert.match(aggregate,/name: checks \(ubuntu-latest\)/u);
-  assert.match(aggregate,/needs: \[scope, checks, linux-default-tests, linux-ignored-tests\]/u);
+  assert.match(aggregate,/needs: \[scope, dependencies, checks, linux-default-tests, linux-ignored-tests\]/u);
   assert.match(aggregate,/timeout-minutes: 15/u);assert.match(producer,/timeout-minutes: 90/u);
   const guard=step(aggregate,"Require every actual Linux lane before collection");
   assert.ok(guard); assert.ok(aggregate.indexOf("Require every actual Linux lane")<aggregate.indexOf("uses: actions/download-artifact@"));
@@ -388,7 +388,7 @@ test("the stable UI gate requires coverage merged from all Linux shards", () => 
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
-  assert.match(ui, /needs: \[linux, desktop, desktop-windows, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, scope\]/);
+  assert.match(ui, /needs: \[linux, desktop, desktop-windows, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, health, scope\]/);
   assert.match(ui, /COVERAGE: \$\{\{ needs.coverage.result \}\}/);
   assert.match(ui, /test "\$COVERAGE" = success/);
 });
@@ -401,7 +401,7 @@ function runGate(file, name, env) {
 }
 
 test("direct checks replace redundant runner-backed summary gates", () => {
-  assert.doesNotMatch(read("ci.yml"), /^  verify:/m);
+  assert.match(workflowJob(read("ci.yml"), "verify"), /github\.base_ref == 'dev'/u);
   assert.doesNotMatch(read("check-health.yml"), /^  check:/m);
   assert.doesNotMatch(read("e2e-backend.yml"), /^  backend-e2e:/m);
   assert.doesNotMatch(read("hidden-contacts-native.yml"), /^  multicast-capability:/m);
@@ -832,4 +832,56 @@ test("Linux full-scope aggregate rejects unsuccessful or missing lanes before do
   assert.doesNotMatch(collector,/linux-workspace-binaries|rust-toolchain|rust-cache/u);
   for(const value of ["PRODUCER","CONSUMERS","IGNORED"]) assert.ok(collector.includes(`MESH_LINUX_${value}_RESULT`));
   for(const lane of ["linux-default-tests","linux-ignored-tests"]) assert.match(workflowJob(read("ci.yml"),lane),/needs: \[scope, checks\]/u);
+});
+
+for (const profile of ["help", "frontend"]) {
+  test(`selected ${profile} dependencies reject failed, cancelled and missing acceptance`, () => {
+    for (const result of ["failure", "cancelled", "skipped", ""]) {
+      assert.notEqual(runGate("ci.yml", "Require selected dependency acceptance", { PROFILE: profile, DEPENDENCIES: result }).status, 0);
+    }
+    assert.equal(runGate("ci.yml", "Require selected dependency acceptance", { PROFILE: profile, DEPENDENCIES: "success" }).status, 0);
+  });
+}
+test("scoped acceptance revalidates exact source and executes real npm/browser owners", () => {
+  const source = read("dependency-acceptance.yml");
+  assert.match(source, /uses: \.\/\.github\/actions\/ci-scope/u);
+  assert.match(source, /test "\$EXPECTED" = "\$ACTUAL"/u);
+  for (const command of ["node --test tools/help/*.test.mjs", "npm run test:coverage", "npm run audit:ci", "ui-visual-regression.spec.ts", "EVAL_BROWSER: webkit", "scripts/ci/ui-runner.mjs"]) assert.ok(source.includes(command), command);
+  assert.doesNotMatch(source, /pull_request_target|secrets: inherit|continue-on-error/u);
+});
+
+test("auto-merge admits only known npm minor/patch metadata", async (t) => {
+  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "auto-merge-policy-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const valid = { TARGET: "dev", ECOSYSTEM: "npm_and_yarn", DIRECTORY: "/frontend", UPDATE: "version-update:semver-patch", NAMES: "jsdom", MAINTAINER_CHANGES: "false" };
+  for (const [i, override] of [{}, { DIRECTORY: "/tools/help" }, { UPDATE: "version-update:semver-major" }, { ECOSYSTEM: "cargo" }, { NAMES: "@tauri-apps/api" }, { NAMES: "" }, { MAINTAINER_CHANGES: "true" }, { DIRECTORY: "/unknown" }, { TARGET: "main" }, { ECOSYSTEM: "", UPDATE: "", MAINTAINER_CHANGES: "" }].entries()) {
+    const file = join(root, String(i));
+    const result = runGate("dependabot-auto-merge.yml", "Classify auto-merge eligibility", { ...valid, ...override, GITHUB_OUTPUT: file });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(file, "utf8"), `eligible=${i < 2}\n`);
+  }
+  const source = read("dependabot-auto-merge.yml");
+  assert.doesNotMatch(source, /actions\/checkout|skip-verification: true/u);
+  assert.match(source, /gh pr merge --disable-auto/u);
+  const revoke = step(source, "Retain manual review for other updates");
+  assert.match(revoke, /if: \$\{\{ always\(\) && steps\.policy\.outputs\.eligible != 'true' \}\}/u);
+  const job = workflowJob(source, "dependabot");
+  assert.doesNotMatch(job.match(/^    if:.*$/mu)?.[0] ?? "", /base\.ref/u);
+
+  assert.match(source, /--match-head-commit "\$EVENT_HEAD"/u);
+});
+
+test("reduced UI acceptance still requires source and health checks", () => {
+  const gate = workflowJob(read("e2e-ui.yml"), "ui-gate");
+  assert.match(gate, /needs: \[[^\n]*health, scope\]/u);
+  const check = step(gate, "Require scoped source and health acceptance");
+  assert.ok(check);
+  const script = check.split("        run: ")[1].trim();
+  for (const result of ["success", "failure", "cancelled", "skipped", ""]) {
+    const run = spawnSync("bash", ["-e", "-c", script], { env: { ...process.env, HEALTH: result } });
+    assert.equal(run.status === 0, result === "success");
+  }
 });
