@@ -201,6 +201,15 @@ async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
         assert!(ready, "real independent selection must finish preparation");
         drop(view);
     }
+    // An independent mailbox may durably advance its transport checkpoint.
+    // That is not a consent policy/source mutation for this settled mailbox.
+    assert!(
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .put_checkpoint(b"independent-mailbox-progress", b"transport-progress")
+            .unwrap()
+    );
     super::super::file_consent::offered_observations::reset();
     let (_, custody, _) = counted_scope_exchange(
         &node,

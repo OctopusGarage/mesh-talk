@@ -111,7 +111,7 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    snapshots or indexes. Checking a blocked retry must not persist another scheduling ticket.
    Keep immutable admission/completion facts and bound runtime retry cursors;
    scoped cursor eviction must preserve global recovery fairness. Changes to
-   disposable query work must not invalidate otherwise unchanged semantic work
+   disposable query work or optional transport checkpoints must not invalidate otherwise unchanged semantic work
    hints. Enforce that exclusion at the SQL table/transaction owner, preserving
    current authority, default write fences and rollback behavior.
    Batch safe related mutations under the existing durable

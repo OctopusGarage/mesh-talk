@@ -587,7 +587,7 @@ impl EncryptedDatabase {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
     ) -> Result<T, LogError> {
-        self.transaction_with_purpose(false, operation)
+        self.transaction_with_purpose(None, operation)
     }
     /// Disposable participant selection tables only. SQLite rejects writes to
     /// every other table, including trigger/cached-statement writes. This is work
@@ -597,12 +597,22 @@ impl EncryptedDatabase {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
     ) -> Result<T, LogError> {
-        self.transaction_with_purpose(true, operation)
+        self.transaction_with_purpose(Some(selection_work::Purpose::Selection), operation)
+    }
+    /// Optional protocol checkpoints/wrapper hints and their bounded usage only.
+    /// These do not change consent authority, source history or current custody.
+    /// Trigger side effects and writes outside these three tables are denied.
+    #[track_caller]
+    pub(crate) fn transport_hint_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_purpose(Some(selection_work::Purpose::TransportHint), operation)
     }
     #[track_caller]
     fn transaction_with_purpose<T>(
         &self,
-        selection_work: bool,
+        purpose: Option<selection_work::Purpose>,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
     ) -> Result<T, LogError> {
         let mut connection = self
@@ -614,12 +624,12 @@ impl EncryptedDatabase {
         }
         // Observe prior default writes before acknowledging this derived slice.
         // Both observations and the transaction share this exclusive guard.
-        if selection_work {
+        if purpose.is_some() {
             let stamp = self.checked_operation(Self::main_write_stamp_on(&connection))?;
             connection.observe_work(stamp);
         }
-        let selection_guard = selection_work
-            .then(|| selection_work::Guard::install(&connection))
+        let work_guard = purpose
+            .map(|purpose| selection_work::Guard::install(&connection, purpose))
             .transpose()?;
         let tx = self.checked_operation(
             connection
@@ -632,19 +642,19 @@ impl EncryptedDatabase {
         match self.checked_operation(operation(&tx)) {
             Ok(value) => match tx.commit() {
                 Ok(()) => {
-                    if selection_work {
+                    if purpose.is_some() {
                         let stamp =
                             match self.checked_operation(Self::main_write_stamp_on(&connection)) {
                                 Ok(stamp) => stamp,
                                 Err(error) => {
-                                    connection.acknowledge_selection(None);
+                                    connection.acknowledge_derived(None);
                                     return Err(error);
                                 }
                             };
-                        connection.acknowledge_selection(stamp);
+                        connection.acknowledge_derived(stamp);
                     }
                     // Restore unrestricted default authority BEFORE unlocking or logging.
-                    drop(selection_guard);
+                    drop(work_guard);
 
                     #[cfg(test)]
                     if connection.total_changes() != changes_before {
@@ -947,6 +957,99 @@ mod tests {
         );
         db.faulted.store(true, Ordering::Release);
         assert!(db.work_hint_stamp().is_err());
+    }
+    #[test]
+    fn transport_hint_work_has_a_closed_table_boundary_and_preserves_authority_fences() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE opaque_checkpoints(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE opaque_wrapper_ids(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE opaque_checkpoint_usage(bucket TEXT PRIMARY KEY,records INTEGER,bytes INTEGER)")?;
+            Ok(())
+        }).unwrap();
+        let before = db.work_hint_stamp().unwrap().unwrap();
+        let raw = db.main_write_stamp().unwrap().unwrap();
+        db.transport_hint_transaction(|c| {
+            c.execute(
+                "INSERT INTO opaque_checkpoints VALUES('mailbox','cursor')",
+                [],
+            )?;
+            c.execute("INSERT INTO opaque_wrapper_ids VALUES('inner','outer')", [])?;
+            c.execute(
+                "INSERT INTO opaque_checkpoint_usage VALUES('checkpoint',1,12)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!raw.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        assert_eq!(db.work_hint_stamp().unwrap(), Some(before));
+        // Neither closed purpose may acquire the other's table authority.
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute("DELETE FROM opaque_checkpoints", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute(
+                    "INSERT INTO participant_sync_progress VALUES(1,'forbidden')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .is_err()
+        );
+        // Cached SQL and trigger side effects retain the business-table fence.
+        db.read(|c| {
+            c.prepare_cached("UPDATE messages SET body=?1")?
+                .execute([SECRET])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute("UPDATE opaque_checkpoints SET value='uncommitted'", [])?;
+                c.prepare_cached("UPDATE messages SET body=?1")?
+                    .execute(["forbidden"])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(
+            db.read(|c| Ok(c
+                .query_row("SELECT value FROM opaque_checkpoints", [], |r| r
+                    .get::<_, String>(0))?))
+                .unwrap(),
+            "cursor"
+        );
+        db.transaction(|c| {
+            c.execute_batch("CREATE TRIGGER hint_cannot_change_authority AFTER UPDATE ON opaque_checkpoints BEGIN UPDATE messages SET body='triggered'; END")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            db.transport_hint_transaction(|c| {
+                c.execute("UPDATE opaque_checkpoints SET value='forbidden'", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        let prior = db.work_hint_stamp().unwrap().unwrap();
+        db.transaction(|c| {
+            c.execute("UPDATE messages SET body='real change'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.transport_hint_transaction(|c| {
+            c.execute("DELETE FROM opaque_wrapper_ids", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(db.work_hint_stamp().unwrap(), Some(prior));
+        assert_eq!(body(&db), "real change");
     }
     #[test]
     fn selection_work_guard_rejects_cached_business_writes_and_trigger_side_effects() {

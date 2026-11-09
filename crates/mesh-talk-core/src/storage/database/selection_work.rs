@@ -1,17 +1,51 @@
-//! A closed write boundary for disposable participant selection tables.
+//! Closed write boundaries for disposable selections and transport hints.
 //! The database mutex owns this guard through commit/rollback and restoration.
 use super::{Connection, LogError, context};
 use rusqlite::ffi;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
+#[derive(Clone, Copy)]
+pub(super) enum Purpose {
+    Selection,
+    TransportHint,
+}
+impl Purpose {
+    fn tables(self) -> &'static [&'static [u8]] {
+        match self {
+            Self::Selection => &[
+                b"participant_sync_views",
+                b"participant_sync_rows",
+                b"participant_sync_have",
+                b"participant_sync_ancestors",
+                b"participant_sync_departures",
+                b"participant_sync_authors",
+                b"participant_sync_progress",
+                b"participant_sync_receipts",
+                b"participant_sync_export_work",
+            ],
+            Self::TransportHint => &[
+                b"opaque_checkpoints",
+                b"opaque_wrapper_ids",
+                b"opaque_checkpoint_usage",
+            ],
+        }
+    }
+}
+
 unsafe extern "C" fn authorize(
-    _: *mut c_void,
+    context: *mut c_void,
     action: c_int,
     table: *const c_char,
     _: *const c_char,
     database: *const c_char,
     _: *const c_char,
 ) -> c_int {
+    if context.is_null() {
+        return ffi::SQLITE_DENY;
+    }
+    // SAFETY: install supplies one of two immutable program-lifetime statics;
+    // SQLite retains no borrowed connection or transaction in this context.
+    let purpose = unsafe { *(context.cast::<Purpose>()) };
     match action {
         ffi::SQLITE_READ
         | ffi::SQLITE_SELECT
@@ -32,21 +66,7 @@ unsafe extern "C" fn authorize(
             };
             // TEMP scratch is not part of MAIN work evidence. Trigger writes
             // back into MAIN are authorized independently and remain fenced.
-            if database == b"temp"
-                || (database == b"main"
-                    && [
-                        b"participant_sync_views".as_slice(),
-                        b"participant_sync_rows",
-                        b"participant_sync_have",
-                        b"participant_sync_ancestors",
-                        b"participant_sync_departures",
-                        b"participant_sync_authors",
-                        b"participant_sync_progress",
-                        b"participant_sync_receipts",
-                        b"participant_sync_export_work",
-                    ]
-                    .contains(&table))
-            {
+            if database == b"temp" || (database == b"main" && purpose.tables().contains(&table)) {
                 ffi::SQLITE_OK
             } else {
                 ffi::SQLITE_DENY
@@ -59,16 +79,23 @@ unsafe extern "C" fn authorize(
 pub(super) struct Guard(*mut ffi::sqlite3);
 impl Guard {
     /// Caller must retain the exclusive live connection until this guard drops.
-    pub(super) fn install(connection: &Connection) -> Result<Self, LogError> {
+    pub(super) fn install(connection: &Connection, purpose: Purpose) -> Result<Self, LogError> {
+        static SELECTION: Purpose = Purpose::Selection;
+        static TRANSPORT_HINT: Purpose = Purpose::TransportHint;
+        let policy_context = match purpose {
+            Purpose::Selection => &SELECTION,
+            Purpose::TransportHint => &TRANSPORT_HINT,
+        } as *const Purpose;
         // SAFETY: connection is live and exclusively locked by the owner. This
         // owner has no other authorizer. SQLite expires previously prepared
         // statements when changing the authorizer, so caches cannot bypass it.
         let database = unsafe { connection.handle() };
-        let result =
-            unsafe { ffi::sqlite3_set_authorizer(database, Some(authorize), std::ptr::null_mut()) };
+        let result = unsafe {
+            ffi::sqlite3_set_authorizer(database, Some(authorize), policy_context.cast_mut().cast())
+        };
         if result != ffi::SQLITE_OK {
             return Err(context(
-                "guard disposable selection writes",
+                "guard derived work writes",
                 rusqlite::Error::SqliteFailure(ffi::Error::new(result), None),
             ));
         }

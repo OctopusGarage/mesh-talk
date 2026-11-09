@@ -2665,13 +2665,19 @@ policy generations. An owner-qualified runtime work clock observes the current p
 version and non-reset dirty-page write count under its exclusive connection
 mutex. Default writes, including legacy mutations through read closures, remain
 conservative invalidations. The owner acknowledges only the write interval of
-an explicitly guarded disposable participant selection transaction; preceding
+an explicitly guarded disposable selection or transport-hint transaction; preceding
 ordinary writes are observed first under the same guard. SQLite authorization
 allows that transaction to read current authority and use TEMP scratch, but write
-MAIN only through its closed set of `participant_sync_*` selection/progress
-tables. Other MAIN writes, including trigger side effects and previously cached
+MAIN only through the purpose's closed table set. Selection work owns its nine
+`participant_sync_*` selection/progress tables; optional transport-hint work owns
+`opaque_checkpoints`, `opaque_wrapper_ids` and `opaque_checkpoint_usage` only.
+Neither purpose can write the other's tables. Other MAIN writes, including trigger side effects and previously cached
 statements, are rejected and rolled back. Schema/kind backfill, events, controls, receipts and other business facts
-retain the default fence. Restore normal SQL authority before releasing the
+retain the default fence. A transport checkpoint is not an authoritative delivery
+receipt: saving another mailbox's cursor must not force settled consent offers
+through history preparation again. The real mailbox regression advances such an
+independent checkpoint while retaining policy and remote-reset controls.
+Restore normal SQL authority before releasing the
 connection; commit/rollback failure preserves the database fault fence.
 Unknown observations, owner changes or exhausted runtime generations cannot
 supply unchanged evidence. This work clock is not durable progress or an

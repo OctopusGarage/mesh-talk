@@ -781,7 +781,11 @@ permit TEMP scratch but reject business-table writes through direct SQL, cached
 statements or triggers, and restore default authority on success, failure and unwinding. Schema and
 source/authority indexes keep conservative invalidation. The database work-clock
 regressions and the real incremental-mailbox consent exchange cover independent
-selection preparation/retirement, actual authority invalidation and rollback.
+selection preparation/retirement, transport checkpoint advancement, actual
+authority invalidation and rollback. Optional transport hints have their own
+closed table set; they cannot acquire selection or business-write authority.
+Progress in one mailbox must not invalidate every settled consent offer merely
+because both happen to share the same encrypted database.
 
 Treat derived-index cache retirement as a storage mutation when its destructor
 marks/deletes SQL rows. Fully version-qualified plans must not expire only because

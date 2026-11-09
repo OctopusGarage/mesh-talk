@@ -1,5 +1,5 @@
 //! Runtime work evidence; ordinary database writes remain conservative fences.
-//! Only guarded disposable selection transactions may acknowledge their writes.
+//! Only guarded selection/transport-hint transactions may acknowledge their writes.
 use super::{Connection, MainWriteStamp};
 use std::{
     ops::{Deref, DerefMut},
@@ -63,7 +63,7 @@ impl Clock {
             generation: self.generation?,
         })
     }
-    fn acknowledge_selection(&mut self, stamp: Option<MainWriteStamp>) {
+    fn acknowledge_derived(&mut self, stamp: Option<MainWriteStamp>) {
         if stamp.is_none() {
             self.generation = None;
         }
@@ -85,8 +85,8 @@ impl OwnedConnection {
     pub(super) fn observe_work(&mut self, stamp: Option<MainWriteStamp>) -> Option<WorkStamp> {
         self.clock.observe(stamp)
     }
-    pub(super) fn acknowledge_selection(&mut self, stamp: Option<MainWriteStamp>) {
-        self.clock.acknowledge_selection(stamp);
+    pub(super) fn acknowledge_derived(&mut self, stamp: Option<MainWriteStamp>) {
+        self.clock.acknowledge_derived(stamp);
     }
     pub(super) fn into_connection(self) -> Connection {
         self.connection
@@ -117,11 +117,11 @@ mod tests {
     fn derived_acknowledgement_preserves_prior_writes_and_owner_identity() {
         let mut clock = Clock::default();
         let first = clock.observe(raw(1)).unwrap();
-        clock.acknowledge_selection(raw(2));
+        clock.acknowledge_derived(raw(2));
         assert_eq!(clock.observe(raw(2)), Some(first));
         let changed = clock.observe(raw(3)).unwrap();
         assert_ne!(changed, first);
-        clock.acknowledge_selection(raw(4));
+        clock.acknowledge_derived(raw(4));
         assert_eq!(clock.observe(raw(4)), Some(changed));
         assert_ne!(Clock::default().observe(raw(4)), Some(changed));
     }
@@ -130,13 +130,13 @@ mod tests {
         let mut clock = Clock::default();
         assert!(clock.observe(raw(1)).is_some());
         assert!(clock.observe(None).is_none());
-        clock.acknowledge_selection(raw(2));
+        clock.acknowledge_derived(raw(2));
         assert!(clock.observe(raw(2)).is_none());
         let mut clock = Clock::default();
         clock.observe(raw(1));
         clock.generation = Some(u64::MAX);
         assert!(clock.observe(raw(2)).is_none());
-        clock.acknowledge_selection(raw(3));
+        clock.acknowledge_derived(raw(3));
         assert!(clock.observe(raw(3)).is_none());
     }
 }

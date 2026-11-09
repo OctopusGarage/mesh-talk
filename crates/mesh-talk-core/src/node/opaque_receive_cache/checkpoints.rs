@@ -114,7 +114,7 @@ impl Bucket {
         // Sync before entering the SQL guard. The transaction still checks the
         // exact value again; this preflight does not own concurrent mutation.
         cache.checkpoint_source()?.check_write()?;
-        profile.database().transaction(|c| {
+        profile.database().transport_hint_transaction(|c| {
             let existing: Option<(i64,bool)> = c.query_row(&format!("SELECT length(key)+length(value),value=?2 FROM {} WHERE key=?1",self.table), params![key,value], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
             // A warmed poll is read-only, including FIFO metadata.
             if matches!(existing,Some((_,true))) { return Ok(true); }
@@ -155,7 +155,7 @@ impl Bucket {
             return Ok(());
         }
         cache.checkpoint_source()?.check_write()?;
-        profile.database().transaction(|c| {
+        profile.database().transport_hint_transaction(|c| {
             let charge: Option<i64> = c
                 .query_row(
                     &format!(
