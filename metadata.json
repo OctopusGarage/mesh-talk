@@ -1,0 +1,61 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6ZB7Y812HSH7TG16MNDQFMF",
+  "strategy": "manual-commit",
+  "branch": "perf/dependabot-scoped-ci",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/actions/ci-scope/action.yml",
+    ".github/workflows/check-health.yml",
+    ".github/workflows/ci-scope.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/dependabot-auto-merge.yml",
+    ".github/workflows/dependency-acceptance.yml",
+    ".github/workflows/e2e-ui.yml",
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "docs/quality-gates.md",
+    "scripts/ci/docs-scope.mjs",
+    "scripts/diagnostics/ci-docs-scope.test.mjs",
+    "scripts/diagnostics/ci-latency.test.mjs",
+    "scripts/validation/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 180195,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 15764096,
+    "output_tokens": 44871,
+    "api_call_count": 102,
+    "subagent_tokens": {
+      "input_tokens": 57963,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 631680,
+      "output_tokens": 1875,
+      "api_call_count": 12
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 4,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 4,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}

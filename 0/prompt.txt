@@ -1,0 +1,9 @@
+dependabot[bot] https://github.com/OctopusGarage/mesh-talk/pulls 提交的这些，是不是可以不需要跑那么多CI，现在每次都跑那么多CI，又慢又老是失败，成本也高？而且只是合并到dev而已，仔细专业分析清楚
+
+---
+
+按照你的建议全面优化吧，使用专业优雅可靠高效的方式
+
+---
+
+提交推送合并验证
