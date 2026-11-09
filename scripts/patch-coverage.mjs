@@ -155,7 +155,12 @@ function committedFrontendDiff(root, base) {
       "--",
       "frontend/src",
     ],
-    { encoding: "utf8", cwd: root },
+    {
+      encoding: "utf8",
+      cwd: root,
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 30000,
+    },
   );
   return diff;
 }
@@ -170,6 +175,16 @@ export async function prePrPatchCoverage({
   signal,
 } = {}) {
   signal?.throwIfAborted();
+  if (base === "origin/dev") {
+    const { verifyMainPromotion } =
+      await import("./pr-platform/main-promotion.mjs");
+    if (await verifyMainPromotion({ root, base, signal }))
+      return {
+        applicable: false,
+        reason:
+          "exact current main source has verified complete trusted main-push acceptance",
+      };
+  }
   const added = addedSourceLines(committedFrontendDiff(root, base));
   if (!added.size) return { applicable: false };
   const { inputGroup } = await import("./validation/stage-inputs.mjs");

@@ -1085,3 +1085,24 @@ installed-version and nonretryable HTTP failures remain fatal; never publish the
 tool environment before successful verification. `release-sevenzip.test.mjs`
 retains alternate-source, exhausted-budget and no-publication controls. Actual
 installed-tool acceptance remains required on each consuming native platform.
+
+### Synchronizing an accepted main source into dev
+
+A pure main-to-dev synchronization introduces no product source beyond the exact
+current main tip. The PR preparation owner may reuse the existing complete
+trusted-main acceptance contract instead of retroactively applying the local
+unit-only patch target to the entire development-branch backlog. This is limited
+to `origin/dev` comparisons with a clean HEAD equal to the live remote main SHA.
+`scripts/pr-platform/main-promotion.mjs` invokes the existing
+`release/check-source-checks.mjs` owner: every required current-source check must
+belong to its latest successful same-repository main-push workflow suite, with no
+open main scanning alerts. PR-only, stale, pending, failed, skipped and wrong-suite
+evidence cannot authorize promotion.
+
+The verifier rechecks live main and local source after proof collection, bounds
+network work and retires child processes through the existing process owner.
+Failure, cancellation, changed source and unavailable evidence reject promotion.
+This does not lower the configured patch target for ordinary new changes or
+replace dev's current-head protected integration checks. Large ordinary diffs
+remain fully measured within a bounded 32 MiB Git output budget; over-budget
+input fails rather than becoming an empty or truncated patch.
