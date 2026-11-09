@@ -325,6 +325,7 @@
         "scripts/create-pr.sh",
         "scripts/pr-preflight.sh",
         "scripts/pr-platform/",
+        "scripts/diagnostics/pr-main-promotion.test.mjs",
         "scripts/validation/pr-scenarios.mjs",
         "scripts/diagnostics/create-pr.test.mjs",
         "scripts/diagnostics/prepare-pr.test.mjs",
@@ -335,6 +336,7 @@
         "scripts/diagnostics/native-build.test.mjs"
       ],
       "node": [
+        "scripts/diagnostics/pr-main-promotion.test.mjs",
         "scripts/diagnostics/prepare-pr.test.mjs",
         "scripts/diagnostics/create-pr.test.mjs",
         "scripts/diagnostics/pr-platform.test.mjs",

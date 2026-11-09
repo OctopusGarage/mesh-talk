@@ -788,6 +788,14 @@ eligibility after failure and ineligibility after cancellation. Follow the
 [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
 and keep unresolved native, cross-platform and stress obligations explicit.
 
+Bounded subprocess output discovery must fail on truncation, not infer an empty
+patch from a saturated buffer. Size Git diff transport for the supported source
+boundary and exercise a real committed patch above the default buffer. Accepted
+source promotion requires the existing exact main-push evidence owner plus live
+source revalidation, not a local reference, PR-only green status or a coverage
+threshold waiver. The [CI maintenance owner](ci-maintenance.md#synchronizing-an-accepted-main-source-into-dev),
+`patch-coverage.test.mjs` and `pr-main-promotion.test.mjs` own these controls.
+
 Dependency verification scope must bind identity to the actual tested merge and
 consumer boundary, not only a bot author or version label. Independently revalidate
 reduced profiles and require every selected producer's terminal success. External

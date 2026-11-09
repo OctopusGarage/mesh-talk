@@ -36,6 +36,12 @@ Rust unit/integration, real multi-process backend E2E, browser UI tests, and nat
 desktop tests answer different questions. A VM/Xvfb/software-renderer pass does not
 establish that a reported physical GPU or VMware compositor fault is fixed.
 
+A clean exact-current-main promotion into dev may use the
+[trusted main synchronization proof](ci-maintenance.md#synchronizing-an-accepted-main-source-into-dev)
+for PR preparation. Its source must already satisfy the existing complete trusted
+main-push acceptance owner, and dev still requires its own integration checks.
+Ordinary source changes retain the configured local patch coverage target.
+
 ## Test quality and evidence
 
 `node --test scripts/diagnostics/*.test.mjs` runs in three-platform CI and the health
