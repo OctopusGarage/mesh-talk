@@ -1,0 +1,42 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M70QG6P2YJRA657C0RRJHM00",
+  "strategy": "manual-commit",
+  "branch": "fix/group-anchor-observation",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md",
+    "src-tauri/src/shared_account_login/tests.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 112446,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 42892160,
+    "output_tokens": 37719,
+    "api_call_count": 159
+  },
+  "redaction": {
+    "replacements": 2,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 2,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
