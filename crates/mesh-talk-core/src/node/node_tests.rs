@@ -20,6 +20,27 @@ fn ready_history(result: Result<Vec<HistoryEntry>, NodeError>) -> Option<Vec<His
     }
 }
 
+#[test]
+fn ready_history_distinguishes_pending_from_ready_empty() {
+    assert!(ready_history(Err(NodeError::Log(LogError::StaleCursor))).is_none());
+    assert!(
+        ready_history(Ok(Vec::new())).is_some_and(|history| history.is_empty()),
+        "a ready empty result must remain available for immediate assertions"
+    );
+}
+
+#[test]
+#[should_panic(expected = "history observation failed: log error:")]
+fn ready_history_rejects_storage_failure() {
+    ready_history(Err(NodeError::Log(LogError::CorruptId)));
+}
+
+#[test]
+#[should_panic(expected = "history observation failed: authorization:")]
+fn ready_history_rejects_authorization_failure() {
+    ready_history(Err(NodeError::Authorization("denied".into())));
+}
+
 // Bare fixtures inject signed rows without the host's recovery worker. Drive
 // that same bounded owner until its durable channel demand is retired.
 fn settle_injected_channel(node: &Node, channel: ConversationId) {
@@ -10245,10 +10266,11 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         loop {
             attachment_predicates.fill(None);
             phase("attachments_account_card_begin");
-            let account_card = a2_node
-                .account_history(&bob_account.account_id(), 20).unwrap()
-                .iter()
-                .any(|entry| entry.id == attachment_id && entry.file.is_some());
+            let account_card = ready_history(
+                a2_node.account_history(&bob_account.account_id(), 20),
+            )
+            .is_some_and(|history| history.iter()
+                .any(|entry| entry.id == attachment_id && entry.file.is_some()));
             attachment_predicates[0] = Some(account_card);
             phase("attachments_account_card_finished");
             if account_card
@@ -10268,9 +10290,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                 }
                 && {
                     phase("attachments_channel_card_begin");
-                    let present = a2_node.channel_history(channel, 20).unwrap()
-                        .iter()
-                        .any(|entry| entry.id == channel_attachment_id && entry.file.is_some());
+                    let present = ready_history(a2_node.channel_history(channel, 20))
+                        .is_some_and(|history| history.iter()
+                            .any(|entry| entry.id == channel_attachment_id && entry.file.is_some()));
                     attachment_predicates[3] = Some(present);
                     phase("attachments_channel_card_finished");
                     present

@@ -2632,6 +2632,8 @@
             "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work",
             "node::node::participant_storage_tests::public_account_history_rejects_incomplete_ready_selector_without_hanging",
             "node::node::tests::linked_device_catches_up_incoming_dm_after_reconnect",
+            "node::node::tests::ready_history_",
+            "node::node::tests::channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
             "eventlog::repository::order::tests::history_selectors_reject_retired_unready_and_incomplete_derived_ranges"
           ]
         }

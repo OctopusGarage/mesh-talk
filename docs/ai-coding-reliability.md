@@ -675,7 +675,13 @@ fallback. A snapshot taken after timeout is diagnostic evidence, not success.
 
 A bounded positive observer may keep waiting on the owning API's explicit pending
 state. Match only that state; storage, authorization and unexpected failures stay
-fatal. Preserve the original deadline and exact outcome assertions.
+fatal. Preserve the original deadline and exact outcome assertions. Prior readiness
+is not a lease: live sibling attachment recovery can invalidate a canonical history
+projection between polls. The existing `ready_history` owner in
+[`node_tests.rs`](../crates/mesh-talk-core/src/node/node_tests.rs) preserves
+`StaleCursor` as pending and distinguishes a ready empty history; its storage and
+authorization controls remain fatal. Keep the real checkpoint invalidation and
+linked-device reconnect controls alongside those classification tests.
 
 An offline fixture that needs prompt connection failure must own and observe
 actual transport closure; reserving a TCP port does not guarantee refusal or
