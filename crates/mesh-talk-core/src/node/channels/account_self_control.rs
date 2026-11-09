@@ -1708,6 +1708,8 @@ pub(in crate::node) mod tests {
         armed: std::sync::atomic::AtomicBool,
         admitted: std::sync::atomic::AtomicBool,
         published: std::sync::atomic::AtomicBool,
+        setup_wake_revision: std::sync::atomic::AtomicU64,
+        setup_wake_observed: std::sync::Mutex<Option<std::time::Instant>>,
         first_wake_revision: std::sync::atomic::AtomicU64,
         wake_received: std::sync::atomic::AtomicBool,
         cancelled: std::sync::atomic::AtomicBool,
@@ -1725,6 +1727,8 @@ pub(in crate::node) mod tests {
                 armed: Default::default(),
                 admitted: Default::default(),
                 published: Default::default(),
+                setup_wake_revision: Default::default(),
+                setup_wake_observed: Default::default(),
                 first_wake_revision: Default::default(),
                 wake_received: Default::default(),
                 cancelled: Default::default(),
@@ -1751,6 +1755,10 @@ pub(in crate::node) mod tests {
                 .strip_prefix("wake_received revision=")
                 .and_then(|value| value.parse::<u64>().ok())
             {
+                let setup = self.setup_wake_revision.load(Ordering::Acquire);
+                if setup > 0 && revision >= setup && !self.admitted.load(Ordering::Acquire) {
+                    *self.setup_wake_observed.lock().unwrap() = Some(std::time::Instant::now());
+                }
                 let first = self.first_wake_revision.load(Ordering::Acquire);
                 if first > 0 && revision >= first {
                     self.wake_received.store(true, Ordering::Release);
@@ -1782,6 +1790,17 @@ pub(in crate::node) mod tests {
                     if page.task != *task && self.admitted.load(Ordering::Acquire) {
                         self.replacement_seen.store(true, Ordering::Release);
                     }
+                    return;
+                }
+                // A request already in flight before the accepted setup Wake
+                // can still be live until the scheduler observes its refresh.
+                // It cannot witness the post-change comparison this hold needs.
+                if !self
+                    .setup_wake_observed
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|at| page.dispatched_at >= at)
+                {
                     return;
                 }
                 if !page.dispatch().is_some_and(|dispatch| {
@@ -2587,6 +2606,44 @@ pub(in crate::node) mod tests {
             .unwrap();
         if let Some(hold) = request_hold.as_ref() {
             hold.armed.store(true, std::sync::atomic::Ordering::Release);
+            // Settled unchanged comparisons stay idle. Create actual signed
+            // requester input after arming the hold, then send its authenticated
+            // Wake within the original readiness deadline. This is not the
+            // operation publication whose later Wake must retire the held read.
+            observe_self_control_by_deadline(readiness_deadline, async {
+                use crate::node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
+                crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                    &reference,
+                    ConversationId::new([67; 32]),
+                );
+                let (_, before_wake) = reference.account_wake_token_for_test();
+                hold.setup_wake_revision.store(
+                    before_wake.checked_add(1).unwrap(),
+                    std::sync::atomic::Ordering::Release,
+                );
+                reference.note_account_local_change();
+                let peer = reference.routing_peer(&online.user_id()).unwrap();
+                let (epoch, revision) = reference.account_wake_token_for_test();
+                let mut channel = reference
+                    .begin_account_exchange(
+                        &peer,
+                        AccountSyncVersion::V2,
+                        AccountHistoryFrame::Wake {
+                            account_id: reference.account_id(),
+                            epoch,
+                            revision,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let bytes = channel.recv().await.unwrap();
+                assert!(matches!(AccountHistoryFrame::decode_versioned(&bytes),
+                    Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: received, revision: received_revision }))
+                    if received == epoch && received_revision == revision));
+                channel.recycle(&reference);
+            })
+            .await
+            .expect("changed requester input must wake its executor before self-control admission");
             online.account_sync_notify.notify_one();
             wait_self_control_noise_diagnosed(
                 readiness_deadline,
@@ -3098,21 +3155,37 @@ pub(in crate::node) mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reference_modern_accept_uses_noise_and_keeps_optional_archive_off() {
-        reference_self_control_over_noise(AccountSelfControlInput::Accept, false).await;
+        Box::pin(reference_self_control_over_noise(
+            AccountSelfControlInput::Accept,
+            false,
+        ))
+        .await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reference_modern_leave_keeps_left_over_old_member_head_and_reopen() {
-        reference_self_control_over_noise(AccountSelfControlInput::Leave, false).await;
+        Box::pin(reference_self_control_over_noise(
+            AccountSelfControlInput::Leave,
+            false,
+        ))
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reference_modern_decline_uses_noise_and_keeps_left_without_acceptance_or_archive() {
-        reference_self_control_over_noise(AccountSelfControlInput::Decline, false).await;
+        Box::pin(reference_self_control_over_noise(
+            AccountSelfControlInput::Decline,
+            false,
+        ))
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reference_modern_leave_request_overtakes_the_executors_held_requester_read() {
-        reference_self_control_over_noise(AccountSelfControlInput::Leave, true).await;
+        Box::pin(reference_self_control_over_noise(
+            AccountSelfControlInput::Leave,
+            true,
+        ))
+        .await;
     }
 
     fn decline_payload(grant: AccountGrantId) -> Vec<u8> {

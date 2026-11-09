@@ -313,6 +313,8 @@
           "filters": [
             "node::account_documents::",
             "node::account_sync::personal_replay_tests::",
+            "node::account_group::tests::owner_targets::modern_owner_transfers_to_the_target_account_without_changing_grants",
+            "node::account_group::tests::owner_targets::legacy_owner_transfers_to_a_deterministic_accepted_target_device",
             "node::account_sync::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
             "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery",

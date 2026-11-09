@@ -1,7 +1,7 @@
 //! A real short operation prefix leaves a queued suffix that cannot witness new demand.
 use super::selected_same_source_control_latency::{
     BTrace, ColdControlScope, ControlTestPages, record_b_trace, record_control_frame,
-    result_snapshot,
+    result_snapshot, send_boundary_wake,
 };
 use super::*;
 use crate::node::account_documents::wire::DocumentRequest;
@@ -712,6 +712,9 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
+    let setup_wake_observed = Arc::new(Mutex::new(None::<std::time::Instant>));
+    let setup_wake_ready = Arc::new(Semaphore::new(0));
+    let _release_setup_wake = ReleaseQueuedReads(setup_wake_ready.clone());
     let preparation_read = Arc::new(PreparationReadGate::default());
     let _release_preparation_read = ReleasePreparationRead(preparation_read.clone());
     // Independent bounded owner rings keep frequent requester maintenance from
@@ -819,6 +822,7 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     }));
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let peer_a = a.identity.public();
+        let setup_wake_observed = setup_wake_observed.clone();
         let peer_b = b.identity.public();
         let own = reference.identity.public();
         let local_maintenance = local_maintenance.clone();
@@ -843,6 +847,9 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
         move |peer, phase| {
+            if peer == peer_a && phase.starts_with("wake_received revision=") {
+                *setup_wake_observed.lock().unwrap() = Some(std::time::Instant::now());
+            }
             let held_task = *first_held_task.lock().unwrap();
             if peer == peer_a
                 && let Some(task) = held_task
@@ -1013,6 +1020,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
     }));
     *a.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let expected = reference.identity.public();
+        let setup_wake_ready = setup_wake_ready.clone();
+        let setup_wake_observed = setup_wake_observed.clone();
         let release = release.clone();
         let first_tx = first_tx.clone();
         let resume_tx = resume_tx.clone();
@@ -1026,6 +1035,8 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
         let preparation_read = preparation_read.clone();
         move |peer, frame| {
             let expected = expected.clone();
+            let setup_wake_ready = setup_wake_ready.clone();
+            let setup_wake_observed = setup_wake_observed.clone();
             let release = release.clone();
             let first_tx = first_tx.clone();
             let resume_tx = resume_tx.clone();
@@ -1072,9 +1083,25 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
                 {
                     return;
                 }
+                // Only the initial qualified unpaired read waits for setup
+                // WakeAck. Paired/protected cold reads must finish above so B
+                // can become ready and the setup sender can deliver that Wake.
+                if first_pending {
+                    let _ = setup_wake_ready.acquire().await;
+                }
+                // Re-resolve after the wait: a pre-Wake child may have retired
+                // while the authenticated change was being processed.
                 let Some(page) = pages.lock().unwrap().live_request(&request) else {
                     return;
                 };
+                if first_pending
+                    && !setup_wake_observed
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|at| page.dispatched_at >= at)
+                {
+                    return;
+                }
                 let Some(dispatch) = page.dispatch() else {
                     return;
                 };
@@ -1328,8 +1355,22 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             })
         }
     }));
-    reference.account_sync_notify.notify_one();
-    let (first_task, first_task_lifetime) = super::cold_account_setup(first_rx)
+    let (first_task, first_task_lifetime) = super::cold_account_setup(async {
+        // The first hold must follow settled B setup. An unchanged notification
+        // need not open A again; publish real signed input after arming its hook.
+        while !b_readiness.lock().unwrap().ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+            &a,
+            ConversationId::new([67; 32]),
+        );
+        a.note_account_local_change();
+        send_boundary_wake(&a, &reference).await;
+        setup_wake_ready.close();
+        reference.account_sync_notify.notify_one();
+        first_rx.await
+    })
         .await
         .unwrap_or_else(|error| {
             let ready = b_readiness.lock().unwrap().ready();

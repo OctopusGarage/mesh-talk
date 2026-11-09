@@ -1353,6 +1353,9 @@ mod tests {
         assert!(next.is_none());
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].announce.public(), moved.identity.public());
+        // Group::new serves inbound sessions only. Finish the receiver's
+        // retained membership cut before its maintenance owner evaluates it.
+        receiver.await_channel_metadata(channel).await.unwrap();
         let mut work = ChannelAccountMaintenance::default();
         for _ in 0..8 {
             receiver.maintain_account_channels(&mut work).await;
@@ -1908,6 +1911,13 @@ mod tests {
             .send_channel_message(channel, b"other account still participates")
             .await
             .unwrap();
+        // These bare servers have no participant plaintext recovery task.
+        // Drive its real bounded owners before checking history and sharing
+        // the newly received author's chain; the owner stays offline.
+        for node in [source, target, other] {
+            node.await_channel_metadata(channel).await.unwrap();
+            node.process_channel(channel);
+        }
         tokio::task::yield_now().await;
         for _ in 0..4 {
             source.maintain_account_channels(&mut source_work).await;

@@ -6466,6 +6466,9 @@ async fn channel_departure_retry_preserves_original_event_after_owner_reconnects
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             member.retry_channel_departures().await;
+            // This fixture serves inbound sessions without the participant's
+            // metadata owner. Finish the received cut before reading roles.
+            owner.await_channel_metadata(group).await.unwrap();
             match owner.account_group_projection(group) {
                 Ok(projection)
                     if projection.is_authorized(departure.id).unwrap()
@@ -8349,10 +8352,18 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         .send_file_channel(channel, &source, crate::file::FileKind::File)
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // Bare inbound servers retain the cut but do not run its bounded
+        // metadata and reception owners. Keep preparation inside the budget.
+        for recipient in [&bob_node, &carol_node] {
+            recipient.await_channel_metadata(channel).await.unwrap();
+            recipient.process_channel(channel);
+            recipient.process_file_events_reception(channel, "live");
+        }
+        bob_rx.recv().await.unwrap()
+    })
+    .await
+    .unwrap();
     let live_card = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
         .await
         .unwrap()
@@ -8417,10 +8428,14 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         &carol_id,
     );
     carol_node.pull_one_channel_from_member(0).await;
-    let recovered_card = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let recovered_card = tokio::time::timeout(Duration::from_secs(5), async {
+        carol_node.await_channel_metadata(channel).await.unwrap();
+        carol_node.process_channel(channel);
+        carol_node.process_file_events_reception(channel, "catch_up");
+        carol_rx.recv().await.unwrap()
+    })
+    .await
+    .unwrap();
     assert_eq!(recovered_card.file_conv, missed_file);
     assert_eq!(recovered_card.arrival_kind, "catch_up");
     assert!(

@@ -1303,14 +1303,19 @@ mod tests {
         handle
             .delete_left_group_if(&account, deleted, |commit| commit())
             .unwrap();
-        // Positive control: the real node publishes inventory through maintenance.
+        // Positive control: read the real document published by maintenance.
+        // Physical channel listing deliberately skips inventory bodies.
         // Synchronous reads here and in with_runtime execute on this test thread;
         // independently owned maintenance runs on the blocking pool.
+        let inventory_key = mesh_talk_core::node::AccountDocumentKey::GroupInventory {
+            channel: hex::encode(unrelated.as_bytes()),
+            source_device: handle.user_id(),
+        };
         let before = handle.test_group_inventory_body_read_count();
         tauri::async_runtime::block_on(async {
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {
-                    handle.list_channels().unwrap();
+                    handle.account_document(&inventory_key).unwrap();
                     if handle.test_group_inventory_body_read_count() > before {
                         break;
                     }

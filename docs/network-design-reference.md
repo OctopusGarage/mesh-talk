@@ -922,7 +922,13 @@ bindings, grant membership, install keys, enable sends or authorize management.
 A reference-only group remains read-only until validated authority is available.
 No additional plaintext history store or history-wire version is introduced.
 Member display facts are capped at 256 per source snapshot, retaining its owner
-and observer. The snapshot carries the full accepted-account count and an explicit
+and observer. In modern groups the inventory owner device is the lowest user ID
+among accepted devices bound by the validated projection to the current owner
+account. This descriptive representative changes with account ownership without
+rewriting the historical legacy owner device, membership grants or authority.
+Missing accepted owner-account representation defers publication rather than
+inventing a binding. Legacy inventory retains its actual owner device.
+The snapshot carries the full accepted-account count and an explicit
 roster-completeness flag; consumers must identify a partial roster rather than
 presenting it as every member. Source status flags describe that device's observed
 group state and do not establish account-wide authority or departure.

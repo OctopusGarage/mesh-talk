@@ -336,13 +336,19 @@ mod tests {
             "an unbound device is never labeled a person"
         );
 
-        // A real inventory row is published by the running node's maintenance.
+        // Read the real inventory explicitly: physical-group presence deliberately
+        // skips its inventory body. Maintenance must first publish the document.
         // Observe actual caller-thread durable reads before testing matching tokens.
         // This current-thread runtime executes the command projection synchronously;
         // maintenance owns a separate blocking task and cannot pollute this counter.
+        let inventory_key = mesh_talk_core::node::AccountDocumentKey::GroupInventory {
+            channel: hex::encode(accepted_group.as_bytes()),
+            source_device: node.user_id(),
+        };
         let initial_reads = node.test_group_inventory_body_read_count();
         let full = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
+                node.account_document(&inventory_key).unwrap();
                 let snapshot = serde_json::to_value(
                     super::super::get_presence(state.clone(), Some(String::new()))
                         .await
@@ -412,8 +418,23 @@ mod tests {
         .unwrap();
         assert!(repair.get("groups").is_some());
         assert!(
+            repair["groups"]
+                .as_object()
+                .unwrap()
+                .contains_key(&hex::encode(accepted_group.as_bytes())),
+            "forced repair must return the current physical group projection"
+        );
+        assert_eq!(
+            node.test_group_inventory_body_read_count(),
+            reads,
+            "forced physical-group projection must not hydrate unused inventory"
+        );
+        // Explicit inventory consumers retain durable reads. Core inventory
+        // regressions separately reject missing/corrupt blobs after warming.
+        assert!(node.account_document(&inventory_key).unwrap().is_some());
+        assert!(
             node.test_group_inventory_body_read_count() > reads,
-            "forced repair must recheck durable inventory integrity"
+            "explicit inventory reads must still check the durable body"
         );
         node.set_account_display_name("Changed Diagnostics")
             .unwrap();

@@ -266,6 +266,7 @@ test("shared Cargo configuration selects every workspace crate via owning contra
     "node::runtime_work::tests::",
     "node::trust_card::indexed::tests::",
     "node::trust_card::tests::",
+    "storage::profile::profile_receive::retry::tests::",
     "storage::profile::profile_receive::tests::",
     "unknown_profile_callback_skips_body_then_verified_proof_resumes",
     "unrelated_profile_callbacks_leave_unknown_pending_work_quiet",

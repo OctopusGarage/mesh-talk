@@ -955,6 +955,23 @@ impl Node {
                 .filter(|member| state.is_accepted_member(&member.user_id()))
                 .cloned()
                 .collect();
+            // Modern ownership belongs to an account. The legacy owner device
+            // remains historical; inventory needs a current accepted device of
+            // the exact owner account to describe that role coherently.
+            let inventory_owner = if let Some(account) = state.owner_account_id() {
+                accepted
+                    .iter()
+                    .filter(|member| state.member_account_id(&member.user_id()) == Some(account))
+                    .map(PublicIdentity::user_id)
+                    .min()
+                    .ok_or_else(|| {
+                        NodeError::InvalidInput(
+                            "group inventory owner account has no accepted device".into(),
+                        )
+                    })?
+            } else {
+                state.owner().to_owned()
+            };
             let member_count = if state.owner_account_id().is_some() {
                 accepted
                     .iter()
@@ -968,7 +985,7 @@ impl Node {
             let mut members = state.members().to_vec();
             members.sort_by_key(|member| {
                 (
-                    member.user_id() != state.owner() && member.user_id() != own,
+                    member.user_id() != inventory_owner && member.user_id() != own,
                     member.user_id(),
                 )
             });
@@ -977,7 +994,7 @@ impl Node {
                 source_device: own.clone(),
                 name: inventory_display_name(state.name(), *id),
                 member_count,
-                owner: state.owner().into(),
+                owner: inventory_owner,
                 owner_account_id: state.owner_account_id().map(str::to_owned),
                 dissolved: state.is_dissolved(),
                 left: !self.channel_identity_matches_account(&state),

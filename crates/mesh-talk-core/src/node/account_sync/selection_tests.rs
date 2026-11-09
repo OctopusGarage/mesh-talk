@@ -6783,7 +6783,7 @@ async fn bounded_attachment_handoff_keeps_exact_total_and_rotates_past_page() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     let (_dir, source, receiver, files) = manifest_only_attachment_fixture(2).await;
     restore_attachment_bytes(&source, files[0].0, &files[0].1);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6793,10 +6793,44 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
     let (release, released) = std::sync::mpsc::channel();
     let released = std::sync::Mutex::new(released);
     let held = Arc::new(AtomicBool::new(false));
+    let handoff_generation = Arc::new(AtomicU64::new(0));
+    let terminal_generation = Arc::new(AtomicU64::new(0));
+    let (consumed, consumption) = tokio::sync::oneshot::channel();
+    let consumed = std::sync::Mutex::new(Some(consumed));
     *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let held = held.clone();
+        let handoff_generation = handoff_generation.clone();
+        let terminal_generation = terminal_generation.clone();
         move |_, event| {
-            if event == "attachment_terminal_ready" && !held.swap(true, Ordering::SeqCst) {
+            if let Some(record) = event.strip_prefix("attachment_stale_terminal ") {
+                let values: std::collections::HashMap<_, _> = record
+                    .split_whitespace()
+                    .map(|value| value.split_once('=').unwrap())
+                    .collect();
+                let generation: u64 = values["generation"].parse().unwrap();
+                if generation == terminal_generation.load(Ordering::SeqCst)
+                    && let Some(sender) = consumed.lock().unwrap().take()
+                {
+                    sender
+                        .send((
+                            generation,
+                            values["replacement"].parse::<u64>().unwrap(),
+                            values["total_before"].parse::<usize>().unwrap(),
+                            values["total_after"].parse::<usize>().unwrap(),
+                            values["status_before"].to_string(),
+                            values["status_after"].to_string(),
+                        ))
+                        .unwrap();
+                }
+            }
+            if let Some(handoff) = event.strip_prefix("attachment_handoff_published generation=") {
+                let (generation, _) = handoff.split_once(" pending=").unwrap();
+                handoff_generation.store(generation.parse().unwrap(), Ordering::SeqCst);
+            }
+            if let Some(generation) = event.strip_prefix("attachment_terminal_ready generation=")
+                && !held.swap(true, Ordering::SeqCst)
+            {
+                terminal_generation.store(generation.parse().unwrap(), Ordering::SeqCst);
                 entered.lock().unwrap().take().unwrap().send(()).unwrap();
                 released
                     .lock()
@@ -6810,12 +6844,22 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
     let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
     let preparation = tokio::time::timeout(Duration::from_secs(5), ready).await;
     let result = if matches!(preparation, Ok(Ok(()))) {
+        let original_generation = terminal_generation.load(Ordering::SeqCst);
+        assert_ne!(
+            original_generation, 0,
+            "the held terminal must own a published handoff"
+        );
         receiver.request_sibling_pull(&source.identity.public());
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !receiver
-                .device_sync_status()
-                .iter()
-                .any(|status| status.pending_attachments == 1)
+            // The old handoff can already report one pending item. Observe
+            // the replacement selection's actual publication generation before
+            // releasing its predecessor's terminal result. The old active task
+            // retains this peer's attachment slot until that release.
+            while handoff_generation.load(Ordering::SeqCst) <= original_generation
+                || !receiver
+                    .device_sync_status()
+                    .iter()
+                    .any(|status| status.pending_attachments == 1)
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -6827,17 +6871,15 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
     };
     release.send(()).unwrap();
     let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        let record = consumption.await?;
         loop {
             let status = receiver.device_sync_status().remove(0);
-            assert_ne!(
-                status.pending_attachments, 0,
-                "old terminal decremented a newer handoff"
-            );
             if status.pending_attachments == 1 && status.phase == SyncPhase::WaitingForFiles {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        Ok::<_, tokio::sync::oneshot::error::RecvError>(record)
     })
     .await;
     worker.abort();
@@ -6845,7 +6887,23 @@ async fn held_attachment_terminal_cannot_decrement_replacement_handoff() {
     let _ = worker.await;
     let _ = server.await;
     result.expect("new source comparison must replace the handoff while old terminal is held");
-    recovered.expect("one unavailable local file remains visible after stale terminal retires");
+    let (old, replacement, before, after, status_before, status_after) = recovered
+        .expect("one unavailable local file remains visible after stale terminal retires")
+        .expect("the exact old terminal must be consumed against its replacement");
+    assert_eq!(old, terminal_generation.load(Ordering::SeqCst));
+    assert!(
+        replacement > old,
+        "the witness must belong to a newer selection"
+    );
+    assert_eq!(
+        (before, after),
+        (1, 1),
+        "stale terminal consumption must preserve the replacement's exact pending total"
+    );
+    assert_eq!(
+        status_before, status_after,
+        "stale terminal consumption must not mutate aggregate pending status"
+    );
 }
 
 #[tokio::test]

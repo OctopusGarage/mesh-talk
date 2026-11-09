@@ -1247,7 +1247,7 @@ impl Drop for PaidPairBoundary {
     }
 }
 
-async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>) -> ([u8; 16], u64) {
+pub(super) async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>) -> ([u8; 16], u64) {
     use crate::node::account_sync_wire::AccountSyncVersion;
     let peer = source.routing_peer(&target.user_id()).unwrap();
     let (epoch, revision) = source.account_wake_token_for_test();
@@ -1837,7 +1837,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         }
     }
     // Import the immutable prefix through the real background workers before
-    // arming a held request. Only row 66 is introduced at the natural snapshot;
+    // arming a held request. Row 66 then creates genuine source demand;
     // the operation budgets must not include cold replication of rows 1..65.
     let partial_keys = Arc::new(Mutex::new(Vec::new()));
     for value in 1..=65u8 {
@@ -2062,7 +2062,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         siblings
             .iter()
             .all(|node| node.account_document_meta(&last).is_none()),
-        "the controlled tail must remain absent until the natural snapshot"
+        "the controlled tail must remain absent until the hold hooks are armed"
     );
 
     let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -2554,17 +2554,13 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                             crate::eventlog::ConversationId::new([66; 32]),
                             revision,
                         );
-                        if revision == 1 {
-                            partial_keys.lock().unwrap().push(key);
-                        } else {
-                            assert!(
-                                partial_keys.lock().unwrap().last() == Some(&key),
-                                "preparation may revise only the same controlled tail key"
-                            );
-                        }
+                        assert!(
+                            partial_keys.lock().unwrap().last() == Some(&key),
+                            "preparation may revise only the same controlled tail key"
+                        );
                         revision
                     };
-                    if preparation_wake && revision == 1 {
+                    if preparation_wake && revision == 2 {
                         let lifetime = control_pages
                             .lock()
                             .unwrap()
@@ -2711,8 +2707,21 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         }));
     }
     let mut executor_preparation_failure = None;
-    reference.account_sync_notify.notify_one();
     super::cold_account_setup(async {
+        // Paid unchanged comparisons are idle. Publish the one controlled tail
+        // only after every hold hook is armed, then use the authenticated Wake
+        // to create the genuine background comparison this scenario requires.
+        let tail_key =
+            crate::node::account_documents::sync::seed_legacy_control_page_revision_for_test(
+                &owner,
+                crate::eventlog::ConversationId::new([66; 32]),
+                1,
+            );
+        partial_keys.lock().unwrap().push(tail_key);
+        tail_revision.store(1, std::sync::atomic::Ordering::Release);
+        owner.note_account_local_change();
+        send_boundary_wake(&owner, &reference).await;
+        reference.account_sync_notify.notify_one();
         held.await?;
         if preparation_wake {
             super::observe_account_fixture_condition(|| {

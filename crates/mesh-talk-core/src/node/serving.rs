@@ -1296,11 +1296,6 @@ impl Node {
             self.channel_recovery_notify.notify_one();
             return Ok(false);
         }
-        // This owner has released its log/SQL guards. Only paid canonical
-        // publication wakes waiters; unchanged ready reads remain quiet.
-        if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
-            self.wake_group_file_checkpoint(conv);
-        }
         #[cfg(test)]
         {
             let hook = self
@@ -1312,7 +1307,17 @@ impl Node {
                 hook();
             }
         }
-        if !self.install_current_channel_metadata(conv)? {
+        // Custody observes both canonical history and installed membership.
+        // Publish only after installation released its book/log/SQL guards.
+        // Preserve the paid canonical wake on installation errors too: source
+        // replacement needs another paid turn, while sender-key restore may
+        // fail after current membership has already been installed. Every
+        // awakened attempt independently checks the current authority fences.
+        let installed = self.install_current_channel_metadata(conv);
+        if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+            self.wake_group_file_checkpoint(conv);
+        }
+        if !installed? {
             if self.channel_checkpoints.finish_runtime(conv, None)? {
                 self.channel_recovery_notify.notify_one();
             }
@@ -1768,8 +1773,6 @@ impl Node {
             self.channel_recovery_notify.notify_one();
         }
         pending.lanes.remove(&conv);
-        drop(pending);
-        self.wake_group_file_checkpoint(conv);
         Ok(())
     }
 

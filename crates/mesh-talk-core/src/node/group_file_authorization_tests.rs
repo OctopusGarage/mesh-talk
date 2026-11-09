@@ -1855,7 +1855,23 @@ async fn group_file_blocked_checkpoint_keeps_backoff_without_repeated_offer_read
         reads,
         "an observer wake before recovery must not hydrate the same blocked offer again"
     );
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = observed.clone();
+    let weak = Arc::downgrade(node);
+    *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+        let node = weak.upgrade().unwrap();
+        assert!(node.log.try_lock().is_ok());
+        assert!(node.channels.try_lock().is_ok());
+        let jobs = node.group_file_delivery.jobs.lock().unwrap();
+        let blocked = jobs.get(&key).unwrap();
+        assert!(
+            blocked.waiting_dependency && blocked.retry_after.is_some(),
+            "canonical publication must not wake custody before membership installation"
+        );
+        seen.store(true, std::sync::atomic::Ordering::Release);
+    }));
     crate::node::test_support::settle_group_metadata(node, fixture.channel);
+    assert!(observed.load(std::sync::atomic::Ordering::Acquire));
     assert!(
         node.group_file_delivery
             .jobs
@@ -1883,6 +1899,55 @@ async fn group_file_blocked_checkpoint_keeps_backoff_without_repeated_offer_read
     assert!(
         !resumed.waiting_dependency && resumed.retry_after.is_some(),
         "finite preparation must converge and resume normal custody retry after recovery"
+    );
+}
+
+#[tokio::test]
+async fn completed_channel_reception_keeps_unchanged_group_file_dependency_backoff() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    crate::node::test_support::settle_group_metadata(node, fixture.channel);
+    // Exercise the real reception completion path before arming a waiter. The
+    // finite canonical/presentation setup must not be mistaken for a no-op.
+    for _ in 0..256 {
+        node.process_channel_reception_inner(fixture.channel, "catch_up")
+            .unwrap();
+        if !node.channel_plaintext_pending_for_test(fixture.channel) {
+            break;
+        }
+    }
+    assert!(
+        !node.channel_plaintext_pending_for_test(fixture.channel),
+        "the real reception lane must finish before arming the no-op regression"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    {
+        let mut jobs = node.group_file_delivery.jobs.lock().unwrap();
+        assert!(!jobs.is_empty());
+        for job in jobs.values_mut() {
+            job.waiting_dependency = true;
+            job.retry_after = Some(deadline);
+        }
+    }
+    for _ in 0..3 {
+        node.process_channel_reception_inner(fixture.channel, "catch_up")
+            .unwrap();
+        let jobs = node.group_file_delivery.jobs.lock().unwrap();
+        assert!(
+            jobs.values()
+                .all(|job| job.waiting_dependency && job.retry_after == Some(deadline)),
+            "completed unchanged reception must not consume blocked authorization backoff"
+        );
+    }
+    node.wake_group_file_checkpoint(fixture.channel);
+    assert!(
+        node.group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .all(|job| !job.waiting_dependency && job.retry_after.is_none()),
+        "a matching dependency publication must still clear the same deadlines"
     );
 }
 

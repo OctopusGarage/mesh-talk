@@ -314,8 +314,12 @@ edges or preparation phase advanced. Register dependency waiting before probing,
 so a concurrent readiness notification cannot be overwritten by the attempt.
 After consuming readiness, reserve the active network attempt's cancellation
 deadline before awaiting; an earlier wake must not erase its backoff.
-Publish scoped readiness hints after releasing source and cache guards; the next
-attempt still validates authority. The
+Publish scoped readiness hints after installing the state consumers observe and
+releasing source and cache guards; the next attempt still validates authority.
+An unchanged reception completion is not dependency publication and must not
+clear a blocked deadline. Keep queue-continuation booleans distinct from state
+change evidence: completing the last queued lane can still publish readiness.
+The
 [group-file authorization regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
 holds a real stale checkpoint, checks quiet backoff, then drives the actual
 checkpoint owner and verifies continuation before the deadline expires.
@@ -713,6 +717,15 @@ unrelated wakes, cancelled reservations, replacement attempts, completed-step
 progress and capacity churn without retaining file payloads in cooldown hints.
 
 ## R06: Exact authority and stale completions
+
+When projecting account roles into device-shaped display fields, derive the
+representative from the current validated account membership. A historical
+legacy device owner cannot describe a transferred account role. Keep exact
+account/device validation and bounded-snapshot inclusion together at the
+[inventory publisher](../crates/mesh-talk-core/src/node/account_documents/inventory.rs);
+the real modern and legacy transfer regressions in
+[owner target tests](../crates/mesh-talk-core/src/node/account_group/tests/owner_targets.rs)
+check readable inventory while preserving grants and the legacy owner field.
 
 **Failure pattern:** work authorized before an await or queue delay commits after
 logout, same-user relogin, account replacement or a policy off/on transition.

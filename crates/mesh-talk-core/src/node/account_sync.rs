@@ -3091,7 +3091,7 @@ impl Node {
                         #[cfg(test)]
                         if matches!(result, Ok(AttachmentOutcome::Complete)) {
                             node.trace_account_client(&peer.public, || {
-                                "attachment_terminal_ready".into()
+                                format!("attachment_terminal_ready generation={generation}")
                             });
                         }
                         (id, file, unsupported, result, None)
@@ -4035,6 +4035,13 @@ impl Node {
                                 status.phase = SyncPhase::CatchingUp;
                             }
                             self.set_account_sync_status(id.clone(), status);
+                            #[cfg(test)]
+                            if let Some(selection) = sibling_attachments.get(&id) {
+                                self.trace_account_client(&peer.public, || format!(
+                                    "attachment_handoff_published generation={} pending={}",
+                                    selection.generation, selection.page.total
+                                ));
+                            }
                             let deferred_history = state.history_retry_at.is_some();
                             cursors.insert(id.clone(), state);
                             if continuation || deferred_history {
@@ -4116,7 +4123,23 @@ impl Node {
                         active_attachments.remove(&id);
                         let generation = sibling_attachment_generations.remove(&task);
                         if generation.is_some() && !sibling_attachments.get(&id).is_some_and(|selection| Some(selection.generation) == generation) {
-                            if let Some(selection) = sibling_attachments.get_mut(&id) { selection.refill = true; }
+                            #[cfg(test)]
+                            let pending_before = self.account_sync_status.lock().unwrap()
+                                .get(&id).map(|status| status.pending_attachments);
+                            if let Some(selection) = sibling_attachments.get_mut(&id) {
+                                #[cfg(test)]
+                                let total_before = selection.page.total;
+                                selection.refill = true;
+                                #[cfg(test)]
+                                {
+                                    let pending_after = self.account_sync_status.lock().unwrap()
+                                        .get(&id).map(|status| status.pending_attachments);
+                                    self.trace_account_client(&selection.peer.public, || format!(
+                                        "attachment_stale_terminal generation={} replacement={} total_before={total_before} total_after={} status_before={pending_before:?} status_after={pending_after:?}",
+                                        generation.expect("stale terminal generation"), selection.generation, selection.page.total
+                                    ));
+                                }
+                            }
                         } else if file_operation.is_some() {
                             if result.is_ok() {
                                 retry_attachment.remove(&id);
