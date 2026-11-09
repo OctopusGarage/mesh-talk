@@ -129,8 +129,11 @@ pub trait NetworkSyncStore {
     type View;
     type HaveCursor;
     type ExportCursor;
+    /// Qualify optional node-owned preparation reuse with the actual authenticated
+    /// peer. Cached plans grant no remote outcome or custody authority.
+    fn bind_session_peer(&mut self, _peer: &crate::identity::device::PublicIdentity) {}
     /// Optional current scalar probe. Returning metadata grants no export or Have
-    /// permission; a differing fingerprint still requires a fresh owned view.
+    /// permission; a differing fingerprint still requires a qualified owned view.
     fn probe_metadata(
         &self,
         _conversation: &ConversationId,
@@ -138,7 +141,7 @@ pub trait NetworkSyncStore {
         Ok(None)
     }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
-    /// Optionally transfer one already prepared, currently qualified connection-owned
+    /// Optionally transfer an exclusively owned, currently qualified prepared
     /// view to the caller. It must not share mutable export/Have state with any
     /// other request. A miss uses ordinary bounded authorization preparation.
     fn take_custody_view(
@@ -148,7 +151,9 @@ pub trait NetworkSyncStore {
         Ok(None)
     }
     /// Return ownership after an exact custody query and final validation, or
-    /// after an ordinary Response and its terminal Have have both been sent.
+    /// after an ordinary Response and its terminal Have have both been sent,
+    /// or after the requester's complete probe/followup exchange. This is one
+    /// exclusive local preparation lease, never a cached remote outcome.
     /// Custody callers keep an uncached view alive through response sending.
     /// This never caches the custody answer or a partially sent ordinary response.
     fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {

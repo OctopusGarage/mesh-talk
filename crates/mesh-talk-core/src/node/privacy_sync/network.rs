@@ -12,12 +12,20 @@ use crate::eventlog::{
         },
     },
 };
+use crate::node::work_observation::reason as query_reason;
 use std::sync::{Mutex, atomic::Ordering};
+
+pub(in crate::node) struct RetainedSelection {
+    denied: bool,
+    inbound: bool,
+    pull_only: bool,
+    view: ParticipantView,
+}
 
 /// Exact local history and authorization observation, not mailbox completion.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(in crate::node) struct HistorySyncStamp {
-    fingerprint: [u8; 32],
+    pub(super) fingerprint: [u8; 32],
 }
 
 /// One bounded runtime cache entry. Its existing SQL selection and profile
@@ -119,6 +127,135 @@ pub(in crate::node) struct ParticipantExportCursor {
     have: [u8; 32],
 }
 impl GuardedSyncStore<'_> {
+    fn prepared_scope(&self, conversation: ConversationId) -> super::prepared_views::Scope {
+        super::prepared_views::Scope {
+            peer: self.peer.clone(),
+            conversation,
+            inbound: self.inbound,
+            pull_only: self.pull_only,
+            denied: self.denied,
+        }
+    }
+    fn take_retained_selection(
+        &mut self,
+        conversation: &ConversationId,
+    ) -> Result<Option<RetainedSelection>, LogError> {
+        if !self.use_node_preparation {
+            return Ok(self.custody_view.take());
+        }
+        let Some(stamp) = self.history_sync_stamp(conversation)? else {
+            return Ok(None);
+        };
+        let (value, retired) = {
+            self.node
+                .prepared_sync_views
+                .lock()
+                .expect("prepared sync cache lock")
+                .take(&self.prepared_scope(*conversation), &stamp)
+        };
+        drop(retired);
+        if let Some(mut value) = value {
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .activate_cached_selection(
+                    value
+                        .view
+                        .preparation
+                        .get_mut()
+                        .expect("owned view preparation")
+                        .selection
+                        .as_mut()
+                        .ok_or(LogError::StaleCursor)?,
+                )?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+    fn cache_prepared_view(
+        &self,
+        mut view: ParticipantView,
+    ) -> Result<Option<ParticipantView>, LogError> {
+        // Pending uninvited ancestry remains operation-owned, never node-wide.
+        if !view.pending.is_empty()
+            || !self.pending_channels.is_empty()
+            || !view
+                .preparation
+                .get_mut()
+                .expect("owned view preparation")
+                .compact_for_cache()
+        {
+            return Ok(Some(view));
+        }
+        let bytes = match view
+            .preparation
+            .get_mut()
+            .expect("owned view preparation")
+            .cached_bytes
+        {
+            Some(bytes) => bytes,
+            None => {
+                let bytes = self
+                    .node
+                    .log
+                    .lock()
+                    .expect("log lock")
+                    .repository()?
+                    .selection_cache_bytes(
+                        view.preparation
+                            .get_mut()
+                            .expect("owned view preparation")
+                            .selection()?,
+                    )?;
+                view.preparation
+                    .get_mut()
+                    .expect("owned view preparation")
+                    .cached_bytes = Some(bytes);
+                bytes
+            }
+        };
+        if !super::PreparedSyncCache::accepts_bytes(bytes) {
+            return Ok(Some(view));
+        }
+        let scope = self.prepared_scope(view.conversation);
+        let stamp = view.metadata_stamp.clone().ok_or(LogError::StaleCursor)?;
+        let retired = {
+            let mut cache = self
+                .node
+                .prepared_sync_views
+                .lock()
+                .expect("prepared sync cache lock");
+            // Retirement closes commit authority before draining the cache.
+            if self.node.runtime_work.is_closed() {
+                return Ok(Some(view));
+            }
+            // Owned mutable access takes no preparation mutex or DB lock here.
+            view.preparation
+                .get_mut()
+                .expect("owned view preparation")
+                .selection
+                .as_mut()
+                .ok_or(LogError::StaleCursor)?
+                .park();
+            cache.insert(
+                scope,
+                stamp,
+                bytes,
+                RetainedSelection {
+                    denied: self.denied,
+                    inbound: self.inbound,
+                    pull_only: self.pull_only,
+                    view,
+                },
+                std::time::Instant::now(),
+            )
+        };
+        drop(retired);
+        Ok(None)
+    }
     pub(in crate::node) fn history_upload_id_page(
         &self,
         upload: &HistoryUpload,
@@ -649,6 +786,12 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl NetworkSyncStore for GuardedSyncStore<'_> {
+    fn bind_session_peer(&mut self, peer: &PublicIdentity) {
+        self.use_node_preparation = peer == &self.peer && !self.node.runtime_work.is_closed();
+        if self.use_node_preparation {
+            drop(self.custody_view.take());
+        }
+    }
     type View = ParticipantView;
     type HaveCursor = ParticipantHaveCursor;
     type ExportCursor = ParticipantExportCursor;
@@ -657,6 +800,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         conversation: &ConversationId,
     ) -> Result<Option<SyncMetadata>, LogError> {
         let Some(stamp) = self.history_sync_stamp(conversation)? else {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_STAMP_UNKNOWN, None);
             return Ok(None);
         };
         let metadata = self
@@ -665,12 +810,22 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .lock()
             .expect("projection cache lock not poisoned")
             .get_paged(&stamp);
+        self.node.observe_mailbox_work(
+            if metadata.is_some() {
+                query_reason::QUERY_META_HIT
+            } else {
+                query_reason::QUERY_META_MISS
+            },
+            None,
+        );
         if metadata.is_some() && self.history_sync_stamp(conversation)?.as_ref() != Some(&stamp) {
             return Ok(None);
         }
         Ok(metadata)
     }
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError> {
+        self.node
+            .observe_mailbox_work(query_reason::QUERY_VIEW_NEW, None);
         // Capture BEFORE the finite repository cutoff. A later append must
         // never label this older view with its newer exact history stamp.
         let metadata_stamp = self.history_sync_stamp(conversation)?;
@@ -731,26 +886,54 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         &mut self,
         conversation: &ConversationId,
     ) -> Result<Option<Self::View>, LogError> {
-        let Some((denied, view)) = self.custody_view.take() else {
+        let Some(retained) = self.take_retained_selection(conversation)? else {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_VIEW_ABSENT, None);
             return Ok(None);
         };
-        if view.conversation != *conversation || denied != self.denied {
+        let RetainedSelection {
+            denied,
+            inbound,
+            pull_only,
+            view,
+        } = retained;
+        if view.conversation != *conversation
+            || denied != self.denied
+            || inbound != self.inbound
+            || pull_only != self.pull_only
+            || self.node.runtime_work.is_closed()
+        {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_SCOPE_MISS, None);
             return Ok(None);
         }
         let current = self.history_sync_stamp(conversation)?;
         if current.is_none() || current.as_ref() != view.metadata_stamp.as_ref() {
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_STAMP_MISS, None);
             return Ok(None);
         }
         match self.validate_view(&view) {
-            Ok(()) => Ok(Some(view)),
-            Err(LogError::StaleCursor) => Ok(None),
+            Ok(()) => {
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_REUSED, None);
+                Ok(Some(view))
+            }
+            Err(LogError::StaleCursor) => {
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_INVALID, None);
+                Ok(None)
+            }
             Err(error) => Err(error),
         }
     }
     fn retain_custody_view(&mut self, view: Self::View) -> Result<Option<Self::View>, LogError> {
         // Evict before admitting another selection. The existing SQL owner
         // bounds both live selections and incremental retirement work.
-        self.custody_view = None;
+        drop(self.custody_view.take());
+        if self.node.runtime_work.is_closed() {
+            return Ok(Some(view));
+        }
         let ready = view
             .preparation
             .lock()
@@ -763,7 +946,22 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         if let Some(stamp) = &view.metadata_stamp
             && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
         {
-            self.custody_view = Some((self.denied, view));
+            if self.use_node_preparation {
+                let result = self.cache_prepared_view(view)?;
+                if result.is_none() {
+                    self.node
+                        .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
+                }
+                return Ok(result);
+            }
+            self.custody_view = Some(RetainedSelection {
+                denied: self.denied,
+                inbound: self.inbound,
+                pull_only: self.pull_only,
+                view,
+            });
+            self.node
+                .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
             Ok(None)
         } else {
             Ok(Some(view))
@@ -833,11 +1031,16 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             && let Some(stamp) = &view.metadata_stamp
             && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
         {
-            self.node
+            let evicted = self
+                .node
                 .channel_projection_cache
                 .lock()
                 .expect("projection cache lock not poisoned")
                 .insert_paged(stamp.clone(), metadata);
+            if evicted {
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_META_EVICTED, None);
+            }
         }
         Ok(metadata)
     }
@@ -942,7 +1145,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     ) -> Result<PreparationStep, LogError> {
         self.validate_view(view)?;
         *view.export_have.lock().expect("view export lock") = None;
-        let preparation = view.preparation.lock().expect("view preparation lock");
+        let mut preparation = view.preparation.lock().expect("view preparation lock");
+        preparation.cached_bytes = None;
         if !preparation.ready() {
             return Err(LogError::StaleCursor);
         }
@@ -955,7 +1159,8 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     }
     fn stage_export_have(&self, view: &Self::View, ids: &[EventId]) -> Result<(), LogError> {
         self.validate_view(view)?;
-        let preparation = view.preparation.lock().expect("view preparation lock");
+        let mut preparation = view.preparation.lock().expect("view preparation lock");
+        preparation.cached_bytes = None;
         self.node
             .log
             .lock()
@@ -971,8 +1176,9 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     ) -> Result<PreparationStep, LogError> {
         self.validate_view(view)?;
         let step = {
-            let preparation = view.preparation.lock().expect("view preparation lock");
-            self.node
+            let mut preparation = view.preparation.lock().expect("view preparation lock");
+            let step = self
+                .node
                 .log
                 .lock()
                 .expect("log lock")
@@ -983,7 +1189,11 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                     view.sibling_closure,
                     !self.inbound && !preparation.replica_shared,
                     budget,
-                )?
+                )?;
+            if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+                preparation.cached_bytes = None;
+            }
+            step
         };
         self.validate_view(view)?;
         if step.ready {
@@ -1044,29 +1254,28 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         })
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
-        #[cfg(not(test))]
-        {
-            SyncStore::ingest(self, event)
+        #[cfg(test)]
+        let message =
+            (event.kind == EventKind::Message).then_some((event.conversation_id, event.id));
+        let result = SyncStore::ingest(self, event);
+        // Duplicate payloads can restore ownership or unlock prior reception.
+        // Empty frames never call ingest, and failed admission grants no signal.
+        if result.is_ok() {
+            self.received_work = true;
         }
         #[cfg(test)]
+        if matches!(result, Ok(AppendOutcome::Appended))
+            && let Some((channel, id)) = message
         {
-            let message =
-                (event.kind == EventKind::Message).then_some((event.conversation_id, event.id));
-            let result = SyncStore::ingest(self, event);
-            if matches!(result, Ok(AppendOutcome::Appended))
-                && let Some((channel, id)) = message
-            {
-                // The durable append owner has returned and released its store guards.
-                self.node.trace_account_client(&self.peer, || {
-                    format!(
-                        "gossip_diag_ciphertext_applied channel={} event={}",
-                        hex::encode(channel.as_bytes()),
-                        id.to_hex()
-                    )
-                });
-            }
-            result
+            self.node.trace_account_client(&self.peer, || {
+                format!(
+                    "gossip_diag_ciphertext_applied channel={} event={}",
+                    hex::encode(channel.as_bytes()),
+                    id.to_hex()
+                )
+            });
         }
+        result
     }
 
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
@@ -1126,7 +1335,9 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         SyncStore::file_message_identity(self, file, manifest)
     }
     fn accept_file_message_identity(&mut self, bundle: Event) -> Result<bool, LogError> {
-        SyncStore::accept_file_message_identity(self, bundle)
+        let accepted = SyncStore::accept_file_message_identity(self, bundle)?;
+        self.received_work |= accepted;
+        Ok(accepted)
     }
     fn sticker_file_consent(
         &mut self,
@@ -1134,7 +1345,10 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         manifest: &EventId,
         headers: Vec<Event>,
     ) -> Result<Option<Event>, LogError> {
-        SyncStore::sticker_file_consent(self, file, manifest, headers)
+        let supplied_headers = !headers.is_empty();
+        let result = SyncStore::sticker_file_consent(self, file, manifest, headers);
+        self.received_work |= supplied_headers && result.is_ok();
+        result
     }
     fn sticker_file_proof(
         &self,
@@ -3227,12 +3441,28 @@ mod control_publication_tests {
                 .unwrap()
                 .is_some()
         );
-        node.clear_conversation(conversation).unwrap();
+        // The fixture has retained ciphertext but no plaintext sidecars. A
+        // no-op presentation clear must not impersonate an authority change.
+        assert_eq!(node.clear_conversation(conversation).unwrap(), 0);
+        assert!(
+            NetworkSyncStore::probe_metadata(&*store, &conversation)
+                .unwrap()
+                .is_some(),
+            "unchanged history must preserve qualified inventory"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .drop_conversation(&conversation)
+                .unwrap(),
+            1
+        );
         assert!(
             NetworkSyncStore::probe_metadata(&*store, &conversation)
                 .unwrap()
                 .is_none(),
-            "destructive history changes must invalidate previously qualified inventory"
+            "actual retained-history deletion must invalidate previously qualified inventory"
         );
     }
 
@@ -3663,6 +3893,11 @@ mod control_publication_tests {
             .await
             .expect("connection owner failed to retire")
             .unwrap();
+        let retirement = node
+            .retire_prepared_sync_views()
+            .expect("cached selection retirement");
+        retirement.await.unwrap();
+        node.runtime_work.drain().await;
         let active: i64 = node
             .storage
             .database()
@@ -3676,7 +3911,7 @@ mod control_publication_tests {
             .unwrap();
         assert_eq!(
             active, 0,
-            "closed connection must release its cached selection lease"
+            "retired node cache must release its selection leases"
         );
     }
 

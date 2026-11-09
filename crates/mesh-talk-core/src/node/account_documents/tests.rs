@@ -2129,7 +2129,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .unwrap()
             .confirm(event, &bob.user_id())
             .unwrap();
-        a.migrate_channel_custody(&mut None);
+        a.migrate_channel_custody(&mut None).unwrap();
         assert_eq!(
             a.channel_custody_count(channel, event).unwrap(),
             Some(0),
@@ -2262,6 +2262,33 @@ async fn account_worker_retries_local_authentication_contention_without_a_false_
     let account = Account::generate();
     let source = node(&dir.path().join("source"), &account);
     let target = node(&dir.path().join("target"), &account);
+    let trace = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let started = Instant::now();
+    let draft_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let trace = trace.clone();
+        let draft_attempts = draft_attempts.clone();
+        *target.account_client_test_hook.lock().unwrap() =
+            Some(std::sync::Arc::new(move |_, event| {
+                if event.starts_with("page_begin domain=Draft ") {
+                    draft_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                if event.starts_with("channel_recovery")
+                    || event.starts_with("control_queue")
+                    || event.starts_with("control_refresh")
+                {
+                    return;
+                }
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 128 {
+                    trace.pop_front();
+                }
+                trace.push_back(format!(
+                    "target {}ms {event}",
+                    started.elapsed().as_millis()
+                ));
+            }));
+    }
     for (owner, sibling) in [(&source, &target), (&target, &source)] {
         owner
             .account_devices
@@ -2302,20 +2329,42 @@ async fn account_worker_retries_local_authentication_contention_without_a_false_
     }
     assert!(!target.device_sync_status().is_empty());
     assert!(target.account_document(&key()).unwrap().is_none());
+    let attempts_while_held = draft_attempts.load(std::sync::atomic::Ordering::SeqCst);
     drop(held);
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let recovered = tokio::time::timeout(Duration::from_secs(15), async {
         while target.account_document(&key()).unwrap().is_none() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
+    .await;
+    let statuses = target.device_sync_status();
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    source.runtime_work.close();
+    target.runtime_work.close();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        source.runtime_work.drain().await;
+        target.runtime_work.drain().await;
+    })
     .await
-    .unwrap();
+    .expect("contention fixture must retire its actual work");
+    *source.account_client_test_hook.lock().unwrap() = None;
+    *target.account_client_test_hook.lock().unwrap() = None;
+    assert!(
+        recovered.is_ok(),
+        "statuses={statuses:?}; trace={:?}",
+        trace.lock().unwrap()
+    );
+    assert_eq!(
+        attempts_while_held, 1,
+        "repeated local wakes must not spin before the admission retry deadline"
+    );
     assert_eq!(
         target.account_document(&key()).unwrap().unwrap().payload(),
         b"automatic retry"
     );
-    worker.abort();
-    server.abort();
 }
 
 #[tokio::test]

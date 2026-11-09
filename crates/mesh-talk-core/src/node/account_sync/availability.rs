@@ -25,6 +25,17 @@ impl Default for Availability {
     }
 }
 impl Node {
+    /// Coalesced unavailable-to-available transitions, not authentication renewals.
+    /// Scheduling evidence only; callers still recheck authority at use.
+    pub(in crate::node) fn sibling_availability_revision(&self) -> u64 {
+        *self.account_wake.availability.changed.borrow()
+    }
+    pub(in crate::node) fn subscribe_sibling_availability(
+        &self,
+    ) -> tokio::sync::watch::Receiver<u64> {
+        self.account_wake.availability.changed.subscribe()
+    }
+
     pub(super) fn sibling_availability_scope(&self) -> Scope {
         (
             self.privacy.generation.load(Ordering::Acquire),

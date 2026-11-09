@@ -209,8 +209,52 @@ impl DeliveryControlIndex {
         &mut self,
         bindings: std::collections::HashMap<EventId, ControlBinding>,
     ) {
-        self.bindings = bindings;
-        self.revision = self.revision.wrapping_add(1);
+        if self.bindings != bindings {
+            self.bindings = bindings;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_index_tests {
+    use super::*;
+
+    #[test]
+    fn equal_replacement_is_quiet_while_retirement_and_aba_invalidate() {
+        let id = EventId::new([7; 32]);
+        let binding = ControlBinding {
+            device: crate::identity::device::DeviceIdentity::generate().public(),
+            account: Some("account".into()),
+        };
+        let rows = std::collections::HashMap::from([(id, binding.clone())]);
+        let mut index = DeliveryControlIndex::new(rows.clone());
+        let initial = index.revision();
+        index.replace(rows);
+        assert_eq!(
+            index.revision(),
+            initial,
+            "unchanged authority is not a new generation"
+        );
+        index.replace(Default::default());
+        assert_ne!(
+            index.revision(),
+            initial,
+            "retirement must revoke old selections"
+        );
+        let retired = index.revision();
+        index.insert(id, binding);
+        assert_ne!(
+            index.revision(),
+            retired,
+            "restoration must invalidate the empty selection"
+        );
+        let restored = index.revision();
+        index.replace(Default::default());
+        assert_ne!(index.revision(), restored);
+        let empty = index.revision();
+        index.replace(Default::default());
+        assert_eq!(index.revision(), empty);
     }
 }
 

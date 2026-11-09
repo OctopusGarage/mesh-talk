@@ -4,6 +4,7 @@ use crate::node::work_observation::reason;
 
 mod checkpoints;
 mod confirmation;
+mod controls;
 use crate::node::{
     privacy_sync::{HistorySyncStamp, HistoryUpload},
     session::{self, mailbox},
@@ -18,6 +19,8 @@ const MAX_RECEIVE_OWNERS: usize = 2;
 const UNFINISHED_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_PENDING: usize = 256;
 const MAX_RESULTS: usize = 64;
+const MAX_UNSELECTED_TARGETS: usize = 64;
+const MAX_UNSELECTED_SCOPE_BYTES: usize = 256;
 // Six entry owners, IDs only; independent of the 16-KiB receipt envelope.
 const MAX_REPAIR_HINT_BYTES: usize = 2 * 1024 * 1024;
 const PAGE_BYTES: usize = crate::transport::MAX_PLAINTEXT - 2048;
@@ -40,6 +43,14 @@ type UploadEntryOwner = Arc<Mutex<UploadEntry>>;
 pub(in crate::node) struct UploadCache {
     entries: BTreeMap<Vec<u8>, UploadEntryOwner>,
     receive_entries: BTreeMap<Vec<u8>, UploadEntryOwner>,
+    // Optional selected-membership absence only; no custody/permission state.
+    unselected: VecDeque<UnselectedTarget>,
+    quiet_consents: controls::QuietConsentCache,
+}
+struct UnselectedTarget {
+    scope: Vec<u8>,
+    stamp: HistorySyncStamp,
+    inner: EventId,
 }
 struct UploadEntry {
     busy: bool,
@@ -102,14 +113,47 @@ impl Drop for Lease {
     }
 }
 impl UploadCache {
+    fn unselected_target(
+        &mut self,
+        scope: &[u8],
+        stamp: &HistorySyncStamp,
+        inner: EventId,
+    ) -> bool {
+        self.unselected
+            .retain(|entry| entry.scope != scope || &entry.stamp == stamp);
+        self.unselected
+            .iter()
+            .any(|entry| entry.scope == scope && &entry.stamp == stamp && entry.inner == inner)
+    }
+    fn remember_unselected(&mut self, scope: &[u8], stamp: &HistorySyncStamp, inner: EventId) {
+        // 64 entries, each <=256 scope bytes + two fixed 32-byte values. No
+        // historical body, persistent tombstone or SQL selection is retained.
+        if scope.len() > MAX_UNSELECTED_SCOPE_BYTES || self.unselected_target(scope, stamp, inner) {
+            return;
+        }
+        if self.unselected.len() == MAX_UNSELECTED_TARGETS {
+            self.unselected.pop_front();
+        }
+        self.unselected.push_back(UnselectedTarget {
+            scope: scope.to_vec(),
+            stamp: stamp.clone(),
+            inner,
+        });
+    }
+
     pub(in crate::node) fn observed_len(&self) -> usize {
         self.entries.len() + self.receive_entries.len()
+    }
+    pub(in crate::node) fn observed_control_hints(&self) -> usize {
+        self.quiet_consents.len()
     }
 
     #[cfg(test)]
     fn clear(&mut self) {
         self.entries.clear();
         self.receive_entries.clear();
+        self.unselected.clear();
+        self.quiet_consents = Default::default();
     }
 
     pub(in crate::node) fn clear_receive_repair_leases(&mut self) {
@@ -280,6 +324,7 @@ pub(super) struct State {
     history_after: i64,
     history_complete: bool,
     controls: Option<VecDeque<SelectedOpaqueControl>>,
+    control_scope: Option<controls::ControlScope>,
     wrote: bool,
     final_probe: bool,
     remote: Option<RemoteBinding>,
@@ -1336,6 +1381,7 @@ impl Node {
                 history_after: -1,
                 history_complete: false,
                 controls: None,
+                control_scope: None,
                 wrote: false,
                 final_probe: false,
                 remote: None,
@@ -1449,6 +1495,7 @@ impl Node {
             state_mut(p).retry = Some(VecDeque::new());
         }
         if state(p).controls.is_none() {
+            state_mut(p).control_scope = self.consent_control_scope(p)?;
             let controls = self.opaque_controls(p, current)?;
             state_mut(p).controls = Some(
                 controls
@@ -1464,6 +1511,7 @@ impl Node {
                 .send_mailbox_event(channel, p, event, current, false)
                 .await?
         {
+            self.remember_quiet_consent(p, &selected)?;
             self.opaque_receive_cache
                 .lock()
                 .expect("opaque cache")

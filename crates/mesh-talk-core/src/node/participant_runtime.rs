@@ -16,28 +16,128 @@ use tokio::{
 };
 
 const FILE_PULL_INTERVAL_SECS: u64 = 3;
+const FILE_REPAIR_INTERVAL_SECS: u64 = 300;
+
+// Scheduling evidence only. Actual file admission keeps current consent and
+// transport authority checks; ordinary lease renewals do not represent new work.
+pub(super) struct FilePullPeer {
+    public: crate::identity::device::PublicIdentity,
+    account: Option<String>,
+    post_office: bool,
+    preferred: std::net::SocketAddr,
+    routes: Vec<(std::net::SocketAddr, crate::discovery::roster::RouteSource)>,
+    fresh_until: Option<std::time::Instant>,
+}
+impl FilePullPeer {
+    fn changes_work(&self, next: &Self, now: std::time::Instant) -> bool {
+        self.public != next.public
+            || self.account != next.account
+            || self.post_office != next.post_office
+            || self.preferred != next.preferred
+            || self.routes != next.routes
+            || (self.fresh_until.is_none_or(|at| at <= now)
+                && next.fresh_until.is_some_and(|at| at > now))
+    }
+}
 
 impl Node {
+    pub(super) fn file_pull_peers(&self) -> Vec<FilePullPeer> {
+        let now = std::time::Instant::now();
+        let peers = self.roster.lock().expect("roster lock").peers();
+        let mut snapshot: Vec<_> = peers
+            .into_iter()
+            .map(|peer| {
+                let fresh_until = peer.presence_deadline(now);
+                let mut routes: Vec<_> = peer
+                    .routes
+                    .iter()
+                    .map(|route| (route.addr, route.source))
+                    .collect();
+                routes.sort_unstable_by_key(|route| (route.0, route.1 as u8));
+                FilePullPeer {
+                    public: peer.public,
+                    account: peer.account_id,
+                    post_office: peer.post_office,
+                    preferred: peer.addr,
+                    routes,
+                    fresh_until,
+                }
+            })
+            .collect();
+        snapshot.sort_unstable_by_key(|peer| peer.public.user_id());
+        snapshot
+    }
+
+    pub(super) async fn wait_for_file_pull(
+        &self,
+        network: &mut tokio::sync::watch::Receiver<u64>,
+        roster: &mut tokio::sync::watch::Receiver<u64>,
+        available: &mut tokio::sync::watch::Receiver<u64>,
+        channels: &mut tokio::sync::broadcast::Receiver<crate::eventlog::ConversationId>,
+        peers: &mut Vec<FilePullPeer>,
+        wait: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut channels_open = true;
+        loop {
+            tokio::select! {
+                _ = self.file_pull_notify.notified() => return true,
+                _ = network.changed() => return true,
+                _ = available.changed() => return true,
+                event = channels.recv(), if channels_open => {
+                    match event {
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => channels_open = false,
+                    }
+                },
+                _ = roster.changed() => {
+                    let next = self.file_pull_peers();
+                    let now = std::time::Instant::now();
+                    let changed = peers.len() != next.len()
+                        || peers.iter().zip(&next).any(|(old, new)| old.changes_work(new, now));
+                    // Refresh the captured lease even when ignoring a heartbeat.
+                    // A later expired-to-fresh transition at the same endpoint
+                    // must wake work without treating every renewal as demand.
+                    *peers = next;
+                    if changed { return true; }
+                },
+                _ = tokio::time::sleep_until(deadline) => return false,
+            }
+        }
+    }
     /// Observe retained work after a pull before scheduling this producer's wait.
     pub(super) fn file_pull_schedule(&self, delay: Duration) -> (Duration, bool) {
-        let downloading = {
+        let (downloading, preparing) = {
             let files = self.files.lock().expect("files lock");
-            files.download_work_pending().unwrap_or_else(|error| {
+            let downloading = files.download_work_pending().unwrap_or_else(|error| {
                 log::warn!("download scheduling observation failed: {error}");
                 true
-            })
+            });
+            let preparing = files
+                .download_preparation_pending()
+                .unwrap_or_else(|error| {
+                    log::warn!("download preparation observation failed: {error}");
+                    false
+                });
+            (downloading, preparing)
         };
-        let pending = downloading
+        let local = preparing
             || self.group_file_work_pending()
             || self.pending_channel_file().is_some()
             || self.media_maintenance_pending().unwrap_or_else(|error| {
                 log::warn!("media scheduling observation failed: {error}");
-                true
+                false
             });
-        let wait = if pending {
+        let pending = downloading || local;
+        let wait = if local {
             delay.min(Duration::from_secs(FILE_PULL_INTERVAL_SECS))
+        } else if pending {
+            delay.clamp(
+                Duration::from_secs(FILE_PULL_INTERVAL_SECS),
+                Duration::from_secs(FILE_REPAIR_INTERVAL_SECS),
+            )
         } else {
-            delay
+            delay.max(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
         };
         let wait = self
             .group_file_retry_delay()
@@ -192,6 +292,9 @@ impl PreparedParticipant {
             tasks.push(tokio::spawn(async move {
                 let mut network = node.network_changes.subscribe();
                 let mut roster = node.roster.lock().expect("roster lock not poisoned").subscribe_changes();
+                let mut available = node.subscribe_sibling_availability();
+                let mut channels = node.subscribe_channel_changes();
+                let mut peers = node.file_pull_peers();
                 let mut delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS);
                 loop {
                     let Some(permit) = node.runtime_work.admit() else { break; };
@@ -209,13 +312,13 @@ impl PreparedParticipant {
                         _ = node.pull_pending_files() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
                     }
-                    let (wait, pending) = node.file_pull_schedule(delay);
-                    tokio::select! {
-                        _ = node.file_pull_notify.notified() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
-                        _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
-                        _ = roster.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); },
-                        _ = tokio::time::sleep(wait) => { delay = if pending { Duration::from_secs(FILE_PULL_INTERVAL_SECS) } else { (delay * 2).min(Duration::from_secs(60)) }; },
-                    }
+                    let (wait, _pending) = node.file_pull_schedule(delay);
+                    let changed = node.wait_for_file_pull(&mut network, &mut roster, &mut available, &mut channels, &mut peers, wait).await;
+                    delay = if changed {
+                        Duration::from_secs(FILE_PULL_INTERVAL_SECS)
+                    } else {
+                        (delay * 2).min(Duration::from_secs(FILE_REPAIR_INTERVAL_SECS))
+                    };
                 }
             }));
         }
@@ -350,7 +453,7 @@ impl ParticipantRuntime {
     /// Close admission, cancel and join producers, then wait for admitted
     /// blocking work. Externally held Node handles remain the host's responsibility.
     pub async fn stop(mut self) {
-        self.node.runtime_work.close();
+        let prepared_retirement = self.node.retire_prepared_sync_views();
         self.node.clear_delivery_observations();
         for owner in &mut self.graceful_host_tasks {
             if let Some(shutdown) = owner.shutdown.take() {
@@ -366,13 +469,18 @@ impl ParticipantRuntime {
         for owner in std::mem::take(&mut self.graceful_host_tasks) {
             let _ = owner.task.await;
         }
+        if let Some(retirement) = prepared_retirement {
+            let _ = retirement.await;
+        }
         self.node.runtime_work.drain().await;
     }
 }
 
 impl Drop for ParticipantRuntime {
     fn drop(&mut self) {
-        self.node.runtime_work.close();
+        // Drop requests retirement; its admitted blocking owner keeps the actual
+        // profile leases until cleanup ends even without an awaited shutdown.
+        drop(self.node.retire_prepared_sync_views());
         self.node.clear_delivery_observations();
         for owner in &mut self.graceful_host_tasks {
             if let Some(shutdown) = owner.shutdown.take() {

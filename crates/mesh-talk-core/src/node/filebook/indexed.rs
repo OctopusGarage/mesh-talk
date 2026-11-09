@@ -91,6 +91,8 @@ pub(crate) struct IndexedFileBook {
     // Early WAL/migration setup may precede adoption publication. Only the
     // recaptured final owner may schedule newly received events.
     pub(super) receive_owner: Option<ParticipantEventOwner>,
+    // Bounded volatile retry order; clones share one scheduling owner.
+    pub(super) receive_order: Arc<std::sync::Mutex<Vec<EventId>>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileOffer {
@@ -392,6 +394,7 @@ impl IndexedFileBook {
             profile,
             account,
             receive_owner,
+            receive_order: Arc::default(),
         })
     }
     pub(super) fn check(&self, c: &Connection) -> Result<(), LogError> {
@@ -1938,6 +1941,192 @@ mod tests {
             f.book.receive_conversations().unwrap().first(),
             Some(&other),
             "matching the last ticket cannot hide an interleaved conversation"
+        );
+    }
+
+    #[test]
+    fn file_receive_small_blocked_rotation_is_read_only_and_fair() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversations: Vec<_> = (10..22).map(|n| ConversationId::new([n; 32])).collect();
+        for (index, conversation) in conversations.iter().enumerate() {
+            log.append_durable(Event::new(
+                &sender,
+                *conversation,
+                index as u64 + 1,
+                vec![],
+                index as u64 + 1,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        let database = f.book.profile.database();
+        let before = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            // Clones share the runtime scheduling owner.
+            let clone = f.book.clone();
+            for conversation in clone.receive_conversations().unwrap() {
+                let ids = clone.receive_candidates(conversation, 8, 4096).unwrap();
+                assert_eq!(ids.len(), 1);
+                seen.insert(conversation);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            conversations.len(),
+            "blocked work must not starve a later conversation"
+        );
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before,
+            "fair retry ordering is runtime state, not durable progress"
+        );
+        assert_eq!(database.successful_write_commits(), commits);
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn file_receive_runtime_order_is_not_published_after_failed_cleanup() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let conversation = ConversationId::new([12; 32]);
+        for sequence in 1..=2 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book
+            .discover_receives(
+                None,
+                &rows,
+                Author::from_ed25519(f.device.public().ed25519_pub),
+            )
+            .unwrap();
+        assert_eq!(
+            f.book.receive_candidates(conversation, 1, 4096).unwrap(),
+            vec![rows[0].header.id]
+        );
+        let before = f.book.receive_order.lock().unwrap().clone();
+        f.book.profile.database().transaction(|c| {
+            // Model a retained legacy completion whose pending cleanup failed.
+            c.execute("INSERT INTO file_book_processed VALUES(?1,?2)", params![f.book.account.as_slice(), rows[1].header.id.as_bytes().as_slice()])?;
+            c.execute_batch("CREATE TRIGGER fail_receive_retirement BEFORE DELETE ON file_receive_pending BEGIN SELECT RAISE(ABORT,'injected'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(f.book.receive_candidates(conversation, 1, 4096).is_err());
+        assert_eq!(*f.book.receive_order.lock().unwrap(), before);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_receive_retirement")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            f.book
+                .receive_candidates(conversation, 1, 4096)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            f.book.receive_candidates(conversation, 1, 4096).unwrap(),
+            vec![rows[0].header.id]
+        );
+        assert!(f.book.receive_order.lock().unwrap().capacity() <= 128);
+    }
+
+    #[test]
+    fn file_receive_runtime_rotation_falls_back_above_its_bound() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        for sequence in 1..=129 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; 100],
+            ))
+            .unwrap();
+        }
+        let first = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &first, own).unwrap();
+        let after = f.book.receive_after().unwrap();
+        let last = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(after, 128)
+            .unwrap();
+        f.book.discover_receives(after, &last, own).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..18 {
+            seen.extend(
+                f.book
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(seen.len(), 129, "large queues retain indexed fair rotation");
+        f.book.forget_receive(last[0].header.id).unwrap();
+        let database = f.book.profile.database();
+        let before = database.read(|c| Ok(c.total_changes())).unwrap();
+        seen.clear();
+        for _ in 0..32 {
+            seen.extend(
+                f.book
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            128,
+            "shrinking through the bound retains every pending row"
+        );
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap(),
+            before,
+            "the bounded runtime path must resume after shrink"
         );
     }
 

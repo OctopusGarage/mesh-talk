@@ -14,6 +14,22 @@ use crate::{
 };
 use std::{collections::HashSet, path::Path, sync::Arc};
 
+/// Read-only scalar relay storage state; excludes identities and message data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayStorageObservation {
+    pub retained_count: u64,
+    pub retained_bytes: u64,
+    pub drain_requested: bool,
+    pub source_revision: u64,
+    pub next_commit: u64,
+    pub visibility: u64,
+    pub database_changes: u64,
+    pub page_size: u64,
+    pub page_count: u64,
+    pub free_pages: u64,
+    pub write_observer_enabled: bool,
+}
+
 #[derive(Clone)]
 pub struct IndexedPostOffice {
     pub(crate) state: Arc<IndexedRelayState>,
@@ -24,6 +40,10 @@ impl IndexedPostOffice {
     /// Peer classification includes admission revocation; it does not assign blame.
     pub fn ingest_observation(&self) -> Option<[u64; 5]> {
         self.state.ingest_observation()
+    }
+    /// Samples durable metadata without advancing expiry or committing changes.
+    pub fn storage_observation(&self) -> Result<RelayStorageObservation, LogError> {
+        self.state.storage_observation()
     }
     /// Consumes the caller's existing profile lease; never reacquires node.lock.
     pub fn open_with_lease(
@@ -221,6 +241,28 @@ impl NetworkSyncStore for IndexedFederationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relay_storage_observation_is_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let office = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(root.path()).unwrap(),
+            &root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let db = office.state.profile().database();
+        let before = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        let first = office.storage_observation().unwrap();
+        for _ in 0..8 {
+            assert_eq!(office.storage_observation().unwrap(), first);
+        }
+        assert_eq!(first.retained_count, 0);
+        assert!(!first.drain_requested);
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), before);
+        assert_eq!(db.successful_write_commits(), commits);
+    }
     #[test]
     fn relay_ingest_observation_counts_real_outcomes_without_changing_business_state() {
         let mut business = Vec::new();

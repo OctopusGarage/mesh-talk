@@ -5,6 +5,428 @@ use crate::identity::device::DeviceIdentity;
 use crate::storage::database::EncryptedDatabase;
 use std::sync::Arc;
 
+#[tokio::test]
+async fn metadata_query_does_not_dispatch_pending_file_reception() {
+    use crate::{discovery::Announce, identity::account::Account};
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+    // Retained but not yet decryptable file work is a legitimate retry state.
+    // A metadata query must not claim/rotate it or perform reception recovery.
+    let pending = Event::new(
+        &peer,
+        conversation,
+        1,
+        vec![],
+        1,
+        0,
+        EventKind::FileManifest,
+        vec![0; 128],
+    );
+    let pending_id = pending.id;
+    node.log.lock().unwrap().append_durable(pending).unwrap();
+    // Use the receiving owner's storage scope, which is distinct from the
+    // public account identifier represented in discovery and UI.
+    let account: Vec<u8> = node
+        .storage
+        .database()
+        .read(|c| {
+            c.query_row("SELECT account FROM file_receive_scan", [], |r| r.get(0))
+                .map_err(Into::into)
+        })
+        .unwrap();
+    node.storage
+        .database()
+        .transaction(|c| {
+            let after: i64 =
+                c.query_row("SELECT max(commit_ordinal) FROM retained_events", [], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(
+                c.execute(
+                    "UPDATE file_receive_scan SET after_commit=?1,next_ticket=3 WHERE account=?2",
+                    rusqlite::params![after, &account]
+                )?,
+                1
+            );
+            c.execute(
+                "INSERT INTO file_receive_pending VALUES(?1,?2,?3,256,1)",
+                rusqlite::params![
+                    &account,
+                    pending_id.as_bytes().as_slice(),
+                    conversation.as_bytes().as_slice()
+                ],
+            )?;
+            c.execute(
+                "INSERT INTO file_receive_pending VALUES(?1,?2,?3,256,2)",
+                rusqlite::params![&account, [231_u8; 32].as_slice(), [232_u8; 32].as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let tickets = || {
+        node.storage
+            .database()
+            .read(|c| {
+                let ticket: i64 = c.query_row(
+                    "SELECT ticket FROM file_receive_pending WHERE account=?1 AND event=?2",
+                    rusqlite::params![&account, pending_id.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )?;
+                let next: i64 = c.query_row(
+                    "SELECT next_ticket FROM file_receive_scan WHERE account=?1",
+                    [account.as_slice()],
+                    |r| r.get(0),
+                )?;
+                Ok((ticket, next))
+            })
+            .unwrap()
+    };
+    let before = tickets();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = node.clone();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let channel = SecureChannel::accept(socket, &server.identity)
+            .await
+            .unwrap();
+        server.serve_connection(channel).await;
+    });
+    let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut channel = SecureChannel::connect(socket, &peer, Some(&node.identity.public()))
+        .await
+        .unwrap();
+    channel
+        .send(
+            &encode(&SyncWire::FpRequestV5(FpRequest {
+                conversation,
+                fingerprint: [0; 32],
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        decode(&channel.recv().await.unwrap()).unwrap(),
+        SyncWire::FpResponse(_)
+    ));
+    drop(channel);
+    tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    // Observe after the actual production serving task, including callbacks, retired.
+    let after = tickets();
+    // Accepted payloads still publish reception work, including retryable
+    // duplicates; an invalid payload cannot manufacture the signal.
+    let owner = node.serve_sync_store(&peer.public());
+    {
+        let mut store = owner.lock().unwrap();
+        assert!(!store.take_received_work());
+        let body = crate::dm::seal(
+            &peer,
+            &node.identity.public().x25519_pub,
+            b"received payload",
+        )
+        .unwrap();
+        let message = Event::new(
+            &peer,
+            conversation,
+            2,
+            vec![pending_id],
+            2,
+            0,
+            EventKind::Message,
+            body,
+        );
+        assert!(matches!(
+            NetworkSyncStore::ingest(&mut *store, message.clone()).unwrap(),
+            crate::eventlog::AppendOutcome::Appended
+        ));
+        assert!(store.take_received_work());
+        assert!(!store.take_received_work());
+        assert!(matches!(
+            NetworkSyncStore::ingest(&mut *store, message.clone()).unwrap(),
+            crate::eventlog::AppendOutcome::Duplicate
+        ));
+        assert!(store.take_received_work());
+        let mut invalid = Event::new(
+            &peer,
+            conversation,
+            3,
+            vec![message.id],
+            3,
+            0,
+            EventKind::Message,
+            message.ciphertext.clone(),
+        );
+        invalid.sig[0] ^= 1;
+        assert!(NetworkSyncStore::ingest(&mut *store, invalid).is_err());
+        assert!(!store.take_received_work());
+    }
+    drop(owner);
+    if let Some(retirement) = node.retire_prepared_sync_views() {
+        retirement.await.unwrap();
+    }
+    node.runtime_work.drain().await;
+    assert_eq!(
+        after, before,
+        "read-only metadata must not mutate pending reception fair turns"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_requester_reuses_selection_without_idle_commits() {
+    requester_selection_reuse_fixture(false, false).await;
+}
+
+#[tokio::test]
+async fn ordinary_requester_reuses_selection_across_connections_without_idle_commits() {
+    requester_selection_reuse_fixture(true, false).await;
+}
+
+#[tokio::test]
+async fn ordinary_requester_preserves_unchanged_selection_after_long_idle() {
+    requester_selection_reuse_fixture(true, true).await;
+}
+
+async fn requester_selection_reuse_fixture(fresh_connections: bool, age_entries: bool) {
+    use crate::{discovery::Announce, identity::account::Account};
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let left_id = DeviceIdentity::generate();
+    let right_id = DeviceIdentity::generate();
+    let left_account = Account::generate();
+    let right_account = Account::generate();
+    let left_proof = Announce::new_with_account(&left_id, &left_account, "Left", 9);
+    let right_proof = Announce::new_with_account(&right_id, &right_account, "Right", 9);
+    let (left, _, _) = super::super::test_support::node_with_files(
+        left_dir.path(),
+        left_id,
+        left_account,
+        &right_proof,
+    );
+    let (right, _, _) = super::super::test_support::node_with_files(
+        right_dir.path(),
+        right_id,
+        right_account,
+        &left_proof,
+    );
+    left.cached_peer_snapshot_async().await.unwrap();
+    right.cached_peer_snapshot_async().await.unwrap();
+    let conversation = super::super::conversation::dm_conversation_id(
+        &left.identity.public(),
+        &right.identity.public(),
+    );
+    for seq in 1..=32 {
+        let event = Event::new(
+            &left.identity,
+            conversation,
+            seq,
+            vec![],
+            seq,
+            0,
+            EventKind::Message,
+            vec![7; 128],
+        );
+        for node in [&left, &right] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = right.clone();
+    let peer = left.identity.public();
+    let (finished, mut completions) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        for _ in 0..if fresh_connections { 12 } else { 1 } {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(socket, &server.identity)
+                .await
+                .unwrap();
+            let store = server.serve_sync_store(&peer);
+            loop {
+                if matches!(
+                    serve_one_paged(&mut channel, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+                finished.send(()).unwrap();
+            }
+            drop(store);
+            drop(channel);
+            if fresh_connections {
+                finished.send(()).unwrap();
+            }
+        }
+    });
+    let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut channel = Some(
+        SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+            .await
+            .unwrap(),
+    );
+    let counters = || {
+        (
+            left.storage
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap(),
+            left.storage.database().successful_write_commits(),
+            right
+                .storage
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap(),
+            right.storage.database().successful_write_commits(),
+        )
+    };
+    let mut baseline = None;
+    for round in 0..12 {
+        if age_entries && round % 6 > 2 {
+            for node in [&left, &right] {
+                node.prepared_sync_views
+                    .lock()
+                    .unwrap()
+                    .age_for_test(std::time::Duration::from_secs(60 * 60));
+            }
+        }
+        if channel.is_none() {
+            let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            channel = Some(
+                SecureChannel::connect(socket, &left.identity, Some(&right.identity.public()))
+                    .await
+                    .unwrap(),
+            );
+        }
+        // Production callers keep the socket but create a new request adapter.
+        let store = left.sync_store(&right.identity.public());
+        if round == 6 {
+            let tail = Event::new(
+                &left.identity,
+                conversation,
+                33,
+                vec![],
+                33,
+                0,
+                EventKind::Message,
+                vec![8; 128],
+            );
+            for node in [&left, &right] {
+                node.log
+                    .lock()
+                    .unwrap()
+                    .append_durable(tail.clone())
+                    .unwrap();
+            }
+        }
+        // An ordinary query remains valid even when the optional digest probe
+        // was skipped or differed. Exercise its actual paged network path.
+        let mut progress = SyncProgress {
+            started: true,
+            ..Default::default()
+        };
+        while !progress
+            .step_burst_paged(channel.as_mut().unwrap(), &store, conversation, 1)
+            .await
+            .unwrap()
+        {}
+        // Fence the server's final followup before observing committed rows.
+        for _ in 0..2 {
+            completions.recv().await.unwrap();
+        }
+        assert_eq!(progress.total.applied, 0);
+        assert_eq!(
+            progress.remote_have_count(),
+            Some(if round < 6 { 32 } else { 33 })
+        );
+        drop(store);
+        if fresh_connections {
+            drop(channel.take());
+            // Fence the actual server connection and adapter retirement.
+            completions.recv().await.unwrap();
+        }
+        if round % 6 == 2 {
+            baseline = Some(counters());
+        }
+        if round % 6 > 2 {
+            assert_eq!(
+                counters(),
+                baseline.unwrap(),
+                "unchanged ordinary requester must reuse its exclusive prepared selection"
+            );
+        }
+    }
+    // A surviving adapter owns no active query after its completed exchange.
+    let survivor = left.sync_store(&right.identity.public());
+    if let Some(channel) = channel.as_ref() {
+        NetworkSyncStore::bind_session_peer(
+            &mut *survivor.lock().unwrap(),
+            channel.peer_identity(),
+        );
+        // Another runtime cannot claim this socket's prepared state, even with
+        // a wrapper naming the same authenticated peer.
+        let foreign = right.sync_store(&right.identity.public());
+        NetworkSyncStore::bind_session_peer(&mut *foreign.lock().unwrap(), channel.peer_identity());
+        assert!(
+            NetworkSyncStore::take_custody_view(&mut *foreign.lock().unwrap(), &conversation,)
+                .unwrap()
+                .is_none()
+        );
+        drop(foreign);
+    }
+    drop(channel);
+    task.await.unwrap();
+    for node in [&left, &right] {
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .active_selection_count(),
+            0,
+            "completed sockets must release active admission while plans remain cached"
+        );
+        let retirement = node
+            .retire_prepared_sync_views()
+            .expect("node must retain its qualified derived plan across sockets");
+        retirement.await.unwrap();
+        node.runtime_work.drain().await;
+        let live: i64 = node
+            .storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM participant_sync_views WHERE retired=0",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            live, 0,
+            "node cache retirement must release its prepared selection"
+        );
+    }
+    drop(survivor);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
     use crate::discovery::{Announce, DiscoveryVisibility};
@@ -98,6 +520,22 @@ async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
         id
     };
     let first = append(1);
+    node.storage.database().read(|c| {
+        c.execute_batch("CREATE TEMP TABLE observed_selection_creations(value INTEGER); CREATE TEMP TRIGGER observe_selection_creation AFTER INSERT ON main.participant_sync_views BEGIN INSERT INTO observed_selection_creations VALUES(1); END;")?;
+        Ok(())
+    }).unwrap();
+    let selection_creations = || {
+        node.storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM observed_selection_creations",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+    };
     let counters = || {
         (
             node.storage
@@ -131,6 +569,20 @@ async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
             // response, including selection retention or retirement after send.
             assert!(request_durable_have(&mut channel, conversation, first).await.unwrap());
         }
+        // A changed file-scope qualification invalidates this selection without
+        // revoking the authenticated socket. Actual privacy revocation below
+        // must still be allowed to close the connection immediately.
+        node.privacy.projection_revision.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        channel.send(&encode(&SyncWire::FpRequestV4(FpRequest {
+            conversation, fingerprint: [0; 32],
+        })).unwrap()).await.unwrap();
+        assert!(matches!(decode(&channel.recv().await.unwrap()).unwrap(),
+            SyncWire::FpResponse(FpResponse { matched: false })));
+        let after_probe = selection_creations();
+        assert_eq!(request(&mut channel, conversation, vec![]).await, vec![first]);
+        assert!(request_durable_have(&mut channel, conversation, first).await.unwrap());
+        assert_eq!(selection_creations(), after_probe,
+            "ordinary request must take over its completed fingerprint selection");
         let warm = counters();
         for _ in 0..3 {
             assert_eq!(request(&mut channel, conversation, vec![]).await, vec![first]);

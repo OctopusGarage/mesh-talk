@@ -227,8 +227,54 @@ impl Args {
     }
 }
 
+// The core write observer emits static source locations and numeric counters.
+// Keep ordinary logs (which can contain peer or message context) off this sink.
+struct SqlWorkLogger;
+static SQL_WORK_LOGGER: SqlWorkLogger = SqlWorkLogger;
+fn sql_work_line(target: &str, level: log::Level, message: &str) -> bool {
+    (target == "mesh_talk_core::node::node"
+        && level == log::Level::Info
+        && message.starts_with("sql-write-work "))
+        || (target == "mesh_talk_core::postoffice::maintenance"
+            && level == log::Level::Debug
+            && (message.starts_with("indexed relay physical cleanup: ")
+                || message.starts_with("indexed relay physical checkpoint deferred: ")))
+}
+impl log::Log for SqlWorkLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        (metadata.target() == "mesh_talk_core::node::node" && metadata.level() == log::Level::Info)
+            || (metadata.target() == "mesh_talk_core::postoffice::maintenance"
+                && metadata.level() == log::Level::Debug)
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            let message = record.args().to_string();
+            if sql_work_line(record.target(), record.level(), &message) {
+                emit(&message);
+            }
+        }
+    }
+    fn flush(&self) {}
+}
+fn initialize_sql_work_logger() {
+    if std::env::var_os("MESH_TALK_TRACE_WORK").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        let installed = log::set_logger(&SQL_WORK_LOGGER).is_ok();
+        if installed {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
+        emit(&format!(
+            "work_observer logger_installed={} static_max={} runtime_max={}",
+            installed,
+            log::STATIC_MAX_LEVEL,
+            log::max_level()
+        ));
+        log::info!(target: "mesh_talk_core::node::node", "sql-write-work diagnostic_probe=true");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    initialize_sql_work_logger();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("federation")) {
         return federation_config::run_cli();
     }
@@ -1472,5 +1518,38 @@ mod tests {
     #[test]
     fn empty_roster_is_not_found() {
         assert_eq!(resolve_recipient(&[], "ab"), Err(ResolveError::NotFound));
+    }
+}
+
+#[cfg(test)]
+mod sql_work_logger_tests {
+    use super::sql_work_line;
+    #[test]
+    fn diagnostic_filter_excludes_other_logs_and_payloads() {
+        let target = "mesh_talk_core::node::node";
+        let line = "sql-write-work [static-owner.rs:10 commits=2 rows=3] overflow_commits=0 overflow_rows=0";
+        assert!(sql_work_line(target, log::Level::Info, line));
+        assert!(sql_work_line(
+            "mesh_talk_core::postoffice::maintenance",
+            log::Level::Debug,
+            "indexed relay physical cleanup: 64 iterations, free pages 2000 -> 1936, SQL pages 8000 -> 7936"
+        ));
+        assert!(!sql_work_line(
+            "mesh_talk_core::postoffice::maintenance",
+            log::Level::Debug,
+            "unrelated private context"
+        ));
+        assert!(!sql_work_line("other", log::Level::Info, line));
+        assert!(!sql_work_line(target, log::Level::Debug, line));
+        assert!(!sql_work_line(
+            target,
+            log::Level::Info,
+            "peer identity or message context"
+        ));
+        assert!(!sql_work_line(
+            target,
+            log::Level::Info,
+            "sql-write-workaround private context"
+        ));
     }
 }

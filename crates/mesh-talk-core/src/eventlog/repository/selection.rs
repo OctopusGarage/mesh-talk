@@ -1,8 +1,10 @@
 //! Disposable participant authorization selections in the encrypted profile DB.
 //! Rows contain identities and scalar policy facts, never event bodies. The
-//! exchange owner supplies its existing connection limit; one view occupies one
-//! slot. Retired/crashed work is drained in bounded transactions before another
-//! selection is admitted, so repeated cancellation cannot accumulate history.
+//! exchange owner supplies its existing active-query limit. Idle node indexes
+//! park their runtime permits under a separate bounded cache; SQL ownership and
+//! authority checks remain unchanged. Retired/crashed work is drained in bounded
+//! transactions before another selection is admitted, so cancellation cannot
+//! accumulate history.
 use super::network::{ExportCursor, HaveCursor, NetworkView};
 use super::*;
 use crate::eventlog::sync::network::{ExportPage, ExportPageBudget, IdPageBudget, SyncPage};
@@ -47,11 +49,64 @@ CREATE TABLE IF NOT EXISTS participant_sync_receipts(
  PRIMARY KEY(view,id), FOREIGN KEY(view) REFERENCES participant_sync_views(id)
 ) WITHOUT ROWID;";
 
+struct SelectionAdmission(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl SelectionAdmission {
+    fn acquire(
+        counter: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        limit: usize,
+    ) -> Result<Self, LogError> {
+        use std::sync::atomic::Ordering;
+        i64::try_from(limit).map_err(|_| LogError::InvalidPageBudget)?;
+        let mut active = counter.load(Ordering::Acquire);
+        loop {
+            if active >= limit {
+                return Err(LogError::AdmissionRejected(
+                    "participant sync connection capacity exhausted".into(),
+                ));
+            }
+            match counter.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => active = current,
+            }
+        }
+        Ok(Self(counter.clone()))
+    }
+}
+impl Drop for SelectionAdmission {
+    fn drop(&mut self) {
+        let previous = self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
+}
+
 pub(crate) struct Selection {
     id: [u8; 16],
     domain: EventDomainId,
     owner: [u8; 16],
     database: RepositoryOwner,
+    admission: Option<SelectionAdmission>,
+    admission_counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    admission_limit: usize,
+}
+impl Selection {
+    /// Idle derived indexes do not consume an active query permit.
+    pub(crate) fn park(&mut self) {
+        drop(self.admission.take());
+    }
+    pub(crate) fn activate(&mut self) -> Result<(), LogError> {
+        if self.admission.is_none() {
+            self.admission = Some(SelectionAdmission::acquire(
+                &self.admission_counter,
+                self.admission_limit,
+            )?);
+        }
+        Ok(())
+    }
 }
 impl Drop for Selection {
     fn drop(&mut self) {
@@ -113,6 +168,11 @@ fn cleanup_on(
 }
 impl EventRepository {
     #[cfg(test)]
+    pub(crate) fn active_selection_count(&self) -> usize {
+        self.selection_admission
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    #[cfg(test)]
     pub(crate) fn selection_counts(&self) -> Result<(usize, usize, usize), LogError> {
         self.database.read(|c| {
             Ok((
@@ -144,6 +204,42 @@ impl EventRepository {
         self.database
             .transaction(|tx| cleanup_on(tx, self.domain, self.selection_owner, STEP))
     }
+    pub(crate) fn activate_cached_selection(
+        &self,
+        selection: &mut Selection,
+    ) -> Result<(), LogError> {
+        if selection.owner != self.selection_owner
+            || selection.domain != self.domain
+            || !std::sync::Arc::ptr_eq(&selection.admission_counter, &self.selection_admission)
+        {
+            return Err(LogError::StaleCursor);
+        }
+        selection.activate()
+    }
+
+    /// Charge disposable IDs/scalar work, including variable checkpoint bytes.
+    /// This indexed accounting runs only after preparation/export state changes.
+    pub(crate) fn selection_cache_bytes(&self, selection: &Selection) -> Result<usize, LogError> {
+        self.database.read(|c| {
+            self.require_selection_on(c, selection)?;
+            // Conservative fixed page/index overhead per cached projection.
+            let mut bytes = 64_usize * 1024;
+            for table in ["participant_sync_rows", "participant_sync_have", "participant_sync_receipts",
+                "participant_sync_ancestors", "participant_sync_departures", "participant_sync_authors",
+                "participant_sync_export_work", "participant_sync_progress"] {
+                let rows: i64 = c.query_row(&format!("SELECT count(*) FROM {table} WHERE view=?1"),
+                    [selection.id.as_slice()], |r| r.get(0))?;
+                let charge = usize::try_from(rows).ok().and_then(|rows| rows.checked_mul(256))
+                    .ok_or(LogError::RepositoryCounterExhausted)?;
+                bytes = bytes.checked_add(charge).ok_or(LogError::RepositoryCounterExhausted)?;
+            }
+            let context: i64 = c.query_row("SELECT coalesce(sum(length(context)),0) FROM participant_sync_progress WHERE view=?1",
+                [selection.id.as_slice()], |r| r.get(0))?;
+            bytes.checked_add(usize::try_from(context).map_err(|_| LogError::RepositoryCounterExhausted)?)
+                .ok_or(LogError::RepositoryCounterExhausted)
+        })
+    }
+
     pub(crate) fn source_revision(&self) -> Result<i64, LogError> {
         self.database.read(|c| {
             nonnegative(c.query_row(
@@ -180,6 +276,9 @@ impl EventRepository {
         })
     }
     fn require_selection_on(&self, c: &Connection, selection: &Selection) -> Result<(), LogError> {
+        if selection.admission.is_none() {
+            return Err(LogError::StaleCursor);
+        }
         let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_views WHERE id=?1 AND owner=?2 AND domain=?3 AND retired=0)",params![selection.id.as_slice(),self.selection_owner.as_slice(),self.domain.0.as_slice()],|r|r.get(0))?;
         if !valid {
             return Err(LogError::StaleCursor);
@@ -338,6 +437,60 @@ impl EventRepository {
 #[cfg(test)]
 mod retirement_tests {
     use super::*;
+
+    #[test]
+    fn parked_selection_preserves_active_capacity_owner_and_quiet_checkout() {
+        use super::super::tests::{database, event};
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let message = event(
+            &crate::identity::device::DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repository.append(&message).unwrap();
+        let view = NetworkSyncStore::open_view(&repository, &message.conversation_id).unwrap();
+        let mut first = repository.begin_selection(&view, 1, 512).unwrap().unwrap();
+        assert_eq!(repository.active_selection_count(), 1);
+        assert!(repository.begin_selection(&view, 1, 512).is_err());
+        let charge = repository.selection_cache_bytes(&first).unwrap();
+        assert!(charge >= 64 * 1024);
+        first.park();
+        assert_eq!(repository.active_selection_count(), 0);
+        assert!(matches!(
+            repository.selected_contains(&first, message.id),
+            Err(LogError::StaleCursor)
+        ));
+        let second = repository.begin_selection(&view, 1, 512).unwrap().unwrap();
+        assert!(matches!(
+            repository.activate_cached_selection(&mut first),
+            Err(LogError::AdmissionRejected(_))
+        ));
+        drop(second);
+        let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        for _ in 0..8 {
+            repository.activate_cached_selection(&mut first).unwrap();
+            assert_eq!(repository.active_selection_count(), 1);
+            assert!(!repository.selected_contains(&first, message.id).unwrap());
+            first.park();
+        }
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(db.successful_write_commits(), commits);
+        let other = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
+        assert!(matches!(
+            other.activate_cached_selection(&mut first),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(other.active_selection_count(), 0);
+        drop(first);
+        assert_eq!(repository.active_selection_count(), 0);
+    }
 
     #[test]
     fn participant_selection_retirement_shares_one_limit_across_all_tables() {

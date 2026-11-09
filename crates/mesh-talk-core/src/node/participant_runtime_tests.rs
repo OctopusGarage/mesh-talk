@@ -229,3 +229,292 @@ async fn graceful_host_task_joins_children_before_stop_returns() {
     release.send(()).unwrap();
     stopping.await.unwrap();
 }
+
+#[test]
+fn quiet_file_producer_uses_sparse_repair_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    node.retry_file_receives();
+    let generation = node
+        .attachment_consent
+        .lock()
+        .unwrap()
+        .generation()
+        .unwrap();
+    node.files
+        .lock()
+        .unwrap()
+        .discover_downloads(generation)
+        .unwrap();
+    for _ in 0..128 {
+        if !node.media_maintenance_pending().unwrap() {
+            break;
+        }
+        node.maintain_media().unwrap();
+    }
+    let (wait, pending) = node.file_pull_schedule(Duration::from_secs(3));
+    assert!(
+        !pending,
+        "empty profile has no transfer or maintenance work"
+    );
+    assert!(
+        wait >= Duration::from_secs(300),
+        "quiet repair must not poll every few seconds: {wait:?}"
+    );
+}
+
+#[tokio::test]
+async fn file_producer_ignores_presence_renewal_but_wakes_for_new_route() {
+    use crate::discovery::Announce;
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    // Startup explicitly requests one file turn. This fixture observes the
+    // settled wait after that turn, rather than mistaking startup demand for a heartbeat.
+    use futures_util::FutureExt;
+    let _ = node.file_pull_notify.notified().now_or_never();
+    let peer = DeviceIdentity::generate();
+    let announce = Announce::new(&peer, "synthetic peer", 12345);
+    let update = |announce: &Announce| {
+        node.roster
+            .lock()
+            .unwrap()
+            .update(announce, "127.0.0.1".parse().unwrap(), &node.user_id());
+    };
+    update(&announce);
+    let mut network = node.network_changes.subscribe();
+    let mut roster = node.subscribe_roster_changes();
+    let mut available = node.subscribe_sibling_availability();
+    let mut channels = node.subscribe_channel_changes();
+    let mut peers = node.file_pull_peers();
+    let waiting = node.wait_for_file_pull(
+        &mut network,
+        &mut roster,
+        &mut available,
+        &mut channels,
+        &mut peers,
+        Duration::from_secs(300),
+    );
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+            .await
+            .is_err()
+    );
+    for _ in 0..4 {
+        update(&announce);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err(),
+            "unchanged presence must not restart storage and file authorization work"
+        );
+    }
+    update(&Announce::new(&peer, "synthetic peer", 12346));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut waiting)
+            .await
+            .unwrap(),
+        "new endpoint resumes recovery immediately"
+    );
+}
+
+#[test]
+fn cold_file_work_retains_its_prompt_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    let (wait, pending) = node.file_pull_schedule(Duration::from_secs(300));
+    assert!(pending, "startup metadata and media work has not completed");
+    assert!(wait <= Duration::from_secs(3));
+}
+
+#[tokio::test(start_paused = true)]
+async fn ignored_file_heartbeats_do_not_extend_the_original_deadline() {
+    use crate::discovery::Announce;
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    let _ = node.file_pull_notify.notified().now_or_never();
+    let peer = DeviceIdentity::generate();
+    let announce = Announce::new(&peer, "synthetic peer", 12345);
+    let update = || {
+        node.roster.lock().unwrap().update(
+            &announce,
+            "127.0.0.1".parse().unwrap(),
+            &node.user_id(),
+        );
+    };
+    update();
+    let mut network = node.network_changes.subscribe();
+    let mut roster = node.subscribe_roster_changes();
+    let mut available = node.subscribe_sibling_availability();
+    let mut channels = node.subscribe_channel_changes();
+    let mut peers = node.file_pull_peers();
+    let started = tokio::time::Instant::now();
+    let waiting = node.wait_for_file_pull(
+        &mut network,
+        &mut roster,
+        &mut available,
+        &mut channels,
+        &mut peers,
+        Duration::from_millis(100),
+    );
+    tokio::pin!(waiting);
+    for _ in 0..3 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        update();
+    }
+    assert!(
+        !tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_millis(100)
+    );
+}
+
+#[test]
+fn blocked_file_receive_keeps_sparse_repair_instead_of_three_second_polling() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    node.retry_file_receives();
+    let generation = node
+        .attachment_consent
+        .lock()
+        .unwrap()
+        .generation()
+        .unwrap();
+    node.files
+        .lock()
+        .unwrap()
+        .discover_downloads(generation)
+        .unwrap();
+    for _ in 0..128 {
+        if !node.media_maintenance_pending().unwrap() {
+            break;
+        }
+        node.maintain_media().unwrap();
+    }
+    node.storage.database().transaction(|c| {
+        c.execute("INSERT INTO file_receive_pending SELECT account,?1,?2,64,next_ticket FROM file_receive_scan", rusqlite::params![[51u8;32].as_slice(),[52u8;32].as_slice()])?;
+        Ok(())
+    }).unwrap();
+    let (wait, pending) = node.file_pull_schedule(Duration::from_secs(300));
+    assert!(pending, "blocked work must retain its recovery obligation");
+    assert!(
+        wait >= Duration::from_secs(300),
+        "unchanged blocked work must not override backoff: {wait:?}"
+    );
+}
+
+#[tokio::test]
+async fn group_metadata_change_wakes_file_recovery_before_sparse_deadline() {
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    let _ = node.file_pull_notify.notified().now_or_never();
+    let mut network = node.network_changes.subscribe();
+    let mut roster = node.subscribe_roster_changes();
+    let mut available = node.subscribe_sibling_availability();
+    // Subscribe before work: a change during the work turn must remain pending.
+    let mut channels = node.subscribe_channel_changes();
+    let mut peers = node.file_pull_peers();
+    let conversation = crate::eventlog::ConversationId::new([71; 32]);
+    node.channel_changes.send(conversation).unwrap();
+    let changed = tokio::time::timeout(
+        Duration::from_secs(1),
+        node.wait_for_file_pull(
+            &mut network,
+            &mut roster,
+            &mut available,
+            &mut channels,
+            &mut peers,
+            Duration::from_secs(300),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        changed,
+        "accepted group information invalidates file recovery immediately"
+    );
+}
+
+#[tokio::test]
+async fn lagged_group_metadata_subscription_repairs_file_recovery() {
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    let _ = node.file_pull_notify.notified().now_or_never();
+    let mut network = node.network_changes.subscribe();
+    let mut roster = node.subscribe_roster_changes();
+    let mut available = node.subscribe_sibling_availability();
+    let (sender, mut channels) = tokio::sync::broadcast::channel(1);
+    let mut peers = node.file_pull_peers();
+    for id in [72, 73] {
+        sender
+            .send(crate::eventlog::ConversationId::new([id; 32]))
+            .unwrap();
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            node.wait_for_file_pull(
+                &mut network,
+                &mut roster,
+                &mut available,
+                &mut channels,
+                &mut peers,
+                Duration::from_secs(300)
+            )
+        )
+        .await
+        .unwrap(),
+        "lag is missed invalidation, not proof of no work"
+    );
+}
+
+#[tokio::test]
+async fn route_change_during_file_work_survives_until_the_next_wait() {
+    use crate::discovery::Announce;
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    let _ = node.file_pull_notify.notified().now_or_never();
+    let peer = DeviceIdentity::generate();
+    let update = |port| {
+        node.roster.lock().unwrap().update(
+            &Announce::new(&peer, "peer", port),
+            "127.0.0.1".parse().unwrap(),
+            &node.user_id(),
+        );
+    };
+    update(12345);
+    let mut network = node.network_changes.subscribe();
+    let mut roster = node.subscribe_roster_changes();
+    let mut available = node.subscribe_sibling_availability();
+    let mut channels = node.subscribe_channel_changes();
+    let mut peers = node.file_pull_peers();
+    update(12346);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            node.wait_for_file_pull(
+                &mut network,
+                &mut roster,
+                &mut available,
+                &mut channels,
+                &mut peers,
+                Duration::from_secs(300)
+            )
+        )
+        .await
+        .unwrap(),
+        "a route update during work must not be recaptured as an unchanged heartbeat"
+    );
+}

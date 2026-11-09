@@ -85,6 +85,7 @@ pub(super) struct Preparation {
     pub(super) selection: Option<Selection>,
     phase: Phase,
     pub(super) metadata: SyncMetadata,
+    pub(super) cached_bytes: Option<usize>,
     generation: Option<OrderGeneration>,
     principal: Option<Principal>,
     rank: i64,
@@ -117,6 +118,7 @@ impl Default for Preparation {
             selection: None,
             phase: Phase::Begin,
             metadata: SyncMetadata::default(),
+            cached_bytes: None,
             generation: None,
             principal: None,
             rank: 0,
@@ -174,6 +176,20 @@ impl Preparation {
     // A phase transition can make progress without charging a row or byte.
     pub(super) fn progress_phase(&self) -> u8 {
         self.phase as u8
+    }
+
+    /// Finished network plans retain SQL identities and scalar metadata only.
+    /// History uploads have a separate incremental owner and cannot be compacted.
+    pub(super) fn compact_for_cache(&mut self) -> bool {
+        if !self.ready() || self.history_only {
+            return false;
+        }
+        self.principal = None;
+        self.policy_scopes = None;
+        self.active = None;
+        self.closing = None;
+        self.hash = None;
+        true
     }
 
     pub(super) fn ready(&self) -> bool {

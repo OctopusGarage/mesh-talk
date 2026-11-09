@@ -45,7 +45,6 @@ pub(in crate::node) struct StoredManifestScope {
     pub(in crate::node) author: crate::eventlog::Author,
     pub(in crate::node) event: crate::eventlog::EventId,
 }
-#[derive(Default)]
 pub(in crate::node) struct PrivacyControl {
     pub state: RwLock<Option<PrivacyState>>,
     pub gate: Arc<tokio::sync::RwLock<()>>,
@@ -55,6 +54,19 @@ pub(in crate::node) struct PrivacyControl {
     pub route_probe_retries: Mutex<super::privacy_routing::PrivateProbeRetries>,
     // Last: legacy privacy files and admission captures drop before storage.
     _storage: Option<Arc<crate::storage::profile::context::ProfileStorage>>,
+}
+impl Default for PrivacyControl {
+    fn default() -> Self {
+        Self {
+            state: RwLock::default(),
+            gate: Arc::default(),
+            generation: AtomicU64::default(),
+            projection_revision: AtomicU64::default(),
+            route_probe_cursor: AtomicU64::default(),
+            route_probe_retries: Mutex::new(super::privacy_routing::private_probe_retries()),
+            _storage: None,
+        }
+    }
 }
 impl PrivacyControl {
     pub(in crate::node) fn with_storage(
@@ -1234,6 +1246,50 @@ impl Node {
         candidates
     }
 
+    /// Resource classification only: neither cached routes nor this hint grant
+    /// identity, admission or public presence. All are checked at their owners.
+    pub(in crate::node) fn historical_route_candidate(
+        &self,
+        address: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        now: std::time::Instant,
+    ) -> bool {
+        let key = self.peer_endpoint_key(address, expected);
+        if self.sessions.recently_authenticated_route(&key, now) {
+            return false;
+        }
+        let fresh = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .get(&expected.user_id())
+            .is_some_and(|peer| {
+                peer.public == *expected
+                    && peer.presence_routes(now).any(|(route, _, _)| {
+                        !matches!(
+                            route.source,
+                            crate::discovery::roster::RouteSource::PostOffice
+                                | crate::discovery::roster::RouteSource::Gateway
+                        ) && route.addr.port() == address.port()
+                            && crate::transport::net::canonical_peer_ip(route.addr.ip())
+                                == crate::transport::net::canonical_peer_ip(address.ip())
+                    })
+            });
+        !fresh
+            && self
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned")
+                .as_ref()
+                .is_some_and(|state| {
+                    state.routes.contains(
+                        expected,
+                        crate::transport::net::canonical_peer_ip(address.ip()),
+                    )
+                })
+    }
+
     pub(in crate::node) async fn privacy_dial(
         &self,
         addr: std::net::SocketAddr,
@@ -1253,12 +1309,39 @@ impl Node {
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_budgeted(addr, expected, priority, false)
+            .await
+    }
+
+    /// Explicit call/pairing actions bypass only speculative-route admission;
+    /// privacy, pinned authentication and the shared TCP limit remain mandatory.
+    pub(in crate::node) async fn privacy_dial_interactive(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_budgeted(
+            addr,
+            expected,
+            super::session_pool::AuthenticationPriority::Ordinary,
+            true,
+        )
+        .await
+    }
+
+    async fn privacy_dial_budgeted(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        priority: super::session_pool::AuthenticationPriority,
+        interactive: bool,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
         // One caller owns every route attempt and the disclosure lease. Keep
         // that lease across Noise identity disclosure, but never accumulate a
         // fresh full deadline for each capacity wait or candidate wave.
         tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
-            self.privacy_dial_inner(addr, expected, priority),
+            self.privacy_dial_inner(addr, expected, priority, interactive),
         )
         .await
         .map_err(|_| TransportError::Noise("dial deadline exceeded".into()))?
@@ -1269,6 +1352,7 @@ impl Node {
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
+        interactive: bool,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
@@ -1320,15 +1404,25 @@ impl Node {
                     let _authentication = match priority {
                         super::session_pool::AuthenticationPriority::Ordinary => {
                             self.sessions
-                                .authentication_admission(authentication_key)
+                                .authentication_admission(authentication_key.clone())
                                 .await?
                         }
                         super::session_pool::AuthenticationPriority::Control => {
                             self.sessions
-                                .authentication_admission_priority(authentication_key, priority)
+                                .authentication_admission_priority(authentication_key.clone(), priority)
                                 .await?
                         }
                     };
+                    // Re-evaluate freshness after the per-endpoint wait. An
+                    // old failure cannot suppress newly eligible discovery.
+                    let historical = !interactive && self.historical_route_candidate(candidate, expected, std::time::Instant::now());
+                    let mut historical_attempt = if historical {
+                        Some(self.sessions.historical_authentication(&authentication_key,
+                            *self.network_changes.borrow(), std::time::Instant::now())?)
+                    } else { None };
+                    let _historical = historical
+                        .then(|| self.sessions.historical_dial())
+                        .transpose()?;
                     #[cfg(test)]
                     self.trace_account_client(expected, || {
                         "dial_authentication_admission_acquired_outbound_wait".into()
@@ -1376,6 +1470,9 @@ impl Node {
                         self.sessions.authentication_timed_out(expected, candidate);
                         Err(TransportError::Noise("dial timed out".into()))
                     });
+                    if let Some(attempt) = &mut historical_attempt {
+                        attempt.complete(result.is_ok(), std::time::Instant::now());
+                    }
                     #[cfg(test)]
                     self.trace_account_client(expected, || {
                         format!(
@@ -1384,12 +1481,16 @@ impl Node {
                             super::account_session::client_transport_outcome(&result)
                         )
                     });
-                    if started.elapsed() >= Duration::from_secs(2) {
-                        log::warn!(
-                            target: "mesh_talk::delivery",
-                            "slow peer authentication endpoint={} elapsed_ms={} authenticated={}",
-                            candidate, started.elapsed().as_millis(), result.is_ok(),
-                        );
+                    let elapsed = started.elapsed();
+                    if elapsed >= Duration::from_secs(2) {
+                        log::debug!(target: "mesh_talk::delivery",
+                            "slow peer authentication endpoint={} elapsed_ms={} authenticated={} historical={} interactive={}",
+                            candidate, elapsed.as_millis(), result.is_ok(), historical, interactive);
+                        if let Some(summary) = self.sessions.observe_slow_authentication(elapsed, result.is_ok(), historical, interactive) {
+                            log::warn!(target: "mesh_talk::delivery",
+                                "slow peer authentication summary attempts={} failures={} historical={} max_elapsed_ms={} last_endpoint={} interactive={}",
+                                summary.attempts, summary.failures, summary.historical, summary.longest.as_millis(), candidate, interactive);
+                        }
                     }
                     result.map(|channel| (channel, permits, started.elapsed()))
                 }

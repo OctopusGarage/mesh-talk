@@ -160,6 +160,87 @@ impl Fixture {
 }
 
 #[test]
+fn channel_warm_open_does_not_rewrite_already_retired_query_index() {
+    let fixture = Fixture::new(1);
+    let profile = fixture.store.profile.clone();
+    profile
+        .database()
+        .transaction(|c| {
+            for index in 0..1025u64 {
+                let mut job = [0; 16];
+                job[..8].copy_from_slice(&index.to_le_bytes());
+                c.execute(
+                    "INSERT INTO channel_projection_queries VALUES(?1,?2,?3)",
+                    params![
+                        job.as_slice(),
+                        fixture.channel.as_bytes().as_slice(),
+                        i64::from(index != 1024)
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let warm = ChannelCheckpointStore::open(profile.clone()).unwrap();
+    assert_eq!(
+        profile
+            .database()
+            .read(|c| Ok(c.query_row(
+                "SELECT count(*) FROM channel_projection_queries WHERE retired=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        1025,
+        "opening still retires abandoned runtime queries"
+    );
+    let before = profile.database().main_write_stamp().unwrap().unwrap();
+    let changes = profile.database().read(|c| Ok(c.total_changes())).unwrap();
+    let again = ChannelCheckpointStore::open(profile.clone()).unwrap();
+    assert_eq!(
+        profile.database().read(|c| Ok(c.total_changes())).unwrap(),
+        changes,
+        "already-retired rows must not be matched by another initialization"
+    );
+    assert!(
+        before.unchanged_since(&profile.database().main_write_stamp().unwrap().unwrap()),
+        "warm validation must not dirty the retired/job index"
+    );
+    drop((warm, again));
+}
+
+#[test]
+fn channel_completed_query_drop_does_not_rewrite_retirement() {
+    let fixture = Fixture::new(1);
+    fixture.project();
+    let source = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    let query = fixture.store.start_decision_query(&source).unwrap();
+    // Completion can retire the persisted row before its final runtime lease
+    // drops. Releasing that lease is not another logical state transition.
+    let db = fixture.store.profile.database();
+    db.transaction(|c| {
+        c.execute(
+            "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
+            [query.job().as_slice()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let before = db.main_write_stamp().unwrap().unwrap();
+    let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+    drop(query);
+    assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+    assert!(
+        before.unchanged_since(&db.main_write_stamp().unwrap().unwrap()),
+        "dropping already-completed query facts must not rewrite their indexed status"
+    );
+}
+
+#[test]
 fn channel_indexed_authority_tail_and_warm_turns_read_no_historical_bodies() {
     for count in [8, 256] {
         let fixture = Fixture::new(count);

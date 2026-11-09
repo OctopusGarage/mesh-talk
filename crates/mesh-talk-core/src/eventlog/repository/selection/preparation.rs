@@ -33,19 +33,26 @@ impl EventRepository {
         {
             return Ok(None);
         }
+        let admission = SelectionAdmission::acquire(&self.selection_admission, max_views)?;
         let selection = Selection {
             id: *uuid::Uuid::new_v4().as_bytes(),
             domain: self.domain,
             owner: self.selection_owner,
             database: self.database.clone(),
+            admission: Some(admission),
+            admission_counter: self.selection_admission.clone(),
+            admission_limit: max_views,
         };
         self.database.transaction(|c| {
             self.validate_network_on(c, view)?;
-            let active: i64 = c.query_row("SELECT count(*) FROM participant_sync_views WHERE domain=?1 AND owner=?2 AND retired=0",params![self.domain.0.as_slice(),self.selection_owner.as_slice()],|r|r.get(0))?;
-            if active >= i64::try_from(max_views).map_err(|_| LogError::InvalidPageBudget)? {
-                return Err(LogError::AdmissionRejected("participant sync connection capacity exhausted".into()));
-            }
-            c.execute("INSERT INTO participant_sync_views(id,owner,domain) VALUES(?1,?2,?3)",params![selection.id.as_slice(),self.selection_owner.as_slice(),self.domain.0.as_slice()])?;
+            c.execute(
+                "INSERT INTO participant_sync_views(id,owner,domain) VALUES(?1,?2,?3)",
+                params![
+                    selection.id.as_slice(),
+                    self.selection_owner.as_slice(),
+                    self.domain.0.as_slice()
+                ],
+            )?;
             Ok(())
         })?;
         Ok(Some(selection))

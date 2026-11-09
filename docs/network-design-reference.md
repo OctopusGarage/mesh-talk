@@ -325,7 +325,16 @@ sleep after slow authentication. A cached address must not allocate a separate
 probe lane for the same device. Only permitted fresh public authentication can
 renew presence; the fifteen-second observation lease is unchanged.
 Failed historical probes use the existing bounded, jittered retry schedule
-(up to fifteen seconds); successful probes retain their five-second cadence.
+(up to five minutes); successful probes retain their five-second cadence.
+Other delivery schedules retain their existing fifteen-second ceiling. Local
+admission pressure releases only the exact probe reservation, preserving learned
+peer failures and the later of its provisional deadline or five seconds from
+completion. It neither penalizes the peer nor clears failed-route evidence as
+though authentication succeeded.
+Account document pages deferred by local capacity likewise remain queued under
+their exact retry deadline, even without a remote continuation. Repeated wakes
+cannot bypass that deadline; releasing capacity resumes the saved page without
+requiring another discovery or user action.
 The full identity, effective route set and network/privacy generation qualify
 each hint. Changed routes or a new network bypass old pacing; local capacity
 pressure is not negative peer evidence. Deferred prefixes cannot hide later peers,
@@ -2647,6 +2656,33 @@ rediscovers its replacement. Revalidating one selected control must not rebuild
 every other control in the batch. This selection does not certify an unchanged
 control sweep or replace current send authorization.
 
+Individually confirmed consent offers may skip repeated preparation and HAVE
+queries through at most 256 runtime hints, with at most 512 scope bytes each.
+Each hint matches the full relay/recipient/mailbox/intent scope, a conservative
+local producer fingerprint and the exact freshly observed remote binding and
+window upper/revision. The fingerprint includes relevant certificate and runtime
+policy generations. A separate runtime stamp pairs the current open profile's
+MAIN file version with the connection's non-reset dirty-page write count, read
+under the same connection guard. SQLite's
+[`SQLITE_FCNTL_DATA_VERSION`](https://www.sqlite.org/c3ref/c_fcntl_begin_atomic_write.html)
+includes this connection's commits but also advances for zero-row MAIN updates;
+[`SQLITE_DBSTATUS_CACHE_WRITE`](https://www.sqlite.org/c3ref/c_dbstatus_options.html)
+distinguishes those transactions from actual dirty-page writes. Under the profile's
+exclusive single-writer lease and finite hint lifetime, both must change to
+invalidate the local stamp. In-memory TEMP activity does not invalidate it. An indexed same-value UPDATE
+can still dirty pages and conservatively invalidates the hint.
+`total_changes` includes TEMP and `PRAGMA data_version` omits own commits.
+Unsupported observations disable this hint; the database fault fence remains
+mandatory. This comparison is not valid across owners or independent writers.
+It is neither a durable
+revision nor custody or authorization evidence. Only actual HAVE/upload success
+under an unchanged captured producer scope creates a hint. Reads never renew its
+sixty-second expiry, which bounds rechecks of external files and time conditions.
+Local mutations, remote replacement or revision changes immediately restore
+normal preparation and current send checks. Hints contain no event bodies and
+never skip the rotating offer selector, so later unseen offers retain their turn.
+Legacy exchanges and the three-second receive cadence remain unchanged.
+
 Completed upload qualifications are kept in the existing bounded signed
 checkpoint store independently of those four heavyweight views. Rotating through
 more relay/mailbox scopes therefore does not restart unchanged history traversal
@@ -2671,6 +2707,15 @@ their original progress protection. This retirement never claims bulk completion
 New local generations replace its pairs; they never inherit
 membership from an older selection. Every custody check still requires fresh
 exact remote evidence. Reading an unchanged pair does not rewrite its checkpoint.
+A completed ready selection may also establish that an exact target is absent.
+The existing upload owner retains at most 64 such runtime facts, each with at most
+256 scope bytes, an event ID and the complete local history/authority stamp.
+Fresh completed qualification and current permission/read checks still precede a
+hit; changed or unknown stamps use normal bounded preparation. No negative fact
+is persisted or interpreted as custody, a denial grant or permanent deletion.
+Missing payloads, unavailable views, incomplete work and errors are not absence.
+Cache eviction permits a later retry; a newly appended target must invalidate its
+old absence and synchronize normally.
 Older signed checkpoints preserve incoming cursor and pending retry evidence;
 unsupported completion qualifications are discarded and rebuilt normally.
 
@@ -2769,6 +2814,32 @@ it retains no historical bodies. Exhaustion defers work without certifying a
 completed scan or inventing a delivery result.
 This exceptional repair can read the captured mailbox prefix;
 it is not part of unchanged ordinary polling.
+
+Historical authentication failure pacing is shared by all background producers in
+`node/session_pool.rs`, using the existing bounded retry owner. At most 256 hints
+match the complete signing/key-agreement identity and canonical endpoint, with
+privacy and network generations as recovery inputs. Only an actual failed
+TCP/Noise attempt learns a 30-second minimum, exponential recovery delay capped
+at five minutes. Reservations, local capacity and cancellation do not learn
+remote failures. Changed generations, untried endpoints, current eligible signed
+discovery and explicit interactive call/link operations retain prompt admission;
+all existing privacy, identity and socket checks still apply. A failed endpoint
+never cools the device's other routes. Successful authentication clears that
+endpoint's hint. These runtime hints grant no presence, authorization or custody.
+
+Channel causal-query retirement updates only active rows, both at reopen and
+when completion or the final runtime lease retires its facts. Already-retired
+indexed statuses remain read-only; preserved legacy-cut leases are excluded from
+reopen retirement as before. Bounded cleanup retains its existing authority.
+
+Slow authentication diagnostics retain only saturating scalar counters. Normal
+background operation logs the first slow attempt and at most one aggregate per
+five-minute window on a subsequent slow attempt; no reporting timer or shutdown
+flush is added. Aggregates retain attempt/failure/historical counts, maximum
+elapsed time and the last reported endpoint. Interactive attempts retain their
+individual report, per-attempt detail remains at DEBUG, and caller-owned delivery
+errors and durable pending state are unchanged. Diagnostic aggregation never
+controls retry admission or clears its learned failures.
 
 For operator investigation, `MESH_TALK_TRACE_WORK=1` at Node construction enables
 one indexed page of at most 64 order-job metadata rows every thirty seconds in
@@ -2986,14 +3057,23 @@ continuation preserves the original operation, effect and journal sequence; it
 does not replace the independent ten-second departure retry or change peer and
 foreground-operation deadlines.
 
-Historical-route rounds launch at most two device probes concurrently. Each may
-race at most two candidates, so this producer alone consumes at most four of the
-seven outbound slots; other protocol producers still share the remaining
-capacity. A round launches at most eight devices under its existing deadline.
+Historical-route rounds launch at most two device probes concurrently. All
+background producers share a further limit of two simultaneous TCP/Noise attempts
+to cached routes lacking fresh exact-endpoint discovery or a pinned authentication
+within fifteen seconds. The hint is scoped to full public identity, endpoint and
+privacy generation, bounded to 256 entries and cleared with session state; it
+grants neither presence nor admission. It does not change stored or wire formats.
+Explicit call and pairing actions bypass only this speculative limit, retaining
+all privacy, identity and shared eight/seven connection checks. Historical permits
+belong to actual attempts and release on success, failure or cancellation; they
+never follow an authenticated session. Local pressure defers work without remote
+failure evidence. A round examines at most eight devices under its existing deadline.
 Its rotating cursor advances when a child is launched, rather than when a batch
 is selected, so cancellation of a stalled prefix cannot repeatedly skip the
-queued suffix. The round owns its children through the existing runtime-work
-and cancellation lifecycle. This is a bound on historical probing, not a global
+queued suffix. Capacity-deferred devices retain the next turn while the bounded
+scan still admits later fresh routes. Completed rounds retire canceled children
+before publishing retry hints. The round owns its children through the existing runtime-work
+and cancellation lifecycle. This is a bound on historical dialing, not a global
 priority scheduler or an end-to-end delivery latency guarantee.
 
 Actual outbound capacity timeouts produce a per-pool warning at most once every

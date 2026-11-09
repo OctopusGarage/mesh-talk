@@ -163,7 +163,16 @@ export function useVideoPoster(
     function fail() {
       if (settled) return;
       finish();
-      if (cacheKey) POSTER_FAILED.add(cacheKey);
+      if (cacheKey) {
+        if (
+          POSTER_FAILED.size >= POSTER_CACHE_MAX &&
+          !POSTER_FAILED.has(cacheKey)
+        ) {
+          const oldest = POSTER_FAILED.values().next().value;
+          if (oldest !== undefined) POSTER_FAILED.delete(oldest);
+        }
+        POSTER_FAILED.add(cacheKey);
+      }
       if (alive) setFailed(true);
     }
     function grab() {

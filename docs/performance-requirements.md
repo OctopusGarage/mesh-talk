@@ -49,9 +49,19 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    user navigation and foreground activation. Schedule the next actual expiry or
    retry deadline. Empty success is not progress and must not keep a fast retry
    hot. Coalesce duplicate wakes; retain bounded dirty work while a task is busy.
+   A retained blocked task is not evidence of progress: keep its recovery fact
+   while backing off, and resume promptly on dependency changes. Local pagination
+   and actual received bytes retain prompt continuation.
    Preserve invalidation domains through batching and acknowledgement; a roster
    heartbeat must not reload unrelated settings or history. Empty pages do not
    imply a global change. Presentation metadata does not renew user activity.
+   Retry fairness is scheduling state, not durable progress. Use a bounded
+   runtime order where possible; retain durable pending/completion evidence and
+   an explicit capacity fallback. Rechecking blocked work must not itself renew
+   durable tickets indefinitely.
+   Advance semantic revisions only when their authoritative value changes.
+   Replacing an identical binding map is not invalidation; actual removal and
+   later restoration must each invalidate their preceding observation.
 
 2. **Use recovery deliberately.** A fallback repairs missed events; it is not the
    main data path. Back off failures, stop with the owner and refresh on return.
@@ -67,6 +77,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    changes; drain available pages promptly in bounded batches. A slower fallback
    must not delay each already-available page by another interval.
    A memo that still hydrates its input on every wake is not an I/O optimization.
+   Place the cheap revision gate before routing filters, list hydration and
+   authority projections. Mark a cycle settled only when every selected item
+   has matching successful evidence; preserve continuation and retry deadlines.
    Reuse authenticated immutable input within one decision instead of reading
    and verifying it again down the call chain; keep current authority and read
    failure checks independent of that reuse.
@@ -85,12 +98,36 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Library catalogs and background registration receipts must not retain image
    URLs or archives. Scope point reads to content revisions, bound concurrent
    hydration and release inactive payloads; readiness belongs to the selected asset.
+   Bound negative caches as well as successful results; eviction permits a later
+   retry instead of retaining every failed identifier until logout.
+   For fully version-qualified derived plans, elapsed idle time alone must not
+   force durable cleanup/rebuild. Bound retained resources by entries and bytes;
+   invalidate on authoritative change, capacity pressure or owner retirement.
+   Time-based credentials, delivery deadlines and network leases remain subject
+   to their own current expiry checks.
    Compressed file size is not decoded image memory. Avoid keeping archives,
    base64 strings, Blobs and decoded originals together without a measured need.
 5. **Write only durable changes.** No-op reads/heartbeats must not rewrite logs,
    snapshots or indexes. Batch safe related mutations under the existing durable
-   transaction; atomically update derived indexes. Bound WAL/log maintenance;
+   transaction; atomically update derived indexes. Bound WAL/log maintenance and
    preserve crash recovery and acknowledgment semantics when reducing flushes.
+   Treat sync preparation as part of query cost: a fingerprint mismatch is not
+   evidence that the local source changed. Reuse the existing exclusively owned
+   authorization selection across query phases while its complete source and
+   policy qualification matches; recheck current authority before exporting.
+   Own reusable derived indexes at the node/version lifetime; verify unchanged
+   costs across fresh adapters and fresh sockets. Separate active-query admission
+   from idle index quotas, discard finished reducers/payloads and retire extracted
+   indexes outside cache locks. Close publication before joining actual cleanup.
+   A successfully answered query is not received data. Dispatch reception from
+   admitted payload changes; metadata, Have/custody queries and empty frames must
+   not advance retry queues, refresh messages or schedule profile recovery.
+   Reuse free database pages before compacting small temporary allocations;
+   physical reclamation needs its own size/ratio trigger and low-duty budget.
+   Zero changed SQL rows does not exclude vacuum or checkpoint writes.
+   Discovery watermarks advance only over new input. Keep cyclic rediscovery
+   positions volatile; elapsed checkpoint time cannot turn an old scan into new
+   durable progress. Signed consent decisions retain their separate durability.
    Retry selection must not renumber an entire queue that already fits one turn;
    preserve fair rotation under contention and exact completion revisions.
 6. **Plan for accumulation and deletion.** Give history, attachments, indexes,
@@ -111,7 +148,10 @@ Before optimizing, identify the owner and capture the offending operation count
 or allocation/CPU/write trace. Add a regression that fails on that mechanism,
 then validate empty/no-change, growth, failure/retry, cancellation and recovery.
 Compare the same device/build/runtime/profile; include whole-family resource
-measurements and a correctness witness. Heap snapshots/retaining paths distinguish
+measurements and a correctness witness. SQL affected-row counts do not measure
+write amplification: attribute pager flushes separately when they cannot explain
+OS-observed WAL activity. Keep such diagnostics opt-in, bounded and free of SQL
+text, parameters and message content. Heap snapshots/retaining paths distinguish
 leaks from stable bloat and allocation churn. Forced working-set trims, periodic
 GC, cache deletion or moving pressure to disk do not prove a fix.
 

@@ -34,6 +34,100 @@ fn preferred_route_hints_bound_churn_and_retain_recent_successes() {
 }
 
 #[tokio::test]
+async fn historical_authentication_failures_are_paced_across_callers_and_fresh_discovery_recovers()
+{
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&directory.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    {
+        let mut guard = alice.privacy.state.write().unwrap();
+        let state = guard.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), address.ip()).unwrap();
+    }
+    let rejected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let server = {
+        let rejected = rejected.clone();
+        let accepted = accepted.clone();
+        let bob = bob.clone();
+        tokio::spawn(async move {
+            let mut exchanges = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    incoming = listener.accept() => {
+                        let (socket, _) = incoming.unwrap();
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                        if !rejected.load(Ordering::SeqCst) {
+                            let bob = bob.clone();
+                            exchanges.spawn(async move { bob.privacy_accept(socket).await });
+                        }
+                    }
+                }
+            }
+            exchanges.shutdown().await;
+        })
+    };
+    let expected = bob.identity.public();
+    assert!(alice.historical_route_candidate(address, &expected, std::time::Instant::now()));
+    assert!(alice.privacy_dial(address, &expected).await.is_err());
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    let second = tokio::time::timeout(
+        Duration::from_millis(200),
+        alice.privacy_dial(address, &expected),
+    )
+    .await
+    .expect("a separate background caller must defer without another network timeout");
+    assert!(second.is_err());
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "independent producers must not repeat the same unchanged failed historical authentication"
+    );
+    alice
+        .network_changes
+        .send_modify(|generation| *generation += 1);
+    assert!(alice.privacy_dial(address, &expected).await.is_err());
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "network change must bypass old pacing"
+    );
+    rejected.store(false, Ordering::SeqCst);
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    let connected = tokio::time::timeout(
+        Duration::from_secs(1),
+        alice.privacy_dial(address, &expected),
+    )
+    .await
+    .expect("fresh signed discovery must recover without waiting for historical cooldown")
+    .unwrap();
+    assert_eq!(connected.peer_identity(), &expected);
+    assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    drop(connected);
+    let _ = stop.send(());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn evicted_preferred_route_falls_back_to_current_authenticated_peer_route() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));
@@ -336,7 +430,8 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
         });
     }
     assert_eq!(alice.cached_routing_peers().len(), 8);
-    let producer = tokio::spawn({
+    let mut producers = tokio::task::JoinSet::new();
+    producers.spawn({
         let alice = alice.clone();
         async move {
             alice
@@ -344,6 +439,14 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
                 .await
         }
     });
+    // Different background owners can dial the same historical inventory.
+    // A per-producer limit alone cannot protect the shared TCP budget.
+    for peer in alice.cached_routing_peers() {
+        let alice = alice.clone();
+        producers.spawn(async move {
+            let _ = alice.privacy_dial(peer.addr, &peer.public).await;
+        });
+    }
     tokio::time::timeout(Duration::from_secs(1), async {
         while accepted.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -359,6 +462,19 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
     let expected = healthy.identity.public();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let proof = healthy.signed_announce("Healthy", address.port());
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.routes.record(&expected, address.ip()).unwrap();
+    }
+    assert!(alice.historical_route_candidate(address, &expected, std::time::Instant::now()));
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, address.ip(), &alice.user_id());
+    assert!(!alice.historical_route_candidate(address, &expected, std::time::Instant::now()));
     let responder = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let channel = healthy.privacy_accept(socket).await.unwrap();
@@ -379,12 +495,16 @@ async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
         .map_err(|error| error.to_string())
     })
     .await;
-    producer.abort();
-    let _ = producer.await;
+    producers.abort_all();
+    while producers.join_next().await.is_some() {}
     responder.abort();
     let _ = responder.await;
     servers.abort_all();
     while servers.join_next().await.is_some() {}
+    assert!(
+        stalled_sockets <= 2,
+        "historical dials across producers opened {stalled_sockets} stalled sockets"
+    );
     assert!(
         round.is_ok_and(|result| result.is_ok()),
         "healthy foreground Noise+sync missed its one-second deadline while historical probes held {stalled_sockets} real stalled TCP sockets"

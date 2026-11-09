@@ -180,6 +180,198 @@ it("pulls bounded native receipts through the existing unread owner and commits 
   }
 });
 
+it("keeps recovery observations and unchanged empty pages out of durable receipt writes", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  const commits: string[] = [];
+  let rejectCommit = false;
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      if (key.startsWith("mesh-talk-reception-commit-v1:")) {
+        if (rejectCommit) throw new Error("quota exceeded");
+        commits.push(value);
+      }
+      values.set(key, value);
+    },
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  let cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+  let acknowledgements = 0;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+    if (command === "owner_reception_page")
+      return Promise.resolve({
+        scope,
+        token: "page",
+        after: cursor,
+        next: cursor,
+        through: cursor,
+        complete: true,
+        receipts: [],
+      });
+    if (command === "owner_reception_ack") {
+      acknowledgements++;
+      expect(JSON.parse(commits[commits.length - 1]).cursor).toEqual(cursor);
+      return Promise.resolve(false);
+    }
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const baseline = commits.length;
+    expect(baseline).toBe(1);
+    for (let n = 0; n < 5; n++) {
+      useChat.setState({
+        reception: {
+          "channel:team": {
+            phase: n % 2 ? "waiting" : "idle",
+            received: 0,
+            checkedAt: n,
+          },
+        },
+      });
+      captured.current?.onReceptionWake(scope);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(useChat.getState().reception["channel:team"].checkedAt).toBe(4);
+    expect(acknowledgements).toBe(6);
+    expect(commits).toHaveLength(baseline);
+
+    // Batch progress remains durable even without another message identity.
+    useChat.setState({
+      reception: {
+        "channel:team": {
+          phase: "catching_up",
+          received: 1,
+          batchId: "batch",
+          processing: true,
+        },
+      },
+    });
+    expect(commits).toHaveLength(baseline + 1);
+    rejectCommit = true;
+    useChat.setState({ unread: { "account:friend": 1 } });
+    expect(commits).toHaveLength(baseline + 1);
+    expect(useChat.getState().error).toContain("quota exceeded");
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acknowledgements).toBe(6);
+    rejectCommit = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(acknowledgements).toBe(7);
+    expect(
+      JSON.parse(commits[commits.length - 1]).unread["account:friend"],
+    ).toBe(1);
+    // A new epoch must commit even at the same sequence with no payload.
+    cursor = { ...cursor, epoch: "fedcba9876543210fedcba9876543210" };
+    const beforeEpoch = commits.length;
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(commits).toHaveLength(beforeEpoch + 1);
+    expect(acknowledgements).toBe(8);
+    // A new delivery owner cannot assume the live store still equals its
+    // persisted cursor's snapshot (for example a read during unavailable IPC).
+    useChat.setState({ ready: false });
+    useChat.setState({ unread: { "account:friend": 2 } });
+    const beforeResume = commits.length;
+    useChat.setState({ ready: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(commits).toHaveLength(beforeResume + 1);
+    expect(
+      JSON.parse(commits[commits.length - 1]).unread["account:friend"],
+    ).toBe(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("retains an applied receipt across a failed atomic commit without acknowledging or double counting", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  let writes = 0;
+  let failing = true;
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      if (key.startsWith("mesh-talk-reception-commit-v1:")) {
+        writes++;
+        if (writes > 1 && failing) throw new Error("quota exceeded");
+      }
+      values.set(key, value);
+    },
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "1" };
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+    if (command === "owner_reception_page")
+      return Promise.resolve({
+        scope,
+        token: "page",
+        after: { ...cursor, sequence: "0" },
+        next: cursor,
+        through: cursor,
+        complete: true,
+        receipts: [
+          {
+            kind: "dm",
+            event: {
+              message_id: "durable-message",
+              from_account: "friend",
+              from: "peer-device",
+              from_name: "Friend",
+              text: "hello",
+            },
+          },
+        ],
+      });
+    if (command === "owner_reception_ack") return Promise.resolve(false);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  const count = (command: string) =>
+    invoke.mock.calls.filter(([name]) => name === command).length;
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().unread["account:friend"]).toBe(1);
+    expect(count("owner_reception_ack")).toBe(0);
+    expect(
+      JSON.parse(values.get("mesh-talk-reception-commit-v1:host:myacct:me")!)
+        .cursor.sequence,
+    ).toBe("0");
+    failing = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(count("owner_reception_ack")).toBe(1);
+    expect(count("owner_reception_page")).toBe(1);
+    expect(useChat.getState().unread["account:friend"]).toBe(1);
+    const saved = JSON.parse(
+      values.get("mesh-talk-reception-commit-v1:host:myacct:me")!,
+    );
+    expect(saved.cursor).toEqual(cursor);
+    expect(saved.unread["account:friend"]).toBe(1);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
 it("keeps repeated roster pages out of document and full group refreshes", async () => {
   vi.useFakeTimers();
   const values = new Map<string, string>();

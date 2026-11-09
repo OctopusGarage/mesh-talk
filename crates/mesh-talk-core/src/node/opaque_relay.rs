@@ -660,14 +660,11 @@ impl Node {
                 if progress.consent_offers.is_none() {
                     progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
                 }
+                let offers = self.unsettled_consent_offers(progress);
                 controls.extend(
-                    self.file_consent_controls(
-                        &progress.recipient,
-                        progress.consent_offers.as_deref().unwrap_or(&[]),
-                        false,
-                    )?
-                    .into_iter()
-                    .map(|event| (event.id, event)),
+                    self.file_consent_controls(&progress.recipient, &offers, false)?
+                        .into_iter()
+                        .map(|event| (event.id, event)),
                 );
             }
         }

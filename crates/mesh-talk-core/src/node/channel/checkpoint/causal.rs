@@ -72,7 +72,7 @@ pub(super) fn initialize(c: &Connection, fresh: bool) -> Result<(), LogError> {
     // Only one query constructs under serialization. Completed memo/caller
     // leases retain their facts during this store's lifetime; reopening retires
     // prior runtime queries without an all-row warm-start replay.
-    c.execute("UPDATE channel_projection_queries SET retired=1 WHERE job NOT IN (SELECT query FROM channel_legacy_cuts)", [])?;
+    c.execute("UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job NOT IN (SELECT query FROM channel_legacy_cuts)", [])?;
     Ok(())
 }
 
@@ -109,7 +109,7 @@ impl Drop for Query {
     fn drop(&mut self) {
         if let Err(error) = self.profile.database().transaction(|c| {
             c.execute(
-                "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
+                "UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job=?1",
                 [self.job.as_slice()],
             )?;
             Ok(())
@@ -283,7 +283,7 @@ impl ChannelCheckpointStore {
                 ],
             )?;
             c.execute(
-                "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
+                "UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job=?1",
                 [query.job.as_slice()],
             )?;
             Ok(())
@@ -761,7 +761,7 @@ impl ChannelCheckpointStore {
                 ],
             )?;
             c.execute(
-                "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
+                "UPDATE channel_projection_queries SET retired=1 WHERE retired=0 AND job=?1",
                 [query.as_slice()],
             )?;
             cleanup_on(c)?;

@@ -37,7 +37,16 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
         && value.post_office == holder.starts_with("relay:")
 }
 
+#[cfg(test)]
+thread_local! {
+    static CUSTODY_CERTIFICATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 impl Node {
+    #[cfg(test)]
+    pub(in crate::node) fn custody_certificate_builds(&self) -> usize {
+        CUSTODY_CERTIFICATES.with(std::cell::Cell::get)
+    }
+
     pub(in crate::node) fn publish_channel_custody(
         &self,
         channel: ConversationId,
@@ -70,6 +79,8 @@ impl Node {
             .filter(|proof| proof.public() == *holder)
             .and_then(|proof| proof.account_cert);
         let payload = if held {
+            #[cfg(test)]
+            CUSTODY_CERTIFICATES.with(|count| count.set(count.get() + 1));
             serde_json::to_vec(&Observation {
                 observer: AccountDevice {
                     public: self.identity.public(),
@@ -125,62 +136,73 @@ impl Node {
         Ok(())
     }
 
-    /// Migrate/retry a bounded portion of the existing local journal automatically.
-    pub(in crate::node) fn migrate_channel_custody(&self, after: &mut Option<(EventId, String)>) {
+    /// One bounded page: true is an observed end, false retains continuation.
+    /// Errors preserve the last successfully published/skipped observation.
+    pub(in crate::node) fn migrate_channel_custody(
+        &self,
+        after: &mut Option<(EventId, String)>,
+    ) -> Result<bool, NodeError> {
         let rows = self
             .channel_custody
             .lock()
             .expect("custody mutex")
-            .observations_after(after.as_ref());
-        let rows = match rows {
-            Ok(rows) => rows,
-            Err(error) => {
-                log::warn!("custody migration deferred: {error}");
-                return;
-            }
-        };
+            .observations_after(after.as_ref())?;
         if rows.is_empty() {
             *after = None;
-            return;
+            return Ok(true);
         }
         for ((event, holder), held) in rows {
-            let selected = self.log.lock().expect("log mutex").get(&event);
-            let selected = match selected {
-                Ok(selected) => selected,
-                Err(error) => {
-                    log::warn!("custody migration deferred: {error}");
-                    return;
-                }
-            };
-            *after = Some((event, holder.clone()));
-            let channel = selected.map(|event| event.conversation_id);
-            let Some(channel) = channel else {
-                continue;
-            };
-            let post_office = holder.starts_with("relay:");
-            let public = if let Some(device) = holder.strip_prefix("relay:") {
-                self.historical_peer_proofs()
-                    .into_iter()
-                    .find(|proof| proof.user_id == device && proof.post_office && proof.verify())
-                    .map(|proof| proof.public())
-            } else {
-                self.channels
+            // This existing scalar lookup retains owned read failures and the
+            // repository's exact visible/retirement fence without a body read.
+            let channel = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .event_conversation(&event)?;
+            if let Some(channel) = channel {
+                let current = self
+                    .channels
                     .lock()
                     .expect("channels mutex")
                     .state(&channel)
-                    .and_then(|state| {
-                        state
-                            .members()
-                            .iter()
-                            .find(|member| member.user_id() == holder)
-                            .cloned()
-                    })
-            };
-            if let Some(public) = public {
-                let _ =
-                    self.publish_channel_custody(channel, event, &public, held, true, post_office);
+                    .is_some_and(|state| self.channel_identity_matches_account(state));
+                if current {
+                    let post_office = holder.starts_with("relay:");
+                    let public = if let Some(device) = holder.strip_prefix("relay:") {
+                        self.historical_peer_proofs()
+                            .into_iter()
+                            .find(|proof| {
+                                proof.user_id == device && proof.post_office && proof.verify()
+                            })
+                            .map(|proof| proof.public())
+                    } else {
+                        self.channels
+                            .lock()
+                            .expect("channels mutex")
+                            .state(&channel)
+                            .and_then(|state| {
+                                state
+                                    .members()
+                                    .iter()
+                                    .find(|member| member.user_id() == holder)
+                                    .cloned()
+                            })
+                    };
+                    if let Some(public) = public {
+                        self.publish_channel_custody(
+                            channel,
+                            event,
+                            &public,
+                            held,
+                            true,
+                            post_office,
+                        )?;
+                    }
+                }
             }
+            *after = Some((event, holder));
         }
+        Ok(false)
     }
 
     #[cfg(test)]

@@ -279,13 +279,15 @@ a healthy wake. Preserve diagnostic deduplication, bounded slices, exact file
 ownership and joined shutdown assertions. The real role-GC/physical-progress
 fixture separates SQL wall cost from its virtual functional watchdog. It follows
 each actual completed slice to its armed duty Sleep and proves a second poll
-cannot bypass that pacing or perform another physical inspection. The production
-duty remains three times the measured cost. Full logical and digest retirement,
+cannot bypass that pacing or perform another physical inspection. The shared logical-work
+duty remains three times the measured cost; physical reclamation has a separate
+reuse threshold and low-duty eligibility gate. Full logical and digest retirement,
 real repeated vacuum/page reduction, unchanged live mail/body-read/charge state
 and joined shutdown remain required; page shrink alone cannot certify completion. Initial
 publication can leave retryable archive cleanup pending, while provenance and
 authoritative database failures remain explicit. A separate physical class
-reclaims already-free pages in capped background slices and completes eligible
+keeps small freelists for reuse, reclaims substantial unused capacity in paced
+background slices and completes eligible
 main-file truncation through PASSIVE checkpoints. It does not delete live mail
 or change retention. Reader-pinned or incomplete checkpoints retain independently
 paced work; ordinary traffic and cleanup continue. Actual checkpoint work can

@@ -720,6 +720,7 @@ impl SyncProgress {
         if max_followups == 0 || max_followups > FILE_FOLLOWUP_BURST {
             return Err(SessionError::UnexpectedMessage);
         }
+        backend.bind_session_peer(channel.peer_identity());
         // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
         // id-set; if the responder's matches, the logs are identical and we skip the O(N)
         // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
@@ -774,6 +775,10 @@ impl SyncProgress {
                         return Ok(false);
                     }
                     SyncWire::FpResponse(FpResponse { matched: true }) => {
+                        if let Some(view) = probe_view {
+                            backend.validate_view(&view)?;
+                            drop(backend.retain_custody_view(view)?);
+                        }
                         self.remote_have_count = Some(local_count);
                         log::debug!(
                             target: "mesh_talk::sync",
@@ -783,6 +788,13 @@ impl SyncProgress {
                         return Ok(true);
                     }
                     SyncWire::FpResponse(FpResponse { matched: false }) => {
+                        // A differing remote digest does not invalidate our
+                        // local authorization selection. Transfer its one
+                        // existing lease to the following Have/export phase.
+                        if let Some(view) = probe_view {
+                            backend.validate_view(&view)?;
+                            drop(backend.retain_custody_view(view)?);
+                        }
                         // A complete exchange is a scheduling boundary for
                         // bounded callers, even when reconciliation must follow.
                         return Ok(false);
@@ -970,13 +982,15 @@ impl SyncProgress {
             self.total.rejected.extend(report.rejected);
         }
 
-        if !made_progress && !more_to_push {
-            return Ok(true);
-        }
-        if round + 1 == MAX_SYNC_ROUNDS {
+        let complete = !made_progress && !more_to_push;
+        if !complete && round + 1 == MAX_SYNC_ROUNDS {
             return Err(SessionError::NoProgress);
         }
-        Ok(false)
+        // Retain only after every followup was sent successfully. Changed
+        // source/policy rejects retention; failures/cancellation drop the lease.
+        // Repeated queries reuse preparation without retaining historical bodies.
+        drop(backend.retain_custody_view(outgoing_view)?);
+        Ok(complete)
     }
 }
 
@@ -1031,6 +1045,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
     backend: &B,
     bytes: &[u8],
 ) -> Result<Served, SessionError> {
+    backend.bind_session_peer(channel.peer_identity());
     match decode(bytes)? {
         SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
             if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
@@ -1239,6 +1254,12 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             channel
                 .send(&encode(&SyncWire::FpResponse(FpResponse { matched }))?)
                 .await?;
+            if let Some(view) = probe_view {
+                // The response completed this probe, not the local view's
+                // useful lifetime. A following ordinary Request may reuse it.
+                backend.validate_view(&view)?;
+                drop(backend.retain_custody_view(view)?);
+            }
             Ok(Served::Handled(conversation))
         }
         // A Response/FpResponse, or a stray have-chunk outside its stream, is out of order.

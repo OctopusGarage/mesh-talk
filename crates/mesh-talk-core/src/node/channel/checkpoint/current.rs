@@ -1,7 +1,22 @@
 //! Current metadata access never materializes historical applied/authorized IDs.
 pub(crate) const PUBLISHED_PROJECTION_SQL: &str = "SELECT source_job,source_revision,next_rank FROM channel_current WHERE channel=?1 AND owner_account=?2";
 use super::*;
+#[cfg(test)]
+thread_local! {
+    static STATE_HYDRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROJECTION_HYDRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 impl ChannelCheckpointStore {
+    #[cfg(test)]
+    pub(in crate::node) fn projection_hydrations(&self) -> usize {
+        PROJECTION_HYDRATIONS.with(std::cell::Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn state_hydrations(&self) -> usize {
+        STATE_HYDRATIONS.with(std::cell::Cell::get)
+    }
+
     /// Scheduling evidence only. A stale or previous-account checkpoint may
     /// need replay, but can never supply current membership through this read.
     pub(in crate::node) fn has_local_channel_checkpoint(
@@ -63,6 +78,8 @@ impl ChannelCheckpointStore {
             let row:Option<(Vec<u8>,i64,Vec<u8>)>=c.query_row("SELECT source_job,source_revision,state FROM channel_current WHERE channel=?1 AND owner_account=?2 AND known_local=1",params![channel.as_bytes().as_slice(),self.account.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             let Some((job,revision,bytes))=row else{return Ok(None);};
             replay::require_source_on(c,channel,job.try_into().map_err(|_|invalid("invalid current channel job"))?,revision)?;
+            #[cfg(test)]
+            STATE_HYDRATIONS.with(|count| count.set(count.get() + 1));
             ChannelState::decode_current(&bytes).map(Some).map_err(|e|invalid(&e.to_string()))
         })
     }
@@ -137,6 +154,8 @@ impl ChannelCheckpointStore {
             self.check_account_on(c)?;
             replay::require_source_on(c, channel, job, revision)
         })?;
+        #[cfg(test)]
+        PROJECTION_HYDRATIONS.with(|count| count.set(count.get() + 1));
         let (reducer, next) = super::super::projection_facts::ProjectionFacts::load(
             self.profile.clone(),
             job,

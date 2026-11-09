@@ -1342,8 +1342,8 @@ async fn group_file_unfinished_discovery_keeps_short_cadence_until_eof() {
     assert!(!pending);
     assert_eq!(
         wait,
-        std::time::Duration::from_secs(60),
-        "cooled EOF work permits the full idle wait"
+        std::time::Duration::from_secs(300),
+        "cooled EOF work permits sparse repair without shortening retained retry deadlines"
     );
     node.group_file_delivery
         .jobs

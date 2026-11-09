@@ -13,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 // The staging area is scoped to one authenticated sync connection. An unrelated
 // group can consume at most this much memory and is forgotten when it disconnects.
 mod network;
+pub(in crate::node) mod prepared_views;
+pub(in crate::node) type PreparedSyncCache =
+    prepared_views::PreparedCache<network::RetainedSelection>;
 pub(in crate::node) use network::{HistorySyncStamp, HistoryUpload};
 mod principal;
 
@@ -53,11 +56,53 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     inbound: bool,
     pending_channels: HashMap<ConversationId, PendingChannel>,
     pending_bytes: usize,
-    // One custody-only selection, owned by this authenticated connection. It is
-    // checked out during a query and never shared with mutable export state.
-    custody_view: Option<(bool, network::ParticipantView)>,
+    // Unbound adapters retain one operation-local plan. Authenticated network
+    // adapters check out an exclusive plan from the node/version owner.
+    custody_view: Option<network::RetainedSelection>,
+    use_node_preparation: bool,
+    received_work: bool,
 }
+// Field order keeps the actual SQL retirement alive until its work permit ends.
+struct PreparedViewsRetirement {
+    _views: Vec<network::RetainedSelection>,
+    _permit: Option<super::runtime_work::WorkPermit>,
+}
+
+impl GuardedSyncStore<'_> {
+    /// Reception work is published by accepted payload owners, not by queries.
+    pub(in crate::node) fn take_received_work(&mut self) -> bool {
+        std::mem::take(&mut self.received_work)
+    }
+}
+
 impl Node {
+    pub(in crate::node) fn retire_prepared_sync_views(
+        &self,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let permit = self.runtime_work.admit();
+        self.runtime_work.close();
+        let views = self.take_prepared_sync_views();
+        if views.is_empty() {
+            return None;
+        }
+        let retirement = PreparedViewsRetirement {
+            _views: views,
+            _permit: permit,
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            Some(runtime.spawn_blocking(move || drop(retirement)))
+        } else {
+            drop(retirement);
+            None
+        }
+    }
+
+    pub(in crate::node) fn take_prepared_sync_views(&self) -> Vec<network::RetainedSelection> {
+        self.prepared_sync_views
+            .lock()
+            .expect("prepared sync cache lock")
+            .clear()
+    }
     pub(in crate::node) fn sync_store(
         &self,
         peer: &PublicIdentity,
@@ -71,6 +116,8 @@ impl Node {
             pending_channels: HashMap::new(),
             pending_bytes: 0,
             custody_view: None,
+            use_node_preparation: false,
+            received_work: false,
         })
     }
     pub(in crate::node) fn pull_sync_store(
@@ -86,6 +133,8 @@ impl Node {
             pending_channels: HashMap::new(),
             pending_bytes: 0,
             custody_view: None,
+            use_node_preparation: false,
+            received_work: false,
         })
     }
 
@@ -102,6 +151,8 @@ impl Node {
             pending_channels: HashMap::new(),
             pending_bytes: 0,
             custody_view: None,
+            use_node_preparation: false,
+            received_work: false,
         })
     }
 

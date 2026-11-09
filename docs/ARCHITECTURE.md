@@ -543,20 +543,40 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   compare scalar summaries before creating SQL selections. Missing observations
   and changed stamps use ordinary bounded preparation; cached summaries never
   authorize export, custody or admission.
-  Repeated exact custody queries and ordinary history Requests may reuse one
-  ready authorization selection owned exclusively by their authenticated connection. The captured exact history stamp,
-  current denied state and ordinary view validation qualify reuse. Each query
-  still checks selected membership, synchronizes retained storage when required,
-  evaluates current historical completion and validates authority before replying;
-  no Boolean custody answer is cached. Missing or changed qualification evicts
-  before cold preparation. Sequential ordinary Requests may also reuse completed
-  export preparation when the exact current source/authority stamp and remote
-  Have digest match. Fresh export cursors, bounded reads and authority checks
-  remain mandatory; mutable staging is never shared between concurrent requests.
-  Ordinary responses return the view only after Response and terminal Have sends
-  both succeed. Checked-out views drop on failure/cancellation; the connection releases its
-  retained view through existing bounded selection retirement. Its one slot
-  remains charged to the unchanged selection admission limit.
+  Exact custody queries and ordinary history requests reuse node-owned prepared
+  authorization indexes under the complete current source/authority stamp, full
+  peer identity, direction, pull mode and denied state. Each request checks out
+  its mutable export state exclusively; a second concurrent request cannot share
+  its cursors. Fresh authenticated connections reuse the same completed plan.
+  Current selected membership, retained durability, historical completion and
+  authority remain fresh checks; no Boolean custody answer is cached.
+  Only ready, stamped plans without pending uninvited ancestry enter this cache.
+  Finished reducers, projections and event bodies are released; cached identities
+  remain in SQL. The cache has 64 entries and 64 MiB of charged rows/checkpoint
+  bytes, with conservative page/index overhead. Oversized plans use the existing
+  bounded cold path. Version replacement, LRU/byte pressure and runtime retirement
+  reclaim entries. Elapsed idle time alone does not invalidate an unchanged plan:
+  source and current authority are rechecked on reuse. Destruction occurs after
+  cache admission unlocks. These are disposable runtime indexes; restart
+  uses existing bounded stale-owner cleanup, not cached authorization evidence.
+  Parked plans release active query admission without SQL mutations and cannot
+  serve reads before their exact repository owner reactivates them. The existing
+  16-active-selection bound is independent of the 64 idle entries. Runtime
+  retirement closes cache publication, extracts idle plans and joins their actual
+  SQL cleanup under the retirement work permit before drain completes.
+  Ordinary responses return a plan only after Response and terminal Have sends
+  succeed; requesters return it after every followup succeeds. Failures and
+  cancellation retire checked-out work. Have-dependent closure additionally
+  requires the exact remote Have digest; independent export rebinds the digest
+  and filters fresh Have without persisting query IDs. Source or authority
+  changes invalidate reuse. Unchanged queries, including across new sockets,
+  must perform no warm SQL mutations or write commits.
+  The serving owner dispatches message/file/profile reception from accepted
+  payload signals after releasing the adapter lock. Query replies and empty
+  followups do not claim receive queues or schedule reception recovery. Accepted
+  duplicate payloads can restore ownership and retain recovery; invalid events
+  do not publish reception work. Header-bearing control exchanges preserve their
+  admission/recovery path independently of pure reads.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
@@ -1562,14 +1582,19 @@ and write transaction; late statement, COMMIT and rollback failures retain the
 same authority and fault policy. No whole-file scan or history-body hydration is
 needed to discover this work.
 
-The dedicated worker starts a physical drain at 256 free pages, stops at or below
-64, and processes at most 64 iterations per eligible slice with a 100 ms success
-cooldown plus its measured-duty gate. These are internal scheduling/hysteresis
-choices, not physical-byte, latency or throughput guarantees. The class has
-independent 100 ms–5 s retry eligibility for typed BUSY/LOCKED and incomplete
-checkpoint progress; other role, digest, staging, archive and session work
-continues. With only future physical work pending, the worker waits for its
-eligibility deadline, cancellation or a normal wake instead of polling a backlog.
+The dedicated worker keeps reusable capacity instead of treating every small
+freelist as compaction demand. Automatic physical draining starts only when free
+pages occupy at least 8 MiB and 25% of the SQL page estimate. An active drain stops
+when free capacity reaches 4 MiB or 10% of that estimate. It processes at most 64
+iterations per admitted slice. Its independent success pause is at least five
+seconds and 99 times the measured physical work, including checkpoint work; this
+is a scheduling duty bound, not an OS-byte or latency guarantee. Typed BUSY/LOCKED
+and incomplete checkpoint retries use the same duty floor with a five-second to
+five-minute exponential minimum. Below-threshold free pages remain available for
+SQLite to reuse and arm no physical retry timer. Logical expiry, custody admission,
+digest, staging, archive and session work retain their own independent schedules.
+With only future physical work pending, the worker waits for its eligibility
+deadline, cancellation or a normal wake instead of polling a backlog.
 
 Each successful vacuum slice requests one background PASSIVE checkpoint outside
 its transaction and live statements. A partial frame transfer remains pending
@@ -1808,6 +1833,14 @@ Returning to an account resumes both undiscovered and pending work without admit
 intervening accounts' events. Adoption generations reject old handles and ACKs even
 when the same account returns. Rows are admitted by count and decoded allocation
 cost before body reads; an oversized legal row remains pending for a larger budget.
+The participant producer distinguishes runnable metadata preparation from blocked
+receive/download rows. Unchanged blocked work backs off to a five-minute repair
+interval; pending rows alone cannot reset it. Meaningful roster routes, private
+availability, accepted group information, consent and actual received-byte progress
+wake its existing owner. Group notifications are subscribed before work, and lag
+requests recovery. Presence lease renewals do not create another storage turn.
+Consent discovery checkpoints only increasing high-water progress; bounded cyclic
+rediscovery remains volatile and cannot rewrite an old durable cursor.
 The direct-file producer and idle retry worker use this index; channel FILES use
 the independent checkpoint/CAS scheduler and rotate a bounded discovery prefix
 so a stalled channel cannot starve another conversation. Consent changes restart
@@ -1912,7 +1945,14 @@ The frontend demand pump uses a single in-flight page and a dirty wake bit. The
 existing reception owner still decides unread, mention, own-device, history-sync
 and batch-terminal behavior. A single local-storage replacement commits its
 bounded ledger, unread counts, undiscovered senders, overflow, history coverage,
-batch state and exact decimal-string cursor. A persistence failure leaves that
+batch state and exact decimal-string cursor.
+UI-only recovery phase and check-time observations do not dirty this commit;
+actual batch progress still does. An empty page at the successfully committed
+epoch and sequence may ACK without another storage replacement only when no
+durable reception state has changed. The dirty flag belongs to that runtime's
+delivery owner, clears only after a successful save, and resets on replacement.
+A restored cursor first establishes a commit of current live state, including
+changes made while delivery was unavailable. A persistence failure leaves that
 page pending without replaying its already-applied effects; an ambiguous ACK
 retries the same token. The snapshot is scoped to local user, account and device;
 the first observed prefix is persisted before applying any effects, so older
@@ -2351,12 +2391,17 @@ falling back to disk; failed writes roll back cleanup and usage before retry.
 Retained-event mappings, signed transport receipts and ordinary message custody
 remain durable. The [mailbox contract](network-design-reference.md#incremental-opaque-mailbox-synchronization)
 owns the exact lookup and fallback rules.
-File-manifest retries also preserve tickets when an owner-checked transaction
-proves that all admitted unfinished candidates already form the exact global
-account suffix. A bounded indexed suffix read includes one extra row to detect
-unselected or interleaved work. This changes no processing evidence: missing
-keys and blocked manifests remain pending. New work, partial pages and byte-skipped
-candidates retain ordinary fair rotation; completed rows still retire.
+File-manifest retries keep a shared runtime order of at most 128 event IDs
+(4 KiB of ID payload) when a 129-row lookahead proves the whole account queue
+fits. Each owner-checked selection reconciles that order against current durable
+metadata, appends new work, and rotates unfinished attempts, including oversized
+rows. Clones share the scheduler; failed SQL operations do not publish rotation.
+Pending rows, discovery progress and exact completion evidence remain durable;
+restart resets fairness only. No event bodies are cached. Above this limit the
+runtime order is cleared and indexed durable fair rotation remains the fallback.
+That fallback preserves tickets when bounded lookahead proves the selected
+unfinished candidates already form the exact global account suffix. Completed
+rows still retire transactionally in both modes.
 Maintenance demand comes from newly discovered, retained active Profile headers,
 including the local author's sources, rather than unchanged network callbacks.
 The bounded page deduplicates conversations and commits demand before advancing

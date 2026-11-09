@@ -707,15 +707,22 @@ impl Node {
 
     async fn run_account_channel_maintenance_loop(self: Arc<Self>, periodic: bool) {
         let mut work = super::channel_account_maintenance::ChannelAccountMaintenance::default();
-        let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // These subscriptions do not consume the local recovery/roster Notify
         // permits. The existing maintenance state survives every local wake.
         let mut metadata = self.subscribe_channel_changes();
         let mut network = self.network_changes.subscribe();
+        let mut ui = self.subscribe_ui_changes();
+        let mut documents = self.account_document_updates.subscribe();
+        let mut roster = self.subscribe_roster_changes();
+        let mut availability = self.subscribe_sibling_availability();
         loop {
             let periodic_wake = tokio::select! {
-                _ = tick.tick(), if self.channel_recovery_periodic_enabled(periodic) => true,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(work.deadline())),
+                    if self.channel_recovery_periodic_enabled(periodic) => true,
+                change = availability.changed() => { if change.is_err() { return; } false },
+                change = ui.changed() => { if change.is_err() { return; } false },
+                change = documents.changed() => { if change.is_err() { return; } false },
+                change = roster.changed() => { if change.is_err() { return; } false },
                 change = metadata.recv() => match change {
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => false,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,

@@ -11,6 +11,7 @@ pub(super) trait SessionBackend {
     type View;
     type HaveCursor;
     type ExportCursor;
+    fn bind_session_peer(&self, _peer: &crate::identity::device::PublicIdentity) {}
     fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
         None
     }
@@ -342,6 +343,12 @@ pub(super) struct PagedNetworkBackend<'a, S>(
     pub(super) Option<&'a RemoteHaveBudget>,
 );
 impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
+    fn bind_session_peer(&self, peer: &crate::identity::device::PublicIdentity) {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .bind_session_peer(peer);
+    }
     fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
         self.1
     }
@@ -358,11 +365,14 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
         &self,
         c: &ConversationId,
     ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError> {
-        let store = self.0.lock().expect("store mutex not poisoned");
+        let mut store = self.0.lock().expect("store mutex not poisoned");
         if let Some(metadata) = store.probe_metadata(c)? {
             return Ok((Some(metadata), None));
         }
-        let view = store.open_view(c)?;
+        let view = match store.take_custody_view(c)? {
+            Some(view) => view,
+            None => store.open_view(c)?,
+        };
         Ok((None, Some(view)))
     }
     fn open_view(&self, c: &ConversationId) -> Result<S::View, LogError> {
@@ -582,6 +592,11 @@ pub(super) async fn open_prepared_view<B: SessionBackend>(
     backend: &B,
     conversation: &ConversationId,
 ) -> Result<B::View, SessionError> {
+    // Check out the existing exclusive connection lease before allocating a
+    // new durable selection. The backend rechecks exact source and authority.
+    if let Some(view) = backend.take_custody_view(conversation)? {
+        return Ok(view);
+    }
     let view = backend.open_view(conversation)?;
     prepare_view(backend, &view).await?;
     Ok(view)

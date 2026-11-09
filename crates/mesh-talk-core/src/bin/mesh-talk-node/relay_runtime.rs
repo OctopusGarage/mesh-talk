@@ -255,9 +255,13 @@ pub(super) async fn run(
                         Some(interval)=>{interval.tick().await;},
                         None=>std::future::pending::<()>().await,
                     } }, if ingest_observation.is_some()=>{
-                        // Only scalar atomics are sampled; no storage/collection
-                        // guards cross the CLI's existing stdout sink. Opt-in
-                        // operator tracing uses that sink's synchronous lifetime.
+                        // Sample fixed storage metadata and ingest atomics. The read
+                        // finishes before the CLI stdout sink is called; no
+                        // storage guard crosses its synchronous lifetime.
+                        match office.storage_observation() {
+                            Ok(s) => super::emit(&format!("relay_storage retained_count={} retained_bytes={} drain_requested={} source_revision={} next_commit={} visibility={} database_changes={} page_size={} page_count={} free_pages={} write_observer_enabled={}", s.retained_count,s.retained_bytes,s.drain_requested,s.source_revision,s.next_commit,s.visibility,s.database_changes,s.page_size,s.page_count,s.free_pages,s.write_observer_enabled)),
+                            Err(_) => super::emit("relay_storage unavailable=true"),
+                        }
                         if let Some([appended,duplicate,rejected,unavailable,failed])=office.ingest_observation() {
                             super::emit(&format!("relay_ingest cumulative=true approximate=true appended={appended} duplicate={duplicate} peer_classified_rejection={rejected} locally_unavailable={unavailable} authoritative_failure={failed}"));
                         }

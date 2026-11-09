@@ -29,6 +29,7 @@ pub(crate) use indexed::{MailboxCursor, MailboxDeltaPage};
 mod maintenance;
 pub use indexed::{
     IndexedPostOffice, IndexedRelayExportCursor, IndexedRelayHaveCursor, IndexedRelayView,
+    RelayStorageObservation,
 };
 pub mod election;
 pub mod federation;

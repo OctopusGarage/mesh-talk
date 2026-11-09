@@ -399,6 +399,7 @@ pub struct Node {
     pub(in crate::node) channels: Mutex<ChannelBook>,
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
     pub(in crate::node) pending_channel_files: Mutex<Option<super::files::ChannelFileTurn>>,
+    pub(in crate::node) prepared_sync_views: Mutex<super::privacy_sync::PreparedSyncCache>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
     pub(in crate::node) raw_group_views: Mutex<super::account_group::RawViewCache>,
@@ -1352,6 +1353,7 @@ impl Node {
             channel_senders: Mutex::new(channel_senders),
             channel_checkpoints,
             channel_custody: Mutex::new(channel_custody),
+            prepared_sync_views: Mutex::new(Default::default()),
             channel_projection_cache: Mutex::new(Default::default()),
             raw_group_views: Mutex::new(Default::default()),
             group_metadata_cache: Mutex::new(Default::default()),

@@ -825,10 +825,7 @@ impl Node {
         .await
         {
             Ok(Ok(Served::Handled(conv))) => {
-                self.emit_new_messages(conv);
-                self.process_channel(conv);
-                self.process_file_events(conv);
-                self.process_profile_events(conv);
+                self.dispatch_received_sync_work(&store, conv);
             }
             _ => return,
         }
@@ -838,14 +835,27 @@ impl Node {
             }
             match tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
                 Ok(Ok(Served::Handled(conv))) => {
-                    self.emit_new_messages(conv);
-                    self.process_channel(conv);
-                    self.process_file_events(conv);
-                    self.process_profile_events(conv);
+                    self.dispatch_received_sync_work(&store, conv);
                 }
                 _ => break, // peer closed, error, or idle past the timeout
             }
         }
+    }
+
+    fn dispatch_received_sync_work(
+        &self,
+        store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
+        conversation: ConversationId,
+    ) {
+        let received = store.lock().expect("sync store lock").take_received_work();
+        if !received {
+            return;
+        }
+        // Release the adapter guard before reception acquires log/book owners.
+        self.emit_new_messages(conversation);
+        self.process_channel(conversation);
+        self.process_file_events(conversation);
+        self.process_profile_events(conversation);
     }
 
     /// Open and surface any new `FileManifest` events in `conv`. Channel manifests
@@ -923,8 +933,9 @@ impl Node {
                 8 * 1024 * 1024,
             )?;
             if candidates.is_empty() {
-                if self.files.lock().expect("files lock").contains_file(conv)? {
-                    self.persist_media_if_complete(conv);
+                // Release the file-book guard before completion re-enters it.
+                let known_file = self.files.lock().expect("files lock").contains_file(conv)?;
+                if known_file && self.persist_media_if_complete(conv) {
                     self.note_file_change();
                 }
                 return Ok(());
@@ -1076,6 +1087,7 @@ impl Node {
                                     return Ok(());
                                 }
                             };
+                            let mut received = self.file_progress(fc)?.map(|progress| progress.done);
                             let mut pulls = stream::iter(candidates)
                                 .map(|peer| async move {
                                     let _ = tokio::time::timeout(
@@ -1160,8 +1172,16 @@ impl Node {
                                 })
                                 .buffer_unordered(2);
                             while pulls.next().await.is_some() {
-                                self.note_file_change();
-                                if self.file_progress(fc)?.is_some_and(|p| p.done >= p.total) {
+                                let progress = self.file_progress(fc)?;
+                                let next = progress.as_ref().map(|progress| progress.done);
+                                if next > received {
+                                    self.note_file_change();
+                                    // New chunks justify a prompt continuation; an
+                                    // unchanged/failed peer attempt must not reset backoff.
+                                    self.file_pull_notify.notify_one();
+                                }
+                                received = next;
+                                if progress.is_some_and(|p| p.done >= p.total) {
                                     break;
                                 }
                             }

@@ -75,17 +75,19 @@ impl ChannelProjectionCache {
         })
     }
 
-    pub fn insert_paged(&mut self, stamp: HistorySyncStamp, value: SyncMetadata) {
+    /// Return whether admission evicted another bounded metadata entry.
+    pub fn insert_paged(&mut self, stamp: HistorySyncStamp, value: SyncMetadata) -> bool {
         if value.fingerprint.is_none() || self.get_paged(&stamp).is_some() {
-            return;
+            return false;
         }
-        if self.entries.len() == MAX_PROJECTIONS {
+        let evicted = self.entries.len() == MAX_PROJECTIONS;
+        if evicted {
             self.entries.pop_front();
         }
         self.entries.push_back(Entry::Paged(stamp, value));
+        evicted
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

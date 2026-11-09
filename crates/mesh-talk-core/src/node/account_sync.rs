@@ -3850,7 +3850,10 @@ impl Node {
                             if !control_pairs.contains_key(&key) && refresh && state.begin_refresh() {
                                 document_refresh.remove(&key);
                             }
-                            let continuation = control_pairs.contains_key(&key) || (refresh && !state.admission_deferred()) || state.pending;
+                            // A locally deferred page owns a retry deadline even
+                            // though it has no remote continuation. Keep it queued
+                            // so the existing deadline selector can resume it.
+                            let continuation = control_pairs.contains_key(&key) || (refresh && !state.admission_deferred()) || state.pending || state.admission_deferred();
                             let projection = control_pairs.get(&key).map_or_else(|| state.status(policy), |pair| pair.status(&state, policy));
                             document_statuses.insert(key.clone(), projection);
                             let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")

@@ -300,15 +300,16 @@ impl IndexedFileConsentStore {
             return Ok(());
         }
         let now = Instant::now();
-        let checkpoint = after != durable
+        let checkpoint = after > durable
             && previous.is_none_or(|scan| {
                 now.duration_since(scan.checkpoint_at) >= OFFER_SCAN_CHECKPOINT_INTERVAL
             });
         let checkpoint_at = previous.map_or(now, |scan| scan.checkpoint_at);
         if checkpoint {
             // Discovery is a replayable hint, never durable consent acceptance.
-            // Checkpoint the first changed page so repeated short restarts still
-            // progress; warm rotation only needs a bounded periodic checkpoint.
+            // Checkpoint new high-water progress so short restarts still advance.
+            // Wrapping through old offers is volatile fairness, not new input;
+            // neither elapsed time nor a changed rotation position makes it durable.
             #[cfg(test)]
             self.check_write_failure()?;
             self.source.profile().database().transaction(|c| {
@@ -1334,6 +1335,35 @@ mod tests {
                 "subsequent runtime rotation must not checkpoint again immediately"
             );
         }
+    }
+
+    #[test]
+    fn rotating_old_offers_never_checkpoint_backwards_or_rewrite_old_watermark() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = IndexedFileConsentStore::open(&root.path().join("controls"), "pw").unwrap();
+        let peer = [42; 32];
+        store.advance_offer_scan(&peer, 0, 100).unwrap();
+        let profile = store.source.profile().clone();
+        let database = profile.database();
+        let commits = database.successful_write_commits();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let mut before = 100;
+        for after in [20, 40, 80, 100, 20, 40, 80, 100] {
+            store.offer_scans.get_mut(&peer).unwrap().checkpoint_at -=
+                OFFER_SCAN_CHECKPOINT_INTERVAL;
+            store.advance_offer_scan(&peer, before, after).unwrap();
+            assert_eq!(store.offer_scan_position(&peer).unwrap(), after);
+            before = after;
+        }
+        assert_eq!(store.durable_offer_scan_position(&peer).unwrap(), 100);
+        assert_eq!(
+            database.successful_write_commits(),
+            commits,
+            "old discovery rotation is not durable progress"
+        );
+        assert_eq!(database.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        store.advance_offer_scan(&peer, 100, 120).unwrap();
+        assert_eq!(store.durable_offer_scan_position(&peer).unwrap(), 120);
     }
 
     #[test]

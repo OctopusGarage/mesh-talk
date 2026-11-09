@@ -1115,6 +1115,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     let receiptCursor: ReceptionCursor | null = null;
     let receiptScope: ReceptionScope | null = null;
     let receiptPending = false;
+    let receiptDirty = false;
     const snapshot = (cursor: ReceptionCursor) => {
       const state = get();
       return {
@@ -1141,6 +1142,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       receiptCursor = null;
       receiptScope = null;
       receiptPending = false;
+      receiptDirty = false;
       if (!runtime || !lease.current() || !lease.owner) return;
       const scope: ReceptionScope = {
         owner: lease.owner,
@@ -1151,6 +1153,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       try {
         receiptCursor = loadReceptionSnapshot(scope)?.cursor ?? null;
         receiptScope = scope;
+        // A restored cursor proves the saved snapshot, not equality with live
+        // state changed while delivery was unavailable. Establish that once.
+        receiptDirty = true;
         let firstPull = true;
         let avatarIdentityLoaded = false;
         delivery = createReceptionDelivery({
@@ -1186,6 +1191,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
               // older per-field persistence, including legacy rows without IDs.
               saveReceptionSnapshot(scope, snapshot(page.after));
               receiptCursor = page.after;
+              receiptDirty = false;
             }
             for (const receipt of page.receipts) {
               switch (receipt.kind) {
@@ -1225,7 +1231,16 @@ export const useChat = create<ChatState>((rawSet, get) => ({
             }
           },
           persist: (cursor) => {
-            saveReceptionSnapshot(scope, snapshot(cursor));
+            // Observation-only wakes can reserve an empty page at the already
+            // committed prefix. They still ACK, without rewriting the ledger.
+            if (
+              receiptDirty ||
+              receiptCursor?.epoch !== cursor.epoch ||
+              receiptCursor?.sequence !== cursor.sequence
+            ) {
+              saveReceptionSnapshot(scope, snapshot(cursor));
+              receiptDirty = false;
+            }
             receiptCursor = cursor;
             receiptPending = false;
           },
@@ -1239,20 +1254,18 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     };
     const stopReceptionObservation = useChat.subscribe((state, previous) => {
       synchronizeDelivery();
+      const changed = durableReceptionChanged(state, previous);
+      if (receiptScope && lease.current() && changed) receiptDirty = true;
       if (
         receiptScope &&
         receiptCursor &&
         !receiptPending &&
         lease.current() &&
-        (state.ledger !== previous.ledger ||
-          state.overflowUnread !== previous.overflowUnread ||
-          state.unread !== previous.unread ||
-          state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
-          state.historyFullBaselines !== previous.historyFullBaselines ||
-          state.reception !== previous.reception)
+        changed
       ) {
         try {
           saveReceptionSnapshot(receiptScope, snapshot(receiptCursor));
+          receiptDirty = false;
         } catch (error) {
           failReception(error);
         }
@@ -2139,6 +2152,34 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     reportError: (message) => rawSet({ error: message }),
   }),
 }));
+
+/** UI recovery observations do not change the durable reception commit. */
+function durableReceptionChanged(state: ChatState, previous: ChatState) {
+  if (
+    state.ledger !== previous.ledger ||
+    state.overflowUnread !== previous.overflowUnread ||
+    state.unread !== previous.unread ||
+    state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
+    state.historyFullBaselines !== previous.historyFullBaselines
+  )
+    return true;
+  if (state.reception === previous.reception) return false;
+  // Batch progress is recovery state, unlike phase/check-time presentation.
+  return [
+    ...new Set([
+      ...Object.keys(state.reception),
+      ...Object.keys(previous.reception),
+    ]),
+  ].some((key) => {
+    const next = state.reception[key];
+    const prior = previous.reception[key];
+    return (
+      (next?.received ?? 0) !== (prior?.received ?? 0) ||
+      next?.batchId !== prior?.batchId ||
+      (next?.processing ?? false) !== (prior?.processing ?? false)
+    );
+  });
+}
 
 function refreshChannelRecovery(set: Set, get: Get) {
   const recoveryEntries = get()

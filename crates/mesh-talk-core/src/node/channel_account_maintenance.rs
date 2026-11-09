@@ -123,9 +123,11 @@ struct Capability {
     account_hint: Option<String>,
     probe_at: Instant,
     poll_at: Instant,
+    poll_failed: bool,
     after: Option<ConversationId>,
     pending: VecDeque<ConversationId>,
     binding_poll_at: Instant,
+    binding_failed: bool,
     binding_channel: Option<ConversationId>,
     binding_after: Option<String>,
     binding_cursor: usize,
@@ -133,12 +135,119 @@ struct Capability {
 }
 #[derive(Default)]
 pub(super) struct ChannelAccountMaintenance {
+    #[cfg(test)]
+    projection_reads: usize,
+    #[cfg(test)]
+    distribution_reads: usize,
+    input: Option<[u8; 32]>,
+    observed_input: Option<[u8; 32]>,
+    run_at: Option<Instant>,
+    settled: BTreeMap<[u8; 32], ([u8; 32], Instant)>,
     peers: BTreeMap<String, Capability>,
     peer_cursor: usize,
     channel_cursor: usize,
     refresh_after: BTreeMap<([u8; 32], [u8; 32]), Instant>,
 }
 impl ChannelAccountMaintenance {
+    pub(super) fn deadline(&self) -> Instant {
+        self.run_at.unwrap_or_else(Instant::now)
+    }
+
+    // Scheduling evidence only: admitted work still checks current signed
+    // authority, privacy and source fences. Capture before work, so mutations
+    // during a turn cannot be acknowledged by that turn's completion.
+    // Watch generations and last-seen timestamps are deliberately excluded.
+    fn input(&self, node: &Node) -> Result<[u8; 32], LogError> {
+        use sha2::{Digest, Sha256};
+        let revision = node.group_projection_revision()?;
+        let consent = node
+            .channel_migration
+            .lock()
+            .expect("channel migration lock")
+            .record
+            .roots
+            .clone();
+        let mut routes: Vec<_> = node
+            .roster
+            .lock()
+            .expect("roster lock")
+            .peers()
+            .into_iter()
+            .map(|peer| {
+                let mut routes: Vec<_> = peer
+                    .routes
+                    .iter()
+                    .map(|route| route.addr)
+                    .chain([peer.addr])
+                    .collect();
+                routes.sort_unstable();
+                routes.dedup();
+                (peer.public, peer.account_id, peer.post_office, routes)
+            })
+            .collect();
+        routes.sort_unstable_by_key(|peer| peer.0.user_id());
+        // Raw cached hints grant nothing. Calling routing_peers here would
+        // evaluate shared-group authority before the producer gate.
+        let mut cached = node
+            .privacy
+            .state
+            .read()
+            .expect("privacy state lock")
+            .as_ref()
+            .map(|state| state.routes.routes())
+            .unwrap_or_default();
+        cached.sort_unstable_by_key(|(public, ip)| (public.ed25519_pub, public.x25519_pub, *ip));
+        let capabilities: Vec<_> = self
+            .peers
+            .iter()
+            .map(|(id, value)| {
+                (
+                    id,
+                    &value.public,
+                    value.generation,
+                    value.supported,
+                    value.supported && Instant::now() < value.probe_at,
+                    &value.proof,
+                    &value.account_hint,
+                )
+            })
+            .collect();
+        let bytes = bincode::serialize(&(
+            revision,
+            consent,
+            routes,
+            cached,
+            capabilities,
+            node.sibling_availability_revision(),
+        ))
+        .map_err(|error| LogError::Serialization(error.to_string()))?;
+        Ok(Sha256::digest(bytes).into())
+    }
+
+    fn next_deadline(&self, own_account: &str) -> Instant {
+        let now = Instant::now();
+        let mut deadline = now + REFRESH;
+        for value in self.peers.values() {
+            deadline = deadline.min(value.probe_at);
+            if value.supported {
+                deadline = deadline.min(value.binding_poll_at);
+                if value.account_hint.as_deref() == Some(own_account) {
+                    deadline = deadline.min(value.poll_at);
+                }
+                if !value.pending.is_empty()
+                    || value.after.is_some()
+                    || value.binding_after.is_some()
+                {
+                    deadline = deadline.min(now + Duration::from_secs(3));
+                }
+            }
+        }
+        for (_, at) in self.settled.values() {
+            deadline = deadline.min(*at);
+        }
+        deadline.max(now + Duration::from_secs(3))
+    }
+
     fn capability(&mut self, peer: &PeerRecord, generation: u64) -> &mut Capability {
         let mut routes: Vec<_> = peer
             .routes
@@ -161,9 +270,11 @@ impl ChannelAccountMaintenance {
             account_hint: peer.account_id.clone(),
             probe_at: Instant::now(),
             poll_at: Instant::now(),
+            poll_failed: false,
             after: None,
             pending: VecDeque::new(),
             binding_poll_at: Instant::now(),
+            binding_failed: false,
             binding_channel: None,
             binding_after: None,
             binding_cursor: 0,
@@ -183,9 +294,11 @@ impl ChannelAccountMaintenance {
                 account_hint: peer.account_id.clone(),
                 probe_at: Instant::now(),
                 poll_at: Instant::now(),
+                poll_failed: false,
                 after: None,
                 pending: VecDeque::new(),
                 binding_poll_at: Instant::now(),
+                binding_failed: false,
                 binding_channel: None,
                 binding_after: None,
                 binding_cursor: 0,
@@ -237,6 +350,7 @@ impl Node {
             ));
         }
         self.channel_recovery_notify.notify_one();
+        self.note_ui_change();
         Ok(())
     }
     pub(super) fn record_channel_owner_origin(
@@ -272,6 +386,34 @@ impl Node {
     }
     /// One peer turn and one local channel turn; the existing recovery task owns all state.
     pub(super) async fn maintain_account_channels(&self, work: &mut ChannelAccountMaintenance) {
+        let selected_input = work.input(self).ok();
+        if selected_input.is_some()
+            && work.input == selected_input
+            && Instant::now() < work.deadline()
+        {
+            return;
+        }
+        // New semantic inputs invalidate successful inventory comparisons, but
+        // ordinary notifications and independent changes never erase failures.
+        if selected_input.is_some()
+            && work.observed_input.is_some()
+            && work.observed_input != selected_input
+        {
+            let now = Instant::now();
+            for value in work.peers.values_mut().filter(|value| value.supported) {
+                if !value.poll_failed {
+                    value.poll_at = now;
+                }
+                if !value.binding_failed {
+                    value.binding_poll_at = now;
+                }
+            }
+        }
+        if selected_input.is_some() {
+            work.observed_input = selected_input;
+        }
+        // Capture before work. Mutations during this turn remain dirty.
+        let mut cycle_complete = false;
         let result: Result<(), NodeError> = async {
             let mut peers = self.routing_peers();
             // Capability maintenance serves existing group relationships and siblings,
@@ -288,7 +430,15 @@ impl Node {
                 }
             }
             peers = selected;
+            work.peers
+                .retain(|_, value| peers.iter().any(|peer| peer.public == value.public));
             peers.sort_unstable_by_key(|peer| peer.public.user_id());
+            // Seed only cheap bounded metadata for every admitted candidate;
+            // an unvisited new peer must retain its initial probe deadline.
+            let generation = self.privacy.generation.load(Ordering::Acquire);
+            for peer in &peers {
+                work.capability(peer, generation);
+            }
             if !peers.is_empty() {
                 let peer = &peers[work.peer_cursor % peers.len()];
                 work.peer_cursor = work.peer_cursor.wrapping_add(1);
@@ -327,15 +477,17 @@ impl Node {
                             )
                             .await
                         {
+                            value.poll_failed = false;
                             value.pending = channels.into();
                             value.after = next;
                             value.poll_at = Instant::now()
                                 + if next.is_some() {
                                     Duration::ZERO
                                 } else {
-                                    Duration::from_secs(30)
+                                    REFRESH
                                 };
                         } else {
+                            value.poll_failed = true;
                             value.poll_at = Instant::now() + RETRY;
                         }
                     }
@@ -367,15 +519,48 @@ impl Node {
                 }
             }
             let channels = self.list_channels()?;
+            work.settled
+                .retain(|id, _| channels.iter().any(|channel| channel.id.as_bytes() == id));
+            cycle_complete = channels.is_empty();
             if !channels.is_empty() {
                 let channel = channels[work.channel_cursor % channels.len()].id;
                 work.channel_cursor = work.channel_cursor.wrapping_add(1);
-                self.maintain_one_account_channel(channel, work).await;
+                let ready = self.maintain_one_account_channel(channel, work).await;
+                let completed_input = work.input(self).ok();
+                let now = Instant::now();
+                cycle_complete = ready
+                    && completed_input.is_some()
+                    && channels.iter().all(|row| {
+                        work.settled
+                            .get(row.id.as_bytes())
+                            .is_some_and(|(input, until)| {
+                                Some(*input) == completed_input && *until > now
+                            })
+                    });
             }
 
             Ok(())
         }
         .await;
+        work.run_at = Some(
+            if result.is_ok()
+                && cycle_complete
+                && selected_input.is_some()
+                && work.input(self).ok() == selected_input
+                && !work.peers.values().any(|peer| {
+                    peer.supported
+                        && (!peer.pending.is_empty()
+                            || peer.after.is_some()
+                            || peer.binding_after.is_some())
+                })
+            {
+                work.input = selected_input;
+                work.next_deadline(&self.account_id())
+            } else {
+                work.input = None;
+                Instant::now() + Duration::from_secs(3)
+            },
+        );
         if let Err(error) = result {
             log::warn!("maintain_account_channels deferred after storage failure: {error}");
         }
@@ -403,7 +588,8 @@ impl Node {
         }
         groups.sort_unstable_by_key(|id| *id.as_bytes());
         if groups.is_empty() {
-            work.binding_poll_at = Instant::now() + Duration::from_secs(30);
+            work.binding_failed = false;
+            work.binding_poll_at = Instant::now() + REFRESH;
             work.binding_channel = None;
             work.binding_after = None;
             return Ok(false);
@@ -435,6 +621,7 @@ impl Node {
                         .is_none_or(|after| patch.announce.public().user_id() > *after)
                 }) =>
             {
+                work.binding_failed = false;
                 for patch in patches {
                     let _ = self.apply_relayed_account_transition(&patch, channel);
                 }
@@ -442,7 +629,7 @@ impl Node {
                 if work.binding_after.is_none() {
                     work.binding_channel = None;
                     work.binding_cursor = work.binding_cursor.wrapping_add(1);
-                    work.binding_poll_at = Instant::now() + Duration::from_secs(30);
+                    work.binding_poll_at = Instant::now() + REFRESH;
                 }
             }
             _ => {
@@ -450,6 +637,7 @@ impl Node {
                 // Keep their existing group migration and route support enabled.
                 work.binding_channel = None;
                 work.binding_after = None;
+                work.binding_failed = true;
                 work.binding_poll_at = Instant::now() + RETRY;
             }
         }
@@ -475,6 +663,15 @@ impl Node {
                 return false;
             }
         }
+        let selected_input = work.input(self).ok();
+        if let Some(input) = selected_input
+            && work
+                .settled
+                .get(channel.as_bytes())
+                .is_some_and(|(previous, until)| *previous == input && Instant::now() < *until)
+        {
+            return true;
+        }
         let policy = self.privacy.gate.read().await;
         let result = {
             let _membership = self
@@ -484,6 +681,24 @@ impl Node {
             self.commit_account_maintenance(channel, work)
         };
         drop(policy);
+        if result.is_ok()
+            && let Some(input) = selected_input
+        {
+            let now = Instant::now();
+            let until = work
+                .refresh_after
+                .iter()
+                .filter(|((id, _), at)| *id == *channel.as_bytes() && **at > now)
+                .map(|(_, at)| *at)
+                .min()
+                .unwrap_or(now + REFRESH);
+            if work.settled.len() >= MAX_MIGRATIONS
+                && !work.settled.contains_key(channel.as_bytes())
+            {
+                work.settled.pop_first();
+            }
+            work.settled.insert(*channel.as_bytes(), (input, until));
+        }
         match result {
             Ok(Some(members)) => {
                 self.distribute_channel(channel, &members).await;
@@ -520,6 +735,10 @@ impl Node {
         self.prepare_channel_admission(channel, preparation)?;
         let own = self.own_group_proof();
         let me = self.identity.public();
+        #[cfg(test)]
+        {
+            work.projection_reads += 1;
+        }
         let mut projection = self.account_group_projection(channel)?;
         let Some(state) = projection.state.as_ref() else {
             return Ok(None);
@@ -746,6 +965,19 @@ impl Node {
         {
             return Ok(false);
         }
+        let mut recipients = Vec::new();
+        for (grant, inheritance, proof) in projection.authority.inherited_device_proofs() {
+            if proof.public() != self.identity.public()
+                && proof.account_id().as_deref() == Some(self.account_id().as_str())
+                && state.is_accepted_member(&proof.user_id)
+                && projection.is_authorized(inheritance)?
+            {
+                recipients.push((grant, inheritance, proof));
+            }
+        }
+        if recipients.is_empty() {
+            return Ok(false);
+        }
         let source = self
             .channel_checkpoints
             .source_binding(channel)?
@@ -756,6 +988,10 @@ impl Node {
             .iter()
             .filter(|member| state.is_accepted_member(&member.user_id()))
         {
+            #[cfg(test)]
+            {
+                work.distribution_reads += 1;
+            }
             let distribution = if member.user_id() == self.user_id() {
                 self.channel_senders
                     .lock()
@@ -786,15 +1022,8 @@ impl Node {
             }
         }
         let mut selected = None;
-        for (grant, inheritance, proof) in projection.authority.inherited_device_proofs() {
+        for (grant, inheritance, proof) in recipients {
             let recipient = proof.public();
-            if recipient == self.identity.public()
-                || proof.account_id().as_deref() != Some(self.account_id().as_str())
-                || !state.is_accepted_member(&proof.user_id)
-                || !projection.is_authorized(inheritance)?
-            {
-                continue;
-            }
             let shipped = self
                 .channel_checkpoints
                 .shipped_distributions(&source, state, grant, &recipient)?;
@@ -1353,14 +1582,37 @@ mod tests {
         assert!(absent);
         // This is the ordinary account history worker, without channel recovery:
         // the source's first ReceiveKeys publication remains deliberately pending.
+        let wake_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_wake = Arc::clone(&wake_ready);
+        let sibling = target.identity.public();
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, event| {
+            if peer == sibling && event.starts_with("wake_send_ack revision=") {
+                observed_wake.store(true, Ordering::Release);
+            }
+        }));
         let history = tokio::spawn(Arc::clone(target).run_account_history_loop());
-        struct AbortHistory(tokio::task::AbortHandle);
+        let source_history = tokio::spawn(Arc::clone(source).run_account_history_loop());
+        let source_wake = tokio::spawn(Arc::clone(source).run_account_wake_loop());
+        struct AbortHistory(Vec<tokio::task::AbortHandle>);
         impl Drop for AbortHistory {
             fn drop(&mut self) {
-                self.0.abort();
+                for task in &self.0 {
+                    task.abort();
+                }
             }
         }
-        let _history_cleanup = AbortHistory(history.abort_handle());
+        let _history_cleanup = AbortHistory(vec![
+            history.abort_handle(),
+            source_history.abort_handle(),
+            source_wake.abort_handle(),
+        ]);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !wake_ready.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the real source hint owner must complete its first authenticated sweep");
         let old_history = tokio::time::timeout(Duration::from_secs(8), async {
             loop {
                 if target
@@ -1376,8 +1628,12 @@ mod tests {
         })
         .await;
         if old_history.is_err() {
-            history.abort();
-            let _ = history.await;
+            for task in [history, source_history, source_wake] {
+                task.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(3), task)
+                    .await
+                    .expect("history fixture owners must retire after abort");
+            }
             panic!("initial real history must arrive");
         }
         let old_message = source
@@ -1555,8 +1811,13 @@ mod tests {
             }
         })
         .await;
-        history.abort();
-        let _ = history.await;
+        for task in [history, source_history, source_wake] {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .expect("history fixture owners must retire after abort");
+        }
+        *source.account_client_test_hook.lock().unwrap() = None;
         assert!(
             repaired.is_ok(),
             "history must repair an authorized ciphertext whose first receive snapshot is too new"
@@ -2091,6 +2352,319 @@ mod tests {
         node.await_channel_metadata(channel).await.unwrap();
         drain(node, channel);
         assert_quiet(node, channel, &mut work);
+    }
+
+    #[tokio::test]
+    async fn unchanged_channel_maintenance_does_not_rehydrate_projection_or_distributions() {
+        let group = Group::new().await;
+        let node = &group.nodes[0];
+        let channel = node.create_channel("idle producer", vec![]).await.unwrap();
+        let mut work = ChannelAccountMaintenance::default();
+        for _ in 0..4 {
+            node.maintain_account_channels(&mut work).await;
+            node.await_channel_metadata(channel).await.unwrap();
+        }
+        let hydrations = node.channel_checkpoints.projection_hydrations();
+        let before = (work.projection_reads, work.distribution_reads);
+        assert!(
+            before.0 > 0,
+            "fixture must execute the real projection owner"
+        );
+        for _ in 0..8 {
+            node.maintain_account_channels(&mut work).await;
+            assert!(node.maintain_one_account_channel(channel, &mut work).await);
+        }
+        assert!(
+            work.deadline().saturating_duration_since(Instant::now()) >= Duration::from_secs(290),
+            "quiet maintenance must park at sparse recovery, not a hot tick"
+        );
+        assert_eq!(
+            (work.projection_reads, work.distribution_reads),
+            before,
+            "unchanged producer must not hydrate projection or sender distributions"
+        );
+        assert_eq!(
+            node.channel_checkpoints.projection_hydrations(),
+            hydrations,
+            "measure all published projection hydration, not only commit calls"
+        );
+        node.append_event(channel, EventKind::Message, vec![0; 64])
+            .unwrap();
+        assert!(node.maintain_one_account_channel(channel, &mut work).await);
+        assert!(
+            work.projection_reads > before.0,
+            "source changes must invalidate scheduling evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_capability_retains_pending_inventory_without_a_short_retry_loop() {
+        let group = Group::new().await;
+        let node = &group.nodes[1];
+        let channel = node
+            .create_channel("cooled pending inventory", vec![])
+            .await
+            .unwrap();
+        node.await_channel_metadata(channel).await.unwrap();
+        let peer = node.routing_peer(&group.nodes[2].user_id()).unwrap();
+        let mut work = ChannelAccountMaintenance::default();
+        let value = work.capability(&peer, node.privacy.generation.load(Ordering::Acquire));
+        value.supported = false;
+        value.probe_at = Instant::now() + RETRY;
+        value.pending.push_back(channel);
+        for _ in 0..4 {
+            node.maintain_account_channels(&mut work).await;
+        }
+        assert_eq!(work.peers[&peer.public.user_id()].pending.len(), 1);
+        assert!(
+            work.input.is_some(),
+            "failed capability must park retained inventory until its probe deadline"
+        );
+        assert!(
+            work.deadline().saturating_duration_since(Instant::now()) >= Duration::from_secs(50)
+        );
+    }
+
+    #[tokio::test]
+    async fn unvisited_new_peer_retains_its_initial_probe_deadline() {
+        let group = Group::new().await;
+        let node = &group.nodes[0];
+        let channel = node
+            .create_channel(
+                "new maintenance peer",
+                vec![
+                    group.nodes[1].identity.public(),
+                    group.nodes[3].identity.public(),
+                ],
+            )
+            .await
+            .unwrap();
+        node.await_channel_metadata(channel).await.unwrap();
+        let mut peers: Vec<_> = node
+            .routing_peers()
+            .into_iter()
+            .filter(|peer| node.group_member(&peer.public).unwrap())
+            .collect();
+        peers.sort_unstable_by_key(|peer| peer.public.user_id());
+        assert!(peers.len() >= 2);
+        let mut work = ChannelAccountMaintenance::default();
+        let existing = work.capability(&peers[0], node.privacy.generation.load(Ordering::Acquire));
+        existing.probe_at = Instant::now() + REFRESH;
+        node.maintain_account_channels(&mut work).await;
+        assert!(
+            work.peers.contains_key(&peers[1].public.user_id()),
+            "new unvisited peer must own its initial deadline"
+        );
+        assert!(
+            work.deadline().saturating_duration_since(Instant::now()) <= Duration::from_secs(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn private_sibling_authentication_invalidates_once_without_public_roster_changes() {
+        let group = Group::new().await;
+        let node = &group.nodes[1];
+        let source = &group.nodes[2];
+        let address = node.routing_peer(&source.user_id()).unwrap().addr;
+        for (index, owner, port) in [(1, node, 1), (2, source, address.port())] {
+            owner
+                .configure_privacy(
+                    &group._dir.path().join(index.to_string()),
+                    "pw",
+                    &owner.signed_announce("private sibling", port),
+                    Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+                )
+                .unwrap();
+        }
+        source.set_invisible(true).await.unwrap();
+        let proof = source.signed_announce("private sibling", address.port());
+        {
+            let mut guard = node.privacy.state.write().unwrap();
+            let state = guard.as_mut().unwrap();
+            state.proofs.record(&proof).unwrap();
+            state
+                .routes
+                .record(&source.identity.public(), address.ip())
+                .unwrap();
+        }
+        *node.roster.lock().unwrap() = Roster::default();
+        let work = ChannelAccountMaintenance::default();
+        let before = work.input(node).unwrap();
+        let mut changes = node.subscribe_sibling_availability();
+        drop(
+            node.privacy_dial(address, &source.identity.public())
+                .await
+                .unwrap(),
+        );
+        assert!(
+            changes.has_changed().unwrap(),
+            "real private authentication must wake the owner"
+        );
+        changes.borrow_and_update();
+        let available = work.input(node).unwrap();
+        assert_ne!(
+            available, before,
+            "the new watch must invalidate the producer gate"
+        );
+        assert!(node.roster.lock().unwrap().peers().is_empty());
+        drop(
+            node.privacy_dial(address, &source.identity.public())
+                .await
+                .unwrap(),
+        );
+        assert!(
+            !changes.has_changed().unwrap(),
+            "unchanged authentication renewal must coalesce"
+        );
+        assert_eq!(work.input(node).unwrap(), available);
+    }
+
+    #[tokio::test]
+    async fn deferred_channel_is_not_acknowledged_by_another_channels_success() {
+        let group = Group::new().await;
+        let node = &group.nodes[0];
+        let deferred = node.create_channel("deferred", vec![]).await.unwrap();
+        let ready = node.create_channel("ready", vec![]).await.unwrap();
+        node.await_channel_metadata(deferred).await.unwrap();
+        node.await_channel_metadata(ready).await.unwrap();
+        *node.account_channel_maintenance_test_hook.lock().unwrap() =
+            Some(Arc::new(move |channel| channel != deferred));
+        let mut work = ChannelAccountMaintenance::default();
+        for _ in 0..8 {
+            node.maintain_account_channels(&mut work).await;
+        }
+        assert!(
+            work.settled.contains_key(ready.as_bytes()),
+            "the other channel must complete real maintenance"
+        );
+        assert!(!work.settled.contains_key(deferred.as_bytes()));
+        assert!(
+            work.input.is_none(),
+            "one ready channel cannot acknowledge another channel's deferred work"
+        );
+        assert!(
+            work.deadline().saturating_duration_since(Instant::now()) <= Duration::from_secs(3)
+        );
+        *node.account_channel_maintenance_test_hook.lock().unwrap() = None;
+        for _ in 0..8 {
+            node.maintain_account_channels(&mut work).await;
+        }
+        assert!(
+            work.settled.contains_key(deferred.as_bytes()),
+            "removing the hold must recover retained work"
+        );
+        assert!(work.input.is_some());
+    }
+
+    #[tokio::test]
+    async fn invisible_cached_group_routes_do_not_hydrate_stamp_inputs() {
+        let group = Group::new().await;
+        let node = &group.nodes[0];
+        let peer = &group.nodes[1];
+        let address = node.routing_peer(&peer.user_id()).unwrap().addr;
+        let channel = node
+            .create_channel("cached authority", vec![peer.identity.public()])
+            .await
+            .unwrap();
+        node.await_channel_metadata(channel).await.unwrap();
+        node.configure_privacy(
+            &group._dir.path().join("0"),
+            "pw",
+            &node.signed_announce("owner", 1),
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.set_invisible(true).await.unwrap();
+        *node.roster.lock().unwrap() = Roster::default();
+        {
+            let mut state = node.privacy.state.write().unwrap();
+            let state = state.as_mut().unwrap();
+            let proof = peer.signed_announce("cached member", address.port());
+            state.proofs.record(&proof).unwrap();
+            state.routes.record(&proof.public(), address.ip()).unwrap();
+        }
+        let before = node.channel_checkpoints.state_hydrations();
+        assert!(
+            node.cached_routing_peers()
+                .iter()
+                .any(|candidate| candidate.public == peer.identity.public()),
+            "fixture must exercise a genuine cached shared-group grant"
+        );
+        assert!(
+            node.channel_checkpoints.state_hydrations() > before,
+            "negative control must show filtered routing hydrates authority"
+        );
+        let counts = (
+            node.channel_checkpoints.projection_hydrations(),
+            node.channel_checkpoints.state_hydrations(),
+        );
+        let work = ChannelAccountMaintenance::default();
+        let input = work.input(node).unwrap();
+        for _ in 0..8 {
+            assert_eq!(work.input(node).unwrap(), input);
+        }
+        assert_eq!(
+            (
+                node.channel_checkpoints.projection_hydrations(),
+                node.channel_checkpoints.state_hydrations()
+            ),
+            counts,
+            "a scheduling stamp must not authorize raw cached hints"
+        );
+    }
+
+    #[tokio::test]
+    async fn unselected_cached_peer_cannot_retain_an_expired_maintenance_deadline() {
+        let group = Group::new().await;
+        let node = &group.nodes[0];
+        let peer = node.routing_peer(&group.nodes[3].user_id()).unwrap();
+        let mut work = ChannelAccountMaintenance::default();
+        let value = work.capability(&peer, node.privacy.generation.load(Ordering::Acquire));
+        value.supported = true;
+        value.probe_at = Instant::now() - RETRY;
+        value.binding_poll_at = Instant::now() - RETRY;
+        // The cached capability predates the current absence of a shared grant.
+        assert!(!node.group_member(&peer.public).unwrap());
+        for _ in 0..4 {
+            node.maintain_account_channels(&mut work).await;
+        }
+        assert!(
+            work.peers.is_empty(),
+            "unselected full identities must retire their deadlines"
+        );
+        assert!(
+            work.deadline().saturating_duration_since(Instant::now()) >= Duration::from_secs(290)
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_maintenance_invalidation_preserves_failed_inventory_cooldowns() {
+        let group = Group::new().await;
+        let node = &group.nodes[1];
+        let peer = node.routing_peer(&group.nodes[2].user_id()).unwrap();
+        let mut work = ChannelAccountMaintenance::default();
+        let value = work.capability(&peer, node.privacy.generation.load(Ordering::Acquire));
+        value.supported = true;
+        value.probe_at = Instant::now() + REFRESH;
+        value.poll_at = Instant::now() + RETRY;
+        value.binding_poll_at = Instant::now() + RETRY;
+        value.poll_failed = true;
+        value.binding_failed = true;
+        let deadlines = (value.poll_at, value.binding_poll_at);
+        work.observed_input = Some(work.input(node).unwrap());
+        work.input = work.observed_input;
+        work.run_at = Some(Instant::now() + REFRESH);
+        node.privacy
+            .projection_revision
+            .fetch_add(1, Ordering::SeqCst);
+        node.maintain_account_channels(&mut work).await;
+        let value = &work.peers[&peer.public.user_id()];
+        assert_eq!(
+            (value.poll_at, value.binding_poll_at),
+            deadlines,
+            "semantic changes cannot erase a failed exchange's cooldown"
+        );
+        assert!(value.poll_failed && value.binding_failed);
     }
 
     #[test]

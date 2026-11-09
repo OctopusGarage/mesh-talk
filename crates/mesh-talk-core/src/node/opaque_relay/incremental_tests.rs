@@ -123,7 +123,7 @@ async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
         )
         .unwrap();
     }
-    let expected = node.file_consent_events(&sender.public()).unwrap();
+    let mut expected = node.file_consent_events(&sender.public()).unwrap();
     assert_eq!(
         expected.len(),
         8,
@@ -161,6 +161,103 @@ async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
         (8..=16).contains(&checks),
         "one discovery of eight offers plus one fresh singleton check per selected control must examine at most sixteen offers, actual={checks}"
     );
+    // The first completed exchange may publish its final receive checkpoint.
+    // One unchanged round establishes stable local/remote control evidence.
+    counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    node.storage.participant_database().unwrap().transaction(|connection| {
+            connection.execute_batch("CREATE TEMP TABLE quiet_consent_probe(value INTEGER); INSERT INTO quiet_consent_probe VALUES(1),(2),(3); UPDATE main.participant_profile SET singleton=singleton WHERE 0")?;
+        Ok(())
+    }).unwrap();
+    super::super::file_consent::offered_observations::reset();
+    let (_, custody, _) = counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    assert_eq!(
+        super::super::file_consent::offered_observations::count(),
+        0,
+        "unchanged confirmed consent controls must not rehydrate historical offers on every mailbox poll"
+    );
+    assert_eq!(
+        custody, 0,
+        "unchanged control evidence must not repeat per-event HAVE requests"
+    );
+    let replacement_directory = tempfile::tempdir().unwrap();
+    let replacement_office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(replacement_directory.path()).unwrap(),
+        &replacement_directory.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    super::super::file_consent::offered_observations::reset();
+    counted_scope_exchange(
+        &node,
+        replacement_office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    assert!(
+        super::super::file_consent::offered_observations::count() > 0,
+        "a replacement store behind the same relay identity must not inherit control confirmation"
+    );
+    for control in &expected {
+        assert!(
+            NetworkSyncStore::durable_have(
+                &replacement_office,
+                &mailbox.id(),
+                &mailbox.wrap(control).unwrap().id
+            )
+            .unwrap()
+        );
+    }
+    node.set_attachment_global_auto(false).unwrap();
+    super::super::file_consent::offered_observations::reset();
+    counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    assert!(
+        super::super::file_consent::offered_observations::count() > 0,
+        "a changed local consent policy must bypass quiet control evidence immediately"
+    );
+    for control in node.file_consent_events(&sender.public()).unwrap() {
+        assert!(
+            NetworkSyncStore::durable_have(
+                &office,
+                &mailbox.id(),
+                &mailbox.wrap(&control).unwrap().id
+            )
+            .unwrap()
+        );
+    }
+    node.set_attachment_global_auto(true).unwrap();
+    expected = node.file_consent_events(&sender.public()).unwrap();
     let progress = OpaqueMailboxProgress::new(
         &relay.public(),
         &sender.public(),
@@ -1053,7 +1150,17 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
             (1, 1),
             "missing target hint must fetch exactly one selected body"
         );
-        let absent = EventId::new([233; 32]);
+        let late = Event::new(
+            &node.identity,
+            conversation,
+            count + 1,
+            vec![],
+            count + 1,
+            0,
+            EventKind::Message,
+            vec![9; 128],
+        );
+        let absent = late.id;
         node.remember_wrapper_id(mailbox.id(), absent, first);
         let rejected = counted_scope_exchange(
             &node,
@@ -1078,6 +1185,66 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
                 .unwrap()
                 .body_read_counts(),
             after
+        );
+        // Missing target lookup is also a quiet query. Warm each exact mailbox
+        // once, then rotate beyond the four heavy view owners without rescanning.
+        for (relay, office) in &relays {
+            for federated in [false, true] {
+                let rejected = counted_scope_exchange(
+                    &node,
+                    office.clone(),
+                    relay,
+                    &remote.public(),
+                    conversation,
+                    federated,
+                    Some(absent),
+                )
+                .await;
+                assert_eq!(rejected.1, 0);
+                assert!(!rejected.2.iter().any(|(inner, _)| *inner == absent));
+            }
+        }
+        incremental::HISTORY_METADATA_ROWS.with(|rows| rows.set(0));
+        let negative_sql = (
+            node.storage
+                .database()
+                .read(|c| Ok(c.total_changes()))
+                .unwrap(),
+            node.storage.database().successful_write_commits(),
+        );
+        for _ in 0..2 {
+            for (relay, office) in &relays {
+                for federated in [false, true] {
+                    let rejected = counted_scope_exchange(
+                        &node,
+                        office.clone(),
+                        relay,
+                        &remote.public(),
+                        conversation,
+                        federated,
+                        Some(absent),
+                    )
+                    .await;
+                    assert_eq!(rejected.1, 0);
+                    assert!(!rejected.2.iter().any(|(inner, _)| *inner == absent));
+                }
+            }
+        }
+        assert_eq!(
+            incremental::HISTORY_METADATA_ROWS.with(|rows| rows.get()),
+            0,
+            "unchanged negative membership lookup must not rebuild historical selections"
+        );
+        assert_eq!(
+            (
+                node.storage
+                    .database()
+                    .read(|c| Ok(c.total_changes()))
+                    .unwrap(),
+                node.storage.database().successful_write_commits()
+            ),
+            negative_sql,
+            "qualified negative queries must not persist optional runtime evidence or rewrite selections"
         );
         // A destructive remote fence invalidates the compact completion even
         // when all payloads happen to remain durable (no body work required).
@@ -1140,7 +1307,7 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
         );
         let quiet = counted_scope_exchange(
             &node,
-            replacement,
+            replacement.clone(),
             relay,
             &remote.public(),
             conversation,
@@ -1149,6 +1316,34 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
         )
         .await;
         assert_eq!(quiet.1, 0);
+        // Negative membership is version-qualified, never permanent. The exact
+        // previously absent target becomes selectable when its source arrives.
+        // The earlier negative test deliberately signed a false wrapper mapping.
+        // Retire that fixture poison so this phase isolates source invalidation;
+        // an invalid optional hint must use the normal exact-body fallback.
+        let mut late_hint = b"wrapper-v1".to_vec();
+        late_hint.extend_from_slice(mailbox.id().as_bytes());
+        late_hint.extend_from_slice(absent.as_bytes());
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .put_wrapper_hint(&late_hint, b"invalid-signature")
+            .unwrap();
+        node.log.lock().unwrap().append_durable(late).unwrap();
+        let recovered = counted_scope_exchange(
+            &node,
+            replacement,
+            relay,
+            &remote.public(),
+            conversation,
+            false,
+            Some(absent),
+        )
+        .await;
+        assert!(
+            recovered.2.iter().any(|(inner, _)| *inner == absent),
+            "new source must invalidate old negative membership evidence"
+        );
         // Send-only clients must qualify remote custody without consuming the
         // incoming receive cursor or requiring the incoming finite drain.
         node.set_post_office_permissions(true, false);

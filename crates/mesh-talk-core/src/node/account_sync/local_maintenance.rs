@@ -5,6 +5,13 @@ use crate::node::account_group::operations::AccountGroupDataWorkTurn;
 #[derive(Default)]
 pub(super) struct LocalMaintenance {
     custody: Option<(EventId, String)>,
+    custody_input: Option<CustodyInput>,
+    custody_selected: Option<CustodyInput>,
+    custody_active: bool,
+    custody_repair_page: bool,
+    custody_repair_cursor: Option<(EventId, String)>,
+    custody_repair_at: Option<std::time::Instant>,
+    custody_retry: Option<(Option<CustodyInput>, std::time::Instant)>,
     inventory: Option<ConversationId>,
     inventory_cycle_pending: bool,
     profile: Option<String>,
@@ -30,6 +37,26 @@ impl PublicationInput {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CustodyInput {
+    projection: PublicationInput,
+    journal: u64,
+}
+impl CustodyInput {
+    fn capture(node: &Node) -> Result<Self, crate::eventlog::LogError> {
+        let projection = PublicationInput::capture(node)?;
+        let journal = node
+            .channel_custody
+            .lock()
+            .expect("custody mutex")
+            .revision();
+        Ok(Self {
+            projection,
+            journal,
+        })
+    }
+}
+
 const PUBLICATION_REPAIR_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const PUBLICATION_FAILURE_RETRY: Duration = Duration::from_secs(5);
 
@@ -47,6 +74,71 @@ impl LocalMaintenance {
         self.publication_retry
             .map(|(_, at)| at)
             .or(self.publication_repair_at)
+            .into_iter()
+            .chain(
+                self.custody_retry
+                    .map(|(_, at)| at)
+                    .or(self.custody_repair_at),
+            )
+            .min()
+    }
+
+    fn maintain_custody(&mut self, node: &Node) -> (bool, bool) {
+        let input = CustodyInput::capture(node).ok();
+        let now = std::time::Instant::now();
+        let retry_due = self
+            .custody_retry
+            .is_none_or(|(previous, at)| previous != input || at <= now);
+        let dirty = self.custody_active
+            || input.is_none()
+            || self.custody_input != input
+            || self.custody_repair_at.is_none_or(|at| at <= now);
+        if !retry_due || !dirty {
+            return (false, false);
+        }
+        if input.is_none() {
+            self.custody_repair_at = None;
+            self.custody_retry = Some((None, now + PUBLICATION_FAILURE_RETRY));
+            return (false, false);
+        }
+        if !self.custody_active {
+            self.custody_selected = input;
+            self.custody_repair_page = self.custody_input == input;
+            self.custody_active = true;
+        }
+        self.custody_retry = None;
+        self.custody_repair_at = None;
+        let result = if self.custody_repair_page {
+            node.migrate_channel_custody(&mut self.custody_repair_cursor)
+        } else {
+            node.migrate_channel_custody(&mut self.custody)
+        };
+        match result {
+            Ok(_) if self.custody_repair_page => {
+                // Integrity repair rotates one page per sparse deadline; a
+                // timer alone must never drain the entire historical journal.
+                self.custody_selected = None;
+                self.custody_active = false;
+                self.custody_repair_at =
+                    Some(std::time::Instant::now() + PUBLICATION_REPAIR_INTERVAL);
+                (false, true)
+            }
+            Ok(false) => (true, false),
+            Ok(true) => {
+                self.custody_input = self.custody_selected.take();
+                self.custody_active = false;
+                self.custody_repair_cursor = None;
+                self.custody_repair_at =
+                    Some(std::time::Instant::now() + PUBLICATION_REPAIR_INTERVAL);
+                (false, true)
+            }
+            Err(error) => {
+                log::debug!("custody migration awaits recovery: {error}");
+                self.custody_retry =
+                    Some((input, std::time::Instant::now() + PUBLICATION_FAILURE_RETRY));
+                (false, false)
+            }
+        }
     }
 
     pub(super) fn run(
@@ -87,8 +179,8 @@ impl LocalMaintenance {
                     .map(|sequence| (group, sequence))
             })
             .collect();
-        node.migrate_channel_custody(&mut self.custody);
-        let mut more_inventory = false;
+        let (custody_more, custody_complete) = self.maintain_custody(&node);
+        let mut more_inventory = custody_more;
         let mut publication_complete = false;
         if publish {
             self.publication_failed |= publication_input.is_none();
@@ -103,7 +195,7 @@ impl LocalMaintenance {
             let inventory = node.publish_group_inventory(&mut self.inventory);
             self.inventory_cycle_pending |= access.is_pending() || inventory.is_pending();
             self.publication_failed |= access.is_failed() || inventory.is_failed();
-            more_inventory =
+            more_inventory |=
                 self.access.is_some() || self.inventory.is_some() || self.inventory_cycle_pending;
             if self.access.is_none() && self.inventory.is_none() {
                 if self.publication_failed {
@@ -115,7 +207,7 @@ impl LocalMaintenance {
                     ));
                     self.publication_selected = None;
                     self.publication_failed = false;
-                    more_inventory = false;
+                    more_inventory = custody_more;
                 } else if !self.inventory_cycle_pending {
                     self.publication_input = self.publication_selected.take();
                     publication_complete = true;
@@ -146,6 +238,9 @@ impl LocalMaintenance {
             }
             turn
         });
+        if custody_complete {
+            more_inventory |= CustodyInput::capture(&node).ok() != self.custody_input;
+        }
         if publication_complete {
             // Only the selected stamp was acknowledged. Observe newer inputs
             // solely to retain one follow-up, including independent work above.
@@ -230,6 +325,212 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    async fn custody_fixture() -> (tempfile::TempDir, Arc<Node>, ConversationId, EventId) {
+        let (directory, node, _sibling) = super::super::selection_tests::sibling_nodes();
+        let channel = node
+            .create_channel("custody producer", vec![])
+            .await
+            .unwrap();
+        node.send_channel_message(channel, b"custody migration")
+            .await
+            .unwrap();
+        let event = node
+            .channel_history(channel, 20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.text == b"custody migration")
+            .unwrap()
+            .id;
+        node.channel_custody
+            .lock()
+            .unwrap()
+            .confirm(event, &node.user_id())
+            .unwrap();
+        (directory, node, channel, event)
+    }
+
+    #[tokio::test]
+    async fn unchanged_local_custody_migration_does_not_rebuild_certificates() {
+        let (_directory, node, channel, event) = custody_fixture().await;
+        let reads = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        let mut cold_cursor = None;
+        assert!(!node.migrate_channel_custody(&mut cold_cursor).unwrap());
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            reads,
+            "cold required custody migration only needs authoritative scope metadata"
+        );
+        let mut state = settle_publication(&node, LocalMaintenance::default()).await;
+        let before = node.custody_certificate_builds();
+        assert!(
+            before > 0,
+            "fixture must run real custody certificate publication"
+        );
+        for _ in 0..8 {
+            state = state.run(node.clone(), 0, false).state;
+        }
+        assert_eq!(
+            node.custody_certificate_builds(),
+            before,
+            "unchanged local turns must not cycle the historical custody journal"
+        );
+        let revision = node.channel_custody.lock().unwrap().revision();
+        node.channel_custody
+            .lock()
+            .unwrap()
+            .confirm(event, &node.user_id())
+            .unwrap();
+        assert_eq!(
+            node.channel_custody.lock().unwrap().revision(),
+            revision,
+            "no-op confirmations do not invalidate migration"
+        );
+        state = state.run(node.clone(), 0, false).state;
+        assert_eq!(node.custody_certificate_builds(), before);
+        node.channel_custody
+            .lock()
+            .unwrap()
+            .revoke(event, &node.user_id())
+            .unwrap();
+        assert!(node.channel_custody.lock().unwrap().revision() > revision);
+        state = settle_publication(&node, state).await;
+        let key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(channel.as_bytes()),
+            event: hex::encode(event.as_bytes()),
+            holder: node.user_id(),
+        };
+        assert_eq!(
+            state.custody_input.unwrap().journal,
+            node.channel_custody.lock().unwrap().revision(),
+            "changed journal must complete a fresh migration cycle"
+        );
+        assert!(
+            !node.account_document(&key).unwrap().unwrap().meta.tombstone,
+            "legacy migration must preserve the newer signed positive observation"
+        );
+        node.channel_custody
+            .lock()
+            .unwrap()
+            .confirm(event, &node.user_id())
+            .unwrap();
+        let _state = settle_publication(&node, state).await;
+        assert!(!node.account_document(&key).unwrap().unwrap().meta.tombstone);
+        assert!(node.custody_certificate_builds() > before);
+    }
+
+    #[tokio::test]
+    async fn sparse_custody_repair_visits_only_one_page_and_retains_failed_cursor() {
+        let (_directory, node, channel, _event) = custody_fixture().await;
+        for _ in 0..64 {
+            node.append_event(channel, crate::eventlog::EventKind::Message, vec![0; 64])
+                .unwrap();
+        }
+        let author = crate::eventlog::Author::from_ed25519(node.identity.public().ed25519_pub);
+        let keys = node
+            .log
+            .lock()
+            .unwrap()
+            .message_keys_after(channel, author, None, 128)
+            .unwrap();
+        assert_eq!(
+            keys.len(),
+            65,
+            "the fixture must contain more than two real journal pages"
+        );
+        for (_, event) in keys {
+            node.channel_custody
+                .lock()
+                .unwrap()
+                .confirm(event, &node.user_id())
+                .unwrap();
+        }
+        node.await_channel_metadata(channel).await.unwrap();
+        let mut state = settle_publication(&node, LocalMaintenance::default()).await;
+        let before = node.custody_certificate_builds();
+        state.custody_repair_at = Some(std::time::Instant::now());
+        let turn = state.run(node.clone(), 0, false);
+        assert!(
+            !turn.more_inventory,
+            "an integrity deadline must not start a full historical drain"
+        );
+        state = turn.state;
+        let after_page = node.custody_certificate_builds();
+        assert!(after_page > before && after_page - before <= 32);
+        let cursor = state.custody_repair_cursor.clone();
+        assert!(cursor.is_some());
+        for _ in 0..8 {
+            state = state.run(node.clone(), 0, false).state;
+        }
+        assert_eq!(node.custody_certificate_builds(), after_page);
+        let next = node
+            .channel_custody
+            .lock()
+            .unwrap()
+            .observations_after(cursor.as_ref())
+            .unwrap()[0]
+            .0
+            .0;
+        node.log.lock().unwrap().fail_read_for(Some(next));
+        state.custody_repair_at = Some(std::time::Instant::now());
+        state = state.run(node.clone(), 0, false).state;
+        assert_eq!(
+            state.custody_repair_cursor, cursor,
+            "failed scope read must retain the repair page"
+        );
+        assert!(state.custody_retry.is_some());
+        state = state.run(node.clone(), 0, false).state;
+        assert_eq!(node.custody_certificate_builds(), after_page);
+        node.log.lock().unwrap().fail_read_for(None);
+        state.custody_retry.as_mut().unwrap().1 = std::time::Instant::now();
+        let turn = state.run(node.clone(), 0, false);
+        assert!(!turn.more_inventory);
+        assert_ne!(turn.state.custody_repair_cursor, cursor);
+        assert!(node.custody_certificate_builds() - after_page <= 32);
+    }
+
+    #[tokio::test]
+    async fn failed_custody_migration_keeps_the_unpublished_cursor() {
+        let (_directory, node, _channel, _event) = custody_fixture().await;
+        node.account_documents
+            .lock()
+            .unwrap()
+            .fail_index_for_test(true);
+        let mut after = None;
+        assert!(node.migrate_channel_custody(&mut after).is_err());
+        assert!(
+            after.is_none(),
+            "failed publication must not advance the durable observation cursor"
+        );
+        let turn = LocalMaintenance::default().run(node.clone(), 0, false);
+        assert!(turn.state.custody_retry.is_some());
+        let certificates = node.custody_certificate_builds();
+        let mut state = turn.state.run(node.clone(), 0, false).state;
+        assert_eq!(
+            node.custody_certificate_builds(),
+            certificates,
+            "ordinary local turns must respect failed migration backoff"
+        );
+        node.account_documents
+            .lock()
+            .unwrap()
+            .fail_index_for_test(false);
+        state.custody_retry.as_mut().unwrap().1 = std::time::Instant::now();
+        let state = settle_publication(&node, state).await;
+        assert!(state.custody_retry.is_none());
+        assert!(state.custody_input.is_some());
     }
 
     #[tokio::test]

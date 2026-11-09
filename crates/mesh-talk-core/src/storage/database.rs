@@ -14,6 +14,8 @@ use std::{
 use zeroize::Zeroizing;
 
 mod observation;
+mod page_observation;
+pub(crate) use page_observation::snapshot as observe_page_writes;
 
 // Part of the on-disk key format; prevents SQLCipher raw-key syntax bypass.
 const PASSPHRASE_DOMAIN: &str = "mesh-talk:profile-indexed-database:v1:";
@@ -115,7 +117,7 @@ pub(crate) struct PhysicalStats {
     pub freelist_count: u64,
 }
 impl PhysicalStats {
-    fn read_on(c: &Connection) -> Result<Self, LogError> {
+    pub(crate) fn read_on(c: &Connection) -> Result<Self, LogError> {
         require_incremental_vacuum(c)?;
         let scalar = |name| -> Result<u64, LogError> {
             let value: i64 = c.pragma_query_value(None, name, |r| r.get(0))?;
@@ -171,6 +173,20 @@ impl PassiveCheckpointProgress {
             Self::NoWal => true,
             Self::Frames { log, checkpointed } => log == checkpointed,
         }
+    }
+}
+
+/// Runtime evidence for the profile's one leased writer connection. A MAIN
+/// no-op transaction can advance its file version without writing any page.
+/// This is not a multi-writer change detector or persistent revision.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MainWriteStamp {
+    version: u32,
+    writes: i32,
+}
+impl MainWriteStamp {
+    pub(crate) fn unchanged_since(&self, current: &Self) -> bool {
+        self.version == current.version || self.writes == current.writes
     }
 }
 
@@ -300,15 +316,23 @@ impl EncryptedDatabase {
         }
         connection.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
         connection.pragma_update(None, "journal_size_limit", JOURNAL_BYTES)?;
+        let write_observer = observation::from_env();
+        if write_observer.is_some() {
+            page_observation::install(&mut connection);
+        }
         Ok(Self {
             connection: Mutex::new(connection),
             path,
             faulted: AtomicBool::new(false),
-            write_observer: observation::from_env(),
+            write_observer,
             #[cfg(test)]
             successful_write_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
+    pub(crate) fn work_observation_enabled(&self) -> bool {
+        self.write_observer.is_some()
+    }
+
     pub(crate) fn physical_stats(&self) -> Result<PhysicalStats, LogError> {
         self.read(PhysicalStats::read_on)
     }
@@ -473,6 +497,66 @@ impl EncryptedDatabase {
         }
         self.checked_operation(operation(&connection))
     }
+    /// Runtime-only MAIN file version, including this connection's writes but
+    /// excluding unrelated TEMP work. Compare only within this open owner and a
+    /// finite hint lifetime. Unsupported backends supply no unchanged evidence.
+    #[cfg(test)]
+    fn main_data_version(&self) -> Result<Option<u32>, LogError> {
+        self.read(Self::main_data_version_on)
+    }
+    fn main_data_version_on(connection: &Connection) -> Result<Option<u32>, LogError> {
+        let mut version = 0u32;
+        // SAFETY: read holds the connection mutex and its live handle;
+        // "main" is static/NUL-terminated and this opcode writes exactly
+        // one u32 to the valid aligned output pointer. No pointer escapes.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                connection.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_DATA_VERSION,
+                (&mut version as *mut u32).cast(),
+            )
+        };
+        match result {
+            rusqlite::ffi::SQLITE_OK => Ok(Some(version)),
+            rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
+            code => Err(context(
+                "read main data version",
+                rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+            )),
+        }
+    }
+
+    /// Capture both scalars under the same connection guard. Only use within
+    /// this open profile's exclusive-writer lease and finite hint lifetime.
+    pub(crate) fn main_write_stamp(&self) -> Result<Option<MainWriteStamp>, LogError> {
+        self.read(|connection| {
+            let Some(version) = Self::main_data_version_on(connection)? else {
+                return Ok(None);
+            };
+            let (mut writes, mut high) = (0, 0);
+            // SAFETY: the guarded handle stays live; this read-only opcode
+            // writes two aligned ints and does not reset either counter.
+            let result = unsafe {
+                rusqlite::ffi::sqlite3_db_status(
+                    connection.handle(),
+                    rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE,
+                    &mut writes,
+                    &mut high,
+                    0,
+                )
+            };
+            match result {
+                rusqlite::ffi::SQLITE_OK => Ok(Some(MainWriteStamp { version, writes })),
+                rusqlite::ffi::SQLITE_ERROR | rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
+                code => Err(context(
+                    "read pager write count",
+                    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+                )),
+            }
+        })
+    }
+
     /// Successful write transactions through this owner, excluding reads and rollbacks.
     #[cfg(test)]
     pub(crate) fn successful_write_commits(&self) -> usize {
@@ -520,7 +604,21 @@ impl EncryptedDatabase {
                     {
                         // Existing native work-observation target remains visible
                         // in release builds whose general log level is WARN.
-                        log::info!(target: "mesh_talk_core::node::node", "{snapshot}");
+                        // This explicitly requested observer must remain usable
+                        // when release builds compile general INFO macros out.
+                        let metadata = log::Metadata::builder()
+                            .level(log::Level::Info)
+                            .target("mesh_talk_core::node::node")
+                            .build();
+                        let logger = log::logger();
+                        if logger.enabled(&metadata) {
+                            logger.log(
+                                &log::Record::builder()
+                                    .metadata(metadata)
+                                    .args(format_args!("{snapshot}"))
+                                    .build(),
+                            );
+                        }
                     }
                     Ok(value)
                 }
@@ -726,6 +824,64 @@ mod tests {
                 .unwrap())
         })
         .unwrap()
+    }
+    #[test]
+    fn main_data_version_ignores_temp_and_reads_but_detects_owner_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = create(&directory.path().join("profile.db"));
+        let before = db.main_data_version().unwrap().unwrap();
+        let stamp = db.main_write_stamp().unwrap().unwrap();
+        let commits = db.successful_write_commits();
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(db.main_data_version().unwrap(), Some(before));
+        assert_eq!(db.successful_write_commits(), commits);
+        db.transaction(|connection| {
+            connection.execute_batch("CREATE TEMP TABLE version_probe(value INTEGER); INSERT INTO version_probe VALUES(1),(2),(3)")?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(db.main_data_version().unwrap(), Some(before));
+        assert!(stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        for sql in [
+            "UPDATE messages SET body=body WHERE 0",
+            "UPDATE version_probe SET value=value+1; UPDATE messages SET body=body WHERE 0",
+        ] {
+            db.transaction(|connection| {
+                connection.execute_batch(sql)?;
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()),
+                "no-op MAIN and unrelated TEMP work must not invalidate unchanged data: {sql}"
+            );
+        }
+        assert_ne!(
+            db.main_data_version().unwrap(),
+            Some(before),
+            "raw MAIN versions advance even without changed pages"
+        );
+        // An indexed same-value UPDATE can really dirty index pages. Keep
+        // conservative invalidation rather than treating SQL text as no-op evidence.
+        db.transaction(|connection| {
+            connection.execute("UPDATE messages SET body=body", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        let stamp = db.main_write_stamp().unwrap().unwrap();
+        db.transaction(|connection| {
+            connection.execute("UPDATE messages SET body='changed'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(db.main_data_version().unwrap(), Some(before));
+        assert_eq!(body(&db), "changed");
+        assert!(!stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()));
+        db.faulted.store(true, Ordering::Release);
+        assert!(
+            db.main_data_version().is_err() && db.main_write_stamp().is_err(),
+            "a hint read cannot bypass the database fault fence"
+        );
     }
     #[test]
     fn write_commit_observation_excludes_reads_and_rollbacks() {

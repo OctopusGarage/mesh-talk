@@ -19,6 +19,8 @@ struct Entry<R> {
 pub(super) struct RetrySchedule<K, R> {
     entries: HashMap<K, Entry<R>>,
     generation: u64,
+    failure_floor: Duration,
+    failure_ceiling: Duration,
 }
 
 impl<K, R> Default for RetrySchedule<K, R> {
@@ -26,11 +28,29 @@ impl<K, R> Default for RetrySchedule<K, R> {
         Self {
             entries: HashMap::new(),
             generation: 0,
+            failure_floor: Duration::ZERO,
+            failure_ceiling: Duration::from_secs(15),
         }
     }
 }
 
 impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
+    pub(super) fn with_failure_ceiling(failure_ceiling: Duration) -> Self {
+        assert!(!failure_ceiling.is_zero());
+        Self {
+            failure_ceiling,
+            ..Self::default()
+        }
+    }
+    /// A recovery floor applies only after an observed remote failure, never
+    /// to a reservation or local admission/cancellation deferral.
+    pub(super) fn with_failure_bounds(floor: Duration, ceiling: Duration) -> Self {
+        assert!(!floor.is_zero() && floor <= ceiling);
+        Self {
+            failure_floor: floor,
+            ..Self::with_failure_ceiling(ceiling)
+        }
+    }
     pub(super) fn ready(&mut self, key: &K, routes: &R, now: Instant) -> bool {
         self.entries
             .get(key)
@@ -48,7 +68,7 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
         let delay = if progress {
             Duration::from_millis(500)
         } else {
-            Self::failure_delay(&key, failures)
+            Self::failure_delay(&key, failures, self.failure_floor, self.failure_ceiling)
         };
         self.record_completion(key, routes, failures, delay, now);
     }
@@ -119,7 +139,13 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
             Entry {
                 routes,
                 failures,
-                next: now + Self::failure_delay(&key, failures.saturating_add(1)),
+                next: now
+                    + Self::failure_delay(
+                        &key,
+                        failures.saturating_add(1),
+                        Duration::ZERO,
+                        self.failure_ceiling,
+                    ),
                 touched: now,
                 reservation: Some(token),
             },
@@ -137,6 +163,21 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
         self.entries.remove(key);
     }
 
+    /// Local admission pressure proves neither remote failure nor success.
+    /// Retain learned failures and release only this attempt's reservation.
+    pub(super) fn defer(&mut self, key: &K, token: u64, delay: Duration, now: Instant) {
+        let Some(entry) = self
+            .entries
+            .get_mut(key)
+            .filter(|entry| entry.reservation == Some(token))
+        else {
+            return;
+        };
+        entry.next = entry.next.max(now + delay);
+        entry.touched = now;
+        entry.reservation = None;
+    }
+
     /// A clean protocol boundary clears pacing immediately, even if the phase
     /// did not change. Failed work gets a full deadline from actual completion.
     pub(super) fn complete(&mut self, key: &K, token: u64, clean: bool, now: Instant) {
@@ -151,19 +192,27 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
             self.entries.remove(key);
         } else {
             entry.failures = entry.failures.saturating_add(1);
-            entry.next = now + Self::failure_delay(key, entry.failures);
+            entry.next = now
+                + Self::failure_delay(
+                    key,
+                    entry.failures,
+                    self.failure_floor,
+                    self.failure_ceiling,
+                );
             entry.touched = now;
             entry.reservation = None;
         }
     }
 
-    fn failure_delay(key: &K, failures: u32) -> Duration {
+    fn failure_delay(key: &K, failures: u32, floor: Duration, ceiling: Duration) -> Duration {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         failures.hash(&mut hasher);
-        (Duration::from_secs(1 << failures.saturating_sub(1).min(4))
-            + Duration::from_millis(hasher.finish() % 251))
-        .min(Duration::from_secs(15))
+        Duration::from_secs(1_u64 << failures.saturating_sub(1).min(63))
+            .max(floor)
+            .min(ceiling)
+            .saturating_add(Duration::from_millis(hasher.finish() % 251))
+            .min(ceiling)
     }
 
     pub(super) fn clear(&mut self) {
@@ -174,6 +223,68 @@ impl<K: Eq + Hash + Clone, R: Eq + Clone> RetrySchedule<K, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_deferral_preserves_failures_deadlines_and_exact_reservation_authority() {
+        let mut retries = RetrySchedule::default();
+        let mut now = Instant::now();
+        for _ in 0..6 {
+            retries.finished("peer", 1, false, now);
+            now += Duration::from_secs(20);
+        }
+        let token = retries.reserve("peer", 1, now).unwrap().0;
+        let deadline = retries.entries["peer"].next;
+        let failures = retries.entries["peer"].failures;
+        retries.defer(&"peer", token, Duration::from_secs(5), now);
+        assert_eq!(retries.entries["peer"].failures, failures);
+        assert_eq!(retries.entries["peer"].next, deadline);
+        assert_eq!(retries.entries["peer"].reservation, None);
+        assert!(!retries.ready(&"peer", &1, now + Duration::from_secs(10)));
+        assert!(retries.ready(&"peer", &2, now));
+        let replacement = retries.reserve("peer", 2, now).unwrap().0;
+        retries.defer(&"peer", token, Duration::from_secs(300), now);
+        assert_eq!(retries.entries["peer"].reservation, Some(replacement));
+        assert_eq!(retries.entries["peer"].failures, 0);
+        retries.clear();
+        let fresh = retries.reserve("peer", 2, now).unwrap().0;
+        retries.defer(&"peer", replacement, Duration::from_secs(300), now);
+        assert!(retries.owns(&"peer", fresh));
+    }
+
+    #[test]
+    fn local_deferral_has_a_finite_delay_without_creating_peer_failure_evidence() {
+        let mut retries = RetrySchedule::default();
+        let now = Instant::now();
+        let token = retries.reserve("peer", 1, now).unwrap().0;
+        let completed = now + Duration::from_secs(2);
+        retries.defer(&"peer", token, Duration::from_secs(5), completed);
+        assert_eq!(retries.entries["peer"].failures, 0);
+        assert!(!retries.ready(&"peer", &1, completed + Duration::from_secs(4)));
+        assert!(retries.ready(&"peer", &1, completed + Duration::from_secs(5)));
+        retries.defer(&"peer", token, Duration::from_secs(300), completed);
+        assert!(retries.ready(&"peer", &1, completed + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn historical_failure_ceiling_is_isolated_from_ordinary_delivery() {
+        let mut historical = RetrySchedule::with_failure_ceiling(Duration::from_secs(300));
+        let mut ordinary = RetrySchedule::default();
+        let mut now = Instant::now();
+        for _ in 0..40 {
+            historical.finished("peer", 1, false, now);
+            ordinary.finished("peer", 1, false, now);
+            now += Duration::from_secs(301);
+        }
+        historical.finished("peer", 1, false, now);
+        ordinary.finished("peer", 1, false, now);
+        assert!(!historical.ready(&"peer", &1, now + Duration::from_secs(299)));
+        assert!(historical.ready(&"peer", &1, now + Duration::from_secs(300)));
+        assert!(ordinary.ready(&"peer", &1, now + Duration::from_secs(15)));
+        assert!(historical.ready(&"peer", &2, now));
+        let token = historical.reserve("peer", 2, now).unwrap().0;
+        historical.complete(&"peer", token, true, now);
+        assert!(historical.ready(&"peer", &2, now));
+    }
+
     #[test]
     fn reservation_survives_cancellation_and_completion_sets_single_failure_deadline() {
         let mut retries = RetrySchedule::default();

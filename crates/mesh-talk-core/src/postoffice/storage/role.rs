@@ -80,6 +80,31 @@ impl IndexedRelayState {
             .then(|| std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0))),
         })
     }
+    pub(crate) fn storage_observation(
+        &self,
+    ) -> Result<crate::postoffice::indexed::RelayStorageObservation, LogError> {
+        self.profile.database().read(|c| {
+            require_ready(c)?;
+            let values: (i64, i64, bool, i64, i64, i64) = c.prepare_cached(
+                "SELECT d.event_count,d.estimated_bytes,r.drain_requested,d.source_revision,d.next_commit,r.inventory_visibility_epoch FROM event_domains d CROSS JOIN relay_runtime r WHERE d.domain=?1 AND r.singleton=1",
+            )?.query_row([RELAY_EVENTS.0.as_slice()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+            let checked = |value: i64| u64::try_from(value).map_err(|_| invalid("negative relay observation counter"));
+            let physical = crate::storage::database::PhysicalStats::read_on(c)?;
+            Ok(crate::postoffice::indexed::RelayStorageObservation {
+                retained_count: checked(values.0)?,
+                retained_bytes: checked(values.1)?,
+                drain_requested: values.2,
+                source_revision: checked(values.3)?,
+                next_commit: checked(values.4)?,
+                visibility: checked(values.5)?,
+                database_changes: c.total_changes(),
+                page_size: physical.page_size,
+                page_count: physical.page_count,
+                free_pages: physical.freelist_count,
+                write_observer_enabled: self.profile.database().work_observation_enabled(),
+            })
+        })
+    }
     /// Cumulative committed append, duplicate, peer-classified rejection, local
     /// unavailability and authoritative failure counts. No storage access.
     pub(crate) fn ingest_observation(&self) -> Option<[u64; 5]> {

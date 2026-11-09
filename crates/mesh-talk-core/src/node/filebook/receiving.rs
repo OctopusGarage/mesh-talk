@@ -7,6 +7,51 @@ use crate::eventlog::{
 use crate::storage::profile::participant::event_ownership::{self, ParticipantEventOwner};
 use rusqlite::{Connection, params};
 
+// A small blocked queue must not write durable tickets just to take another
+// fair turn. Retain IDs only; larger populations keep the indexed SQL owner.
+const RUNTIME_ORDER_LIMIT: usize = 128;
+struct PendingReceive {
+    id: EventId,
+    conversation: ConversationId,
+    bytes: i64,
+    done: bool,
+}
+fn runtime_queue(
+    c: &Connection,
+    account: &[u8; 32],
+) -> Result<Option<Vec<PendingReceive>>, LogError> {
+    let mut statement = c.prepare_cached("SELECT p.event,p.conversation,p.bytes,EXISTS(SELECT 1 FROM file_book_processed d WHERE d.account=p.account AND d.event=p.event) FROM file_receive_pending p WHERE p.account=?1 ORDER BY ticket,event LIMIT ?2")?;
+    let mut found = statement.query(params![
+        account.as_slice(),
+        (RUNTIME_ORDER_LIMIT + 1) as i64
+    ])?;
+    let mut pending = Vec::new();
+    while let Some(row) = found.next()? {
+        pending.push(PendingReceive {
+            id: EventId::new(blob(row, 0)?),
+            conversation: ConversationId::new(blob(row, 1)?),
+            bytes: row.get(2)?,
+            done: row.get(3)?,
+        });
+    }
+    Ok((pending.len() <= RUNTIME_ORDER_LIMIT).then_some(pending))
+}
+fn reconcile_order(previous: &[EventId], pending: &[PendingReceive]) -> Vec<EventId> {
+    let mut order = Vec::with_capacity(RUNTIME_ORDER_LIMIT);
+    order.extend(
+        previous
+            .iter()
+            .copied()
+            .filter(|id| pending.iter().any(|row| row.id == *id)),
+    );
+    for row in pending {
+        if !order.contains(&row.id) {
+            order.push(row.id);
+        }
+    }
+    order
+}
+
 const SCHEMA: &str = "
 CREATE TABLE file_receive_scan(account BLOB PRIMARY KEY CHECK(length(account)=32),after_commit INTEGER CHECK(after_commit IS NULL OR after_commit>=0),next_ticket INTEGER NOT NULL CHECK(typeof(next_ticket)='integer' AND next_ticket>0)) WITHOUT ROWID;
 CREATE TABLE file_receive_pending(account BLOB NOT NULL CHECK(length(account)=32),event BLOB NOT NULL CHECK(length(event)=32),conversation BLOB NOT NULL CHECK(length(conversation)=32),bytes INTEGER NOT NULL CHECK(bytes>=0),ticket INTEGER NOT NULL CHECK(typeof(ticket)='integer' AND ticket>0),PRIMARY KEY(account,event)) WITHOUT ROWID;
@@ -91,6 +136,64 @@ impl IndexedFileBook {
         if rows == 0 || rows > 128 || bytes == 0 || bytes > 8 * 1024 * 1024 {
             return Err(LogError::InvalidPageBudget);
         }
+        // Lock order is schedule -> profile. No profile callback acquires the
+        // scheduling owner. Publish rotation only after the SQL operation succeeds.
+        let mut runtime = self.receive_order.lock().expect("file receive order");
+        let small = self.profile.database().transaction(|c| {
+            self.check_receive_owner(c)?;
+            let Some(pending) = runtime_queue(c, &self.account)? else {
+                return Ok(None);
+            };
+            let mut order = reconcile_order(&runtime, &pending);
+            let candidates: Vec<_> = order
+                .iter()
+                .filter_map(|id| {
+                    pending
+                        .iter()
+                        .find(|row| row.id == *id && row.conversation == conversation)
+                })
+                .take(rows)
+                .collect();
+            let mut selected = Vec::new();
+            let mut unfinished = Vec::new();
+            let mut used = 0usize;
+            let mut required: Option<usize> = None;
+            for row in &candidates {
+                if row.done {
+                    c.execute(
+                        "DELETE FROM file_receive_pending WHERE account=?1 AND event=?2",
+                        params![self.account.as_slice(), row.id.as_bytes().as_slice()],
+                    )?;
+                    continue;
+                }
+                let cost = usize::try_from(row.bytes)
+                    .ok()
+                    .and_then(|n| n.checked_mul(3))
+                    .and_then(|n| n.checked_add(std::mem::size_of::<Event>()))
+                    .ok_or_else(|| invalid("invalid file receive allocation cost"))?;
+                if used.checked_add(cost).is_some_and(|n| n <= bytes) {
+                    used += cost;
+                    selected.push(row.id);
+                } else {
+                    required = Some(required.map_or(cost, |old| old.min(cost)));
+                }
+                unfinished.push(row.id);
+            }
+            order.retain(|id| !candidates.iter().any(|row| row.id == *id));
+            order.extend(unfinished);
+            Ok(Some((selected, required, order)))
+        })?;
+        if let Some((selected, required, order)) = small {
+            *runtime = order;
+            if selected.is_empty()
+                && let Some(required) = required
+            {
+                return Err(LogError::PageBudgetTooSmall { required });
+            }
+            return Ok(selected);
+        }
+        runtime.clear();
+        drop(runtime);
         let (selected,required)=self.profile.database().transaction(|c| {
             self.check_receive_owner(c)?;
             let mut statement=c.prepare_cached("SELECT p.event,p.bytes,EXISTS(SELECT 1 FROM file_book_processed d WHERE d.account=p.account AND d.event=p.event),p.ticket FROM file_receive_pending p WHERE p.account=?1 AND p.conversation=?2 ORDER BY ticket,event LIMIT ?3")?;
@@ -148,6 +251,32 @@ impl IndexedFileBook {
     /// Select a fixed prefix before deduplicating, so a large pending population
     /// cannot require an all-conversation aggregate or allocation.
     pub(crate) fn receive_conversations(&self) -> Result<Vec<ConversationId>, LogError> {
+        let mut runtime = self.receive_order.lock().expect("file receive order");
+        let small = self.profile.database().read(|c| {
+            self.check_receive_owner(c)?;
+            let Some(pending) = runtime_queue(c, &self.account)? else {
+                return Ok(None);
+            };
+            let order = reconcile_order(&runtime, &pending);
+            let mut selected = Vec::new();
+            for id in order.iter().take(8) {
+                let conversation = pending
+                    .iter()
+                    .find(|row| row.id == *id)
+                    .expect("reconciled receive order")
+                    .conversation;
+                if !selected.contains(&conversation) {
+                    selected.push(conversation);
+                }
+            }
+            Ok(Some((selected, order)))
+        })?;
+        if let Some((selected, order)) = small {
+            *runtime = order;
+            return Ok(selected);
+        }
+        runtime.clear();
+        drop(runtime);
         self.profile.database().read(|c| {
             self.check_receive_owner(c)?;
             let mut statement=c.prepare_cached("SELECT conversation FROM file_receive_pending WHERE account=?1 ORDER BY ticket,event LIMIT 8")?;
