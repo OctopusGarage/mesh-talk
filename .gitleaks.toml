@@ -25,3 +25,13 @@ condition = "AND"
 paths = ['''(^|/)src-tauri/examples/delta-artifact\.rs$''']
 regexTarget = "secret"
 regexes = ['''^99\.0\.0-nightly\.42\.[12]$''']
+
+# A Rust field reference is public metadata, not an embedded credential. Match
+# only this exact reference in its owning test; other values remain scanned.
+[[allowlists]]
+description = "Public recipient field reference in group-file authorization tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)crates/mesh-talk-core/src/node/group_file_authorization_tests\.rs$''']
+regexTarget = "secret"
+regexes = ['''^recipient\.x25519_pub$''']
