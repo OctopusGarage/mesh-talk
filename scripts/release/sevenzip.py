@@ -8,6 +8,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -46,15 +47,23 @@ def release_asset(system, machine):
     return '7z' + VERSION.replace('.', '') + '-' + suffix, digest
 
 
-def download(url):
+def download(url, alternate=None):
+    """Share three attempts across official sources; integrity failures stay fatal."""
+    source = 'primary'
     for attempt in range(1, 4):
         try:
             return _download_once(url)
         except (urllib.error.URLError, TimeoutError) as error:
+            failure = f'HTTP {error.code}' if isinstance(error, urllib.error.HTTPError) else type(error).__name__
+            print(f'7-Zip {source} source attempt {attempt}: {failure}', file=sys.stderr)
             if isinstance(error, urllib.error.HTTPError) and error.code != 429 and not 500 <= error.code < 600:
                 raise RuntimeError(f'7-Zip download refused (HTTP {error.code}, attempt {attempt})') from None
             if attempt == 3:
                 raise RuntimeError('7-Zip download failed after 3 attempts') from error
+            # Leave the failing release host after the first transport error.
+            if alternate is not None:
+                url = alternate
+                source = 'alternate'
             time.sleep(attempt)
 
 
@@ -107,7 +116,11 @@ def install(directory, system=None, machine=None):
     if '\n' in str(directory) or '\r' in str(directory):
         raise RuntimeError('7-Zip directory contains a newline')
     directory.mkdir(parents=True, exist_ok=True)
-    data = download(f'https://github.com/ip7z/7zip/releases/download/{VERSION}/{asset}')
+    # The maintainer lists SourceForge as its official historical distribution.
+    data = download(
+        f'https://github.com/ip7z/7zip/releases/download/{VERSION}/{asset}',
+        f'https://downloads.sourceforge.net/project/sevenzip/7-Zip/{VERSION}/{asset}',
+    )
     if hashlib.sha256(data).hexdigest() != digest:
         raise RuntimeError('7-Zip SHA256 verification failed')
     archive = directory / asset

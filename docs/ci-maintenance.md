@@ -1068,3 +1068,12 @@ workflows cannot acquire fixes from main automatically. Preserve current require
 checks; any protection migration uses its existing owner. Measure selected hosted
 jobs after rollout, recording source, first failures, runner/setup/test time and
 cache conditions. Local policy success is not a hosted latency or native claim.
+
+Pinned native inspection downloads retain the exact version and SHA-256 owner in
+`scripts/release/sevenzip.py`. Retryable transport failures may use the official
+SourceForge distribution linked by the maintainer, within the same three-request
+budget. Record bounded attempt/source/error diagnostics. Size, deadline, integrity,
+installed-version and nonretryable HTTP failures remain fatal; never publish the
+tool environment before successful verification. `release-sevenzip.test.mjs`
+retains alternate-source, exhausted-budget and no-publication controls. Actual
+installed-tool acceptance remains required on each consuming native platform.

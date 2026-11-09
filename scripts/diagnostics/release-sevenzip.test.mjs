@@ -64,6 +64,43 @@ class Tests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '3 attempts') as caught: s.download('https://example.invalid')
             self.assertIsInstance(caught.exception.__cause__, urllib.error.URLError)
             self.assertEqual(request.call_count, 3)
+    def test_official_alternate_after_transient_failure(self):
+        primary = 'https://github.com/ip7z/7zip/releases/download/26.05/7z2605-mac.tar.xz'
+        alternate = 'https://downloads.sourceforge.net/project/sevenzip/7-Zip/26.05/7z2605-mac.tar.xz'
+        with patch.object(s.urllib.request, 'urlopen', side_effect=[urllib.error.HTTPError(primary, 504, 'Gateway timeout', {}, None), io.BytesIO(b'ok')]) as request, patch.object(s.time, 'sleep'), patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(s.download(primary, alternate), b'ok')
+            self.assertIn('primary source attempt 1: HTTP 504', errors.getvalue())
+            self.assertNotIn('https://', errors.getvalue())
+            self.assertEqual([call.args[0] for call in request.call_args_list], [primary, alternate])
+        with patch.object(s.urllib.request, 'urlopen', side_effect=urllib.error.URLError('offline')) as request, patch.object(s.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, '3 attempts'): s.download(primary, alternate)
+            self.assertEqual([call.args[0] for call in request.call_args_list], [primary, alternate, alternate])
+        with patch.object(s.urllib.request, 'urlopen', side_effect=urllib.error.HTTPError(primary, 403, 'Forbidden', {}, None)) as request:
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 403'): s.download(primary, alternate)
+            self.assertEqual(request.call_count, 1)
+        with patch.object(s.urllib.request, 'urlopen', side_effect=[urllib.error.URLError('offline'), urllib.error.HTTPError(alternate, 404, 'Not found', {}, None)]) as request, patch.object(s.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 404'): s.download(primary, alternate)
+            self.assertEqual(request.call_count, 2)
+    def test_corrupt_download_cannot_extract_publish_or_fallback(self):
+        for responses, expected in [([io.BytesIO(b'corrupt')], 1), ([urllib.error.URLError('offline'), io.BytesIO(b'corrupt')], 2)]:
+            with tempfile.TemporaryDirectory() as d:
+                root = pathlib.Path(d)
+                env = root/'env'
+                with patch.dict(os.environ, {'GITHUB_ENV': str(env)}), patch.object(s.urllib.request, 'urlopen', side_effect=responses) as request, patch.object(s.time, 'sleep'), patch.object(s, 'extract') as extract, patch('subprocess.run') as run:
+                    with self.assertRaisesRegex(RuntimeError, 'SHA256'): s.install(root, 'Linux', 'x86_64')
+                    self.assertEqual(request.call_count, expected)
+                    if expected == 2:
+                        self.assertEqual(request.call_args.args[0], 'https://downloads.sourceforge.net/project/sevenzip/7-Zip/26.05/7z2605-linux-x64.tar.xz')
+                    extract.assert_not_called()
+                    run.assert_not_called()
+                    self.assertFalse(env.exists())
+    def test_download_limits_do_not_try_alternate(self):
+        with patch.object(s.urllib.request, 'urlopen', return_value=io.BytesIO(b'a' * 17)) as request, patch.object(s, 'MAX_DOWNLOAD', 16):
+            with self.assertRaisesRegex(RuntimeError, 'size'): s.download('primary', 'alternate')
+            self.assertEqual(request.call_count, 1)
+        with patch.object(s.urllib.request, 'urlopen', return_value=io.BytesIO(b'ok')) as request, patch.object(s.time, 'monotonic', side_effect=[0, s.TIMEOUT + 1]):
+            with self.assertRaisesRegex(RuntimeError, 'deadline'): s.download('primary', 'alternate')
+            self.assertEqual(request.call_count, 1)
     def test_permanent_http_failure_is_not_retried(self):
         with patch.object(s.urllib.request, 'urlopen', side_effect=urllib.error.HTTPError('https://example.invalid', 404, 'Not found', {}, None)) as request:
             with self.assertRaisesRegex(RuntimeError, 'HTTP 404'): s.download('https://example.invalid')
