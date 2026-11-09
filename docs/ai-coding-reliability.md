@@ -809,6 +809,16 @@ saves must retain that dirtiness and block ACK. The
 [reception owner](../frontend/src/store/chat.ts) and its chat regressions cover
 observation-only wakes, epoch changes, batch progress and quota-failure retry.
 
+An unchanged deferred revision must retain its failure history across worker
+admission, with capped retry spacing and a real dependency wake. Identical
+observations must not reset cooldowns; a newer committed revision or dependency
+change during active work must survive its older completion. Bound retry metadata
+to pending/active work and exclude active deadlines from timer selection. The
+[account fanout owner](../crates/mesh-talk-core/src/node/account_sync/fanout.rs)
+checks capped spacing, revision replacement, wake races, overflow cleanup and
+success deduplication; the real source-invalidation fanout regressions retain
+original event/sequence authority through repeated failure and recovery.
+
 Keep retry scheduling distinct from durable progress. A bounded volatile order
 may replace repeated ticket writes, but must reconcile current pending rows,
 retain oversized attempts and publish only after the database operation succeeds.

@@ -2831,6 +2831,33 @@ impl Node {
         // Subscribe before the first snapshot: discovery is receiver demand.
         let mut roster_changes = self.roster.lock().expect("roster lock").subscribe_changes();
         let mut availability_changes = self.account_wake.availability.changed.subscribe();
+        let mut fanout_network = self.network_changes.subscribe();
+        let mut fanout_routes = fanout::FanoutRoutes::default();
+        // Subscribe before snapshotting so a concurrent semantic change remains
+        // observable, but an unchanged first heartbeat grants no retry credit.
+        let observe_fanout_routes = |tracker: &mut fanout::FanoutRoutes| {
+            let peers = self.roster.lock().expect("roster lock").peers();
+            let now = std::time::Instant::now();
+            tracker.observe(
+                peers.into_iter().map(|peer| {
+                    let deadline = peer.presence_deadline(now);
+                    let routes = peer
+                        .routes
+                        .iter()
+                        .map(|route| route.addr)
+                        .chain([peer.addr]);
+                    (
+                        wake::wake_identity(&peer.public),
+                        (
+                            (routes.collect(), peer.account_id, peer.post_office),
+                            deadline,
+                        ),
+                    )
+                }),
+                now,
+            )
+        };
+        observe_fanout_routes(&mut fanout_routes);
         let mut online_routes = HashMap::new();
         let mut initial_refresh = true;
         let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
@@ -3759,8 +3786,19 @@ impl Node {
                     enqueue_all = true;
                     reconcile_all = true;
                 }
-                _ = roster_changes.changed() => { enqueue_all = true; }
-                _ = availability_changes.changed() => { enqueue_all = true; }
+                _ = roster_changes.changed() => {
+                    let changed = observe_fanout_routes(&mut fanout_routes);
+                    if !changed.is_empty() {
+                        fanout.wake_pending_for(|group| self.channel_members(group).iter().any(
+                            |member| changed.contains(&wake::wake_identity(member)),
+                        ));
+                    }
+                    enqueue_all = true;
+                }
+                // This coalesced watch carries no peer identity; it grants one
+                // conservative wake, never a fresh-to-fresh lease renewal.
+                _ = availability_changes.changed() => { fanout.wake_pending(); enqueue_all = true; }
+                _ = fanout_network.changed() => { fanout.wake_pending(); enqueue_all = true; }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     maintenance_requested = true;

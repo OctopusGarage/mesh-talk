@@ -3071,7 +3071,16 @@ transport error. A responder whose finite view becomes invalid can close Noise
 before sending an application error; that failed round cannot acknowledge completed
 fanout. The shared session classifier keeps policy and protocol rejections outside
 this transport retry. The existing bounded
-queue retries after one second without blocking other ready groups; queue
+queue retries the unchanged revision after one second, then doubles the delay
+up to five minutes without blocking other ready groups. Successful completion,
+a newer committed sequence or a semantic dependency change clears its bounded
+pending-only retry state. Roster heartbeats retain cooldowns; a new full peer
+identity, changed endpoints or changed account/relay eligibility releases only
+pending groups containing that exact full member identity. Network generation
+changes release all pending rounds; the coalesced sibling-availability watch
+carries no identity and conservatively releases them on unavailable-to-available
+transitions. A wake during an active round retains one follow-up.
+Every attempt still prepares and validates current authority. Queue
 overflow returns the revision to its durable journal cursor. Successful rounds
 remain deduplicated, and retry never invents custody or recipient confirmation.
 Other transport failures keep their existing recovery policy. This
