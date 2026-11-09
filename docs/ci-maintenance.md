@@ -944,6 +944,11 @@ Preserve exact geometry and cache assertions, and exercise the absent-row contro
 with a snapshot-only observer rather than extending the deadline. The media-scroll
 remount regression owns this case. Run independent adversarial sampler controls
 after the cache-remount journey, so they cannot consume its retention window.
+The [group reading-anchor fixture](../frontend/e2e/group-reception.spec.ts) uses
+the same nonwaiting page snapshot for its initial visible row. Capture its exact
+identity and offset together; retain the outer poll budget and all subsequent
+anchor, focus, unread and navigation assertions. A late successful observation
+does not establish a missing-row defect or identify the source of driver latency.
 
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the

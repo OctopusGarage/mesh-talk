@@ -479,6 +479,10 @@ can exhaust its budget before any decode or geometry observation. The
 preparation before releasing media and checks an absent row through a snapshot-only
 observer; retain its exact geometry and cache assertions. Keep independent
 negative controls outside the journey's active retention window.
+The [group reading-anchor fixture](../frontend/e2e/group-reception.spec.ts) also
+samples the log and row through one nonwaiting page evaluation, returning pending
+when either is absent. Keep its existing assertion budget and exact ID/offset,
+focus and unread checks; a slow locator operation is not proof of absent rows.
 
 Keep extracted runtimes outside diagnostic artifact roots on failure as well as
 success. Stage under an owned directory on the destination filesystem, retire it

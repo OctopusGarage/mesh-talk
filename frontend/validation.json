@@ -2491,6 +2491,15 @@
   ],
   "prScenarios": [
     {
+      "id": "frontend-group-reception-acceptance",
+      "paths": [
+        "frontend/e2e/group-reception.spec.ts"
+      ],
+      "browser": [
+        "e2e/group-reception.spec.ts"
+      ]
+    },
+    {
       "id": "frontend-dialog-focus-acceptance",
       "paths": [
         "frontend/src/components/ui/dialog.tsx",
