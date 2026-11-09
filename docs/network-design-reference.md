@@ -968,6 +968,15 @@ transient chunks after its durable local copy is verified.
 
 ### Ordinary file custody
 
+The group-file retry owner distinguishes paid bounded preparation from an
+unavailable dependency. A stale checkpoint preserves the launch backoff;
+preparation advances through its existing four-view owner. Waiting is registered
+before probing to retain concurrent completion hints. Canonical publication and
+finished preparation wake matching channel/full-recipient jobs after releasing
+source/cache guards; each subsequent attempt still checks current membership,
+retained offer, consent and runtime authority. Ready observations alone do not
+renew work. These scheduling fields remain runtime metadata, not custody proof.
+
 Private and group file sends can deposit recipient-encrypted chunk wrappers in
 eligible post offices before a recipient comes online or approves the offer.
 This is custody of ciphertext, not recipient delivery or permission to install

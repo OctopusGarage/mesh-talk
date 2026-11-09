@@ -126,6 +126,9 @@ pub(in crate::node) mod reason {
     pub const CONSENT_ABSENT: usize = 49;
     pub const CONSENT_LEARNED: usize = 50;
     pub const CONSENT_PREPARE_MOVED: usize = 51;
+    pub const FILE_WAITING: usize = 52;
+    pub const FILE_PREPARING: usize = 53;
+    pub const FILE_ALLOWED: usize = 54;
     pub const OUTER: usize = 0;
     pub const OPEN_FAILED: usize = 1;
     pub const IDENTITY_HANDLED: usize = 2;
@@ -354,7 +357,7 @@ impl Node {
                 emit_info(
                     log::logger(),
                     format_args!(
-                        "query_work counts={:?} labels=stamp_unknown,metadata_hit,metadata_miss,metadata_evicted,view_new,view_absent,scope_miss,stamp_miss,view_invalid,view_reused,view_retained,consent_hit,consent_main_changed,consent_policy_changed,consent_remote_changed,consent_floor_changed,consent_expired,consent_absent,consent_learned,consent_prepare_moved,reserved,reserved,reserved,reserved entries={:?} privacy={} projection={} file_scopes={:?} proofs={:?} controls={:?} device_policy={} hot_views_and_consent_hints={:?} profile_sql_observer_and_total_changes={:?}",
+                        "query_work counts={:?} labels=stamp_unknown,metadata_hit,metadata_miss,metadata_evicted,view_new,view_absent,scope_miss,stamp_miss,view_invalid,view_reused,view_retained,consent_hit,consent_main_changed,consent_policy_changed,consent_remote_changed,consent_floor_changed,consent_expired,consent_absent,consent_learned,consent_prepare_moved,file_waiting,file_preparing,file_allowed,reserved entries={:?} privacy={} projection={} file_scopes={:?} proofs={:?} controls={:?} device_policy={} hot_views_and_consent_hints={:?} profile_sql_observer_and_total_changes={:?}",
                         queries,
                         entries,
                         self.privacy

@@ -1242,6 +1242,20 @@ async fn group_file_refill_failure_preserves_scan_and_attempts_independent_jobs(
 async fn group_file_cancelled_exchange_retains_launch_deadline_and_fair_cursor() {
     let fixture = queued_fixture().await;
     let node = &fixture.node;
+    // Publish real readiness after registration but before the current probe.
+    // The active exchange must reserve its own deadline after consuming it.
+    let weak = Arc::downgrade(node);
+    let channel = fixture.channel;
+    let publications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = publications.clone();
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, event| {
+        if event == "group_file_dependency_registered"
+            && let Some(node) = weak.upgrade()
+        {
+            node.wake_group_file_dependency(channel, Some((peer.ed25519_pub, peer.x25519_pub)));
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay = DeviceIdentity::generate();
     let proof = Announce::new_post_office(
@@ -1263,6 +1277,7 @@ async fn group_file_cancelled_exchange_retains_launch_deadline_and_fair_cursor()
         .unwrap();
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    assert!(publications.load(Ordering::SeqCst) > 0);
     let key = node.group_file_delivery.cursor.lock().unwrap().unwrap();
     let jobs = node.group_file_delivery.jobs.lock().unwrap();
     assert!(
@@ -1776,5 +1791,140 @@ async fn group_file_incoming_control_reuses_exact_retained_manifest_and_preserve
         .unwrap()
         .is_some(),
         "the same offer recovers when its owner becomes readable"
+    );
+}
+
+#[tokio::test]
+async fn group_file_blocked_checkpoint_keeps_backoff_without_repeated_offer_reads() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let jobs: Vec<_> = node
+        .group_file_delivery
+        .jobs
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    for job in &jobs {
+        assert!(settle_job(node, job));
+    }
+    node.refill_group_file_delivery().unwrap();
+    let (key, job) = {
+        let mut queued = node.group_file_delivery.jobs.lock().unwrap();
+        for job in queued.values_mut() {
+            job.retry_after =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        }
+        let (key, job) = queued.iter_mut().next().unwrap();
+        job.retry_after = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        job.retry_delay = std::time::Duration::from_secs(12);
+        (*key, job.clone())
+    };
+    // The fixture has no running channel owner. This real append leaves its
+    // published checkpoint stale until that owner is explicitly advanced.
+    append_history(node, fixture.channel, 1);
+    assert!(
+        matches!(
+            node.group_file_custody_with_attempt(&job, Some(&AttemptOffer::new(None))),
+            Err(LogError::StaleCursor)
+        ),
+        "the held dependency must actually reject current custody authorization"
+    );
+    node.retry_group_file_delivery().await;
+    {
+        let queued = node.group_file_delivery.jobs.lock().unwrap();
+        assert_eq!(
+            queued.len(),
+            5,
+            "unavailable authority must not discard durable pending work"
+        );
+        let waiting = queued.get(&key).unwrap();
+        assert!(
+            waiting
+                .retry_after
+                .is_some_and(|deadline| deadline > std::time::Instant::now()),
+            "an unchanged blocked checkpoint is not finite preparation progress and must retain the launch deadline"
+        );
+        assert!(waiting.retry_delay >= std::time::Duration::from_secs(12));
+    }
+    let reads = node.received_files.lock().unwrap().body_reads();
+    node.retry_group_file_delivery().await;
+    assert_eq!(
+        node.received_files.lock().unwrap().body_reads(),
+        reads,
+        "an observer wake before recovery must not hydrate the same blocked offer again"
+    );
+    crate::node::test_support::settle_group_metadata(node, fixture.channel);
+    assert!(
+        node.group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .get(&key)
+            .unwrap()
+            .retry_after
+            .is_none(),
+        "actual checkpoint publication must wake the same waiting job before its backoff expires"
+    );
+    for _ in 0..4096 {
+        node.retry_group_file_delivery().await;
+        let settled = {
+            let queued = node.group_file_delivery.jobs.lock().unwrap();
+            let job = queued.get(&key).unwrap();
+            !job.waiting_dependency && job.retry_after.is_some()
+        };
+        if settled {
+            break;
+        }
+    }
+    let queued = node.group_file_delivery.jobs.lock().unwrap();
+    let resumed = queued.get(&key).unwrap();
+    assert!(
+        !resumed.waiting_dependency && resumed.retry_after.is_some(),
+        "finite preparation must converge and resume normal custody retry after recovery"
+    );
+}
+
+#[tokio::test]
+async fn group_file_dependency_wake_matches_complete_recipient_and_channel() {
+    let fixture = queued_fixture().await;
+    let node = &fixture.node;
+    let (key, recipient) = {
+        let mut jobs = node.group_file_delivery.jobs.lock().unwrap();
+        for job in jobs.values_mut() {
+            job.waiting_dependency = true;
+            job.retry_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        }
+        let (key, job) = jobs.iter().next().unwrap();
+        (*key, job.recipient.clone())
+    };
+    node.wake_group_file_dependency(ConversationId::new([255; 32]), None);
+    let mut wrong_key = recipient.x25519_pub;
+    wrong_key[0] ^= 1;
+    node.wake_group_file_dependency(fixture.channel, Some((recipient.ed25519_pub, wrong_key)));
+    assert!(
+        node.group_file_delivery
+            .jobs
+            .lock()
+            .unwrap()
+            .values()
+            .all(|job| job.retry_after.is_some())
+    );
+    node.wake_group_file_dependency(
+        fixture.channel,
+        Some((recipient.ed25519_pub, recipient.x25519_pub)),
+    );
+    node.wake_group_file_dependency(
+        fixture.channel,
+        Some((recipient.ed25519_pub, recipient.x25519_pub)),
+    );
+    let jobs = node.group_file_delivery.jobs.lock().unwrap();
+    assert!(jobs[&key].retry_after.is_none());
+    assert!(!jobs[&key].waiting_dependency);
+    assert!(
+        jobs.iter()
+            .filter(|(other, _)| **other != key)
+            .all(|(_, job)| job.waiting_dependency && job.retry_after.is_some())
     );
 }

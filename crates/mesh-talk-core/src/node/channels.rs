@@ -2706,21 +2706,38 @@ impl Node {
             .state(&channel)
             .map(|state| state.members().to_vec())
             .unwrap_or_default();
-        let unreadable = observations.iter().any(|meta| {
-            !meta.tombstone
-                && self
-                    .channel_custody_holder_binding_with_verifier(&meta.key, verifier)
-                    .is_none()
-        });
-        let principals = confirmed.into_iter().filter_map(|device| {
-            if device.starts_with("relay:") { return None; }
-            if let Some(meta) = observations.iter().find(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder == &device)) {
-                let (holder, account) = self.channel_custody_holder_binding_with_verifier(&meta.key, verifier)?;
-                return self.channel_custody_member_principal(channel, &holder, account);
-            }
-            let member = members.iter().find(|member| member.user_id() == device)?;
-            self.channel_custody_member_principal(channel, member, None)
-        }).collect();
+        // One decision reads every positive witness once. This request-local
+        // value never bypasses the next observation's durable readability check.
+        let bindings: HashMap<_, _> = observations
+            .iter()
+            .filter(|meta| !meta.tombstone)
+            .filter_map(|meta| {
+                let super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } =
+                    &meta.key
+                else {
+                    return None;
+                };
+                Some((
+                    holder.as_str(),
+                    self.channel_custody_holder_binding_with_verifier(&meta.key, verifier),
+                ))
+            })
+            .collect();
+        let unreadable = bindings.values().any(Option::is_none);
+        let principals = confirmed
+            .into_iter()
+            .filter_map(|device| {
+                if device.starts_with("relay:") {
+                    return None;
+                }
+                if let Some(binding) = bindings.get(device.as_str()) {
+                    let (holder, account) = binding.as_ref()?;
+                    return self.channel_custody_member_principal(channel, holder, account.clone());
+                }
+                let member = members.iter().find(|member| member.user_id() == device)?;
+                self.channel_custody_member_principal(channel, member, None)
+            })
+            .collect();
         Ok((principals, unreadable))
     }
 

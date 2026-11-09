@@ -980,6 +980,10 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
             holder.log.lock().unwrap().get(&event).unwrap().is_some(),
             "the real holder must retain the exact original encrypted event"
         );
+        // Only inbound serving runs in this fixture. Complete the ordinary
+        // bounded projection owner before asserting received plaintext.
+        crate::node::test_support::settle_group_metadata(&holder, channel);
+        holder.process_channel(channel);
         assert!(
             holder
                 .channel_history(channel, 10)
@@ -987,9 +991,15 @@ async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
                 .iter()
                 .any(|row| row.id == event)
         );
+        let reads = source.account_documents.lock().unwrap().body_read_count();
         assert_eq!(
             source.channel_custody_count(channel, event).unwrap(),
             Some(1)
+        );
+        assert_eq!(
+            source.account_documents.lock().unwrap().body_read_count() - reads,
+            1,
+            "one custody decision must read each signed holder witness only once"
         );
         let key = AccountDocumentKey::ChannelCustody {
             channel: hex::encode(channel.as_bytes()),
@@ -4622,6 +4632,10 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
         let mut cursor =
             sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        // This fixture serves inbound protocols without a recovery producer.
+        // Received originals and private documents do not finish the separate
+        // bounded physical-membership projection by themselves.
+        crate::node::test_support::settle_group_metadata(&sibling, channel);
         eprintln!("certificate custody phase=legacy_import");
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert!(

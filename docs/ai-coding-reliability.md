@@ -308,6 +308,18 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 ## R05: Bounded work must also make progress
 
+Do not interpret an unavailable dependency or a generic stale-cursor error as
+proof of finite preparation progress. Preserve the launch deadline when no rows,
+edges or preparation phase advanced. Register dependency waiting before probing,
+so a concurrent readiness notification cannot be overwritten by the attempt.
+After consuming readiness, reserve the active network attempt's cancellation
+deadline before awaiting; an earlier wake must not erase its backoff.
+Publish scoped readiness hints after releasing source and cache guards; the next
+attempt still validates authority. The
+[group-file authorization regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)
+holds a real stale checkpoint, checks quiet backoff, then drives the actual
+checkpoint owner and verifies continuation before the deadline expires.
+
 Bound work across owners as well as inside a page. One physical mailbox must not
 be rescanned by every outgoing attachment merely because its export conversation
 differs. The [publication regression](../crates/mesh-talk-core/src/node/group_file_authorization_tests.rs)

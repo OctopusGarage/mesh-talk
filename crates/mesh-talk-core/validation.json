@@ -403,7 +403,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "One bounded status request combines member and post-office counts and reuses only intrinsic verification under complete fixed-size certificate keys; document readability, holder binding, tombstones, membership and replica policy remain live per row. Unknown counts stay distinct from zero and request-local reuse expires on return or error.",
+            "name": "One bounded status request combines member and post-office counts and reuses only intrinsic verification under complete fixed-size certificate keys; document readability, holder binding, tombstones, membership and replica policy remain live per row. Member-count qualification reads each signed holder witness once within that decision; subsequent observations recheck durable readability. Unknown counts stay distinct from zero and request-local reuse expires on return or error.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -2546,7 +2546,7 @@
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {
-            "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work. Cancellation reserves retry deadlines, failed routes back off, cooling jobs avoid authorization work, and unchanged discovery rests without discarding periodic eligibility repair or independent progress after scan failures.",
+            "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work. Cancellation reserves retry deadlines, failed routes and unchanged dependencies retain backoff, actual paid preparation remains runnable, and scoped checkpoint/selection completion wakes matching registered waiters without granting authority. Cooling jobs avoid authorization work, and unchanged discovery rests without discarding periodic eligibility repair or independent progress after scan failures.",
             "reference": "docs/network-design-reference.md#ordinary-file-custody"
           },
           {

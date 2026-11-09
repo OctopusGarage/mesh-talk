@@ -66,6 +66,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
 2. **Use recovery deliberately.** A fallback repairs missed events; it is not the
    main data path. Back off failures, stop with the owner and refresh on return.
    A stored address or linked-device certificate is not current availability.
+   A stale dependency is not preparation progress: retain its backoff instead
+   of repeatedly making the item immediately runnable. Wake only matching
+   waiters when the owning dependency publishes readiness; hints grant no access.
    Park offline peer work without discarding receiver progress; resume on fresh
    eligible evidence. Send bounded change hints to available siblings and let
    each receiver own its incremental pull. Local maintenance notifications and
@@ -83,6 +86,8 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Reuse authenticated immutable input within one decision instead of reading
    and verifying it again down the call chain; keep current authority and read
    failure checks independent of that reuse.
+   Keep this reuse inside the decision when metadata alone cannot establish
+   that durable bytes still exist and pass integrity checks.
    Reconnection is a delivery trigger, not a new content revision. Reuse a
    retained immutable publication only with exact, bounded sender provenance
    committed alongside that event. Do not infer plaintext equality from

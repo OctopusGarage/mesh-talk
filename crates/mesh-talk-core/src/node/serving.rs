@@ -1296,6 +1296,11 @@ impl Node {
             self.channel_recovery_notify.notify_one();
             return Ok(false);
         }
+        // This owner has released its log/SQL guards. Only paid canonical
+        // publication wakes waiters; unchanged ready reads remain quiet.
+        if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+            self.wake_group_file_checkpoint(conv);
+        }
         #[cfg(test)]
         {
             let hook = self
@@ -1763,6 +1768,8 @@ impl Node {
             self.channel_recovery_notify.notify_one();
         }
         pending.lanes.remove(&conv);
+        drop(pending);
+        self.wake_group_file_checkpoint(conv);
         Ok(())
     }
 
