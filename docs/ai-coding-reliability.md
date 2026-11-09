@@ -797,6 +797,14 @@ make missing bot credentials look like a product regression. The
 `ci-docs-scope.test.mjs` / `ci-latency.test.mjs` own exact-source, mixed/native,
 lockfile and failed/cancelled/missing-result controls.
 
+Native failure evidence must include the actual release logger, not only captured
+stdout. The [native capture owner](../scripts/diagnostics/native-capture.mjs) reads
+bounded private file-log tails only after child retirement, preserves the original
+failure when diagnostics are unavailable and rejects linked paths. Its filesystem
+controls retain quotas, current-log priority and cutoff redaction. A responsive
+failure screenshot or generic IPC timeout alone cannot identify a backend lock or
+startup error; keep missing evidence distinct from a confirmed mechanism.
+
 ## Review record
 
 For applicable risks, make these answers reviewable in the PR or task result:

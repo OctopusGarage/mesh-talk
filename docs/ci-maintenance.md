@@ -903,6 +903,14 @@ owner to stop diagnostics before the job watchdog. Preserve its structured resul
 execution log and bounded Node lifecycle records, including the active file/case,
 through the always-upload path. Prove interruption and joined cleanup with a real
 parked command. Missing hosted logs require better evidence, not a guessed fix.
+Native release stdout may omit application warnings. After actual child retirement,
+the existing native capture owner retains bounded, redacted private application
+file-log tails in the uploaded evidence. Prefer the current log within bounded
+selection, reject linked/nonregular paths, close handles and report missing or
+unreadable diagnostics without replacing the original failure. Do not collect
+these logs through the IPC channel whose responsiveness is under investigation.
+`native-capture.test.mjs` owns confinement, quotas, cutoff redaction and retirement
+controls; file-log presence does not establish a backend failure cause.
 Cancellation during preparation still needs a failed structured result. Only the
 command owner can attest that admission never happened; failures after that
 boundary must retain uncertain cleanup rather than manufacture a no-work result.
