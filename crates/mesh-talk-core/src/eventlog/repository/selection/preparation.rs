@@ -27,10 +27,9 @@ impl EventRepository {
         rows: usize,
     ) -> Result<Option<Selection>, LogError> {
         crate::eventlog::sync::network::scan_limit(rows)?;
-        if self
-            .database
-            .transaction(|c| cleanup_on(c, self.domain, self.selection_owner, rows))?
-        {
+        if self.database.selection_work_transaction(|c| {
+            cleanup_on(c, self.domain, self.selection_owner, rows)
+        })? {
             return Ok(None);
         }
         let admission = SelectionAdmission::acquire(&self.selection_admission, max_views)?;
@@ -43,7 +42,7 @@ impl EventRepository {
             admission_counter: self.selection_admission.clone(),
             admission_limit: max_views,
         };
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.validate_network_on(c, view)?;
             c.execute(
                 "INSERT INTO participant_sync_views(id,owner,domain) VALUES(?1,?2,?3)",
@@ -168,14 +167,14 @@ impl EventRepository {
         rows: usize,
     ) -> Result<usize, LogError> {
         let rows = crate::eventlog::sync::network::scan_limit(rows)? - 1;
-        self.database.transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_sync_ancestors WHERE view=?1 AND id IN (SELECT id FROM participant_sync_ancestors WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),rows])?)})
+        self.database.selection_work_transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_sync_ancestors WHERE view=?1 AND id IN (SELECT id FROM participant_sync_ancestors WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),rows])?)})
     }
     pub(crate) fn mark_selection_ancestors(
         &self,
         selection: &Selection,
         ids: &[EventId],
     ) -> Result<(), LogError> {
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.require_selection_on(c, selection)?;
             let mut stmt =
                 c.prepare("INSERT OR IGNORE INTO participant_sync_ancestors VALUES(?1,?2)")?;
@@ -213,7 +212,7 @@ impl EventRepository {
     ) -> Result<crate::eventlog::sync::network::PreparationStep, LogError> {
         budget.validate()?;
         budget.rows_for_bytes(64)?;
-        let (next,step)=self.database.transaction(|c| {
+        let (next,step)=self.database.selection_work_transaction(|c| {
             self.require_selection_on(c,selection)?;self.validate_network_on(c,view)?;self.require_selection_order_on(c,view,job)?;
             let mut next=*progress;let mut step=crate::eventlog::sync::network::PreparationStep::default();
             while next.rank>=0 && step.rows<budget.rows && step.edges<budget.edges && step.bytes+64<=budget.bytes {
@@ -242,7 +241,7 @@ impl EventRepository {
         member: &str,
         event: EventId,
     ) -> Result<(), LogError> {
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.require_selection_on(c, selection)?;
             c.execute(
                 "INSERT OR IGNORE INTO participant_sync_departures VALUES(?1,?2,?3,?4)",
@@ -278,7 +277,7 @@ impl EventRepository {
         author: Author,
         insert: bool,
     ) -> Result<bool, LogError> {
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.require_selection_on(c, selection)?;
             if insert {
                 c.execute(
@@ -300,7 +299,7 @@ impl EventRepository {
         limit: usize,
     ) -> Result<usize, LogError> {
         let limit = crate::eventlog::sync::network::scan_limit(limit)? - 1;
-        self.database.transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_sync_rows WHERE view=?1 AND id IN (SELECT id FROM participant_sync_rows WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),limit])?)})
+        self.database.selection_work_transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_sync_rows WHERE view=?1 AND id IN (SELECT id FROM participant_sync_rows WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),limit])?)})
     }
 }
 
@@ -323,7 +322,7 @@ impl EventRepository {
         rows: &[SelectionRow],
         context: &[u8],
     ) -> Result<(), LogError> {
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.require_selection_on(c, selection)?;
             self.validate_network_on(c, view)?;
             for row in rows {

@@ -110,7 +110,7 @@ impl Selection {
 }
 impl Drop for Selection {
     fn drop(&mut self) {
-        let result = self.database.transaction(|tx| {
+        let result = self.database.selection_work_transaction(|tx| {
             tx.execute(
                 "UPDATE participant_sync_views SET retired=1 WHERE id=?1 AND owner=?2",
                 params![self.id.as_slice(), self.owner.as_slice()],
@@ -201,8 +201,19 @@ impl EventRepository {
         })
     }
     pub(crate) fn cleanup_selections(&self) -> Result<bool, LogError> {
-        self.database
-            .transaction(|tx| cleanup_on(tx, self.domain, self.selection_owner, STEP))
+        // Empty maintenance is read-only. Installing the write guard would
+        // expire cached SQL plans even when no selection needs reclamation.
+        // A retirement after this observation is safe to defer to its owner or
+        // the next bounded cleanup pass; this is not an authority decision.
+        let pending = self.database.read(|c| {
+            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2))", params![self.domain.0.as_slice(),self.selection_owner.as_slice()], |r|r.get::<_,bool>(0))?)
+        })?;
+        if !pending {
+            return Ok(false);
+        }
+        self.database.selection_work_transaction(|tx| {
+            cleanup_on(tx, self.domain, self.selection_owner, STEP)
+        })
     }
     pub(crate) fn activate_cached_selection(
         &self,
@@ -437,6 +448,40 @@ impl EventRepository {
 #[cfg(test)]
 mod retirement_tests {
     use super::*;
+
+    #[test]
+    fn empty_selection_cleanup_preserves_cached_read_plans() {
+        use super::super::tests::database;
+        let directory = tempfile::tempdir().unwrap();
+        let db = database(&directory);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        repository.initialize_selections().unwrap();
+        let reprepare = |reset| {
+            db.read(|c| {
+                let mut statement =
+                    c.prepare_cached("SELECT count(*) FROM participant_sync_views")?;
+                let _: i64 = statement.query_row([], |r| r.get(0))?;
+                Ok(if reset {
+                    statement.reset_status(rusqlite::StatementStatus::RePrepare)
+                } else {
+                    statement.get_status(rusqlite::StatementStatus::RePrepare)
+                })
+            })
+            .unwrap()
+        };
+        assert_eq!(reprepare(false), 0);
+        // Positive control: authorizer changes really expire the retained VM.
+        db.selection_work_transaction(|_| Ok(())).unwrap();
+        assert!(reprepare(true) > 0);
+        for _ in 0..8 {
+            assert!(!repository.cleanup_selections().unwrap());
+        }
+        assert_eq!(
+            reprepare(false),
+            0,
+            "empty recovery must not force fresh SQL compilation"
+        );
+    }
 
     #[test]
     fn parked_selection_preserves_active_capacity_owner_and_quiet_checkout() {

@@ -108,7 +108,13 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Compressed file size is not decoded image memory. Avoid keeping archives,
    base64 strings, Blobs and decoded originals together without a measured need.
 5. **Write only durable changes.** No-op reads/heartbeats must not rewrite logs,
-   snapshots or indexes. Batch safe related mutations under the existing durable
+   snapshots or indexes. Checking a blocked retry must not persist another scheduling ticket.
+   Keep immutable admission/completion facts and bound runtime retry cursors;
+   scoped cursor eviction must preserve global recovery fairness. Changes to
+   disposable query work must not invalidate otherwise unchanged semantic work
+   hints. Enforce that exclusion at the SQL table/transaction owner, preserving
+   current authority, default write fences and rollback behavior.
+   Batch safe related mutations under the existing durable
    transaction; atomically update derived indexes. Bound WAL/log maintenance and
    preserve crash recovery and acknowledgment semantics when reducing flushes.
    Treat sync preparation as part of query cost: a fingerprint mismatch is not

@@ -177,6 +177,30 @@ async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
             connection.execute_batch("CREATE TEMP TABLE quiet_consent_probe(value INTEGER); INSERT INTO quiet_consent_probe VALUES(1),(2),(3); UPDATE main.participant_profile SET singleton=singleton WHERE 0")?;
         Ok(())
     }).unwrap();
+    // Another real sync operation may build and retire a disposable SQL
+    // selection while retained history and authorization remain unchanged.
+    // Its bookkeeping must not invalidate confirmed consent work evidence.
+    {
+        let store = node.sync_store(&sender.public());
+        let guarded = store.lock().unwrap();
+        let view = NetworkSyncStore::open_view(&*guarded, &conversation).unwrap();
+        let mut ready = false;
+        for _ in 0..128 {
+            if NetworkSyncStore::prepare_view_step(
+                &*guarded,
+                &view,
+                crate::eventlog::sync::network::PreparationBudget::default(),
+            )
+            .unwrap()
+            .ready
+            {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "real independent selection must finish preparation");
+        drop(view);
+    }
     super::super::file_consent::offered_observations::reset();
     let (_, custody, _) = counted_scope_exchange(
         &node,

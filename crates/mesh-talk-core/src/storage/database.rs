@@ -14,6 +14,9 @@ use std::{
 use zeroize::Zeroizing;
 
 mod observation;
+mod selection_work;
+mod work_clock;
+pub(crate) use work_clock::WorkStamp;
 mod page_observation;
 pub(crate) use page_observation::snapshot as observe_page_writes;
 
@@ -191,7 +194,7 @@ impl MainWriteStamp {
 }
 
 pub(crate) struct EncryptedDatabase {
-    connection: Mutex<Connection>,
+    connection: Mutex<work_clock::OwnedConnection>,
     path: PathBuf,
     faulted: AtomicBool,
     write_observer: Option<Mutex<observation::Observer>>,
@@ -321,7 +324,7 @@ impl EncryptedDatabase {
             page_observation::install(&mut connection);
         }
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection: Mutex::new(work_clock::OwnedConnection::new(connection)),
             path,
             faulted: AtomicBool::new(false),
             write_observer,
@@ -475,6 +478,7 @@ impl EncryptedDatabase {
             ));
         }
         connection
+            .into_connection()
             .close()
             .map_err(|(_connection, error)| context("close encrypted connection", error))
     }
@@ -527,34 +531,49 @@ impl EncryptedDatabase {
         }
     }
 
-    /// Capture both scalars under the same connection guard. Only use within
-    /// this open profile's exclusive-writer lease and finite hint lifetime.
+    /// Raw page/version evidence is retained for storage regression tests.
+    #[cfg(test)]
     pub(crate) fn main_write_stamp(&self) -> Result<Option<MainWriteStamp>, LogError> {
-        self.read(|connection| {
-            let Some(version) = Self::main_data_version_on(connection)? else {
-                return Ok(None);
-            };
-            let (mut writes, mut high) = (0, 0);
-            // SAFETY: the guarded handle stays live; this read-only opcode
-            // writes two aligned ints and does not reset either counter.
-            let result = unsafe {
-                rusqlite::ffi::sqlite3_db_status(
-                    connection.handle(),
-                    rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE,
-                    &mut writes,
-                    &mut high,
-                    0,
-                )
-            };
-            match result {
-                rusqlite::ffi::SQLITE_OK => Ok(Some(MainWriteStamp { version, writes })),
-                rusqlite::ffi::SQLITE_ERROR | rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
-                code => Err(context(
-                    "read pager write count",
-                    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
-                )),
-            }
-        })
+        self.read(Self::main_write_stamp_on)
+    }
+    fn main_write_stamp_on(connection: &Connection) -> Result<Option<MainWriteStamp>, LogError> {
+        let Some(version) = Self::main_data_version_on(connection)? else {
+            return Ok(None);
+        };
+        let (mut writes, mut high) = (0, 0);
+        // SAFETY: the guarded handle stays live; this read-only opcode
+        // writes two aligned ints and does not reset either counter.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                connection.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE,
+                &mut writes,
+                &mut high,
+                0,
+            )
+        };
+        match result {
+            rusqlite::ffi::SQLITE_OK => Ok(Some(MainWriteStamp { version, writes })),
+            rusqlite::ffi::SQLITE_ERROR | rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
+            code => Err(context(
+                "read pager write count",
+                rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+            )),
+        }
+    }
+    /// Exact-owner runtime work evidence. Default writes, including writes made
+    /// through read closures, remain conservative invalidations. Unknown evidence
+    /// disables reuse; the normal database fault fence is never bypassed.
+    pub(crate) fn work_hint_stamp(&self) -> Result<Option<WorkStamp>, LogError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| invalid("database connection mutex poisoned"))?;
+        if self.faulted.load(Ordering::Acquire) {
+            return Err(invalid("database connection faulted; reopen required"));
+        }
+        let stamp = self.checked_operation(Self::main_write_stamp_on(&connection))?;
+        Ok(connection.observe_work(stamp))
     }
 
     /// Successful write transactions through this owner, excluding reads and rollbacks.
@@ -568,6 +587,24 @@ impl EncryptedDatabase {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
     ) -> Result<T, LogError> {
+        self.transaction_with_purpose(false, operation)
+    }
+    /// Disposable participant selection tables only. SQLite rejects writes to
+    /// every other table, including trigger/cached-statement writes. This is work
+    /// scheduling evidence, never permission, custody or a business commit token.
+    #[track_caller]
+    pub(crate) fn selection_work_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_purpose(true, operation)
+    }
+    #[track_caller]
+    fn transaction_with_purpose<T>(
+        &self,
+        selection_work: bool,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
         let mut connection = self
             .connection
             .lock()
@@ -575,6 +612,15 @@ impl EncryptedDatabase {
         if self.faulted.load(Ordering::Acquire) {
             return Err(invalid("database connection faulted; reopen required"));
         }
+        // Observe prior default writes before acknowledging this derived slice.
+        // Both observations and the transaction share this exclusive guard.
+        if selection_work {
+            let stamp = self.checked_operation(Self::main_write_stamp_on(&connection))?;
+            connection.observe_work(stamp);
+        }
+        let selection_guard = selection_work
+            .then(|| selection_work::Guard::install(&connection))
+            .transpose()?;
         let tx = self.checked_operation(
             connection
                 .transaction()
@@ -586,6 +632,20 @@ impl EncryptedDatabase {
         match self.checked_operation(operation(&tx)) {
             Ok(value) => match tx.commit() {
                 Ok(()) => {
+                    if selection_work {
+                        let stamp =
+                            match self.checked_operation(Self::main_write_stamp_on(&connection)) {
+                                Ok(stamp) => stamp,
+                                Err(error) => {
+                                    connection.acknowledge_selection(None);
+                                    return Err(error);
+                                }
+                            };
+                        connection.acknowledge_selection(stamp);
+                    }
+                    // Restore unrestricted default authority BEFORE unlocking or logging.
+                    drop(selection_guard);
+
                     #[cfg(test)]
                     if connection.total_changes() != changes_before {
                         self.successful_write_commits
@@ -825,6 +885,159 @@ mod tests {
         })
         .unwrap()
     }
+    fn selection_fixture(directory: &tempfile::TempDir) -> EncryptedDatabase {
+        let db = create(&directory.path().join("profile.db"));
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE participant_sync_progress(view INTEGER PRIMARY KEY,context TEXT NOT NULL)")?;
+            Ok(())
+        }).unwrap();
+        db
+    }
+    #[test]
+    fn work_hint_stamp_excludes_only_guarded_selection_work_and_catches_prior_default_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        db.transaction(|c| {
+            c.execute_batch("CREATE TEMP TABLE selection_observations(n INTEGER); INSERT INTO selection_observations VALUES(0); CREATE TEMP TRIGGER observe_selection_work AFTER INSERT ON main.participant_sync_progress BEGIN UPDATE selection_observations SET n=n+1; END")?;
+            Ok(())
+        }).unwrap();
+        let before = db.work_hint_stamp().unwrap().unwrap();
+        let raw = db.main_write_stamp().unwrap().unwrap();
+        db.selection_work_transaction(|c| {
+            c.execute(
+                "INSERT INTO participant_sync_progress VALUES(1,'first')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !raw.unchanged_since(&db.main_write_stamp().unwrap().unwrap()),
+            "fixture must really write MAIN pages"
+        );
+        assert_eq!(db.work_hint_stamp().unwrap(), Some(before));
+        assert_eq!(
+            db.read(|c| Ok(
+                c.query_row("SELECT n FROM selection_observations", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+            1,
+            "TEMP-only observation must remain available inside guarded work"
+        );
+        // A default mutation must be observed before acknowledging later query
+        // work, including legacy mutation paths using a read closure.
+        db.read(|c| {
+            c.execute("UPDATE messages SET body='changed'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.selection_work_transaction(|c| {
+            c.execute("UPDATE participant_sync_progress SET context='second'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(db.work_hint_stamp().unwrap(), Some(before));
+        assert_eq!(body(&db), "changed");
+        let other = tempfile::tempdir().unwrap();
+        assert_ne!(
+            selection_fixture(&other).work_hint_stamp().unwrap(),
+            db.work_hint_stamp().unwrap(),
+            "owner lifetimes cannot reuse work evidence"
+        );
+        db.faulted.store(true, Ordering::Release);
+        assert!(db.work_hint_stamp().is_err());
+    }
+    #[test]
+    fn selection_work_guard_rejects_cached_business_writes_and_trigger_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        // Warm the exact SQL before installing the guard: statement caches must
+        // not bypass table ownership when SQLite reparses under authorization.
+        db.read(|c| {
+            c.prepare_cached("UPDATE messages SET body=?1")?
+                .execute([SECRET])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute(
+                    "INSERT INTO participant_sync_progress VALUES(1,'uncommitted')",
+                    [],
+                )?;
+                c.prepare_cached("UPDATE messages SET body=?1")?
+                    .execute(["forbidden"])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(
+            db.read(|c| Ok(c.query_row(
+                "SELECT count(*) FROM participant_sync_progress",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+            0,
+            "the whole mixed transaction must roll back"
+        );
+        db.transaction(|c| {
+            c.execute_batch("INSERT INTO participant_sync_progress VALUES(1,'original'); CREATE TRIGGER query_cannot_change_authority AFTER UPDATE ON participant_sync_progress BEGIN UPDATE messages SET body='triggered'; END")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            db.selection_work_transaction(|c| {
+                c.execute(
+                    "UPDATE participant_sync_progress SET context='forbidden'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(body(&db), SECRET);
+        // Ordinary business authority is restored after both failures.
+        db.transaction(|c| {
+            c.execute("UPDATE participant_sync_progress SET context='allowed'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(body(&db), "triggered");
+        assert!(db.work_hint_stamp().is_ok());
+    }
+    #[test]
+    fn failed_selection_slice_keeps_rollback_and_restores_default_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = selection_fixture(&directory);
+        assert!(matches!(
+            db.selection_work_transaction::<()>(|c| {
+                c.execute(
+                    "INSERT INTO participant_sync_progress VALUES(1,'uncommitted')",
+                    [],
+                )?;
+                Err(LogError::InvalidPageBudget)
+            }),
+            Err(LogError::InvalidPageBudget)
+        ));
+        assert_eq!(
+            db.read(|c| Ok(c.query_row(
+                "SELECT count(*) FROM participant_sync_progress",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+            0
+        );
+        db.transaction(|c| {
+            c.execute("UPDATE messages SET body='after rollback'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(body(&db), "after rollback");
+    }
+
     #[test]
     fn main_data_version_ignores_temp_and_reads_but_detects_owner_commits() {
         let directory = tempfile::tempdir().unwrap();

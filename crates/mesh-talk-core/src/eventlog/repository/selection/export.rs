@@ -16,7 +16,7 @@ impl EventRepository {
     ) -> Result<PreparationStep, LogError> {
         budget.validate()?;
         let limit = budget.rows_for(32)?;
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.require_selection_on(c,selection)?;self.validate_network_on(c,view)?;
             let deleted=c.execute("DELETE FROM participant_sync_have WHERE view=?1 AND id IN (SELECT id FROM participant_sync_have WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),limit as i64])?;
             if deleted==0 {c.execute("INSERT INTO participant_sync_export_work VALUES(?1,-1,NULL,1,1) ON CONFLICT(view) DO UPDATE SET rank=-1,parent_after=NULL,sibling_closed=1,own_closed=1",[selection.id.as_slice()])?;}
@@ -29,7 +29,7 @@ impl EventRepository {
         view: &NetworkView,
         ids: &[EventId],
     ) -> Result<(), LogError> {
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.require_selection_on(c, selection)?;
             self.validate_network_on(c, view)?;
             let mut stmt =
@@ -50,7 +50,7 @@ impl EventRepository {
     ) -> Result<PreparationStep, LogError> {
         budget.validate()?;
         budget.rows_for_bytes(64)?;
-        self.database.transaction(|c| {
+        self.database.selection_work_transaction(|c| {
             self.require_selection_on(c,selection)?;self.validate_network_on(c,view)?;
             let (mut after,mut edge_after,mut sibling_closed,mut own_closed):(i64,Option<Vec<u8>>,bool,bool)=c.query_row("SELECT rank,parent_after,sibling_closed,own_closed FROM participant_sync_export_work WHERE view=?1",[selection.id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
             let original = (after, edge_after.clone(), sibling_closed, own_closed);

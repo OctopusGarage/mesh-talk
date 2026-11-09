@@ -8,7 +8,9 @@ use crate::{
     storage::profile::context::ProfileStorage,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+mod retry;
 const SCHEMA: &str = "CREATE TABLE profile_receive_scan(account BLOB PRIMARY KEY CHECK(length(account)=32), after_commit INTEGER CHECK(after_commit IS NULL OR after_commit>=0), next_ticket INTEGER NOT NULL CHECK(next_ticket>0));
 CREATE TABLE profile_receive_pending(account BLOB NOT NULL CHECK(length(account)=32), id BLOB NOT NULL CHECK(length(id)=32), conversation BLOB NOT NULL CHECK(length(conversation)=32), ticket INTEGER NOT NULL CHECK(ticket>0), PRIMARY KEY(account,id));
 CREATE INDEX profile_receive_retry ON profile_receive_pending(account,ticket);
@@ -123,6 +125,7 @@ fn active(c: &Connection) -> Result<[u8; 32], LogError> {
 pub(crate) struct ProfileReceiveWork {
     profile: Arc<ProfileStorage>,
     account: [u8; 32],
+    rotation: Mutex<retry::Rotation>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Candidate {
@@ -153,7 +156,11 @@ impl ProfileReceiveWork {
             }
             Ok(account)
         })?;
-        Ok(Self { profile, account })
+        Ok(Self {
+            profile,
+            account,
+            rotation: Mutex::default(),
+        })
     }
     fn check(&self, c: &Connection) -> Result<(), LogError> {
         if active(c)? != self.account {
@@ -213,46 +220,59 @@ impl ProfileReceiveWork {
             Ok(())
         })
     }
-    /// Rotate a fixed metadata page before expensive authentication. A storage
-    /// or decryption failure leaves exact pending work eligible on later passes.
+    /// Select a fixed fair page without changing durable work. Admission tickets
+    /// remain immutable; only this account handle's bounded runtime cursor moves.
     #[cfg(test)]
     pub fn candidates(&self) -> Result<Vec<Candidate>, LogError> {
         self.candidates_for(None)
     }
-    /// Callback retries belong to the reconciled conversation; periodic recovery
-    /// keeps the global fair rotation and the same bounded discovery cursor.
+    /// Scoped callbacks and global recovery have independent bounded cursors.
+    /// Cursor eviction/reopen only repeats checks; exact pending facts remain SQL-owned.
     pub fn candidates_for(
         &self,
         conversation: Option<ConversationId>,
     ) -> Result<Vec<Candidate>, LogError> {
-        self.profile.database().transaction(|c| {
+        // Lock order: receive owner -> runtime rotation -> database. No callback,
+        // network work or await occurs while these short read guards are held.
+        let mut rotation = self
+            .rotation
+            .lock()
+            .map_err(|_| invalid("profile retry cursor poisoned"))?;
+        let after = rotation.current(conversation);
+        let (result, last) = self.profile.database().read(|c| {
             self.check(c)?;
-            let mut result=Vec::new();
-            let query = if conversation.is_some() {
-                "SELECT id,conversation FROM profile_receive_pending WHERE account=?1 AND conversation=?2 ORDER BY ticket LIMIT 16"
-            } else {
-                "SELECT id,conversation FROM profile_receive_pending WHERE account=?1 ORDER BY ticket LIMIT 16"
-            };
-            let mut statement=c.prepare(query)?;
-            let mut rows = match conversation.as_ref() {
-                Some(conversation) => statement.query(params![self.account.as_slice(), conversation.as_bytes().as_slice()])?,
-                None => statement.query(params![self.account.as_slice()])?,
-            };
-            while let Some(row)=rows.next()? {
-                let id:Vec<u8>=row.get(0)?;let conversation:Vec<u8>=row.get(1)?;
-                result.push(Candidate {id:EventId::new(id.try_into().map_err(|_|invalid("invalid profile retry id"))?),conversation:ConversationId::new(conversation.try_into().map_err(|_|invalid("invalid profile retry conversation"))?)});
+            let mut result = Vec::with_capacity(16);
+            let mut last = None;
+            for wrap in [false, true] {
+                if result.len() == 16 { break; }
+                let query = match (conversation.is_some(), wrap) {
+                    (false, false) => "SELECT id,conversation,ticket FROM profile_receive_pending WHERE account=?1 AND (ticket,id)>(?2,?3) ORDER BY ticket,id LIMIT ?4",
+                    (false, true) => "SELECT id,conversation,ticket FROM profile_receive_pending WHERE account=?1 AND (ticket,id)<=(?2,?3) ORDER BY ticket,id LIMIT ?4",
+                    (true, false) => "SELECT id,conversation,ticket FROM profile_receive_pending WHERE account=?1 AND conversation=?2 AND (ticket,id)>(?3,?4) ORDER BY ticket,id LIMIT ?5",
+                    (true, true) => "SELECT id,conversation,ticket FROM profile_receive_pending WHERE account=?1 AND conversation=?2 AND (ticket,id)<=(?3,?4) ORDER BY ticket,id LIMIT ?5",
+                };
+                let mut statement = c.prepare_cached(query)?;
+                let limit = (16 - result.len()) as i64;
+                let mut rows = if let Some(conversation) = conversation.as_ref() {
+                    statement.query(params![self.account.as_slice(), conversation.as_bytes().as_slice(), after.0, after.1.as_slice(), limit])?
+                } else {
+                    statement.query(params![self.account.as_slice(), after.0, after.1.as_slice(), limit])?
+                };
+                while let Some(row) = rows.next()? {
+                    let id: [u8; 32] = row.get::<_, Vec<u8>>(0)?.try_into().map_err(|_| invalid("invalid profile retry id"))?;
+                    let conversation: [u8; 32] = row.get::<_, Vec<u8>>(1)?.try_into().map_err(|_| invalid("invalid profile retry conversation"))?;
+                    let ticket: i64 = row.get(2)?;
+                    if ticket <= 0 { return Err(invalid("invalid profile retry ticket")); }
+                    result.push(Candidate { id: EventId::new(id), conversation: ConversationId::new(conversation) });
+                    last = Some((ticket, id));
+                }
             }
-            drop(rows);drop(statement);
-            let mut ticket:i64=c.query_row("SELECT next_ticket FROM profile_receive_scan WHERE account=?1",[self.account.as_slice()],|r|r.get(0))?;
-            for row in &result {
-                c.execute("UPDATE profile_receive_pending SET ticket=?1 WHERE account=?2 AND id=?3",params![ticket,self.account.as_slice(),row.id.as_bytes().as_slice()])?;
-                ticket=ticket.checked_add(1).ok_or_else(||invalid("profile retry ticket exhausted"))?;
-            }
-            if !result.is_empty() {
-                c.execute("UPDATE profile_receive_scan SET next_ticket=?1 WHERE account=?2",params![ticket,self.account.as_slice()])?;
-            }
-            Ok(result)
-        })
+            Ok((result, last))
+        })?;
+        if let Some(last) = last {
+            rotation.advance(conversation, last);
+        }
+        Ok(result)
     }
     /// Call only after durable current-profile installation or definitive
     /// authenticated rejection. There is no second authoritative payload WAL.
@@ -336,6 +356,48 @@ mod tests {
         assert_eq!(counts, (79, ticket));
         let reopened = ProfileReceiveWork::open(work.profile.clone()).unwrap();
         assert_eq!(reopened.after().unwrap(), Some(80));
+    }
+
+    #[test]
+    fn blocked_profile_retry_rotation_is_read_only_and_reopen_preserves_pending() {
+        let (_dir, work, own) = fixture();
+        work.discover(None, &headers(), own).unwrap();
+        let db = work.profile.database();
+        let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = db.successful_write_commits();
+        let stamp = db.main_write_stamp().unwrap().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        // No completion: this models candidates blocked by an unavailable
+        // author or policy. Fair scheduling is not new durable business state.
+        for _ in 0..8 {
+            let page = work.candidates().unwrap();
+            assert!(page.len() <= 16);
+            seen.extend(page.into_iter().map(|candidate| candidate.id));
+        }
+        assert_eq!(
+            seen.len(),
+            headers().len(),
+            "blocked prefixes cannot starve later work"
+        );
+        assert_eq!(
+            db.read(|c| Ok(c.total_changes())).unwrap(),
+            changes,
+            "retry scheduling without progress must not rewrite durable tickets"
+        );
+        assert_eq!(db.successful_write_commits(), commits);
+        assert!(
+            stamp.unchanged_since(&db.main_write_stamp().unwrap().unwrap()),
+            "blocked retry selection must not dirty MAIN pages"
+        );
+        let reopened = ProfileReceiveWork::open(work.profile.clone()).unwrap();
+        let mut recovered = std::collections::HashSet::new();
+        for _ in 0..8 {
+            recovered.extend(reopened.candidates().unwrap().into_iter().map(|row| row.id));
+        }
+        assert_eq!(
+            recovered, seen,
+            "runtime cursor reset cannot lose pending facts"
+        );
     }
 
     #[test]
@@ -441,17 +503,17 @@ mod tests {
     }
 
     #[test]
-    fn scoped_rotation_and_completion_failures_preserve_retry_and_owner_fences() {
+    fn scoped_read_and_completion_failures_preserve_retry_and_owner_fences() {
         let (_dir, work, own) = fixture();
         let page = headers();
         let conv = page[0].header.conversation;
         work.discover(None, &page, own).unwrap();
-        work.profile.database().transaction(|c| { c.execute_batch("CREATE TEMP TRIGGER fail_scoped_rotation BEFORE UPDATE ON profile_receive_pending BEGIN SELECT RAISE(ABORT,'injected rotation failure'); END;")?; Ok(()) }).unwrap();
+        work.profile.database().transaction(|c| { c.execute_batch("CREATE TEMP VIEW profile_receive_pending AS SELECT account,id,conversation,-1 AS ticket FROM main.profile_receive_pending")?; Ok(()) }).unwrap();
         assert!(work.candidates_for(Some(conv)).is_err());
         work.profile
             .database()
             .transaction(|c| {
-                c.execute_batch("DROP TRIGGER fail_scoped_rotation")?;
+                c.execute_batch("DROP VIEW temp.profile_receive_pending")?;
                 Ok(())
             })
             .unwrap();
@@ -566,7 +628,12 @@ mod tests {
         let work = ProfileReceiveWork::open(profile).unwrap();
         let second = work.candidates().unwrap();
         assert_eq!(second.len(), 16);
-        assert!(second.iter().all(|row| !first.contains(row)));
+        // Restart may repeat an unfinished check; only genuine completion is
+        // durable. Fair rotation within the reopened lifetime remains required.
+        assert!(second.iter().all(|row| row.id != first[0].id));
+        assert!(work.processed(first[0].id).unwrap());
+        let third = work.candidates().unwrap();
+        assert!(third.iter().all(|row| !second.contains(row)));
         let mut seen = std::collections::HashSet::new();
         for _ in 0..5 {
             seen.extend(work.candidates().unwrap().into_iter().map(|row| row.id));

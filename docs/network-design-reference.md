@@ -2661,21 +2661,28 @@ queries through at most 256 runtime hints, with at most 512 scope bytes each.
 Each hint matches the full relay/recipient/mailbox/intent scope, a conservative
 local producer fingerprint and the exact freshly observed remote binding and
 window upper/revision. The fingerprint includes relevant certificate and runtime
-policy generations. A separate runtime stamp pairs the current open profile's
-MAIN file version with the connection's non-reset dirty-page write count, read
-under the same connection guard. SQLite's
-[`SQLITE_FCNTL_DATA_VERSION`](https://www.sqlite.org/c3ref/c_fcntl_begin_atomic_write.html)
-includes this connection's commits but also advances for zero-row MAIN updates;
-[`SQLITE_DBSTATUS_CACHE_WRITE`](https://www.sqlite.org/c3ref/c_dbstatus_options.html)
-distinguishes those transactions from actual dirty-page writes. Under the profile's
-exclusive single-writer lease and finite hint lifetime, both must change to
-invalidate the local stamp. In-memory TEMP activity does not invalidate it. An indexed same-value UPDATE
-can still dirty pages and conservatively invalidates the hint.
-`total_changes` includes TEMP and `PRAGMA data_version` omits own commits.
-Unsupported observations disable this hint; the database fault fence remains
-mandatory. This comparison is not valid across owners or independent writers.
-It is neither a durable
-revision nor custody or authorization evidence. Only actual HAVE/upload success
+policy generations. An owner-qualified runtime work clock observes the current profile's MAIN file
+version and non-reset dirty-page write count under its exclusive connection
+mutex. Default writes, including legacy mutations through read closures, remain
+conservative invalidations. The owner acknowledges only the write interval of
+an explicitly guarded disposable participant selection transaction; preceding
+ordinary writes are observed first under the same guard. SQLite authorization
+allows that transaction to read current authority and use TEMP scratch, but write
+MAIN only through its closed set of `participant_sync_*` selection/progress
+tables. Other MAIN writes, including trigger side effects and previously cached
+statements, are rejected and rolled back. Schema/kind backfill, events, controls, receipts and other business facts
+retain the default fence. Restore normal SQL authority before releasing the
+connection; commit/rollback failure preserves the database fault fence.
+Unknown observations, owner changes or exhausted runtime generations cannot
+supply unchanged evidence. This work clock is not durable progress or an
+authorization grant. Raw MAIN version alone includes zero-row updates;
+dirty-page evidence avoids their false invalidation. TEMP-only work does not
+invalidate it. An indexed same-value business UPDATE can still dirty pages and
+conservatively invalidates the hint. SQLite authorizer changes expire prepared
+statements; empty maintenance therefore uses a read-only existence check without
+installing a guard. Actual selection work keeps the bounded guarded path. Its
+cold/active cost requires native validation.
+Only actual HAVE/upload success
 under an unchanged captured producer scope creates a hint. Reads never renew its
 sixty-second expiry, which bounds rechecks of external files and time conditions.
 Local mutations, remote replacement or revision changes immediately restore

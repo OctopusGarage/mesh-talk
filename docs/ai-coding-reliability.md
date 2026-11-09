@@ -766,6 +766,23 @@ uses a shared bounded runtime owner with indexed durable fallback. Its inline
 file-book regressions cover blocked cross-conversation fairness without commits,
 capacity shrink, failed cleanup, stale owners and oversized/reopen recovery.
 
+Profile receive uses immutable durable admission tickets with independent bounded
+runtime cursors for scoped callbacks and global recovery. A blocked nonempty
+queue must rotate fairly with zero SQL changes, write commits or dirty MAIN pages;
+reopening can repeat checks but cannot lose pending/processed facts. The owning
+`blocked_profile_retry_rotation_is_read_only_and_reopen_preserves_pending`
+regression checks those costs rather than only the empty-queue case.
+
+A profile-wide physical write stamp is a conservative invalidator, not a semantic
+revision: disposable query preparation can otherwise invalidate its own work
+hints. Exclude derived writes only inside the connection owner's guarded table
+boundary. Observe prior ordinary writes before the same-lock derived interval;
+permit TEMP scratch but reject business-table writes through direct SQL, cached
+statements or triggers, and restore default authority on success, failure and unwinding. Schema and
+source/authority indexes keep conservative invalidation. The database work-clock
+regressions and the real incremental-mailbox consent exchange cover independent
+selection preparation/retirement, actual authority invalidation and rollback.
+
 Treat derived-index cache retirement as a storage mutation when its destructor
 marks/deletes SQL rows. Fully version-qualified plans must not expire only because
 no request used them recently; enforce capacity and owner/authority invalidation

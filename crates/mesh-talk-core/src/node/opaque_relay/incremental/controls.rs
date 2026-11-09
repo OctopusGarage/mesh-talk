@@ -13,7 +13,7 @@ type Offer = (ConversationId, EventId);
 pub(super) struct ControlScope {
     key: Vec<u8>,
     source: [u8; 32],
-    main_version: crate::storage::database::MainWriteStamp,
+    work_stamp: crate::storage::database::WorkStamp,
     remote: RemoteBinding,
     floor: (i64, i64),
 }
@@ -21,7 +21,7 @@ impl ControlScope {
     fn same_inputs(&self, current: &Self) -> bool {
         self.key == current.key
             && self.source == current.source
-            && self.main_version.unchanged_since(&current.main_version)
+            && self.work_stamp.unchanged_since(&current.work_stamp)
             && self.remote == current.remote
             && self.floor == current.floor
     }
@@ -48,7 +48,7 @@ impl QuietConsentCache {
         else {
             return reason::CONSENT_ABSENT;
         };
-        if !hint.scope.main_version.unchanged_since(&scope.main_version) {
+        if !hint.scope.work_stamp.unchanged_since(&scope.work_stamp) {
             reason::CONSENT_MAIN_CHANGED
         } else if hint.scope.source != scope.source {
             reason::CONSENT_POLICY_CHANGED
@@ -106,9 +106,9 @@ impl Node {
         let (Some(remote), Some(floor)) = (state(p).remote.clone(), state(p).remote_floor) else {
             return Ok(None);
         };
-        // Runtime-only MAIN file evidence: TEMP query/session progress is not a
-        // change to consent inputs. Unknown versions keep normal preparation.
-        let Some(main_version) = database.main_write_stamp()? else {
+        // Runtime-only owner evidence excludes guarded disposable selection work.
+        // Default writes and unknown observations retain normal preparation.
+        let Some(work_stamp) = database.work_hint_stamp()? else {
             return Ok(None);
         };
         let generation = self.privacy.generation.load(Ordering::Acquire);
@@ -123,8 +123,8 @@ impl Node {
         ))
         .map_err(|error| LogError::Serialization(error.to_string()))?;
         if !database
-            .main_write_stamp()?
-            .is_some_and(|current| main_version.unchanged_since(&current))
+            .work_hint_stamp()?
+            .is_some_and(|current| work_stamp.unchanged_since(&current))
             || generation != self.privacy.generation.load(Ordering::Acquire)
             || projection != self.privacy.projection_revision.load(Ordering::Acquire)
         {
@@ -133,7 +133,7 @@ impl Node {
         Ok(Some(ControlScope {
             key: state(p).key.clone(),
             source: Sha256::digest(bytes).into(),
-            main_version,
+            work_stamp,
             remote,
             floor,
         }))
@@ -205,7 +205,7 @@ impl Node {
         } else {
             self.observe_mailbox_work(reason::CONSENT_PREPARE_MOVED, None);
             if let Some(after) = after.as_ref() {
-                let class = if !before.main_version.unchanged_since(&after.main_version) {
+                let class = if !before.work_stamp.unchanged_since(&after.work_stamp) {
                     reason::CONSENT_MAIN_CHANGED
                 } else if before.source != after.source {
                     reason::CONSENT_POLICY_CHANGED
@@ -229,7 +229,7 @@ mod tests {
         ControlScope {
             key: vec![1; 128],
             source: [2; 32],
-            main_version: Default::default(),
+            work_stamp: Default::default(),
             remote: RemoteBinding {
                 store_uuid: [3; 16],
                 conversation: ConversationId::new([4; 32]),
