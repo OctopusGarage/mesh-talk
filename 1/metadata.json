@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6YVCGWEB6A9589H9DRB1RCD",
+  "session_id": "01a1b9d6-e428-7a40-a439-f43aa7acb8c4",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-09T00:30:07.913654Z",
+  "branch": "fix/chat-composer-tools",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "src-tauri/Cargo.toml"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "1f325ca44ada",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 1493,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1426688,
+    "output_tokens": 300,
+    "api_call_count": 6,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 5089,
+    "layers": {
+      "betterleaks": 2,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 3,
+      "credentialed_uri": 0,
+      "entropy": 5084,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 12
+  }
+}
