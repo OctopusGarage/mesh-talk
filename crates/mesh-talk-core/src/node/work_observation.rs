@@ -225,47 +225,64 @@ impl Node {
         match page {
             Ok((page, source, destructive, repair, profile, headers)) => {
                 if let Some(job) = profile.job {
-                    log::info!(target: "mesh_talk_core::node::node",
-                        "profile_work source={} selected={} complete={} candidates={} candidate_bytes={} cursor={} requests_pending={}",
-                        profile.source_revision, job.revision, job.complete, job.candidates,
-                        job.candidate_bytes, hex::encode(job.cursor_tag), profile.requests_pending);
+                    emit_info(
+                        log::logger(),
+                        format_args!(
+                            "profile_work source={} selected={} complete={} candidates={} candidate_bytes={} cursor={} requests_pending={}",
+                            profile.source_revision,
+                            job.revision,
+                            job.complete,
+                            job.candidates,
+                            job.candidate_bytes,
+                            hex::encode(job.cursor_tag),
+                            profile.requests_pending
+                        ),
+                    );
                 } else {
-                    log::info!(target: "mesh_talk_core::node::node",
-                        "profile_work source={} job=absent requests_pending={}",
-                        profile.source_revision, profile.requests_pending);
+                    emit_info(
+                        log::logger(),
+                        format_args!(
+                            "profile_work source={} job=absent requests_pending={}",
+                            profile.source_revision, profile.requests_pending
+                        ),
+                    );
                 }
-                log::info!(
-                    target: "mesh_talk_core::node::node",
-                    "order_work_page age_ms={} rows={} more={} source={} destructive={} receive_repair={}",
-                    age_ms,
-                    page.items.len(),
-                    page.next.is_some(),
-                    source,
-                    destructive,
-                    repair
+                emit_info(
+                    log::logger(),
+                    format_args!(
+                        "order_work_page age_ms={} rows={} more={} source={} destructive={} receive_repair={}",
+                        age_ms,
+                        page.items.len(),
+                        page.next.is_some(),
+                        source,
+                        destructive,
+                        repair
+                    ),
                 );
                 for row in page.items {
                     let kind = match row.order {
                         CausalOrder::Logical => "logical",
                         CausalOrder::WallClock => "wall",
                     };
-                    log::info!(
-                    target: "mesh_talk_core::node::node",
-                        "order_work scope={} job={} kind={} phase={} revision={} target={} base={} cutoff={} seeded={} rank={} seed_after={} child_after={} tail_after={} pop={}",
-                        hex::encode(row.scope_tag),
-                        hex::encode(row.job),
-                        kind,
-                        row.phase,
-                        row.revision,
-                        row.target_count,
-                        row.base_count,
-                        row.cutoff,
-                        row.seeded,
-                        row.next_rank,
-                        row.seed_after,
-                        row.child_after,
-                        row.tail_after,
-                        row.has_pop
+                    emit_info(
+                        log::logger(),
+                        format_args!(
+                            "order_work scope={} job={} kind={} phase={} revision={} target={} base={} cutoff={} seeded={} rank={} seed_after={} child_after={} tail_after={} pop={}",
+                            hex::encode(row.scope_tag),
+                            hex::encode(row.job),
+                            kind,
+                            row.phase,
+                            row.revision,
+                            row.target_count,
+                            row.base_count,
+                            row.cutoff,
+                            row.seeded,
+                            row.next_rank,
+                            row.seed_after,
+                            row.child_after,
+                            row.tail_after,
+                            row.has_pop
+                        ),
                     );
                 }
                 if let Ok(mut observer) = slot.try_lock()
@@ -284,10 +301,20 @@ impl Node {
                     .try_lock()
                     .ok()
                     .map(|cache| (cache.observed_len(), cache.observed_control_hints()));
-                log::info!(target: "mesh_talk_core::node::node", "mailbox_cache usage_retained_records_bytes_session_records_checkpoints_records_bytes_wrappers_records_bytes={:?} hot_len={:?}", cache_usage, hot_len);
-                log::info!(target: "mesh_talk_core::node::node",
-                    "mailbox_work best_effort=true recent_window={} repeats={} counts={:?} header_kinds={:?} header_more={} header_reset={} labels=outer,open_failed,identity_handled,identity_deferred,consent_handled,consent_deferred,semantic_profile,retained_duplicate,admitted_retained,admitted_nonretained,admission_failed,staged,retained_hit,session_hit,get,get_retry,receipt_hot,receipt_durable,receipt_rejected,receipt_missing,view_skip,view_absent,view_stale,stamp_unknown,stamp_changed,view_resumed,view_new,upload_reset,semantic_hit,pull_advanced,pull_quiet,pull_deferred",
-                    recent, repeats, counts, headers.1, headers.2, headers.3);
+                emit_info(
+                    log::logger(),
+                    format_args!(
+                        "mailbox_cache usage_retained_records_bytes_session_records_checkpoints_records_bytes_wrappers_records_bytes={:?} hot_len={:?}",
+                        cache_usage, hot_len
+                    ),
+                );
+                emit_info(
+                    log::logger(),
+                    format_args!(
+                        "mailbox_work best_effort=true recent_window={} repeats={} counts={:?} header_kinds={:?} header_more={} header_reset={} labels=outer,open_failed,identity_handled,identity_deferred,consent_handled,consent_deferred,semantic_profile,retained_duplicate,admitted_retained,admitted_nonretained,admission_failed,staged,retained_hit,session_hit,get,get_retry,receipt_hot,receipt_durable,receipt_rejected,receipt_missing,view_skip,view_absent,view_stale,stamp_unknown,stamp_changed,view_resumed,view_new,upload_reset,semantic_hit,pull_advanced,pull_quiet,pull_deferred",
+                        recent, repeats, counts, headers.1, headers.2, headers.3
+                    ),
+                );
                 // Static counters/revisions only, sampled by this existing
                 // opt-in owner after releasing observer, SQL and log guards.
                 let entries = self
