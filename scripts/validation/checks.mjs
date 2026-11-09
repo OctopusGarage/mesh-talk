@@ -17,6 +17,13 @@ export function buildStaticChecks(plan) {
   const packages = [...new Set(plan.rust.map(item => item.package))].sort();
   const syntax = plan.files.filter(file => !plan.deleted?.includes(file) && syntaxKind(file));
   if (syntax.length) add("changed-syntax", ["node", "scripts/validation/syntax.mjs", "--files", ...syntax]);
+  const spellingFiles = [...new Set(plan.files.filter(file => !plan.deleted?.includes(file)))];
+  if (plan.files.includes("_typos.toml")) add("spelling", ["typos"]);
+  else if (spellingFiles.length) {
+    // Explicit paths otherwise bypass configured exclusions; ./ also keeps a
+    // filename of "-" distinct from typos' standard-input selector.
+    add("spelling", ["typos", "--force-exclude", "--", ...spellingFiles.map(file => `./${file}`)]);
+  }
   if (plan.files.some(file => /^\.github\/(?:workflows|actions)\/.*\.ya?ml$/u.test(file) ||
     [...policyTests.values(), "scripts/ci/docs-scope.mjs", "scripts/validation/checks.mjs"].includes(file))) {
     // Configuration assertions and runner inventory listing only: no suites,

@@ -2536,6 +2536,38 @@ pub(in crate::node) mod tests {
                 );
             }
         }
+        // Capture the source precondition before admission can commit a new
+        // membership event and invalidate its published projection.
+        let canonical = std::cell::RefCell::new(None);
+        wait_self_control_noise_diagnosed(
+            readiness_deadline,
+            || match online.account_group_projection(group) {
+                Ok(projection) => {
+                    *canonical.borrow_mut() = Some(
+                        Node::public_account_group_source(
+                            group,
+                            &projection,
+                            &online.identity.public(),
+                            &online.own_group_proof(),
+                        )
+                        .expect("ready selected source must have canonical membership"),
+                    );
+                    true
+                }
+                Err(crate::eventlog::LogError::StaleCursor) => false,
+                Err(error) => panic!("selected source projection failed: {error}"),
+            },
+            || "selected source projection must be published before operation admission".into(),
+        )
+        .await;
+        assert_eq!(
+            canonical.into_inner().unwrap().role,
+            if pending {
+                AccountGroupRole::Invited
+            } else {
+                AccountGroupRole::Member
+            }
+        );
         let fanout_trace = trace.clone();
         let fanout_operation_trace = operation_trace.clone();
         *online.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
@@ -2639,21 +2671,6 @@ pub(in crate::node) mod tests {
             "an available canonical source must be pinned"
         );
         let full_source = executor.identity.public();
-        let canonical = Node::public_account_group_source(
-            group,
-            &executor.account_group_projection(group).unwrap(),
-            &full_source,
-            &executor.own_group_proof(),
-        )
-        .unwrap();
-        assert_eq!(
-            canonical.role,
-            if pending {
-                AccountGroupRole::Invited
-            } else {
-                AccountGroupRole::Member
-            }
-        );
         let event_kind = input.event_kind();
         let action_deadline = admission_started + operation_budget;
         let mut last_private_predicate = None;

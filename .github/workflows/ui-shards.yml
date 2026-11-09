@@ -73,7 +73,7 @@ jobs:
           CHROMIUM_TOTAL: ${{ inputs.shard_total }}
           CHROMIUM_SHARD: ${{ matrix.shard }}
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: Prepare Ubuntu archive source
         if: runner.os == 'Linux'
         shell: bash

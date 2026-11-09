@@ -36,6 +36,12 @@ Rust unit/integration, real multi-process backend E2E, browser UI tests, and nat
 desktop tests answer different questions. A VM/Xvfb/software-renderer pass does not
 establish that a reported physical GPU or VMware compositor fault is fixed.
 
+A clean exact-current-main promotion into dev may use the
+[trusted main synchronization proof](ci-maintenance.md#synchronizing-an-accepted-main-source-into-dev)
+for PR preparation. Its source must already satisfy the existing complete trusted
+main-push acceptance owner, and dev still requires its own integration checks.
+Ordinary source changes retain the configured local patch coverage target.
+
 ## Test quality and evidence
 
 `node --test scripts/diagnostics/*.test.mjs` runs in three-platform CI and the health
@@ -68,10 +74,14 @@ qualify. Main pushes, merge groups, schedules and manual runs retain complete
 execution. Release consumers require checks from the owning successful trusted
 main-push workflow suite, never PR-only scope decisions.
 
-Branch protection requires direct execution checks instead of runner-backed
+Main branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
-release policy and replacement mapping. Source and all platform checks are
-individually required; Windows requires its build producer and all archive
+release policy and replacement mapping. Development-only dependency profiles use the
+[exact-merge CI scope owner](ci-maintenance.md#dependabot-development-acceptance)
+and retain the existing `dev` required `verify` compatibility context, whose Linux
+producer requires actual selected npm acceptance. That exception cannot authorize
+main or release acceptance. Source and all platform checks are
+individually required for main; Windows requires its build producer and all archive
 consumers. Release acceptance uses the same direct names plus its main-only
 checks, including ASan and mutation-runner acceptance. A newer failed, pending or
 missing check still rejects the exact source. Stable repeats this strict check

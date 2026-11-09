@@ -110,7 +110,7 @@ export async function collectDownloadedShards(input, output, expectedIdentity, {
   }
 }
 
-export async function renderDownloadedReports(input, output, { runAttempt, linuxResult, desktopResult }, {
+export async function renderDownloadedReports(input, output, { runAttempt, linuxResult, desktopResult, windowsResult }, {
   merge = (directory, os) => execFileSync(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "merge-reports", "--config", "playwright.config.ts", "--reporter=html", directory],
     { stdio: "inherit", env: { ...process.env, PLAYWRIGHT_HTML_OUTPUT_DIR: resolve("playwright-report", os) } }),
   log = console.error,
@@ -119,7 +119,7 @@ export async function renderDownloadedReports(input, output, { runAttempt, linux
   let rendered = 0;
   const failures = [];
   for (const os of operatingSystems) {
-    const result = os === "ubuntu-24.04" ? linuxResult : desktopResult;
+    const result = { "ubuntu-24.04": linuxResult, "macos-26-intel": desktopResult, "windows-latest": windowsResult }[os];
     if (result === "skipped") continue;
     if (!["success", "failure", "cancelled"].includes(result)) { failures.push(`Unknown producer conclusion for ${os}: ${result}`); continue; }
     const destination = resolve(output, os);
@@ -146,7 +146,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   if (mode === "extract") await extractShard(input, output, Number(process.env.CHROMIUM_SHARD));
   else if (mode === "collect") await collectShards(input, identity(output));
   else if (mode === "collect-artifacts") await collectDownloadedShards(input, output, identity());
-  else if (mode === "render-artifacts") await renderDownloadedReports(input, output, { runAttempt: process.env.GITHUB_RUN_ATTEMPT, linuxResult: process.env.LINUX_RESULT, desktopResult: process.env.DESKTOP_RESULT });
+  else if (mode === "render-artifacts") await renderDownloadedReports(input, output, { runAttempt: process.env.GITHUB_RUN_ATTEMPT, linuxResult: process.env.LINUX_RESULT, desktopResult: process.env.DESKTOP_RESULT, windowsResult: process.env.WINDOWS_RESULT });
   else if (mode === "shards") console.log(Array.from({ length: chromiumShardCount(input) }, (_, index) => index + 1).join(" "));
   else if (mode === "layout") validateShardLayout(process.env.CHROMIUM_OS, JSON.parse(process.env.CHROMIUM_SHARDS), Number(process.env.CHROMIUM_TOTAL), Number(process.env.CHROMIUM_SHARD));
   else throw Error("usage: chromium-evidence.mjs extract REPORT OUTPUT | collect INPUT PLATFORM | collect-artifacts INPUT OUTPUT | render-artifacts INPUT OUTPUT | shards PLATFORM | layout");

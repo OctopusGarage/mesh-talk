@@ -2589,6 +2589,9 @@ admitted until native settlement; inline refreshes retain only the latest pendin
 demand, and a single-message inspector shares that admission. The active renderer
 cache keeps at most 512 summaries and 2 MiB of charged strings. Incomplete targets
 open a page-replacing inspector; subsequent pages never append an unbounded list.
+An empty inline slice can still have a remainder and must retain its inspector.
+Read-only views preserve authorized summary inspection and paging while disabling
+reaction mutations.
 Reaction projection does not delay the existing history or read-ledger commit.
 
 The standalone legacy SDK's profile maintenance preserves referenced ancestors
@@ -2827,3 +2830,11 @@ establish independently trusted wall time or human identity.
 
 The [profile and verification guide](peer-trust.md) owns the complete lifecycle,
 resource limits, compatibility and delivery invariants.
+
+## Experimental native Bluetooth boundary
+
+The [native Bluetooth guide](native-bluetooth.md) owns the explicit two-host macOS
+rehearsal and its bounded adapter contract. It reuses device-bound Noise channels
+but is not part of production node discovery, routing or account presence. Native
+radio endpoints must not be represented by synthetic IP addresses; desktop
+integration must preserve the existing privacy and delivery owners.

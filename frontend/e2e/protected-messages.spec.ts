@@ -1,5 +1,5 @@
 import { test, expect } from "./tauri-mock";
-import { enterChat } from "./helpers/session";
+import { enterChat, revealComposerAttachments } from "./helpers/session";
 
 test("protected text stays concealed in bubbles and sidebar, reveals temporarily and hides on blur", async ({
   page,
@@ -85,6 +85,12 @@ test("protected composer and concealed bubble fit a narrow conversation", async 
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await page.getByTestId("composer-protection").click();
   await page.getByTestId("composer-protection-click").click();
+  await revealComposerAttachments(page);
+  await expect(page.getByTestId("composer-attach")).toBeDisabled();
+  await expect(page.getByTestId("composer-attach-directory")).toBeDisabled();
+  await expect(page.getByTestId("composer-image")).toBeEnabled();
+  await expect(page.getByTestId("composer-camera")).toBeEnabled();
+  await page.keyboard.press("Escape");
   await page.getByTestId("composer-input").fill("Narrow private message");
   await page.getByTestId("composer-send").click();
   await expect(page.getByTestId("protected-message")).toBeVisible();

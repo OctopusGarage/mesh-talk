@@ -1,0 +1,82 @@
+name: Scoped npm acceptance
+on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  npm:
+    name: Dependency acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: auto
+      - name: Verify requested profile against exact merge
+        env:
+          EXPECTED: ${{ inputs.profile }}
+          ACTUAL: ${{ steps.scope.outputs.profile }}
+        run: |
+          test "$EXPECTED" = "$ACTUAL"
+          case "$ACTUAL" in help|frontend) ;; *) exit 1 ;; esac
+      - name: Reserve browser cleanup time
+        run: |
+          echo "MESH_UI_DEADLINE_MS=$(( $(date +%s) * 1000 + 28 * 60000 ))" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/dependency-browser"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/dependency-browser/source.txt"
+      - name: Help MCP acceptance
+        if: steps.scope.outputs.profile == 'help'
+        run: |
+          npm ci --prefix tools/help --ignore-scripts
+          node --test tools/help/*.test.mjs
+          npm run build --prefix tools/help -- --out "$RUNNER_TEMP/help-site"
+          npm audit --prefix tools/help --audit-level=high
+      - name: Frontend acceptance
+        if: steps.scope.outputs.profile == 'frontend'
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm run test:coverage
+          npm run build
+          npm run check:build-syntax
+          npm run audit:ci
+      - name: Install representative browsers
+        if: steps.scope.outputs.profile == 'frontend'
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium webkit
+      - name: Chromium theme and layout regression
+        env:
+          MESH_UI_EVIDENCE_DIR: ${{ runner.temp }}/dependency-browser/chromium
+        if: steps.scope.outputs.profile == 'frontend'
+        working-directory: frontend
+        run: node ../scripts/ci/ui-runner.mjs e2e/ui-visual-regression.spec.ts e2e/theme-picker.spec.ts --workers=1 --retries=0 --reporter=list,../scripts/ci/ui-runner.mjs
+      - name: WebKit portable regression
+        if: steps.scope.outputs.profile == 'frontend'
+        working-directory: frontend
+        env:
+          EVAL_BROWSER: webkit
+          MESH_UI_EVIDENCE_DIR: ${{ runner.temp }}/dependency-browser/webkit
+        run: node ../scripts/ci/ui-runner.mjs --config=playwright.portable.config.ts --workers=1 --retries=0 --reporter=list,../scripts/ci/ui-runner.mjs
+      - name: Preserve selected acceptance evidence
+        if: ${{ always() && steps.scope.outputs.profile == 'frontend' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-acceptance-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            frontend/coverage/
+            ${{ runner.temp }}/dependency-browser/
+            frontend/eval-results/
+            frontend/test-results/
+          retention-days: 7
+          if-no-files-found: error

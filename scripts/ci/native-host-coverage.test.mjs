@@ -76,6 +76,35 @@ test("native workspace coverage bounds both complete partitions with Nextest", (
   assert.ok(commands.includes("run: cargo test --workspace --doc --locked"));
 });
 
+test("standalone coverage reports every successful cohort and rejects unsupported options", t => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-deferred-coverage-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "bin"));
+  writeFileSync(join(root, "bin/cargo"), '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$RUNNER_TEMP/commands"\nif [ "$2" = report ]; then touch lcov.info; fi\n', { mode: 0o755 });
+  const run = args => spawnSync("bash", [helper, ...args], {
+    cwd: root, encoding: "utf8",
+    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, RUNNER_TEMP: root, MESH_TALK_TEST_TIMING: "0" },
+  });
+  const standalone = run(["linux"]);
+  assert.equal(standalone.status, 0, standalone.stderr);
+  assert.equal(existsSync(join(root, "lcov.info")), true);
+  assert.equal(readFileSync(join(root, "commands"), "utf8").trim().split("\n").length, 3);
+  for (const args of [["linux", "--defer-report"], ["linux", "--unknown"], ["linux", "--defer-report", "extra"], ["linux", "extra"], ["macos", "--defer-report"], ["macos-host", "--defer-report"], ["macos-host", "--unknown"], ["macos-host", "extra"], ["macos-host", "--defer-report", "extra"]]) {
+    const invalid = run(args);
+    assert.equal(invalid.status, 2, `${args}: ${invalid.stderr}`);
+  }
+  rmSync(join(root, "commands"));
+  const hostOnly = run(["macos-host"]);
+  assert.equal(hostOnly.status, 0, hostOnly.stderr);
+  const hostCommands = readFileSync(join(root, "commands"), "utf8").trim().split("\n");
+  assert.equal(hostCommands.length, 2);
+  assert.equal(hostCommands[0], "llvm-cov nextest --no-report --locked -p mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4");
+  assert.equal(hostCommands[1], "llvm-cov report --lcov --output-path lcov.info");
+  const immediate = run(["linux"]);
+  assert.equal(immediate.status, 0, immediate.stderr);
+  assert.equal(existsSync(join(root, "lcov.info")), true);
+});
+
 test("native Host isolation preserves default targets, accumulated coverage and real failure", (t) => {
   const root = mkdtempSync(join(tmpdir(), "mesh-native-host-coverage-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -188,12 +217,12 @@ test("native Host isolation preserves default targets, accumulated coverage and 
       mkdirSync(join(root, directory, path), { recursive: true });
     writeFileSync(
       join(root, directory, "Cargo.toml"),
-      `[package]\nname="${name}"\nversion="0.1.0"\nedition="2024"\n\n[[example]]\nname="default"\ntest=true\n`,
+      `[package]\nname="${name}"\nversion="0.1.0"\nedition="2024"\n\n[[example]]\nname="default"\ntest=true\n\n[features]\ndefault=["fixture-default"]\nfixture-default=[]\n`,
     );
     const crate = name.replaceAll("-", "_");
     writeFileSync(
       join(root, directory, "src/lib.rs"),
-      `#[inline(never)] pub fn ${directory}_unit() -> u8 { 1 }\n#[inline(never)] pub fn ${directory}_example() -> u8 { 4 }\n#[inline(never)] pub fn ${directory}_integration() -> u8 { ${directory === "core" ? 'if let Some(path) = std::env::var_os("MESH_AFTER_TIMEOUT_MARKER") { std::fs::write(path, "continued after timeout").unwrap(); }' : ""} 2 }\n#[test] fn unit() { assert_eq!(${directory}_unit(), 1); ${directory === "host" ? 'assert!(std::env::var_os("MESH_FAIL_HOST").is_none(), "host failure control");' : 'if let Some(path) = std::env::var_os("MESH_REST_MARKER") { std::fs::write(path, "rest execution").unwrap(); } assert!(std::env::var_os("MESH_FAIL_CORE").is_none(), "core failure control"); if let Some(path) = std::env::var_os("MESH_PARK_CORE") { std::fs::write(path, "park entered").unwrap(); loop { std::thread::park(); } }'} }\n#[test] #[ignore] fn default_ignored() { panic!("must remain ignored"); }\n`,
+      `#[inline(never)] pub fn ${directory}_unit() -> u8 { 1 }\n#[inline(never)] pub fn ${directory}_example() -> u8 { 4 }\n#[inline(never)] pub fn ${directory}_integration() -> u8 { ${directory === "core" ? 'if let Some(path) = std::env::var_os("MESH_AFTER_TIMEOUT_MARKER") { std::fs::write(path, "continued after timeout").unwrap(); }' : ""} 2 }\n#[test] fn unit() { assert!(cfg!(feature = "fixture-default")); assert_eq!(${directory}_unit(), 1); ${directory === "host" ? 'assert!(std::env::var_os("MESH_FAIL_HOST").is_none(), "host failure control");' : 'if let Some(path) = std::env::var_os("MESH_REST_MARKER") { std::fs::write(path, "rest execution").unwrap(); } assert!(std::env::var_os("MESH_FAIL_CORE").is_none(), "core failure control"); if let Some(path) = std::env::var_os("MESH_PARK_CORE") { std::fs::write(path, "park entered").unwrap(); loop { std::thread::park(); } }'} }\n#[test] #[ignore] fn default_ignored() { panic!("must remain ignored"); }\n`,
     );
     writeFileSync(
       join(root, directory, "tests/default.rs"),
@@ -231,11 +260,13 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     return result.stdout + result.stderr;
   };
   run(["generate-lockfile", "--offline"]);
-  const hostOutput = run(host);
-  assert.match(hostOutput, /4 tests run: 4 passed, 1 skipped/u);
-  const restOutput = run(rest);
-  assert.match(restOutput, /4 tests run: 4 passed, 1 skipped/u);
-  run(["llvm-cov", "report", "--lcov", "--output-path", "lcov.info"]);
+  const standalone = spawnSync("bash", [helper, "linux"], {
+    cwd: root, env: { ...env, MESH_TALK_TEST_TIMING: "0", RUNNER_TEMP: root },
+    encoding: "utf8", timeout: 120_000,
+  });
+  assert.equal(standalone.status, 0, `${standalone.error ?? ""}\n${standalone.stdout}\n${standalone.stderr}`);
+  assert.equal((standalone.stdout + standalone.stderr).match(/4 tests run: 4 passed, 1 skipped/gu)?.length, 2);
+  assert.equal(existsSync(join(root, "lcov.info")), true, "successful standalone Linux must produce its complete report");
   // llvm-cov intentionally excludes examples/ and tests/ from its default report.
   // Each example therefore calls its own library sentinel, so a real hit proves
   // execution without changing the production coverage denominator.
@@ -250,11 +281,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     }
   assert.match(
     workflow,
-    /bash \.\.\/scripts\/ci\/workspace-coverage\.sh macos/u,
-  );
-  assert.match(
-    workflow,
-    /bash \.\.\/scripts\/ci\/workspace-coverage\.sh linux/u,
+    /bash \.\.\/scripts\/ci\/workspace-coverage\.sh macos-host\n/u,
   );
   const blockMac = "macos";
   // Execute the actual macOS block in a clean coverage cohort. Core's real
@@ -287,18 +314,42 @@ test("native Host isolation preserves default targets, accumulated coverage and 
     /^FNDA:[1-9]\d*,[^\n]*core_/mu,
     "macOS must execute Core normally while Linux/Windows own its full instrumented coverage",
   );
+  run(["llvm-cov", "clean", "--workspace"]);
+  const hostOnlyMarker = join(root, "host-only-core-executed");
+  rmSync(join(root, "lcov.info"));
+  const hostOnly = spawnSync("bash", [helper, "macos-host"], {
+    cwd: root,
+    env: { ...env, MESH_REST_MARKER: hostOnlyMarker, MESH_FAIL_CORE: "1", MESH_TALK_TEST_TIMING: "1", RUNNER_TEMP: root },
+    encoding: "utf8", timeout: 120_000,
+  });
+  assert.equal(hostOnly.status, 0, hostOnly.stdout + hostOnly.stderr);
+  assert.equal((hostOnly.stdout + hostOnly.stderr).match(/4 tests run: 4 passed, 1 skipped/gu)?.length, 1);
+  assert.equal(existsSync(hostOnlyMarker), false);
+  assert.doesNotMatch(hostOnly.stdout + hostOnly.stderr, /Compiling mesh-talk-core|native-resource phase=remaining/u);
+  const hostOnlyCoverage = readFileSync(join(root, "lcov.info"), "utf8");
+  for (const target of ["unit", "integration", "binary", "example"])
+    assert.match(hostOnlyCoverage, new RegExp(`^FNDA:[1-9]\\d*,[^\\n]*host_${target}`, "m"));
+  assert.doesNotMatch(hostOnlyCoverage, /core_.*|SF:.*core\/src/u, "Core must not be instrumented in the Host-only cohort");
+  const hostOnlyTiming = readFileSync(join(root, "mesh-talk-test-timing.log"), "utf8");
+  assert.match(hostOnlyTiming, /4 tests run: 4 passed, 1 skipped/u);
+  if (process.platform === "darwin") {
+    assert.match(hostOnlyTiming, /native-resource phase=host/u);
+    assert.match(hostOnlyTiming, /native-resource phase=report/u);
+    assert.match(hostOnlyTiming, /maximum resident set size/u);
+  }
   const linuxBlock = "linux";
-  for (const block of [blockMac, linuxBlock]) {
+  for (const block of [blockMac, "macos-host", linuxBlock]) {
+    const blockArgs = [block];
     rmSync(join(root, "lcov.info"), { recursive: true, force: true });
     writeFileSync(join(root, "lcov.info"), "previous report");
-    for (const failure of ["HOST", "CORE", "BOTH"]) {
+    for (const failure of (block === "macos-host" ? ["HOST", "BOTH"] : ["HOST", "CORE", "BOTH"])) {
       for (const timing of ["0", "1"]) {
         rmSync(join(root, "lcov.info"));
         const marker = join(
           root,
-          `rest-${block === blockMac ? "mac" : "linux"}-${failure}-${timing}`,
+          `rest-${block}-${failure}-${timing}`,
         );
-        const failedPartition = spawnSync("bash", [helper, block], {
+        const failedPartition = spawnSync("bash", [helper, ...blockArgs], {
           cwd: root,
           env: {
             ...env,
@@ -318,7 +369,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
           `${failedPartition.error ?? ""}\n${failedPartition.stdout}\n${failedPartition.stderr}`,
         );
         const diagnostic = failedPartition.stdout + failedPartition.stderr;
-        if (process.platform === "darwin" && block === blockMac) {
+        if (process.platform === "darwin" && (block === blockMac || block === "macos-host")) {
           assert.match(diagnostic, /native-resource phase=host/u);
           assert.match(diagnostic, /maximum resident set size/u);
           assert.match(diagnostic, /hw\.memsize:/u);
@@ -369,7 +420,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
       rmSync(join(root, "lcov.info"), { recursive: true, force: true });
       // A real report destination failure must fail even after both suites pass.
       mkdirSync(join(root, "lcov.info"));
-      const reportFailure = spawnSync("bash", [helper, block], {
+      const reportFailure = spawnSync("bash", [helper, ...blockArgs], {
         cwd: root,
         env: { ...env, MESH_TALK_TEST_TIMING: timing, RUNNER_TEMP: root },
         encoding: "utf8",
@@ -385,7 +436,7 @@ test("native Host isolation preserves default targets, accumulated coverage and 
         (reportFailure.stdout + reportFailure.stderr).match(
           /4 tests run: 4 passed, 1 skipped/gu,
         )?.length,
-        2,
+        block === "macos-host" ? 1 : 2,
         "report failure must remain nonzero after both complete partitions pass",
       );
     }

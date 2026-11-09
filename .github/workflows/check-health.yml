@@ -68,6 +68,11 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: frontend
         run: npm ci
+      - name: Check full-source standards and hygiene
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        run: |
+          node scripts/validation/standards.mjs
+          node scripts/check-repository-hygiene.mjs
       - name: Frontend static checks
         if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         working-directory: frontend
@@ -78,7 +83,7 @@ jobs:
       - name: Audit frontend dependencies
         if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         working-directory: frontend
-        run: npx --yes audit-ci --config audit-ci.json
+        run: npm run audit:ci
 
       - name: Validate public help and MCP
         if: ${{ steps.scope.outputs.full == 'true' }}
@@ -141,7 +146,6 @@ jobs:
         if: ${{ steps.scope.outputs.full == 'true' }}
         shell: bash
         run: |
-          node scripts/check-repository-hygiene.mjs
           node scripts/validation/stage.mjs diagnostics --profile shared --deadline "$MESH_HEALTH_DEADLINE_MS" --result tmp/health-diagnostics.json -- node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/diagnostics/node-test-progress.mjs --test-reporter-destination=target/validation/health-progress.jsonl scripts/diagnostics/*.test.mjs
 
       - name: Preserve diagnostic execution evidence
@@ -203,16 +207,20 @@ jobs:
           node scripts/validation/standards.mjs
           node scripts/check-repository-hygiene.mjs
       - name: Install Rust
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Rust formatting
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         run: cargo fmt --all -- --check
       - name: Install source scanners
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
       - name: Install pinned prebuilt workflow scanner
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         shell: bash
         run: |
           scanner_dir="$RUNNER_TEMP/actionlint"
@@ -225,6 +233,7 @@ jobs:
           "$scanner_dir/actionlint" -version
           echo "$scanner_dir" >> "$GITHUB_PATH"
       - name: Source and supply-chain policy
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         run: |
           typos
           cargo deny check

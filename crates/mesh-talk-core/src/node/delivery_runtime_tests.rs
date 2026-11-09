@@ -247,6 +247,159 @@ async fn durable_dm_retries_a_reused_socket_closed_after_checkout() {
 }
 
 #[tokio::test]
+async fn durable_account_dm_recovers_after_a_fresh_handshake_failure() {
+    use super::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let recipient_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let recipient_account = Account::generate();
+    let sender_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sender_proof = Announce::new_with_account(
+        &sender_identity,
+        &sender_account,
+        "Sender",
+        sender_listener.local_addr().unwrap().port(),
+    );
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "Recipient",
+        recipient_listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &recipient_proof,
+    );
+    let (recipient, _) = node(
+        recipient_dir.path(),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    let accepted_message_id = sender
+        .enqueue_to_account(
+            &recipient.account_id(),
+            b"one accepted DM survives first transport failure",
+            None,
+        )
+        .await
+        .unwrap();
+    {
+        let store = sender.delivery.lock().unwrap();
+        let message = store.message(accepted_message_id).unwrap();
+        assert_eq!(message.destinations.len(), 1);
+        assert_eq!(message.logical_id, accepted_message_id);
+        assert_eq!(message.destinations[0].device, recipient.identity.public());
+    }
+    // Only this exact destination is contacted. Read genuine initiator bytes
+    // before closing, so an unrelated dial failure cannot satisfy the control.
+    // Joined futures retain cancellation ownership without a detached server.
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let (_, (recipient_listener, rejected)) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            async {
+                sender.flush_delivery(accepted_message_id).await;
+                stop.send(()).unwrap();
+            },
+            async {
+                let mut rejected = 0;
+                loop {
+                    tokio::select! {
+                        _ = &mut stopped => break,
+                        accepted = recipient_listener.accept() => {
+                            let (mut stream, _) = accepted.unwrap();
+                            stream.read_exact(&mut [0u8; 1]).await.unwrap();
+                            drop(stream);
+                            rejected += 1;
+                        }
+                    }
+                }
+                (recipient_listener, rejected)
+            }
+        )
+    })
+    .await
+    .expect("the exact fresh handshake must fail within the existing observation budget");
+    assert!(
+        rejected > 0,
+        "the actual flush must reach the rejecting endpoint"
+    );
+    assert_eq!(
+        sender.delivery_status(accepted_message_id),
+        Some(super::delivery_store::DeliveryStatus::Awaiting)
+    );
+    assert!(
+        recipient
+            .account_history(&sender.account_id(), 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut peers = Vec::new();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        peers.push(
+            IndependentPeerRuntime::start_multithreaded(sender.clone(), sender_listener).await,
+        );
+        peers.push(
+            IndependentPeerRuntime::start_multithreaded(recipient.clone(), recipient_listener)
+                .await,
+        );
+        for peer in &mut peers {
+            peer.launch();
+        }
+        // No resend or manual flush: the application owns durable recovery.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let history = match recipient.account_history(&sender.account_id(), 10) {
+                    Ok(history) => Some(history),
+                    Err(NodeError::Log(LogError::StaleCursor)) => None,
+                    Err(error) => panic!("account recovery history observation failed: {error}"),
+                };
+                if let Some(history) = history
+                    && history.iter().any(|entry| entry.id == accepted_message_id)
+                {
+                    assert_eq!(history.len(), 1);
+                    assert_eq!(
+                        history[0].text,
+                        b"one accepted DM survives first transport failure"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the real hosts must recover the same accepted DM without resending");
+    })
+    .catch_unwind()
+    .await;
+    let mut cleanup_failure = None;
+    for peer in peers {
+        let stopped = std::panic::AssertUnwindSafe(peer.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+    if let Some(error) = cleanup_failure {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[tokio::test]
 async fn confirmed_destination_does_not_open_another_relay_connection() {
     let dir = tempfile::tempdir().unwrap();
     let recipient = DeviceIdentity::generate();

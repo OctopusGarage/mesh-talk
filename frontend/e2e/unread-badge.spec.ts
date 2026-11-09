@@ -804,7 +804,9 @@ test("unread review clears undiscovered senders and hidden channels without hidi
   const row = page.getByTestId(`conversation-row-${CHANNEL.id}`);
   await row.hover();
   await page.getByTestId(`conversation-actions-${CHANNEL.id}`).click();
-  await page.getByRole("button", { name: "Hide channel", exact: true }).click();
+  await page
+    .getByRole("menuitem", { name: "Hide channel", exact: true })
+    .click();
   await page.evaluate(
     ({ channel, device }) => {
       const w = window as unknown as {

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { versions } from "../ci/windows-coverage.mjs";
 
 test("full health builds frontend before Tauri compilation on a fresh checkout", () => {
   const script = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
@@ -16,7 +15,13 @@ test("health installs source scanners while Gitleaks owns the full-history scan"
   assert.match(workflow, /tool: cargo-deny,cargo-machete,typos-cli,shellcheck/);
   const secrets = readFileSync(new URL("../../.github/workflows/gitleaks.yml", import.meta.url), "utf8");
   assert.match(secrets, /fetch-depth: 0/);
-  assert.match(secrets, /GITLEAKS_VERSION: 8\.30\.1/);
+  assert.match(secrets, /run: bash scripts\/ci-gitleaks\.sh/u);
+  assert.match(secrets, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+  assert.doesNotMatch(secrets, /curl|tar -xz/u);
+  const scanner = readFileSync(new URL("../ci-gitleaks.sh", import.meta.url), "utf8");
+  assert.match(scanner, /readonly version='8\.30\.1'/u);
+  assert.match(scanner, /readonly digest='[a-f0-9]{64}'/u);
+  assert.match(scanner, /"\$scanner" git \. --config \.gitleaks\.toml --redact -v/u);
   assert.match(workflow, /https:\/\/github\.com\/rhysd\/actionlint\/releases\/download\/v1\.7\.12\/actionlint_1\.7\.12_linux_amd64\.tar\.gz/);
   assert.match(workflow, /8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8/);
   assert.match(workflow, /sha256sum --check/);
@@ -42,44 +47,6 @@ test("health runs for every PR and retains independent platform results", () => 
   assert.match(caller, /uses: \.\/\.github\/workflows\/check-health\.yml/);
   assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \}\}$/m);
   assert.match(workflow, /^      fail-fast: false$/m);
-});
-
-test("Codecov receives the frontend and Rust coverage produced by CI", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const step = workflow.split(/^      - /m).find((value) => value.startsWith("name: Upload coverage to Codecov\n"));
-  assert.ok(step, "the Codecov upload step must exist");
-  const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
-  assert.match(health, /files: frontend\/coverage\/lcov\.info/, "Health publishes current frontend coverage");
-  assert.match(step, /files:.*src-tauri\/lcov\.info/, "Rust coverage must remain part of the upload");
-});
-
-test("native workspace test passes collect and upload their own platform coverage", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const steps = workflow.split(/^      - /m);
-  const install = steps.find(value => value.startsWith("name: Install cargo-llvm-cov and cargo-nextest\n"));
-  const native = steps.find(value => value.startsWith("name: Test + coverage (macOS)\n"));
-  const upload = steps.find(value => value.startsWith("name: Upload coverage to Codecov\n"));
-  assert.ok(install && native && upload);
-  assert.match(install, /if: \$\{\{ steps\.scope\.outputs\.full == 'true' \}\}/u, "every full native test platform needs the coverage tool");
-  assert.ok(install.includes(`cargo-llvm-cov@${versions.llvmCov},cargo-nextest@${versions.nextest}`));
-  for (const platform of ["macOS", "Linux"]) {
-    const pass = steps.find(value => value.startsWith(`name: Test + coverage (${platform})\n`));
-    assert.ok(pass);
-    assert.match(pass, /working-directory: src-tauri/);
-    assert.match(pass, /shell: bash/);
-    assert.ok(pass.includes(`bash ../scripts/ci/workspace-coverage.sh ${platform === "Linux" ? "linux" : "macos"}`));
-    assert.doesNotMatch(pass, /run_coverage|cargo llvm-cov/, "coverage policy belongs to the actual-tool-tested script owner");
-  }
-  assert.match(native, /NEXTEST_TEST_THREADS: 4/);
-  assert.deepEqual([...native.matchAll(/cargo test --workspace([^\n]*)/g)].map(match => match[1].trim()), ["--doc"], "preserve doctests without repeating unit/integration suites");
-  const windows = readFileSync(new URL("../../.github/workflows/windows-workspace.yml", import.meta.url), "utf8");
-  assert.match(windows, /cargo test --workspace --doc --locked/);
-  assert.match(windows, /cargo build --workspace --locked/);
-  assert.match(windows, /cargo clippy --workspace --all-targets -- -D warnings/);
-  assert.match(windows, /windows-coverage.mjs consume/);
-  assert.match(windows, /fail_ci_if_error: true/);
-  assert.doesNotMatch(upload.split('        uses:')[0], /matrix\.os == 'ubuntu-latest' &&/, "native coverage must not be discarded by a Linux-only upload guard");
-  assert.match(upload, /'src-tauri\/lcov\.info'/, "native-only reports do not depend on Linux frontend artifacts");
 });
 
 test("health reports cheap formatting and frontend static failures before expensive suites", () => {

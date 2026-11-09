@@ -39,6 +39,22 @@ async function fixture(
   }
   await mkdir(path.join(root, "docs"), { recursive: true });
   await writeFile(path.join(root, "docs/story.md"), "old");
+  for (const directory of ["frontend", "tools/help"]) {
+    await mkdir(path.join(root, directory), { recursive: true });
+    const manifest = {
+      name: "fixture",
+      scripts: { test: "node --test" },
+      dependencies: { zod: "4.6.6" },
+    };
+    await writeFile(
+      path.join(root, directory, "package.json"),
+      JSON.stringify(manifest),
+    );
+    await writeFile(
+      path.join(root, directory, "package-lock.json"),
+      JSON.stringify({ lockfileVersion: 3, packages: { "": manifest } }),
+    );
+  }
   git(root, "add", ".");
   git(root, "commit", "-qm", "base");
   const base = git(root, "rev-parse", "HEAD");
@@ -308,7 +324,7 @@ test("CLI publishes only after a valid decision", async (t) => {
     { cwd: f.root, env, encoding: "utf8" },
   );
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(await readFile(output, "utf8"), "full=false\n");
+  assert.equal(await readFile(output, "utf8"), "full=false\nprofile=docs\n");
   assert.match(
     await readFile(summary, "utf8"),
     /N\/A.*product tests not executed/i,
@@ -464,3 +480,72 @@ for (const depth of [1, 2])
       assert.equal((await resolve({ ...f, root })).full, false);
     }
   });
+
+for (const directory of ["tools/help", "frontend"]) {
+  for (const mutation of [
+    "valid",
+    "script",
+    "mixed",
+    "lock",
+    "human",
+    "fork",
+    "main",
+    "delete",
+    "native",
+    "native-lock",
+    "lock-only",
+  ]) {
+    test(`dependency scope ${directory}: ${mutation}`, async (t) => {
+      const f = await fixture(t, async (root) => {
+        const file = path.join(root, directory, "package.json");
+        const manifest = JSON.parse(await readFile(file, "utf8"));
+        manifest.dependencies.zod = "4.6.7";
+        if (mutation === "script") manifest.scripts.test = "other";
+        if (mutation === "native")
+          manifest.dependencies["@tauri-apps/api"] = "^2.0.0";
+        if (mutation !== "lock-only")
+          await writeFile(file, JSON.stringify(manifest));
+        if (mutation === "delete") await rm(file);
+        if (mutation === "mixed")
+          await writeFile(path.join(root, "source.rs"), "changed");
+        const lock = {
+          lockfileVersion: 3,
+          packages: { "": mutation === "lock" ? {} : manifest },
+        };
+        if (mutation === "native-lock")
+          lock.packages["node_modules/@tauri-apps/api"] = { version: "2.0.0" };
+        await writeFile(
+          path.join(root, directory, "package-lock.json"),
+          JSON.stringify(lock),
+        );
+      });
+      f.event.pull_request.base.ref = mutation === "main" ? "main" : "dev";
+      f.event.pull_request.user = {
+        login: mutation === "human" ? "human" : "dependabot[bot]",
+        type: "Bot",
+      };
+      if (mutation === "fork")
+        f.event.pull_request.head.repo.full_name = "fork/repo";
+      const d = await resolve(f);
+      assert.equal(d.full, mutation !== "valid");
+      assert.equal(
+        d.profile,
+        mutation === "valid"
+          ? directory === "frontend"
+            ? "frontend"
+            : "help"
+          : "full",
+      );
+      if (mutation === "valid") {
+        assert.equal(
+          (await resolve({ ...f, expectedFull: "false" })).profile,
+          d.profile,
+        );
+        assert.equal(
+          (await resolve({ ...f, expectedFull: "true" })).full,
+          true,
+        );
+      }
+    });
+  }
+}

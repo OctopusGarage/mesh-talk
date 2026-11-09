@@ -1,24 +1,29 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { reservedCohorts } from "../ci/asan.mjs";
 import { versions } from "../ci/windows-coverage.mjs";
 
 const owner = new URL("../ci/asan.mjs", import.meta.url);
 const hash = value => createHash("sha256").update(value).digest("hex");
 const identity = { platform: "linux", architecture: "x64", sourceSha: "a".repeat(40), sourceTree: "b".repeat(40), runId: "123", runAttempt: "2", toolchain: "nightly-2026-11-02", rustcSha256: "c".repeat(64), cargoSha256: "d".repeat(64), nextest: versions.nextest, inputsSha256: "e".repeat(64), target: "x86_64-unknown-linux-gnu", rustflags: "-Zsanitizer=address", rustdocflags: "-Zsanitizer=address", asanOptions: "detect_leaks=1", testThreads: "1", profileEnvironment: {} };
-const full = Array.from({ length: 9 }, (_, index) => ({ id: `core::case_${index}`, eventName: `core::core$case_${index}`, ignored: index === 8, selected: index !== 8 }));
+const normal = Array.from({ length: 9 }, (_, index) => ({ id: `core::case_${index}`, eventName: `core::core$case_${index}`, ignored: index === 8, selected: index !== 8 }));
+const reservedRows = reservedCohorts.flat().map(name => ({ id: `core::${name}`, eventName: `core::core$${name}`, ignored: false, selected: true }));
+const full = [...normal, ...reservedRows];
 const events = rows => {
   const nextest = { crate: "core", test_binary: "core", kind: "lib" };
   return [ { type: "suite", event: "started", nextest }, ...rows.filter(row => row.selected).flatMap(row => [{ type: "test", event: "started", name: row.eventName }, { type: "test", event: "ok", name: row.eventName }]), { type: "suite", event: "ok", failed: 0, nextest } ].map(JSON.stringify).join("\n") + "\n";
 };
 function bundles() {
   return [1, 2, 3, 4, 5, 6, 7, 8].map(shard => {
-    const selected = full.map((row, index) => ({ ...row, selected: index === shard - 1 }));
+    const selected = full.map((row, index) => ({ ...row, selected: shard <= 6 ? index < 8 && index % 6 === shard - 1 : reservedCohorts[shard - 7].some(name => row.eventName === `core::core$${name}`) }));
     const execution = events(selected);
-    return { receipt: { schema: 1, shard, identity: structuredClone(identity), fullSha256: hash(JSON.stringify(full)), selectedSha256: hash(JSON.stringify(selected)), executionSha256: hash(execution), executedTests: 1 }, full: structuredClone(full), selected, execution };
+    return { receipt: { schema: 1, shard, identity: structuredClone(identity), fullSha256: hash(JSON.stringify(full)), selectedSha256: hash(JSON.stringify(selected)), executionSha256: hash(execution), executedTests: selected.filter(row => row.selected).length }, full: structuredClone(full), selected, execution };
   });
 }
 const load = () => import(owner);
@@ -31,9 +36,35 @@ test("nightly cohort uses the installed release manifest date, not rustc's previ
   for (const input of ['[pkg.rust]\ndate="2026-11-02"', 'date="bad"', 'date="2026-13-01"', 'date="2026-02-30"', 'date="2026-11-02"\ndate="2026-11-03"']) assert.throws(() => nightlyFromManifest(input), /manifest date/u);
 });
 
+test("ASan reserves two cohorts and hashes the remaining inventory over six runners", async () => {
+  const { partitionArgs } = await load();
+  for (const mode of ["list", "run"]) {
+    for (let shard = 1; shard <= 6; shard++) {
+      const args = partitionArgs(mode, [], shard);
+      assert.equal(args[args.indexOf("--partition") + 1], `hash:${shard}/6`);
+      assert.match(args[args.indexOf("-E") + 1], /^not \(test\(=/u);
+    }
+    for (const shard of [7, 8]) {
+      const args = partitionArgs(mode, [], shard);
+      assert.ok(!args.includes("--partition"));
+      assert.ok(args.includes("-E"));
+    }
+    const full = partitionArgs(mode, []);
+    assert.ok(!full.includes("-E") && !full.includes("--partition"));
+  }
+});
+
+test("ASan reserved inventory rejects missing, duplicate, renamed and ignored configured tests", async () => {
+  const { verifyReservedInventory } = await load();
+  assert.doesNotThrow(() => verifyReservedInventory(full));
+  for (const rows of [full.slice(0, -1), [...full, reservedRows[0]], full.map(row => row === reservedRows[0] ? { ...row, eventName: row.eventName + "_renamed" } : row), full.map(row => row === reservedRows[0] ? { ...row, ignored: true, selected: false } : row)]) {
+    assert.throws(() => verifyReservedInventory(rows), /ASan reserved test/u);
+  }
+});
+
 test("ASan union proves all selected cases once, with default ignored cases excluded", async () => {
   const { verifyAsanUnion } = await load();
-  assert.deepEqual(verifyAsanUnion(bundles(), identity), { totalTests: 9, executedTests: 8, ignoredTests: 1, shards: 8 });
+  assert.deepEqual(verifyAsanUnion(bundles(), identity), { totalTests: 13, executedTests: 12, ignoredTests: 1, shards: 8 });
 });
 
 test("ASan union rejects missing, duplicate, empty and overlapping partitions", async () => {
@@ -167,7 +198,7 @@ test("ASan artifact collector binds source, run, attempt and the receipt's actua
     for (const [name, value] of [["receipt", bundle.receipt], ["full", bundle.full], ["selected", bundle.selected]]) writeFileSync(path.join(directory, `${name}.json`), JSON.stringify(value));
     writeFileSync(path.join(directory, "execution.jsonl"), bundle.execution);
   }
-  assert.deepEqual(collectAsan(root, identity), { totalTests: 9, executedTests: 8, ignoredTests: 1, shards: 8 });
+  assert.deepEqual(collectAsan(root, identity), { totalTests: 13, executedTests: 12, ignoredTests: 1, shards: 8 });
   const original = path.join(root, expectedName(1));
   for (const wrong of [expectedName(1).replace("-2-shard-", "-1-shard-"), "asan-renamed-shard-1"]) {
     const renamed = path.join(root, wrong); renameSync(original, renamed);
@@ -204,4 +235,58 @@ test("ASan compiles once and binds every consumer to the current producer archiv
     assert.match(part, /MESH_ASAN_MANIFEST_SHA256: \$\{\{ needs.cohort.outputs.manifest_sha256 \}\}/u);
   }
   assert.match(workflow, /MESH_ASAN_BUILD_RESULT: \$\{\{ needs.cohort.result \}\}/u);
+});
+
+
+test("ASan cohort CLI binds every Rust probe to the declared dated toolchain before exporting outputs", t => {
+  const root = temporary(t);
+  const pin = identity.toolchain;
+  const bin = path.join(root, "toolchain/bin");
+  const manifest = path.join(root, "toolchain/lib/rustlib/multirust-channel-manifest.toml");
+  mkdirSync(bin, { recursive: true }); mkdirSync(path.dirname(manifest), { recursive: true });
+  const probes = path.join(root, "probes.jsonl");
+  const outputs = path.join(root, "outputs");
+  const fake = path.join(root, "rustup.cjs");
+  writeFileSync(fake, String.raw`const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_PROBES, JSON.stringify(args) + '\n');
+if (process.env.FIXTURE_TOOL_FAILURE === (args[0] === 'which' ? 'which' : args[2])) process.exitCode = 9;
+else if (args[0] === 'which') console.log(process.env.FIXTURE_RUSTC);
+else if (args[0] === 'run') console.log(args[2] + ' exact compiler fixture');
+else process.exitCode = 9;
+`);
+  const preload = path.join(root, "preload.cjs");
+  writeFileSync(preload, `const cp = require('node:child_process'); const spawn = cp.spawn;
+cp.spawn = function(binary, args, options) { return binary === 'rustup' ? spawn(process.execPath, [process.env.FIXTURE_RUSTUP, ...args], options) : spawn(binary, args, options); };
+require('node:module').syncBuiltinESMExports();`);
+  const run = (overrides = {}) => {
+    rmSync(outputs, { force: true }); rmSync(probes, { force: true });
+    const env = { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`, MESH_ASAN_TOOLCHAIN: pin, GITHUB_OUTPUT: outputs, FIXTURE_RUSTUP: fake, FIXTURE_PROBES: probes, FIXTURE_RUSTC: path.join(bin, "rustc"), ...overrides };
+    for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+    return spawnSync(process.execPath, [fileURLToPath(owner), "cohort"], { env, encoding: "utf8", timeout: 15000 });
+  };
+  writeFileSync(manifest, `date="${pin.slice(8)}"\n[pkg.rust]\n`);
+  const good = run();
+  assert.equal(good.status, 0, good.stderr);
+  assert.deepEqual(readFileSync(probes, "utf8").trim().split("\n").map(JSON.parse), [["which", "--toolchain", pin, "rustc"], ["run", pin, "rustc", "-vV"], ["run", pin, "cargo", "-vV"]]);
+  assert.equal(readFileSync(outputs, "utf8"), `toolchain=${pin}\nrustc=${hash("rustc exact compiler fixture")}\ncargo=${hash("cargo exact compiler fixture")}\n`);
+  for (const overrides of [{ MESH_ASAN_TOOLCHAIN: undefined }, { MESH_ASAN_TOOLCHAIN: "nightly" }, { MESH_ASAN_TOOLCHAIN: "nightly-2026-02-30" }, ... ["which", "rustc", "cargo"].map(FIXTURE_TOOL_FAILURE => ({ FIXTURE_TOOL_FAILURE })), { GITHUB_OUTPUT: undefined }]) {
+    const failed = run(overrides); assert.notEqual(failed.status, 0, failed.stdout); assert.ok(!existsSync(outputs), "failure must not publish a cohort");
+  }
+  writeFileSync(manifest, 'date="2026-11-03"\n');
+  assert.notEqual(run().status, 0); assert.ok(!existsSync(outputs));
+  rmSync(manifest);
+  assert.notEqual(run().status, 0); assert.ok(!existsSync(outputs));
+});
+
+test("ASan producer installs the declared reviewed nightly once before strict cohort validation and cache restore", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/sanitizers.yml", import.meta.url), "utf8");
+  assert.match(workflow, /^  MESH_ASAN_TOOLCHAIN: nightly-\d{4}-\d{2}-\d{2}$/mu);
+  const producer = workflow.split("  cohort:\n")[1].split("  shards:\n")[0];
+  assert.equal(producer.match(/uses: dtolnay\/rust-toolchain@nightly/gu)?.length, 1);
+  assert.match(producer, /toolchain: \$\{\{ env.MESH_ASAN_TOOLCHAIN \}\}\n          components: rust-src/u);
+  assert.ok(producer.indexOf("components: rust-src") < producer.indexOf("asan.mjs cohort"));
+  assert.ok(producer.indexOf("asan.mjs cohort") < producer.indexOf("Swatinem/rust-cache"));
+  assert.match(producer, /shared-key: sanitizers-shards/u);
+  for (const [key, value] of [["RUSTFLAGS", "-Zsanitizer=address"], ["RUSTDOCFLAGS", "-Zsanitizer=address"], ["ASAN_OPTIONS", "detect_leaks=1"], ["RUST_TEST_THREADS", "1"]]) assert.ok(workflow.includes(`  ${key}: "${value}"`));
 });

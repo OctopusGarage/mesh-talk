@@ -2761,6 +2761,17 @@ impl Node {
                                 Some((manifest.file_conv(), EventId::new(record.event_id)))
                             })
                             .collect();
+                        #[cfg(test)]
+                        let offered_channels: Vec<_> = complete
+                            .records
+                            .iter()
+                            .filter_map(|record| {
+                                let HistoryRecord::Channel(record) = record else {
+                                    return None;
+                                };
+                                Some((record.conversation, record.event_id))
+                            })
+                            .collect();
                         self.account_blocking(move |node| {
                             // Recheck after waiting for the blocking pool.
                             if node.device_sync_policy_snapshot().1 != revision {
@@ -2777,6 +2788,17 @@ impl Node {
                             )
                         })
                         .await?;
+                        #[cfg(test)]
+                        for (conversation, event) in offered_channels {
+                            self.trace_account_client(&peer.public, || {
+                                format!(
+                                    "history_channel_committed revision={} channel={} event={}",
+                                    revision,
+                                    hex::encode(conversation),
+                                    hex::encode(event)
+                                )
+                            });
+                        }
                         channel.recycle(self);
                         self.pull_account_file_message_identities(peer, &identities, revision)
                             .await;
@@ -3907,6 +3929,10 @@ impl Node {
                                     state.history_failures = 0;
                                     status.legacy_file_metadata = version == AccountSyncVersion::V1;
                                     let history_complete = state.complete_page(next, digest);
+                                    #[cfg(test)]
+                                    if history_complete {
+                                        self.trace_account_client(&peer.public, || format!("history_sweep_committed revision={revision}"));
+                                    }
                                     if history_complete && !favorites_pending && !favorites_waiting { status.phase = SyncPhase::UpToDate; }
                                     else { continuation |= !history_complete; }
                                     if let Some(error) = &state.favorite_error {

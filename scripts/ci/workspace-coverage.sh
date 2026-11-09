@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Run from src-tauri (or a fixture workspace); preserve each platform's cohort.
 set -e -o pipefail
+usage() {
+    echo "Usage: workspace-coverage.sh linux | macos | macos-host" >&2
+    exit 2
+}
 case "${1:-}" in
-    linux|macos) platform="$1" ;;
-    *) echo "Usage: workspace-coverage.sh linux|macos" >&2; exit 2 ;;
+    linux|macos|macos-host) platform="$1" ;;
+    *) usage ;;
 esac
+[ "$#" = 1 ] || usage
 if [ "$platform" = linux ]; then
     ulimit -c 262144
 else
@@ -16,7 +21,7 @@ fi
 run_phase() {
     local phase="$1"
     shift
-    if [ "$platform" = macos ] && [ "$(uname -s)" = Darwin ]; then
+    if [ "$platform" != linux ] && [ "$(uname -s)" = Darwin ]; then
         # Diagnostic snapshots are not acceptance gates. time retains the actual
         # command's exit status and reports CPU time and maximum child RSS;
         # that RSS is not the peak aggregate memory of concurrent compilers.
@@ -38,7 +43,7 @@ run_coverage() {
         if
             run_phase remaining cargo llvm-cov nextest --no-report --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4
         then :; else return "$?"; fi
-    else
+    elif [ "$platform" = macos ]; then
         # macOS instruments Host only; all remaining default targets still run.
         if
             run_phase remaining cargo nextest run --locked --workspace --exclude mesh-talk --no-tests fail --no-fail-fast --retries 0 --user-config-file none --profile default --success-output immediate --test-threads 4

@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
-import { captureNativeEvidence, captureNativeFailure, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
+import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLogs, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
 import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
 
@@ -523,6 +523,7 @@ try {
   for (const child of [...owned]) {
     try { await stop(child, child === peer); } catch (error) { report.cleanupFailure = redact(error.message); process.exitCode = 1; }
   }
+  report.applicationLogs = await collectNativeApplicationLogs({ fixture, output, retired: owned.size === 0, password });
   report.cleanSource = initialStatus === "" && execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() === "" && execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() === gitSha;
   const finalBuildProof = await verifyNativeBuild({ sourceSha, appBinary, nodeBinary, expectedManifestDigest: initialBuildProof.manifestDigest });
   report.buildVerified = initialBuildProof.buildVerified && finalBuildProof.buildVerified && initialBuildProof.manifestDigest === finalBuildProof.manifestDigest;

@@ -52,25 +52,52 @@ impl RewriteObserver {
         blocked: Arc<std::sync::atomic::AtomicUsize>,
         required_blocked: usize,
     ) -> Self {
+        Self::with_clock(
+            release,
+            initialized,
+            work,
+            blocked,
+            required_blocked,
+            std::time::Instant::now,
+            None,
+        )
+    }
+    fn with_clock(
+        release: std::sync::mpsc::Sender<()>,
+        initialized: std::sync::mpsc::Receiver<()>,
+        work: Arc<crate::node::runtime_work::RuntimeWork>,
+        blocked: Arc<std::sync::atomic::AtomicUsize>,
+        required_blocked: usize,
+        now: impl Fn() -> std::time::Instant + Send + 'static,
+        setup_waiting: Option<std::sync::mpsc::Sender<()>>,
+    ) -> Self {
         let (arm, armed) = std::sync::mpsc::channel();
         let (ready, retirement_started) = tokio::sync::oneshot::channel();
         let (done, observed) = tokio::sync::oneshot::channel();
         let worker = std::thread::spawn(move || {
             let release = RewriteRelease(Some(release));
             let observation = (|| {
-                // This independent safety uses the existing setup bound. A
-                // stalled reactor cannot leave the artificial gate held forever.
-                let setup_deadline = std::time::Instant::now() + Duration::from_secs(6);
+                // Setup and armed admission each retain their own six-second
+                // safety bound. Waiting for the actual rewrite must not consume
+                // the later retirement/blocker admission phase.
+                if let Some(setup_waiting) = setup_waiting {
+                    let _ = setup_waiting.send(());
+                }
                 armed
-                    .recv_timeout(
-                        setup_deadline.saturating_duration_since(std::time::Instant::now()),
-                    )
+                    .recv_timeout(Duration::from_secs(6))
                     .map_err(|_| "rewrite observer was not armed within setup")?;
+                let admission_deadline = now() + Duration::from_secs(6);
+                // A controlled clock must never disable independent real-time cleanup.
+                let admission_safety_deadline = std::time::Instant::now() + Duration::from_secs(6);
                 while !work.is_closed()
                     || blocked.load(std::sync::atomic::Ordering::SeqCst) < required_blocked
                 {
-                    if std::time::Instant::now() >= setup_deadline {
-                        return Err("retirement or controlled blockers did not enter within setup");
+                    if now() >= admission_deadline
+                        || std::time::Instant::now() >= admission_safety_deadline
+                    {
+                        return Err(
+                            "retirement or controlled blockers did not enter within admission",
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -121,6 +148,70 @@ impl Drop for RewriteObserver {
             let _ = worker.join();
         }
     }
+}
+
+// This protocol control advances only the observer clock. Real channel waits
+// and the safety watchdog remain bounded independently of that controlled clock.
+#[tokio::test]
+async fn rewrite_observer_setup_clock_does_not_consume_retirement_admission() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    let (release, released) = std::sync::mpsc::channel();
+    let (_initialized, initialized) = std::sync::mpsc::channel();
+    let (prearm, prearm_ready) = std::sync::mpsc::channel();
+    let (armed, armed_probe) = std::sync::mpsc::channel();
+    let (advanced, admission_probe) = std::sync::mpsc::channel();
+    let armed = Mutex::new(Some(armed));
+    let advanced = Mutex::new(Some(advanced));
+    let elapsed = Arc::new(AtomicU64::new(0));
+    let clock_elapsed = elapsed.clone();
+    let origin = std::time::Instant::now();
+    let work = Arc::new(crate::node::runtime_work::RuntimeWork::default());
+    let mut observer = RewriteObserver::with_clock(
+        release,
+        initialized,
+        work.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        0,
+        move || {
+            // Capture the instant before acknowledging its phase. Advancing
+            // the clock after the acknowledgment cannot change this sample.
+            let seconds = clock_elapsed.load(Ordering::SeqCst);
+            let instant = origin + Duration::from_secs(seconds);
+            let notification = match seconds {
+                5 => armed.lock().unwrap().take(),
+                7 => advanced.lock().unwrap().take(),
+                _ => None,
+            };
+            if let Some(notification) = notification {
+                notification.send(()).unwrap();
+            }
+            instant
+        },
+        Some(prearm),
+    );
+    prearm_ready.recv_timeout(Duration::from_secs(6)).unwrap();
+    // Setup uses five of its six seconds. Admission then uses only two of
+    // its separate six seconds, but passes the old combined deadline at six.
+    elapsed.store(5, Ordering::SeqCst);
+    observer.arm();
+    armed_probe.recv_timeout(Duration::from_secs(6)).unwrap();
+    elapsed.store(7, Ordering::SeqCst);
+    // Keep work open until the admission deadline is actually checked. This
+    // binds the old failure to deadline exhaustion, not caller scheduling.
+    admission_probe
+        .recv_timeout(Duration::from_secs(6))
+        .unwrap();
+    work.close();
+    // Read the actual observer outcome first: the old shared clock must fail
+    // for its deadline reason, not merely a disconnected readiness channel.
+    let observation = observer.finish().await;
+    (&mut observer.retirement_started)
+        .await
+        .expect("qualified observation must acknowledge actual retirement admission");
+    assert!(!observation.initialized_early);
+    assert_eq!(observation.blocked_workers, 0);
+    released.recv_timeout(Duration::from_secs(6)).unwrap();
 }
 
 struct JoinedBlockers(Option<std::thread::JoinHandle<()>>);

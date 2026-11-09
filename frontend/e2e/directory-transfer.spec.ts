@@ -2,7 +2,7 @@ import { test, expect } from "./helpers/portable-evidence";
 import {
   enterChat,
   openBobDm,
-  revealComposerTools,
+  revealComposerAttachments,
   BOB,
 } from "./helpers/session";
 
@@ -35,7 +35,7 @@ test("folder picker sends its path as an attachment", async ({ page }) => {
       return original(cmd, args);
     };
   });
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach-directory").click();
   await expect
     .poll(() =>

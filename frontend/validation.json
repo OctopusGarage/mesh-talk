@@ -2102,6 +2102,7 @@
     {
       "id": "frontend-inline-media",
       "paths": [
+        "frontend/src/features/chat/ConversationView.tsx",
         "frontend/src/features/chat/MediaPreview.tsx",
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/features/chat/mediaFile.tsx",
@@ -3151,6 +3152,7 @@
     {
       "id": "frontend-inline-media-acceptance",
       "paths": [
+        "frontend/src/features/chat/ConversationView.tsx",
         "frontend/src/features/chat/MediaPreview.tsx",
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/features/chat/mediaFile.tsx",

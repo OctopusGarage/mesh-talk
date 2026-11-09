@@ -58,6 +58,17 @@ instead of a native Windows absolute path. Exercise each boundary on its platfor
 Keep live source/release checks immediately before each publication boundary;
 those protect against changed state and are not redundant setup checks.
 
+Consolidate pure checks only when their immutable candidate, scope and inputs are
+identical. Health's full-scope Linux portable job owns source standards and Git
+index hygiene after frontend dependency setup; documentation scope retains its
+independent source gate. Real checker portability fixtures still run on every
+Health platform. Native CI alone supplies partial acceptance: the protected
+current-source Health check in the UI workflow and the complete release source
+check closure remain necessary. Keep checks at distinct candidate, artifact,
+trust or runtime boundaries, including archive producer and consumer identity and
+cleanliness checks. Removing repeated source invocations does not establish a
+hosted speedup; measure runner cost and latency separately.
+
 The [syntax owner](../scripts/validation/syntax.mjs) parses changed Node, Bash and
 Python sources without executing them or writing Python caches, and invokes
 `actionlint` for changed workflows. Pre-commit selects staged paths but checks
@@ -66,6 +77,10 @@ checks new nonignored sources; PR creation checks the clean committed comparison
 Use Node 22, Bash and Python; install actionlint before changing workflows. No
 checker installs tools or contacts the network. Hook installation configures hooks
 without launching comprehensive health; request that gate explicitly.
+Run the configured spelling check on changed files before publication, and scan
+the repository when its configuration changes. Scope unavoidable external API
+spellings to their language and identifier; do not exclude a source tree or
+replace the API name to satisfy a prose checker.
 
 PR creation runs `make pr-check`'s cheap-check owner against its actual comparison
 base, rejects ownership blockers and checks applicable frontend patch coverage
@@ -210,9 +225,11 @@ cannot replace the actual work owner's acknowledgment. See
 [actual work ownership](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
 
 Stop an already failed candidate before starting another expensive compilation
-partition. Linux/macOS native testing finishes all selected Host cases, then
-admits the remaining complete workspace only if Host passed. Both partitions
-still have to pass before reporting coverage; per-partition terminal result
+partition. Linux and standalone macOS coverage commands finish all selected Host
+cases, then admit the remaining complete workspace only if Host passed. Both
+partitions still have to pass before their combined report. Hosted macOS uses
+independent Host-only and archived remaining-workspace lanes instead; its required
+collector accepts only when every lane succeeds. Per-partition terminal result
 collection, independent matrix jobs, default targets and zero retries remain
 unchanged. The existing actual-tool coverage regression checks Host rejection,
 remaining-partition rejection, successful coverage accumulation, timing pipelines
@@ -221,15 +238,19 @@ requiring evidence on passing jobs; a producer skipped by an upstream failure
 must not create a second missing-artifact error.
 
 The [workspace coverage owner](../scripts/ci/workspace-coverage.sh) owns native
-partition commands, timing pipelines and report generation; workflow steps pass
-only the platform. Actual-tool failure controls verify both platform branches.
+partition commands, timing pipelines and report generation. Linux CI defers its
+interim report until default and ignored backend cases have passed validation,
+then generates and uploads one accumulated report. Avoid uploading an earlier
+subset together with its final superset. Standalone and macOS reporting remain
+immediate; actual-tool controls verify accumulation and both failure paths.
 
 Keep complete tests distinct from duplicate instrumentation. macOS instruments
-Host for its native desktop/updater branches, then runs every remaining default
-workspace target with pinned Nextest without coverage instrumentation. Linux and
+Host for its native desktop/updater branches and runs every remaining default
+workspace target with pinned Nextest without coverage instrumentation. Hosted
+lanes run independently; the standalone command retains Host-first sequencing. Linux and
 Windows retain full instrumented workspace coverage. This removes the separate
 instrumented Core test build on Apple Silicon; it does not claim full macOS Core
-line coverage. The actual-tool regression executes both workflow blocks, requires
+line coverage. The actual-tool regressions execute both coverage modes and real archive consumers, require
 all default targets and the Core execution marker, proves a clean macOS report
 retains Host hits without a Core test cohort, and keeps both partition failures,
 report failures, timing pipelines and process termination controls. All platform
@@ -256,7 +277,6 @@ first-failure traces. Do not erase a failed assertion by increasing its timeout.
 The real-runner control derives both configured watchdogs, accelerates only their
 duration, requires actual parked-case failure and subsequent-case execution, and
 verifies descendant retirement before removing its fixture.
-
 
 ## Reuse compatible work with verifiable inputs
 
@@ -306,9 +326,30 @@ Download pinned prebuilt development tools through the existing installer where
 available. Verify support in the repository-pinned installer version; an unknown
 tool can select an unintended source-build or registry fallback. Bind direct
 release downloads to a reviewed digest and execute the installed version check.
+Keep installer revisions compatible with the pinned tools in every producer and
+consumer; disable source-build fallback for managed prebuilt tools. Otherwise a
+download failure can start an unrelated compilation under inherited sanitizer
+flags instead of reporting the setup failure.
+Check the installed host architecture as well as its version: fallback discovery
+can select a different architecture across otherwise identical archive consumers.
+Preserve producer/consumer identity checks instead of accepting that mismatch.
+When no supported installer exists, keep download logic in its owning script.
+Use the provider's supported asset API, bound transport attempts, verify the
+reviewed digest before extraction and preserve the scanner's exit status.
+Integrity failures must not trigger another source or unverified execution; see
+the [Gitleaks owner](../scripts/ci-gitleaks.sh) and its behavioral controls.
 Compiling tools with `go install` or `cargo install` is recurring setup
 work; retain source installation only when the required tool has no suitable
 trusted binary or the test explicitly validates its build.
+A lockfile does not protect an unpinned `npx` download. Install Node-based
+verification tools from the committed lockfile and reuse their owning npm script
+in CI and local checks. Frontend audits use `npm run audit:ci` with the existing
+`frontend/audit-ci.json` policy.
+Browser execution shards should install with `npm ci --no-audit --no-fund`:
+the install-time advisory summary repeats the dedicated audit without enforcing
+its policy. Keep the explicit audit gate; disable only this duplicate install
+work, not lifecycle scripts or checks for other dependency owners. Measure any
+claimed saving separately from the full installation duration.
 
 Build twice consecutively with identical source, profile, features and environment.
 Inspect unexpected second-build work before enlarging caches or runner counts:
@@ -401,10 +442,13 @@ Preserve complete main-commit verification required by release consumers even
 when a PR has a separately validated docs-only path.
 
 The UI HTML collector follows the mandatory full-shard producers, independently
-of the optional extended-browser jobs. If Health prevents desktop shards from
-starting, their missing reports remain incomplete evidence. The collector checks
-all platform-specific current-attempt shards (eight macOS, four Linux/Windows); fixing the upstream failure and rerunning
-the selected producers supplies that evidence, rather than omitting those OSes.
+of the optional extended-browser jobs. Each OS uses its own producer conclusion:
+skipped producers omit only their own reports; missing or unknown conclusions
+fail. Failed or cancelled admitted producers still render available diagnostics
+before incomplete evidence fails. The collector checks all platform-specific
+current-attempt shards (eight macOS, four Linux/Windows); fixing the upstream
+failure and rerunning the selected producers supplies that evidence, rather than
+omitting those OSes.
 
 ## Documentation-only PR scope
 
@@ -469,7 +513,10 @@ durability, ordering and deadlines while qualifying the new hosted environment.
 
 Full Chromium uses eight macOS partitions and four each on Linux and Windows.
 Desktop browsers inherit the reusable workflow's four-slot per-OS limit; preserve
-Health and WebKit admission before that burst and the existing job watchdog.
+Health and WebKit admission before the macOS burst and the existing job watchdog.
+Windows has an independent caller gated by Health and scope, without waiting for
+unrelated macOS WebKit work. Portable and final acceptance still require explicit
+success from Linux, macOS and Windows; HTML presentation remains independent.
 Scope limits to the actual resource pool rather than applying a macOS restriction
 to Windows. Inspect late queued work after other native jobs finish; an overly
 small limit can leave capacity unused. Four macOS browser jobs leave nominal room
@@ -489,6 +536,14 @@ artifact overhead as well as execution. More shards can increase queueing and
 runner minutes; more workers per machine can increase memory pressure, port
 exhaustion and test interference. Review the product of platform, architecture,
 browser, feature and shard dimensions before expanding a matrix.
+Treat elapsed-time targets as diagnostic goals, not acceptance requirements.
+Prefer a stable, simple pipeline over extra shards, retries or orchestration
+introduced only to reach an arbitrary duration.
+Inspect actual worker-scoped options and test-group assignment as well as case
+counts: tracing modes can produce distinct worker groups and uneven tails.
+Shuffle may reorder work only after shard allocation; verify its actual effect
+before treating it as rebalancing. Preserve required trace evidence and evaluate
+the complete DAG under the global runner quota.
 For a wall-time target, calculate both the dependency critical path and the
 aggregate runner work divided by the constrained pool's available slots.
 Scheduling alone cannot beat that capacity bound; added shard setup consumes
@@ -505,8 +560,28 @@ a runner has no test result; preserve its infrastructure failure separately.
 UI coverage and reports require one complete attempt, so recover that workflow
 as a whole when an unallocated producer prevents its current-attempt evidence.
 
+ASan owns one reviewed dated nightly in the sanitizer workflow environment.
+The producer installs that exact toolchain with `rust-src` once, verifies its
+installed manifest date against the declaration and fingerprints `rustc` and
+Cargo through that explicit toolchain before restoring the existing cache cohort.
+Do not resolve a floating nightly or infer the compiler from an active default:
+calendar changes otherwise invalidate reusable dependencies without source changes.
+Upgrade this CI toolchain dependency through a reviewed PR with the full native
+Linux union and real clean/use-after-free controls on all eight runners; a local
+stable archive-protocol fixture does not qualify instrumentation or a cache hit.
+
 ASan compiles its core library once into an official Nextest archive, then runs
-eight serial partitions. The producer seals the complete default inventory and
+eight serial partitions. Runners 1–6 use Nextest `hash:ID/6`, excluding the
+four exact reserved test names owned by `scripts/ci/asan.mjs`. Runner 7 executes
+the long canonical inventory payload case alone; runner 8 executes the known
+unavailable directory-source acknowledgment, obsolete negative-cache head and
+normal authorization-history growth cases. These fixed cohorts balance measured
+outliers without another timing database. List and run use identical selectors;
+full discovery remains unfiltered. Before sealing and before execution, the owner
+requires every reserved name exactly once and default runnable, rejecting name
+drift, duplicates and ignored cases. Preserve the complete strict union when
+changing cohorts; compare actual instrumented timings before reconsidering them.
+The producer seals the complete default inventory and
 source/compiler/config/platform identity. Trusted job outputs bind both the
 manifest and archive digests; consumers reject mismatches before extraction and
 compare the extracted inventory before execution. Each runner retains the same
@@ -519,6 +594,13 @@ producer compilation, artifact transfer, consumer preparation and queue time
 alongside test execution; more shards alone can duplicate the dominant setup.
 Keep extracted runtimes outside uploaded evidence. Collect receipts, inventories
 and logs; do not upload another compiled binary copy from every consumer.
+This separation also applies to failed or interrupted extraction. Use an owned
+staging directory on the final target's filesystem, outside artifact roots, and
+retire only that directory through the extraction owner's cleanup path. Exercise
+rejection after real extraction and interrupted partial writes while preserving
+unrelated native build outputs. Record image
+rollout metadata separately from actual compiler/runtime compatibility; incidental
+image version changes must not reject otherwise identical compatible inputs.
 Attempt-bound archives and receipts require a complete sanitizer-workflow rerun
 when recovering a failed attempt; do not mix a previous producer with new shards.
 
@@ -540,6 +622,127 @@ Both need compatible inputs and complete inventories, with isolation preserved.
 Archive reuse also requires the actual architecture/ABI and supported runtime
 binary lookup. An archive cannot rewrite executable paths embedded at compile
 time; validate a relocated fresh consumer before sharing builds across jobs.
+The hosted `macos-remaining` profile in `scripts/ci/windows-coverage.mjs`
+requires identical absolute checkout and target paths for embedded CLI lookups.
+It selects every enabled default workspace target except exactly `mesh-talk`,
+with two hash partitions, four test workers, two compiler jobs, default ignored
+policy, no retries and no LLVM coverage instrumentation. Reject inherited LLVM
+activation, Rust flags/wrappers and unexpected target/build overrides; bind the
+accepted profile environment, compiler, source, configuration, resolved features
+and run attempt. Preserve the existing Windows eight serial instrumented shards.
+Hosted CI admits the remaining-workspace producer immediately after full scope,
+in parallel with the native Host lane. Two archive consumers depend only on scope
+and that producer; they do not wait for Host, Health or WebKit. The native lane
+retains all-target Clippy, ordinary production workspace compilation, workspace
+doctests, frontend preparation, native real-tool fixtures and Host-only coverage.
+The standalone `workspace-coverage.sh macos` command still runs Host first and
+admits the remaining partition only after Host succeeds; hosted parallelism does
+not weaken either partition's failure semantics. The existing required
+`checks (macos-latest)` identity collects on Ubuntu only after actual native,
+producer and aggregate consumer success. Documentation scope independently
+revalidates its cheap required check without manufacturing execution receipts.
+Linux retains complete instrumented default and ignored coverage through the
+shared archive flow below.
+
+Preserve the old `workspace-checks-checks` shared dependency-cache cohort without
+an additional job key on Ubuntu, native macOS and the remaining producer. Restore
+before setting the archive step's two-compiler limit or any new profile overrides.
+The native macOS lane is the sole main-branch writer of that macOS cache because
+its ordinary full-workspace build and doctests own the dependency union; the
+remaining producer restores only, and consumers restore no Cargo cache. A matching
+configured key is not evidence of a hosted cache hit. Keep already-compressed
+binary archives in separate one-day artifacts with compression disabled; retain
+small metadata and execution diagnostics separately. Producer hashes and the exact
+Rust version are trusted job outputs, not values recovered from downloaded files.
+
+Additional macOS jobs share the existing five-runner capacity with native,
+backend and browser work. Preserve browser readiness/admission gates and the
+existing job watchdogs. Measure producer compilation, symbol packaging, transfer,
+queues, consumer tails and aggregate runner minutes on the same source. The
+historical roughly 47-minute serial macOS lane may move into the high twenties
+before queues; that is a hypothesis, not a thirty-minute acceptance guarantee.
+The historical roughly 46-minute Linux lane is the archive comparison baseline;
+macOS aggregate work also consumes the shared five-runner capacity.
+
+Linux keeps the existing `checks` job ID and `workspace-checks-checks` cache
+cohort as its sole main-only native/instrumented cache writer. The producer runs
+all native lint, production workspace/frontend builds, syntax checks, doctests
+and real compiler/crash contracts. Native Linux default-archive and ignored
+adapter fixtures gate the product archive. One full instrumented workspace
+archive then admits two four-worker default partitions and one serial ignored
+consumer. Windows remains eight serial consumers; macOS remains two
+uninstrumented remaining-workspace consumers plus native Host coverage.
+
+The Linux consumers restore no Rust cache, install no frontend dependencies and
+compile no Cargo targets. They install the producer's exact Rust version,
+matching LLVM tools, pinned prebuilt Nextest/llvm-cov and required Tauri runtime
+packages. `scripts/ci/linux-workspace.sh` independently captures a successful
+`cargo llvm-cov show-env --sh` before evaluation; failed environment discovery
+cannot admit execution. Fixture shell phases use a dedicated literal interpreter
+launch; ordinary Node/Cargo argv stays on a separate boundary. Keep derived paths
+as quoted environment variables or argv entries, and exercise quotes, spaces and
+literal `$()` in test paths. Keep `target/llvm-cov-target` and embedded CLI paths.
+Default timing markers stay in each consumer's execution log; ignored backend
+markers stay in their original redacted suite logs. Each actual Linux execution
+runner retains crash setup/selftest, always-run collection and verified restoration. Diagnostic selftests must retire their own source, executable and
+empty directories on success and failure before archive admission. Track which
+directories the selftest created; preserve pre-existing trees and newly arrived
+contents. An empty directory still violates a fresh-target contract: never weaken
+archive admission or delete an unowned target to compensate. The real-filesystem
+controls in `linux-crash-diagnostics.test.mjs` cover fresh and populated consumers
+without claiming native kernel qualification.
+Consumer jobs use the storage owner's read-only `--measure` mode without repeating the producer's SDK cleanup; inspect actual space, archive and diagnostic
+image usage before changing storage policy.
+
+The required `checks (ubuntu-latest)` aggregate independently revalidates scope.
+Full scope requires actual producer, default-matrix and ignored success before
+mandatory downloads. Both pure Linux and macOS aggregates use fifteen-minute infrastructure
+watchdogs for receipt/LCOV transfer, validation and upload. Producer/consumer
+ninety-minute watchdogs and all product case budgets remain unchanged. It reuses the shared default receipt collector and existing
+backend ignored validator with trusted producer hashes and current source/run/
+attempt. The original four-suite backend report, all eight backend scenarios,
+complete inventory-owned Bridge ignored subset and exact large-folder case
+remain required. The ignored artifact is uploaded once under the historical
+`backend-core-ubuntu-24.04-ATTEMPT` compatibility name; the sealed runtime identity
+owns actual ABI. Native Ubuntu version, architecture, glibc, runtime packages,
+compiler and profile remain authoritative; incidental image version is retained
+as provenance rather than an additional compatibility restriction.
+
+Two default LCOV reports and the separate ignored report represent genuine
+execution cohorts. Validate every hash and coverage summary before uploading all
+three through the required Linux Codecov owner. This trades the former serial
+report for parallel execution with three report/setup costs; a single raw-profile
+collector would need the compiler, executable archive and profiles again. Measure
+producer compilation, all report costs, transfer, queue delay and runner minutes
+in the complete same-source hosted DAG, including the five-Mac admission limit.
+Local archive mechanics and isolated durations do not establish full native Host
+linkage, Linux ELF diagnostics or a thirty-minute complete CI result.
+
+Trusted producer job outputs supply the manifest and archive hashes before
+consumer extraction. The producer API returns those hashes and the Rust version;
+only explicit CLI `--github-output` export writes GitHub outputs. The small
+metadata artifact contains `manifest.json`, `inventory-{0,1,2}.json` and
+`feature-resolution.json`; consumers also download `workspace.tar.zst`.
+The pure collector requires only that metadata, both selected inventories,
+receipts and execution logs, plus trusted current source/run/attempt and explicit
+successful native, producer and aggregate consumer job outcomes. It checks two
+distinct complete executions and their exact disjoint union without comparing
+its own Ubuntu platform/root to Darwin. Never upload consumer runtime binaries
+or invent LCOV for uninstrumented tests.
+
+Archive qualification must remove producer build outputs and inspect actual
+application stack frame file:line evidence separately from panic-header source
+locations. Successful binary execution alone does not prove diagnostics survived.
+Darwin unpacked line tables depend on compiler objects that official archives do
+not retain. The macOS profile generates only metadata-selected executable dSYM
+bundles with Apple `dsymutil` and includes them through official Nextest archive
+extras, keeping the line-table profile unchanged. Require the producer extraction
+probe and every consumer to verify the actual expected symbol inventory and
+bytes, since repository configuration can override lower-priority tool extras.
+The archive/manifest hashes bind these symbols. Retain a missing-bundle negative
+control in `scripts/ci/macos-remaining-cli.test.mjs`; do not archive the whole
+compiler cache. Measure symbol generation, added bytes and complete hosted
+compile/transfer/queue cost before claiming a speedup.
 
 Cancel superseded verification for the same candidate when safe, with concurrency
 groups that separate caller workflows, event streams and branches. Reusable Health
@@ -570,6 +773,12 @@ request identity, immutable control state and the lifetime of the actual task.
 Historical logs or a previously authenticated request do not prove that a live
 request has entered the required phase. Keep cancellation, task joining and
 cleanup correct on success, failure and panic.
+Give pre-arm setup and the measured admission separate bounded phases; an
+independent watchdog must not release a test barrier merely because unrelated
+preparation consumed its observation window. Keep the owning API's pending/error
+distinction in bounded observers. The
+[failure-evidence rules](ai-coding-reliability.md#r10-evidence-that-exercises-the-failure)
+identify the owning retirement-observer regression.
 When key ordering determines the scenario, use deterministic noncolliding fixture
 identities and check actual signed keys or cursors; random IDs can exercise only
 the easier path. Preserve real signing, publication and receipt assertions.
@@ -607,14 +816,51 @@ intended source change; unrelated copied tools must not inflate changed-file
 validation or consume the assertion's watchdog.
 
 Lifecycle regressions should exercise the real supervisor and child processes
-without making unrelated host tool startup part of their success condition.
+without making unrelated host tool startup part of their success condition. Full-host
+network fixtures must use the existing independent device runtime owner, retain
+the original offline/online cuts and observation budgets, and join actual work
+before profile reuse on success and failure. A timer sharing a synchronously
+stalled reactor provides no independent watchdog; isolate device scheduling
+rather than extending timeouts or assigning one shared reactor more workers.
+Include actual sender recovery and bound advertised listeners, not only recipient
+loops and a best-effort send. Keep the genuine held-worker delivery control
+alongside reconnect acceptance. [Reactor ownership](ai-coding-reliability.md#r02-thread-and-scheduler-progress)
+also explains why direct observer work remains a watchdog limitation. Local
+fixture success does not establish a historical lock cause or native qualification.
 When tool identity is outside the assertion, reuse the existing
 [tool-version fixture](../scripts/diagnostics/test-fixtures/tool-versions.mjs)
 and verify that its probes were actually consumed. Keep the real command,
 failure, cancellation and receipt assertions and their existing watchdogs.
+When adding a local check, inspect subprocess fixtures that invoke its owner.
+Supply unrelated external tools through private, observed fixture dependencies;
+do not depend on developer-installed tools or add scanner setup to every runner
+just to exercise scheduling. Keep real scanner acceptance in its existing job.
+Exercise interrupted log finalization as well as child retirement through the
+existing [process-owner controls](ai-coding-reliability.md#r03-actual-work-owns-its-lifetime).
 Compare nested budgets before adding an outer subprocess timeout: several valid
 inner probes can exhaust it before the behavior under test starts. A passing PR
 run cannot qualify an unbounded environmental dependency for later main runs.
+Do not use a fixed sleep to infer that background synchronization has happened.
+Bind negative assertions to an actual post-change operation: for deletion replay,
+prove the erased record was offered again and all pages were applied before
+checking that it remains absent. A successful page, unchanged-digest response or
+unrelated worker notification does not prove a complete replay. Keep deadlines
+as failure bounds, and retain ownership and joins for admitted work on timeout.
+Request that work through its existing coordinator and observe its publication
+revision and terminal completion. A second hand-driven page loop can race the
+normal worker and bypass its serialization, recovery and cancellation contract.
+Capture immutable precondition evidence before admitting an operation that can
+invalidate it. Published projections may legitimately become pending during a
+commit; a post-admission read cannot prove the operation's initial role. Wait on
+the existing preparation owner within the original setup deadline and fail
+unexpected errors instead of retrying the whole operation.
+Give counterfactual source copies their own Cargo target directory. Relative
+package paths can collide across copies and reuse a mutated test executable;
+the canonical candidate must never consume a negative control's build output.
+Asynchronous progress notifications are observations, not readiness barriers. Cancellation
+fixtures must bind readiness to still-live owned work after the required real
+materialization, then assert its retirement before later admission or cleanup;
+a bounded fallback may fail missing readiness but cannot manufacture a pass.
 
 Executable fixtures must own an independent copied image, not a hard link to
 the running test harness. Assert file identity before launch. After verified
@@ -657,6 +903,14 @@ owner to stop diagnostics before the job watchdog. Preserve its structured resul
 execution log and bounded Node lifecycle records, including the active file/case,
 through the always-upload path. Prove interruption and joined cleanup with a real
 parked command. Missing hosted logs require better evidence, not a guessed fix.
+Native release stdout may omit application warnings. After actual child retirement,
+the existing native capture owner retains bounded, redacted private application
+file-log tails in the uploaded evidence. Prefer the current log within bounded
+selection, reject linked/nonregular paths, close handles and report missing or
+unreadable diagnostics without replacing the original failure. Do not collect
+these logs through the IPC channel whose responsiveness is under investigation.
+`native-capture.test.mjs` owns confinement, quotas, cutoff redaction and retirement
+controls; file-log presence does not establish a backend failure cause.
 Cancellation during preparation still needs a failed structured result. Only the
 command owner can attest that admission never happened; failures after that
 boundary must retain uncertain cleanup rather than manufacture a no-work result.
@@ -673,13 +927,23 @@ infrastructure retry is justified, keep its limit, original failure and outcomes
 visible, and ensure repeating the operation is safe. Test retries still obey the
 owning suite policy.
 
+When a UI action moves into a menu, update the existing shared interaction helper
+and its callers before publication. Exercise the real entry point; retain
+functional, permission, focus and geometry assertions at the toolbar or popup
+boundary they describe. The
+[composer attachment helper](../frontend/e2e/helpers/session.ts) owns that shared
+interaction; forced visibility and dropped assertions do not qualify the new flow.
+
 Keep each observation inside a polling assertion nonwaiting when the assertion
 already owns readiness. A locator operation can wait for a virtualized row and
-consume the entire outer budget without producing one geometry sample. Inspect
-the trace to distinguish missing samples from unequal values; use one browser-side
-DOM snapshot for transient geometry, treating an absent row as pending. Preserve
-exact geometry and cache assertions, and exercise the absent-row control rather
-than extending the deadline. The media-scroll remount regression owns this case.
+consume the entire outer budget without producing one decode or geometry sample.
+Inspect the trace to distinguish missing samples from unequal values; use one
+browser-side DOM snapshot, treating an absent row as pending. Establish visible
+fixture preparation before releasing held media bytes and starting decode checks.
+Preserve exact geometry and cache assertions, and exercise the absent-row control
+with a snapshot-only observer rather than extending the deadline. The media-scroll
+remount regression owns this case. Run independent adversarial sampler controls
+after the cache-remount journey, so they cannot consume its retention window.
 
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the
@@ -743,6 +1007,11 @@ them. Universal local selections must not include a file whose entire suite is
 skipped on other hosts; preserve the nonempty-test guard and explicit native
 escalation instead. Keep workflow wiring assertions in the cheap CI policy
 owner, separate from the underlying tool's filesystem/compiler regressions.
+Environment-specific cases must also distinguish unsupported local environments
+from broken CI configuration. Skip only the new unsupported case, retain the
+file's other checks, and declare its native escalation. A declared GitHub Linux
+run must reach strict environment validation even when required image inputs are
+missing; never turn that misconfiguration into a skip or fabricate hosted inputs.
 
 After pushing, observe the actual hosted candidate until the relevant jobs finish.
 Compare before and after setup time, test time, required-check latency and runner
@@ -763,3 +1032,77 @@ Keep this review proportional: a documentation-only change needs applicable
 formatting, links and structural checks, not a new build benchmark. Rules should
 be enforceable through existing contracts and diagnostics where practical;
 adding this guide does not create a scheduled job or another required check.
+
+## Dependabot development acceptance
+
+The existing exact-merge scope owner, `scripts/ci/docs-scope.mjs`, also admits
+isolated npm dependency profiles for same-repository Dependabot bot PRs targeting
+`dev`. Both manifests and lockfiles must already exist as regular files. Only
+version changes to existing dependency entries qualify; scripts, overrides,
+metadata, additions/removals, mixed paths, unmatched lockfile roots and changed
+Tauri bindings retain full verification. Lockfile-only updates currently retain
+full verification because their consumer boundary has not been qualified.
+
+The `help` profile runs the public help/MCP tests, build and high-severity audit.
+The `frontend` profile runs complete unit coverage, lint/types, production build,
+built-JavaScript syntax checks, audit, Chromium theme/layout regressions and the
+WebKit portable suite. The selected npm workflow independently checks its profile
+against the actual merge. The Linux CI collector requires its success; failure,
+cancellation, missing output or unexpected skipping cannot qualify. The legacy
+`dev` required `verify` context collects the actual platform results. UI matrices
+outside these profiles report not applicable, rather than pretending to execute.
+Health retains source ownership/hygiene checks, without unrelated Rust or help
+security scans blocking an isolated npm update.
+
+Cargo, Actions and native binding updates retain complete acceptance. Main PRs,
+merge groups, pushes, schedules, manual runs and release-source checks retain
+full verification, apart from the separately qualified prose-only main PR rule.
+The direct main/release check policy is unchanged. Do not classify by actor,
+branch name, SemVer label or PR title alone. The existing real-Git scope controls
+and CI policy fixtures own positive profiles, source/identity rejection and
+failed/cancelled/missing selected-check evidence.
+
+Automatic merge additionally requires verified Dependabot metadata for npm
+minor/patch updates in these two directories, no Tauri dependency and no reported
+maintainer change. Other updates have automatic merge disabled and require manual
+review. The privileged metadata workflow never executes PR source; merge enablement
+is bound to the event head. Coverage uploads requiring unavailable Dependabot
+credentials remain excluded; tests and retained local artifacts are independent
+of external coverage publication.
+
+Deploy this policy through a reviewed main change, then align `dev` through a
+reviewed integration before refreshing its dependency PRs. Existing `dev`
+workflows cannot acquire fixes from main automatically. Preserve current required
+checks; any protection migration uses its existing owner. Measure selected hosted
+jobs after rollout, recording source, first failures, runner/setup/test time and
+cache conditions. Local policy success is not a hosted latency or native claim.
+
+Pinned native inspection downloads retain the exact version and SHA-256 owner in
+`scripts/release/sevenzip.py`. Retryable transport failures may use the official
+SourceForge distribution linked by the maintainer, within the same three-request
+budget. Record bounded attempt/source/error diagnostics. Size, deadline, integrity,
+installed-version and nonretryable HTTP failures remain fatal; never publish the
+tool environment before successful verification. `release-sevenzip.test.mjs`
+retains alternate-source, exhausted-budget and no-publication controls. Actual
+installed-tool acceptance remains required on each consuming native platform.
+
+### Synchronizing an accepted main source into dev
+
+A pure main-to-dev synchronization introduces no product source beyond the exact
+current main tip. The PR preparation owner may reuse the existing complete
+trusted-main acceptance contract instead of retroactively applying the local
+unit-only patch target to the entire development-branch backlog. This is limited
+to `origin/dev` comparisons with a clean HEAD equal to the live remote main SHA.
+`scripts/pr-platform/main-promotion.mjs` invokes the existing
+`release/check-source-checks.mjs` owner: every required current-source check must
+belong to its latest successful same-repository main-push workflow suite, with no
+open main scanning alerts. PR-only, stale, pending, failed, skipped and wrong-suite
+evidence cannot authorize promotion.
+
+The verifier rechecks live main and local source after proof collection, bounds
+network work and retires child processes through the existing process owner.
+Failure, cancellation, changed source and unavailable evidence reject promotion.
+This does not lower the configured patch target for ordinary new changes or
+replace dev's current-head protected integration checks. Large ordinary diffs
+remain fully measured within a bounded 32 MiB Git output budget; over-budget
+input fails rather than becoming an empty or truncated patch.

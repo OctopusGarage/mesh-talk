@@ -490,3 +490,16 @@ test("pre-PR cancellation reaches the canonical verifier and cannot produce cove
     },
   );
 });
+
+test("complete committed patches larger than Git's default output buffer remain measurable", async (t) => {
+  await patchFixture(t, { "frontend/src/large.ts": `export const value = "${"x".repeat(1200000)}";\n` }, "", async (root) => {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    const { createHash } = await import("node:crypto");
+    const lcov = "SF:src/large.ts\nDA:1,1\nend_of_record\n";
+    await mkdir(`${root}/frontend/coverage`, { recursive: true });
+    await writeFile(`${root}/frontend/coverage/lcov.info`, lcov);
+    const result = await prePrPatchCoverage({ root, verifyEvidence: () => ({ artifacts: [["coverage/lcov.info", createHash("sha256").update(lcov).digest("hex")]] }) });
+    assert.equal(result.total, 1);
+    assert.equal(result.covered, 1);
+  });
+});

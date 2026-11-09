@@ -160,12 +160,22 @@ reactor. The growing-history regression in
 holds the actual source writer until a receiver page imports, then measures
 continuation progress separately from setup and checks advancing cursors.
 Full-host file fixtures retain a separate two-worker reactor for each simulated
-application. This includes the explicit account File result/retry rigs: use the
+application. The [linked reconnect fixture](../crates/mesh-talk-core/src/node/node_tests.rs)
+also uses that owner at its original offline/online cuts and joins admitted work
+before reopening a profile, on failure as well as success. This separates device
+accept and maintenance loops; direct observer queries and public sends, including
+caller-owned idle-expiry tasks, can still run on the observer reactor. A timer on
+that reactor cannot bound a synchronous stall. Preserve the observation budget
+and do not infer a particular deadlock or complete watchdog independence from an
+unpolled timer alone. This includes the explicit account File result/retry rigs: use the
 existing independent peer owner for source, requester, recipient and the launched
 fresh sibling, keeping inactive retry phases and every byte/manifest assertion.
 Release fault helpers before joining hosts, and preserve body failure after
-actual retirement. A shared-reactor timeout does not by itself prove starvation
-caused that historical failure. The [own-copy control](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+actual retirement. Each online sender needs its normal delivery recovery owner
+and an advertised address bound to its real listener. Local acceptance followed
+by one best-effort flush cannot prove recovery after a transient exchange failure.
+The [fresh-handshake and own-copy controls](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+exercise recovery of the same accepted message without resending; the latter
 holds both sibling workers after its durable copy completes and requires target
 confirmation while they remain held; unrelated devices cannot share that stall.
 
@@ -190,6 +200,11 @@ when empty, so verified `forcedRetirement` alone does not mean work leaked or a
 successful test failed. Preserve the actual exit status and error, cancellation,
 timeout and cleanup-verification results. The empty-job owner control and UI
 runner outcome controls exercise that distinction.
+
+Keep cancellation attached through owned log finalization. After command
+closure, cancel unfinished log publication through the stream owner; partial
+logs fail independently of the original exit status. Still join process-group
+cleanup or verify the helper receipt: log closure cannot certify retirement.
 
 POSIX process-group retirement proves only that group. A browser framework may
 launch its web server in another group; use the actual tool's teardown protocol
@@ -737,6 +752,15 @@ Process a late definite refusal without fabricating a protocol terminal state.
 Do not turn failed readback into an empty successful save or resend an accepted
 message because optional roster, preview or notification work failed.
 
+Keep inspection affordances separate from mutation permissions, and propagate
+the containing view's restrictions into nested inspectors. Opening a reader must
+not restore mutation authority. A bounded projection may omit existing data;
+follow its owner's pending/remainder state rather than treating an empty visible
+slice as an empty collection. The [reaction-summary contract](ARCHITECTURE.md),
+[MessageBubble regressions](../frontend/src/features/chat/MessageBubble.test.ts)
+and [inspector flows](../frontend/e2e/reaction-summaries.spec.ts) exercise these
+boundaries with incomplete inline rows and read-only contexts.
+
 **Evidence:** hold IPC unresolved beyond the observation deadline, attempt a
 duplicate action, then settle the original call with success and with refusal in
 separate cases. Switch sessions during the wait. Assert bounded UI observation,
@@ -927,6 +951,12 @@ The [local publication regressions](../crates/mesh-talk-core/src/node/account_sy
 count actual body reads and cover profile/proof/control changes, in-flight
 invalidation, failed writes and timer-driven recovery without periodic peer polls.
 
+Callback-to-stream
+adapters must reserve queue capacity before copying input. Closing admission must
+also revoke buffered input and pending output; closing only the producer still
+allows stale queued work to escape. The [BLE stream owner](../crates/mesh-talk-core/src/transport/ble.rs)
+covers saturation/recovery and shutdown revocation in `transport::ble::tests`.
+
 **Evidence:** test the limit and just beyond it, malformed or missing data,
 wrong-owner requests, saturation and recovery after capacity returns. Include
 real loopback assertions for changed networking/crypto boundaries as required by
@@ -946,6 +976,44 @@ not globally unique text. Test the same valid value in an unrelated profile and
 verify that it stays unchanged. The [Nextest fixture owner](../scripts/diagnostics/test-fixtures/nextest.mjs)
 and [cheap CI policy regressions](../scripts/diagnostics/ci-latency.test.mjs)
 protect this boundary; actual compiler fixtures still exercise native behavior.
+
+Bind executable probes to the owning package, target kind and complete test
+identity, and require exactly one runnable match. A matching binary basename is
+not authority: Cargo can emit library and binary targets with the same name,
+and metadata order can change. Assert the real probe executed its intended case;
+a zero-test success cannot establish a negative control. The reordered ambiguous
+metadata and archive-only missing-symbol controls in
+[macOS archive qualification](../scripts/ci/macos-remaining-cli.test.mjs) protect
+this boundary. Portable filesystem fixtures must construct native paths with the
+platform path owner while retaining exact identity and escape checks; the
+[archive diagnostics](../scripts/diagnostics/windows-coverage.test.mjs) own those
+controls. Local execution does not replace actual Windows qualification.
+
+Read transient browser state with one nonwaiting DOM snapshot when an outer
+assertion already owns readiness. Attachment waits nested inside that assertion
+can exhaust its budget before any decode or geometry observation. The
+[media-scroll fixture](../frontend/e2e/media-scroll.spec.ts) establishes visible
+preparation before releasing media and checks an absent row through a snapshot-only
+observer; retain its exact geometry and cache assertions. Keep independent
+negative controls outside the journey's active retention window.
+
+Keep extracted runtimes outside diagnostic artifact roots on failure as well as
+success. Stage under an owned directory on the destination filesystem, retire it
+in the extraction owner's cleanup path, and preserve unrelated build outputs. Diagnostic preparation has the same
+ownership obligation: even empty directories can violate a later fresh-target
+admission contract. Record directories actually created, remove only those that
+remain empty, and preserve pre-existing files and trees on setup or execution
+failure. The [Linux crash selftest lifecycle controls](../scripts/ci/linux-crash-diagnostics.test.mjs)
+exercise this composition without weakening archive admission.
+The [Linux archive fixture](../scripts/ci/linux-workspace-cli.test.mjs) rejects
+extraction after real binary materialization and checks diagnostics stay free of
+runtime binaries; successful-path cleanup alone does not prove this boundary. Bind archive-only application stack
+file:line evidence separately from panic-header locations; Linux qualification
+strips a copied ELF's debug sections as a negative control. Environment discovery
+must return successfully before evaluating shell exports. The Linux wrapper
+failure control rejects a real nonzero discovery status before admitting any
+consumer, while strict aggregate collection retains every original default and
+ignored receipt and genuine coverage cohort.
 
 Source-integrity fixtures must not ignore tool output that production leaves
 untracked. Keep generated evidence outside the source checkout and assert the
@@ -990,8 +1058,12 @@ frontend state before navigation; a later settings response must not silently
 remove the capability under test. The call-readiness fixture owns that setup.
 For saved reading positions, exhausting bounded animation-frame polling does not
 prove geometry is ready: retain the conversation-owned target and resume on
-geometry changes, cancelling observers on cleanup and reader intent. The viewport
-unit regression supplies geometry only after the polling window.
+geometry changes, cancelling observers on cleanup and reader intent. Keep one
+owner for automatic scroll correction, including library subscriptions that can
+retain navigation across later measurements; a second writer can override valid
+reader input even when the application owner rejects it. The viewport unit
+regressions cover delayed geometry and insertion/resize pinning under reader intent;
+real browser media scenarios qualify the virtualizer interaction.
 
 Raw storage injection in concurrency fixtures must publish through the normal
 owner notification before requiring a peer's unrelated scope to settle. Preserve
@@ -1065,7 +1137,13 @@ protocol fixtures and their missing/duplicate/failed-receipt controls. ASan
 compilation reuse must bind the source, platform, compiler and archive/manifest
 digests through trusted producer outputs. Reject changed bytes and inventories
 before running archived tests; fresh-consumer controls must prove execution
-without producer build outputs. Retain real instrumentation checks on each runner.
+without producer build outputs. Successful executable exit does not prove that
+failure diagnostics survived relocation. Preserve the selected runtime and debug
+artifacts, and require actual application stack frame file:line evidence after
+removing producer outputs; a panic header alone is insufficient. Retain the
+missing-symbol negative control in the existing
+[archive fixture](../scripts/ci/macos-remaining-cli.test.mjs) and the
+[CI archive contract](ci-maintenance.md). Retain real instrumentation checks on each runner.
 
 A total functional browser-case watchdog is not a product performance SLA.
 Trace the failed interval: when several individually successful cold-load,
@@ -1112,6 +1190,12 @@ Start a progress deadline only after the required stalled operation is admitted,
 and prove the competing work is still incomplete at that point. Release only
 that work's barrier while retaining the stall. Measure cancellation separately
 from setup and history progress; preserve each behavior's required bound.
+An independent safety observer must also distinguish its pre-arm setup from
+post-arm admission. Starting both deadlines when its thread is created lets slow
+setup release the controlled gate before the asserted blockers enter. Keep each
+phase bounded, begin its deadline at the corresponding handshake, and exercise
+that transition with a controlled clock. The profile-rewrite retirement fixture
+in `runtime_retirement_tests.rs` owns this observer regression.
 
 A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
@@ -1126,6 +1210,16 @@ progress budget, and that budget must still cancel actual owned work.
 A storage fault fixture must fail the currently selected persistence owner and
 observe that failure before asserting recovery. A hook on a neighboring journal
 cannot certify the actual commit failed merely because both use the same logger.
+
+A bounded positive observer may keep waiting on the owning API's explicit pending
+state. Match only that state; storage, authorization and unexpected failures stay
+fatal. Preserve the original deadline and exact outcome assertions. Prior readiness
+is not a lease: live sibling attachment recovery can invalidate a canonical history
+projection between polls. The existing `ready_history` owner in
+[`node_tests.rs`](../crates/mesh-talk-core/src/node/node_tests.rs) preserves
+`StaleCursor` as pending and distinguishes a ready empty history; its storage and
+authorization controls remain fatal. Keep the real checkpoint invalidation and
+linked-device reconnect controls alongside those classification tests.
 
 An offline fixture that needs prompt connection failure must own and observe
 actual transport closure; reserving a TCP port does not guarantee refusal or
@@ -1236,6 +1330,31 @@ and block its replacement in the concurrency group. The
 eligibility after failure and ineligibility after cancellation. Follow the
 [validation protocol](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
 and keep unresolved native, cross-platform and stress obligations explicit.
+
+Bounded subprocess output discovery must fail on truncation, not infer an empty
+patch from a saturated buffer. Size Git diff transport for the supported source
+boundary and exercise a real committed patch above the default buffer. Accepted
+source promotion requires the existing exact main-push evidence owner plus live
+source revalidation, not a local reference, PR-only green status or a coverage
+threshold waiver. The [CI maintenance owner](ci-maintenance.md#synchronizing-an-accepted-main-source-into-dev),
+`patch-coverage.test.mjs` and `pr-main-promotion.test.mjs` own these controls.
+
+Dependency verification scope must bind identity to the actual tested merge and
+consumer boundary, not only a bot author or version label. Independently revalidate
+reduced profiles and require every selected producer's terminal success. External
+coverage publication is a separate permission boundary from test execution; never
+make missing bot credentials look like a product regression. The
+[CI maintenance owner](ci-maintenance.md#dependabot-development-acceptance) and
+`ci-docs-scope.test.mjs` / `ci-latency.test.mjs` own exact-source, mixed/native,
+lockfile and failed/cancelled/missing-result controls.
+
+Native failure evidence must include the actual release logger, not only captured
+stdout. The [native capture owner](../scripts/diagnostics/native-capture.mjs) reads
+bounded private file-log tails only after child retirement, preserves the original
+failure when diagnostics are unavailable and rejects linked paths. Its filesystem
+controls retain quotas, current-log priority and cutoff redaction. A responsive
+failure screenshot or generic IPC timeout alone cannot identify a backend lock or
+startup error; keep missing evidence distinct from a confirmed mechanism.
 
 ## Review record
 

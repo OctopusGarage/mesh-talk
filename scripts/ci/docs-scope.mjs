@@ -1,6 +1,6 @@
 /** Conservative CI scope selection bound to the actual tested PR merge. */
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { readFile, appendFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { loadContracts } from "../validation/contracts.mjs";
@@ -64,6 +64,67 @@ export function isProseChange(record) {
     )
   );
 }
+// Dependency scope is an acceptance profile, never an actor-only exemption.
+export function dependencyProfile({
+  records,
+  before,
+  after,
+  beforeLock,
+  lock,
+}) {
+  if (
+    !records.length ||
+    records.some(
+      (r) =>
+        r.status !== "M" || r.oldMode !== "100644" || r.newMode !== "100644",
+    )
+  )
+    return null;
+  const directory = ["tools/help", "frontend"].find((dir) =>
+    records.every((r) =>
+      [`${dir}/package.json`, `${dir}/package-lock.json`].includes(r.path),
+    ),
+  );
+  if (!directory || !records.some((r) => r.path.endsWith("package-lock.json")))
+    return null;
+  const fields = ["dependencies", "devDependencies", "optionalDependencies"];
+  const metadata = (value) =>
+    Object.fromEntries(
+      Object.entries(value).filter(([key]) => !fields.includes(key)),
+    );
+  if (!isDeepStrictEqual(metadata(before), metadata(after))) return null;
+  // npm may rewrite transitive bindings without changing a direct manifest entry.
+  const native = (packages) =>
+    Object.fromEntries(
+      Object.entries(packages ?? {}).filter(([key]) =>
+        key.includes("node_modules/@tauri-apps/"),
+      ),
+    );
+  if (!isDeepStrictEqual(native(beforeLock.packages), native(lock.packages)))
+    return null;
+  let changed = false;
+  for (const field of fields) {
+    const a = before[field] ?? {},
+      b = after[field] ?? {};
+    if (!isDeepStrictEqual(Object.keys(a).sort(), Object.keys(b).sort()))
+      return null;
+    for (const name of Object.keys(a)) {
+      if (typeof b[name] !== "string") return null;
+      if (a[name] !== b[name]) {
+        changed = true;
+        // Desktop bindings and lifecycle tooling require native acceptance.
+        if (
+          name.startsWith("@tauri-apps/") ||
+          !/^[~^]?\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/u.test(b[name])
+        )
+          return null;
+      }
+    }
+    if (!isDeepStrictEqual(b, lock.packages?.[""]?.[field] ?? {})) return null;
+  }
+  if (!changed || lock.lockfileVersion !== 3) return null;
+  return directory === "frontend" ? "frontend" : "help";
+}
 export async function resolveScope({
   root = process.cwd(),
   env = process.env,
@@ -78,6 +139,7 @@ export async function resolveScope({
   const deadline = Date.now() + 30000;
   const run = (args) => git(root, args, deadline);
   let decision = {
+    profile: "full",
     source: null,
     base: null,
     head: null,
@@ -181,9 +243,52 @@ export async function resolveScope({
         ? "validation owner or authority requires full verification"
         : "unowned prose-only PR delta; product tests not executed";
     }
+    if (
+      sameRepository &&
+      pr.base.ref === "dev" &&
+      pr.user?.login === "dependabot[bot]" &&
+      pr.user?.type === "Bot"
+    ) {
+      const directory = ["tools/help", "frontend"].find(
+        (dir) =>
+          records.length &&
+          records.every((r) =>
+            [`${dir}/package.json`, `${dir}/package-lock.json`].includes(
+              r.path,
+            ),
+          ),
+      );
+      if (
+        directory &&
+        records.every(
+          (r) =>
+            r.status === "M" &&
+            r.oldMode === "100644" &&
+            r.newMode === "100644",
+        )
+      ) {
+        const json = async (commit, file) =>
+          JSON.parse(await run(["show", `${commit}:${file}`]));
+        const profile = dependencyProfile({
+          records,
+          before: await json(pr.base.sha, `${directory}/package.json`),
+          after: await json(source, `${directory}/package.json`),
+          beforeLock: await json(pr.base.sha, `${directory}/package-lock.json`),
+          lock: await json(source, `${directory}/package-lock.json`),
+        });
+        if (profile)
+          decision = {
+            ...decision,
+            full: false,
+            profile,
+            reason: `isolated ${profile} npm dependency acceptance required`,
+          };
+      }
+    }
     if (!sameRepository)
       decision.reason = "fork PR requires full protected provider verification";
   }
+  if (!decision.full && decision.profile === "full") decision.profile = "docs";
   if (expectedFull === "false" && decision.full)
     throw Error(
       "Unsafe docs-only hint: independent classification requires full verification",
@@ -192,6 +297,7 @@ export async function resolveScope({
     decision = {
       ...decision,
       full: true,
+      profile: "full",
       reason: "caller explicitly requires full verification",
     };
   return decision;
@@ -218,10 +324,15 @@ async function main() {
       process.env.GITHUB_STEP_SUMMARY,
       decision.full
         ? "CI scope: full verification required.\n"
-        : "CI scope: documentation only. N/A: product tests not executed. Structural policy checks remain required.\n",
+        : decision.profile !== "docs"
+          ? `CI scope: ${decision.profile} dependency acceptance. Full product/native matrices not executed; selected checks remain required.\n`
+          : "CI scope: documentation only. N/A: product tests not executed. Structural policy checks remain required.\n",
     );
   if (process.env.GITHUB_OUTPUT)
-    await appendFile(process.env.GITHUB_OUTPUT, `full=${decision.full}\n`);
+    await appendFile(
+      process.env.GITHUB_OUTPUT,
+      `full=${decision.full}\nprofile=${decision.profile}\n`,
+    );
   process.stdout.write(`${JSON.stringify(decision)}\n`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
