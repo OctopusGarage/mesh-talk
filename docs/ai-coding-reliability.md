@@ -781,6 +781,13 @@ reopening can repeat checks but cannot lose pending/processed facts. The owning
 `blocked_profile_retry_rotation_is_read_only_and_reopen_preserves_pending`
 regression checks those costs rather than only the empty-queue case.
 
+A cleanup cursor is not a deletion receipt. Checkpoint one bounded page rather
+than every protected-file read; retain fresh references, exact revisions and
+durability for each real deletion. On failure/reopen, recheck the bounded page
+without skipping unresolved entries. The
+[media owner](../crates/mesh-talk-core/src/node/media_store.rs) tests a full
+protected page's commit count and safe replay through a fresh profile owner.
+
 A profile-wide physical write stamp is a conservative invalidator, not a semantic
 revision: disposable query preparation can otherwise invalidate its own work
 hints. Exclude derived writes only inside the connection owner's guarded table

@@ -114,6 +114,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    disposable query work or optional transport checkpoints must not invalidate otherwise unchanged semantic work
    hints. Enforce that exclusion at the SQL table/transaction owner, preserving
    current authority, default write fences and rollback behavior.
+   Checkpoint replayable cleanup scans once per bounded page, retaining fresh
+   reference/revision checks and durability for each actual deletion. A failed
+   page may repeat its bounded reads without losing accepted data or skipping
+   unresolved entries. Do not fsync a progress cursor for every protected file.
    Batch safe related mutations under the existing durable
    transaction; atomically update derived indexes. Bound WAL/log maintenance and
    preserve crash recovery and acknowledgment semantics when reducing flushes.

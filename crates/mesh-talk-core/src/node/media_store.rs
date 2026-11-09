@@ -1004,7 +1004,8 @@ impl MediaStore {
         if page.is_empty() {
             return index.advance_gc(None);
         }
-        for entry in page {
+        let count = page.len();
+        for (position, entry) in page.into_iter().enumerate() {
             let _guard = self
                 .mutation
                 .lock()
@@ -1044,7 +1045,13 @@ impl MediaStore {
                     }
                 }
             }
-            index.advance_gc(Some(&entry.name))?;
+            // This is replayable scan progress, not acceptance of file data.
+            // Checkpoint once per bounded page while the last mutation guard
+            // is still held. Failure/crash may recheck at most 32 rows; each
+            // unlink still obtains current references and its exact revision.
+            if position + 1 == count {
+                index.advance_gc(Some(&entry.name))?;
+            }
         }
         Ok(())
     }
@@ -1418,6 +1425,107 @@ mod tests {
         store.schedule_gc().unwrap();
         assert!(store.gc_step(|_| Ok(false)).is_err());
         assert_eq!(std::fs::read(external).unwrap(), b"outside media directory");
+    }
+
+    #[test]
+    fn indexed_media_protected_gc_page_checkpoints_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = indexed_profile(directory.path());
+        let store =
+            MediaStore::open_profile(profile.clone(), directory.path(), "password", "owner", None)
+                .unwrap();
+        for number in 0..32 {
+            store
+                .store_bytes(indexed_id(number), "image.png", b"retained")
+                .unwrap();
+        }
+        store.schedule_gc().unwrap();
+        let database = profile.database();
+        let changes = database.read(|c| Ok(c.total_changes())).unwrap();
+        let commits = database.successful_write_commits();
+        let mut checked = 0;
+        store
+            .gc_step(|_| {
+                checked += 1;
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(
+            checked, 32,
+            "the real bounded page must check every reference"
+        );
+        assert_eq!(
+            database.successful_write_commits() - commits,
+            1,
+            "a page of retained files needs one progress checkpoint, not one write per read"
+        );
+        assert_eq!(
+            database.read(|c| Ok(c.total_changes())).unwrap() - changes,
+            1
+        );
+        for number in 0..32 {
+            assert_eq!(store.read(indexed_id(number)).unwrap(), b"retained");
+        }
+        store
+            .gc_step(|_| panic!("the completed page must not be scanned again"))
+            .unwrap();
+        assert!(!store.gc_pending().unwrap());
+    }
+
+    #[test]
+    fn indexed_media_gc_failed_page_reopens_with_bounded_safe_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = indexed_profile(directory.path());
+        let store =
+            MediaStore::open_profile(profile.clone(), directory.path(), "password", "owner", None)
+                .unwrap();
+        for number in 0..32 {
+            store
+                .store_bytes(indexed_id(number), "image.png", b"retained")
+                .unwrap();
+        }
+        store.schedule_gc().unwrap();
+        let mut checked = 0;
+        let error = store
+            .gc_step(|_| {
+                checked += 1;
+                if checked == 9 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "reference unavailable",
+                    ))
+                } else {
+                    Ok(true)
+                }
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(store.gc_pending().unwrap());
+        for number in 0..32 {
+            assert_eq!(store.read(indexed_id(number)).unwrap(), b"retained");
+        }
+        drop(store);
+        drop(profile);
+        let reopened = indexed_store(directory.path());
+        let mut seen = std::collections::HashSet::new();
+        reopened
+            .gc_step(|file| {
+                assert!(seen.insert(file), "one retry page cannot repeat a row");
+                Ok(false)
+            })
+            .unwrap();
+        assert_eq!(
+            seen.len(),
+            32,
+            "recovery must recheck the failed page with fresh references"
+        );
+        for number in 0..32 {
+            assert!(reopened.read(indexed_id(number)).is_none());
+        }
+        reopened
+            .gc_step(|_| panic!("deleted metadata cannot reappear"))
+            .unwrap();
+        assert!(!reopened.gc_pending().unwrap());
     }
 
     #[test]

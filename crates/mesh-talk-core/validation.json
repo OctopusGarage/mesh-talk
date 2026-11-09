@@ -414,6 +414,10 @@
           {
             "name": "Custody keys retain a separate bounded quota; legal document counts survive reopening, and orphan cleanup scans owned regular files once while preserving live data.",
             "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Media cleanup checks current references and exact revisions per deletion, but checkpoints a protected metadata page once rather than writing per read. Failed pages remain pending and replay at most the bounded page after reopen.",
+            "reference": "docs/performance-requirements.md#design-and-review-rules"
           }
         ]
       },
