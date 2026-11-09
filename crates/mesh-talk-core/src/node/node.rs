@@ -1792,7 +1792,29 @@ impl Node {
             channel,
             kind,
             ciphertext,
-            required_profile_parent,
+            required_profile_parent.map(|parent| super::profile_io::LocalProfilePublication {
+                required_parent: Some(parent),
+                payload: None,
+            }),
+            None,
+            |_| Ok(()),
+        )
+    }
+
+    pub(in crate::node) fn append_profile_publication(
+        &self,
+        peer: &PublicIdentity,
+        wire: &[u8],
+        required_parent: Option<EventId>,
+    ) -> Result<(u64, EventId), NodeError> {
+        self.append_event_checked(
+            super::conversation::dm_conversation_id(&self.identity.public(), peer),
+            EventKind::Profile,
+            Vec::new(),
+            Some(super::profile_io::LocalProfilePublication {
+                required_parent,
+                payload: Some((peer, wire)),
+            }),
             None,
             |_| Ok(()),
         )
@@ -1826,7 +1848,7 @@ impl Node {
         channel: ConversationId,
         kind: EventKind,
         ciphertext: Vec<u8>,
-        required_profile_parent: Option<EventId>,
+        profile: Option<super::profile_io::LocalProfilePublication<'_>>,
         source: Option<&super::channel::checkpoint::ChannelSource>,
         check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
     ) -> Result<(u64, EventId), NodeError> {
@@ -1857,6 +1879,51 @@ impl Node {
             // is installed. Recheck after pending local WAL recovery as well.
             self.channel_checkpoints.check_source(source)?;
         }
+        let required_profile_parent = profile
+            .as_ref()
+            .and_then(|publication| publication.required_parent);
+        if let Some(parent) = required_profile_parent
+            && (kind != EventKind::Profile
+                || !log.get(&parent)?.is_some_and(|event| {
+                    event.kind == EventKind::Profile
+                        && event.conversation_id == channel
+                        && event.author == self_author
+                }))
+        {
+            return Err(NodeError::InvalidInput(
+                "required profile parent is not a local profile in this conversation".into(),
+            ));
+        }
+        // The delivery -> log allocation guards cover lookup and append together,
+        // so concurrent reconnect/edit producers cannot manufacture duplicate IDs.
+        let publication = profile
+            .as_ref()
+            .and_then(|publication| publication.payload)
+            .map(|(peer, wire)| {
+                (
+                    self.profile_publication_key(peer, wire, required_profile_parent),
+                    peer,
+                    wire,
+                )
+            });
+        if let Some((key, _, _)) = &publication
+            && let Some(existing) = self.retained_profile_publication(
+                &log,
+                key,
+                channel,
+                required_profile_parent,
+                independent_profile,
+            )?
+        {
+            return Ok(existing);
+        }
+        // Sealing is new-publication work, after exact retained provenance misses.
+        let ciphertext = if let Some((_, peer, wire)) = &publication {
+            crate::dm::seal(&self.identity, &peer.x25519_pub, wire)
+                .map_err(|error| NodeError::Log(LogError::Serialization(error.to_string())))?
+        } else {
+            ciphertext
+        };
         let (mut parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
         if independent_profile {
             // Signed profile leaves must remain ingestible while sibling content
@@ -1864,17 +1931,6 @@ impl Node {
             parents.clear();
         }
         if let Some(parent) = required_profile_parent {
-            if kind != EventKind::Profile
-                || !log.get(&parent)?.is_some_and(|event| {
-                    event.kind == EventKind::Profile
-                        && event.conversation_id == channel
-                        && event.author == self_author
-                })
-            {
-                return Err(NodeError::InvalidInput(
-                    "required profile parent is not a local profile in this conversation".into(),
-                ));
-            }
             // Even independent sibling profiles retain this Profile-only edge. It
             // never depends on paused message/file categories and prevents a legacy
             // avatar projection from overtaking its signed metadata across pages.
@@ -1907,7 +1963,12 @@ impl Node {
             ));
         }
         let id = event.id;
-        log.append(event).map_err(NodeError::Log)?;
+        if let Some((key, _, _)) = publication {
+            log.append_profile_publication(event, &key)
+                .map_err(NodeError::Log)?;
+        } else {
+            log.append(event).map_err(NodeError::Log)?;
+        }
         Ok((seq, id))
     }
 }

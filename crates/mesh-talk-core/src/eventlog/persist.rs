@@ -121,6 +121,28 @@ impl PersistentEventLog {
             Backend::Indexed(repository) => repository.sync(),
         }
     }
+    pub(crate) fn retained_profile_publication(
+        &self,
+        key: &[u8; 32],
+    ) -> Result<Option<Event>, LogError> {
+        self.check_read(None)?;
+        let id = match &self.backend {
+            Backend::Legacy(_) => None,
+            Backend::Indexed(repository) => repository.profile_publication_id(key)?,
+        };
+        id.map(|id| self.get(&id)).transpose().map(Option::flatten)
+    }
+    pub(crate) fn append_profile_publication(
+        &mut self,
+        event: Event,
+        key: &[u8; 32],
+    ) -> Result<AppendOutcome, LogError> {
+        match &mut self.backend {
+            Backend::Legacy(log) => log.append(event),
+            Backend::Indexed(repository) => repository.append_profile_publication(&event, key),
+        }
+    }
+
     pub fn append_durable(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         match &mut self.backend {
             Backend::Legacy(log) => log.append_durable(event),

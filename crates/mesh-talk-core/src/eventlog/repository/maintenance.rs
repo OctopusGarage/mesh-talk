@@ -48,13 +48,23 @@ pub(crate) struct MaintenanceApply {
     pub dropped: usize,
 }
 
+#[derive(Default)]
+pub(crate) struct ObservedProfileHeaders {
+    pub count: u64,
+    pub oldest_wall_clock: Option<u64>,
+    pub newest_wall_clock: Option<u64>,
+    pub processed_current_account: u64,
+}
+
+type CommittedKindObservation = (i64, [u64; 20], bool, bool, ObservedProfileHeaders);
+
 impl EventRepository {
     /// Baseline skips existing history. Later calls inspect at most 64 headers,
     /// never bodies or mutable work state. Ordinals are observation only.
     pub(crate) fn observe_committed_kinds(
         &self,
         after: Option<i64>,
-    ) -> Result<(i64, [u64; 20], bool, bool), LogError> {
+    ) -> Result<CommittedKindObservation, LogError> {
         let next = self.database.read(|c| {
             let next: i64 = c.query_row(
                 "SELECT next_commit FROM event_domains WHERE domain=?1",
@@ -65,13 +75,19 @@ impl EventRepository {
         })?;
         let latest = next - 1;
         let mut counts = [0u64; 20];
+        let mut profiles = ObservedProfileHeaders::default();
         let Some(after) = after else {
-            return Ok((latest, counts, false, false));
+            return Ok((latest, counts, false, false, profiles));
         };
         if after > latest || after < -1 {
-            return Ok((latest, counts, false, true));
+            return Ok((latest, counts, false, true, profiles));
         }
         let rows = self.committed_headers_page((after >= 0).then_some(after), 64)?;
+        let owner = match &self.database {
+            RepositoryOwner::Profile(_) => Some(self.receiving_owner()?),
+            #[cfg(test)]
+            RepositoryOwner::Fixture(_) => None,
+        };
         let mut cursor = after;
         for row in rows {
             if row.ordinal > latest {
@@ -81,6 +97,26 @@ impl EventRepository {
                 .get_mut(row.header.kind as usize)
                 .ok_or_else(|| corrupt("unknown observed event kind"))?;
             *count = count.saturating_add(1);
+            if row.header.kind == EventKind::Profile {
+                profiles.count += 1;
+                let clock = row.header.wall_clock;
+                profiles.oldest_wall_clock = Some(
+                    profiles
+                        .oldest_wall_clock
+                        .map_or(clock, |old| old.min(clock)),
+                );
+                profiles.newest_wall_clock = Some(
+                    profiles
+                        .newest_wall_clock
+                        .map_or(clock, |old| old.max(clock)),
+                );
+                if let Some(owner) = &owner {
+                    let processed = self.database.read(|c| {
+                        c.query_row("SELECT EXISTS(SELECT 1 FROM profile_receive_processed WHERE account=?1 AND id=?2)", params![owner.account().as_slice(), row.header.id.as_bytes().as_slice()], |r| r.get::<_, bool>(0)).map_err(LogError::from)
+                    })?;
+                    profiles.processed_current_account += u64::from(processed);
+                }
+            }
             cursor = row.ordinal;
         }
         // Deleted header gaps do not pin this observational cursor forever.
@@ -88,7 +124,7 @@ impl EventRepository {
         if !more {
             cursor = latest;
         }
-        Ok((cursor, counts, more, false))
+        Ok((cursor, counts, more, false, profiles))
     }
     /// A non-Profile append without Profile parents preserves every selected
     /// leaf and its rank, and only increases the denominator of the byte gate.

@@ -751,3 +751,278 @@ async fn publishing_profile_projects_newer_sibling_profile_pulled_in_same_round(
     assert_eq!(latest.bio, old.bio);
     assert_eq!(latest.created_at_ms, old.created_at_ms);
 }
+
+#[test]
+fn unchanged_profile_publication_reuses_retained_events_across_retries_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let peer_identity = crate::identity::device::DeviceIdentity::generate();
+    let peer_account = Account::generate();
+    let proof =
+        crate::discovery::Announce::new_with_account(&peer_identity, &peer_account, "Peer", 9);
+    let node = open(dir.path(), &account);
+    node.set_profile_display_name("Alice").unwrap();
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let peer = node
+        .roster
+        .lock()
+        .unwrap()
+        .peers()
+        .into_iter()
+        .next()
+        .unwrap();
+    let conversation = node
+        .prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    let initial: Vec<_> = node
+        .log
+        .lock()
+        .unwrap()
+        .events(&conversation)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(initial.len(), 2);
+    let before_changes = node
+        .storage
+        .database()
+        .read(|c| Ok(c.total_changes()))
+        .unwrap();
+    let before_commits = node.storage.database().successful_write_commits();
+    let source = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .source_revision()
+        .unwrap();
+    for _ in 0..8 {
+        assert_eq!(
+            node.prepare_current_profile_delivery(&peer).unwrap(),
+            Some(conversation)
+        );
+    }
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .source_revision()
+            .unwrap(),
+        source,
+        "unchanged publication must redeliver retained IDs rather than append new Profile events"
+    );
+    assert_eq!(
+        node.storage
+            .database()
+            .read(|c| Ok(c.total_changes()))
+            .unwrap(),
+        before_changes
+    );
+    assert_eq!(
+        node.storage.database().successful_write_commits(),
+        before_commits
+    );
+    drop(node);
+    let node = open(dir.path(), &account);
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    assert_eq!(
+        node.prepare_current_profile_delivery(&peer).unwrap(),
+        Some(conversation)
+    );
+    let reopened: Vec<_> = node
+        .log
+        .lock()
+        .unwrap()
+        .events(&conversation)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(
+        reopened, initial,
+        "runtime cache loss must not manufacture fresh semantic data"
+    );
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let node = &node;
+            let peer = &peer;
+            scope.spawn(move || {
+                assert_eq!(
+                    node.prepare_current_profile_delivery(peer).unwrap(),
+                    Some(conversation)
+                );
+            });
+        }
+    });
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .events(&conversation)
+            .unwrap()
+            .len(),
+        2
+    );
+    node.log.lock().unwrap().fail_reads(true);
+    assert!(
+        node.prepare_current_profile_delivery(&peer)
+            .unwrap()
+            .is_none()
+    );
+    node.log.lock().unwrap().fail_reads(false);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .events(&conversation)
+            .unwrap()
+            .len(),
+        2
+    );
+    node.set_profile_display_name("Updated").unwrap();
+    node.prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .events(&conversation)
+            .unwrap()
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn profile_publication_missing_sender_evidence_republishes_then_settles() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    node.set_profile_display_name("Alice").unwrap();
+    let peer_identity = crate::identity::device::DeviceIdentity::generate();
+    let proof = crate::discovery::Announce::new_with_account(
+        &peer_identity,
+        &Account::generate(),
+        "Peer",
+        9,
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let peer = node
+        .roster
+        .lock()
+        .unwrap()
+        .peers()
+        .into_iter()
+        .next()
+        .unwrap();
+    let conversation = node
+        .prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute("DELETE FROM profile_publication_hints", [])?;
+            Ok(())
+        })
+        .unwrap();
+    node.prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .events(&conversation)
+            .unwrap()
+            .len(),
+        4
+    );
+    let revision = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .source_revision()
+        .unwrap();
+    node.prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .source_revision()
+            .unwrap(),
+        revision
+    );
+}
+
+#[test]
+fn profile_publication_reuse_rejects_message_parents_when_independent_is_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    node.set_profile_display_name("Alice").unwrap();
+    let peer_identity = crate::identity::device::DeviceIdentity::generate();
+    let proof = crate::discovery::Announce::new_with_account(
+        &peer_identity,
+        &Account::generate(),
+        "Peer",
+        9,
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let peer = node
+        .roster
+        .lock()
+        .unwrap()
+        .peers()
+        .into_iter()
+        .next()
+        .unwrap();
+    let conversation =
+        crate::node::conversation::dm_conversation_id(&node.identity.public(), &peer.public);
+    node.append_event(conversation, crate::eventlog::EventKind::Message, vec![1])
+        .unwrap();
+    node.prepare_current_profile_delivery(&peer)
+        .unwrap()
+        .unwrap();
+    let wire = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap()
+        .encode();
+    let key = node.profile_publication_key(&peer.public, &wire, None);
+    let log = node.log.lock().unwrap();
+    assert!(
+        node.retained_profile_publication(&log, &key, conversation, None, false)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        node.retained_profile_publication(&log, &key, conversation, None, true)
+            .unwrap()
+            .is_none()
+    );
+}

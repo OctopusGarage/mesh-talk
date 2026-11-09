@@ -1409,6 +1409,10 @@ fn committed_kind_observation_baselines_then_bounds_pages_without_writes_or_bodi
     let tail = repo.observe_committed_kinds(Some(page.0)).unwrap();
     assert_eq!(tail.1[0], 1);
     assert_eq!(tail.1[8], 1);
+    assert_eq!(tail.4.count, 1);
+    assert_eq!(tail.4.oldest_wall_clock, Some(67));
+    assert_eq!(tail.4.newest_wall_clock, Some(67));
+    assert_eq!(tail.4.processed_current_account, 0);
     assert!(!tail.2);
     let reset = repo.observe_committed_kinds(Some(999)).unwrap();
     assert!(reset.3);

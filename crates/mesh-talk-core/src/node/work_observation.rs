@@ -315,6 +315,16 @@ impl Node {
                         recent, repeats, counts, headers.1, headers.2, headers.3
                     ),
                 );
+                emit_info(
+                    log::logger(),
+                    format_args!(
+                        "profile_header_work count={} oldest_wall_clock={:?} newest_wall_clock={:?} processed_current_account={}",
+                        headers.4.count,
+                        headers.4.oldest_wall_clock,
+                        headers.4.newest_wall_clock,
+                        headers.4.processed_current_account
+                    ),
+                );
                 // Static counters/revisions only, sampled by this existing
                 // opt-in owner after releasing observer, SQL and log guards.
                 let entries = self

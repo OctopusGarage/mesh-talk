@@ -152,6 +152,14 @@ same authenticated projection owner as inbound exchanges.
 The runtime tracks successful profile revisions per present peer. Failed direct
 or relay attempts retry accepted events rather than appending duplicates. At most
 two profile deliveries run concurrently, with untouched peers ahead of retries.
+Reconnect and ordinary reopen redeliver the retained events for an unchanged
+publication. A local sender fingerprint binds the account, both complete device
+identities, exact signed payload and required Profile parent; it commits in the
+same transaction as the canonical event. The encrypted repository retains at
+most 1,024 fixed-width references, never plaintext profile copies. Each reuse
+reads and validates the retained original; missing or evicted evidence takes the
+normal publication path and storage failures remain errors. Legacy standalone
+logs retain their existing append behavior.
 Existing bounded control deadlines and runtime cancellation apply. A new revision,
 including an avatar clear, is eligible without a reconnect; disappearing peers
 lose their publication cache and receive the current profile when they return.

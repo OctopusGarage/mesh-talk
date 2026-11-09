@@ -315,7 +315,8 @@
             "node::account_sync::personal_replay_tests::",
             "node::account_sync::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
-            "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery"
+            "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery",
+            "node::account_profile_io::tests::unchanged_profile_publication_reuses_retained_events_across_retries_and_reopen"
           ]
         }
       ],
@@ -1758,7 +1759,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer",
+            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer; unchanged reconnect/reopen reuses exact retained event IDs through bounded sender provenance committed atomically with the canonical event",
             "reference": "docs/peer-trust.md"
           },
           {

@@ -618,6 +618,13 @@ resolves a target outside the bounded recent-target memo across more scopes than
 heavy view slots; actual unfinished-upload pressure retains its separate oracle.
 Retain an ordinary responder view only after all response frames succeed, and
 test terminal-send failure and cancellation while its store remains alive.
+A reconnect or lost runtime memo must not manufacture another immutable event
+for unchanged content. Randomized sealed ciphertext cannot establish plaintext
+equality, and the sender may no longer possess the ephemeral decryption secret.
+Keep any bounded sender fingerprint and canonical event in the same transaction;
+recheck the retained original, full identities and required dependency on reuse.
+The [profile publication regression](../crates/mesh-talk-core/src/node/account_profile_io_tests.rs)
+compares actual retained IDs and source revisions across retries and reopen.
 Measure repeated cryptographic work separately from writes: stable event IDs and
 zero SQL mutations do not prove quiet CPU. A positive intrinsic verification memo
 must bind the complete serialized input, including its signature, and be bounded

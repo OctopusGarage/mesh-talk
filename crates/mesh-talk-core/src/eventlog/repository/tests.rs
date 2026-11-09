@@ -2386,3 +2386,49 @@ fn runtime_metadata_receive_control_bootstrap_qualifies_account_before_page() {
     assert_ne!(last[0].header.id, next_control.id);
     assert_eq!(returned.body_read_counts(), (0, 0));
 }
+
+#[test]
+fn profile_publication_provenance_rolls_back_with_failed_hint_and_bounds_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let first = event(&identity, 1, vec![], 1, EventKind::Profile);
+    repo.append_profile_publication(&first, &[9; 32]).unwrap();
+    let next = event(&identity, 2, vec![], 2, EventKind::Profile);
+    let source = repo.source_revision().unwrap();
+    db.transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER fail_profile_publication_hint BEFORE INSERT ON profile_publication_hints BEGIN SELECT RAISE(ABORT,'injected publication hint failure'); END;")?; Ok(())
+    }).unwrap();
+    assert!(repo.append_profile_publication(&next, &[8; 32]).is_err());
+    assert!(!repo.has(&next.id).unwrap());
+    assert_eq!(repo.source_revision().unwrap(), source);
+    assert!(repo.profile_publication_id(&[8; 32]).unwrap().is_none());
+    db.transaction(|c| {
+        c.execute_batch("DROP TRIGGER fail_profile_publication_hint;")?;
+        for value in 0u64..1023 {
+            let mut key = [255u8; 32]; key[..8].copy_from_slice(&value.to_be_bytes());
+            c.execute("INSERT INTO profile_publication_hints(domain,publication,event_id) VALUES(?1,?2,?3)", params![[1u8;16].as_slice(), key.as_slice(), first.id.as_bytes().as_slice()])?;
+        }
+        Ok(())
+    }).unwrap();
+    repo.append_profile_publication(&next, &[8; 32]).unwrap();
+    assert_eq!(
+        repo.profile_publication_id(&[8; 32]).unwrap(),
+        Some(next.id)
+    );
+    assert!(repo.profile_publication_id(&[9; 32]).unwrap().is_none());
+    assert!(
+        repo.has(&first.id).unwrap(),
+        "optional reference eviction never deletes canonical history"
+    );
+    assert_eq!(
+        db.read(|c| Ok(c.query_row(
+            "SELECT count(*) FROM profile_publication_hints",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?))
+        .unwrap(),
+        1024
+    );
+}

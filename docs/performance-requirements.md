@@ -83,6 +83,10 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    Reuse authenticated immutable input within one decision instead of reading
    and verifying it again down the call chain; keep current authority and read
    failure checks independent of that reuse.
+   Reconnection is a delivery trigger, not a new content revision. Reuse a
+   retained immutable publication only with exact, bounded sender provenance
+   committed alongside that event. Do not infer plaintext equality from
+   randomized ciphertext or timestamps; missing evidence uses normal recovery.
    Gate unchanged producers using complete input revisions; acknowledge the
    selected revisions, retain failed work and schedule sparse integrity repair.
    Separate volatile evidence from stable projections: refresh presence without

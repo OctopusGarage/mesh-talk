@@ -6,8 +6,9 @@
 
 use super::*;
 use crate::discovery::roster::PeerRecord;
-use crate::eventlog::LogError;
-use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
+use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
+use crate::eventlog::{LogError, PersistentEventLog};
+use crate::identity::device::PublicIdentity;
 use crate::node::conversation::dm_conversation_id;
 use crate::node::profile::ProfilePayload;
 use std::sync::Arc;
@@ -16,7 +17,66 @@ use std::time::Duration;
 /// Each pass reclaims at most one conversation; the persistent log also applies a cooldown.
 const PROFILE_COMPACTION_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Optional sender provenance at the existing local event-allocation owner.
+pub(super) struct LocalProfilePublication<'a> {
+    pub required_parent: Option<EventId>,
+    pub payload: Option<(&'a PublicIdentity, &'a [u8])>,
+}
+
 impl Node {
+    pub(super) fn profile_publication_key(
+        &self,
+        peer: &PublicIdentity,
+        wire: &[u8],
+        parent: Option<EventId>,
+    ) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"mesh-talk-local-profile-publication-v1");
+        hash.update(self.account.public().ed25519_pub);
+        let own = self.identity.public();
+        for key in [
+            own.ed25519_pub,
+            own.x25519_pub,
+            peer.ed25519_pub,
+            peer.x25519_pub,
+        ] {
+            hash.update(key);
+        }
+        hash.update([u8::from(parent.is_some())]);
+        if let Some(parent) = parent {
+            hash.update(parent.as_bytes());
+        }
+        hash.update((wire.len() as u64).to_be_bytes());
+        hash.update(wire);
+        hash.finalize().into()
+    }
+    pub(super) fn retained_profile_publication(
+        &self,
+        log: &PersistentEventLog,
+        key: &[u8; 32],
+        conversation: ConversationId,
+        required_parent: Option<EventId>,
+        independent: bool,
+    ) -> Result<Option<(u64, EventId)>, NodeError> {
+        let Some(event) = log.retained_profile_publication(key)? else {
+            return Ok(None);
+        };
+        if event.kind != EventKind::Profile
+            || event.conversation_id != conversation
+            || event.author.ed25519_pub() != &self.identity.public().ed25519_pub
+            || required_parent.is_some_and(|parent| !event.parents.contains(&parent))
+            || (independent
+                && event
+                    .parents
+                    .iter()
+                    .any(|parent| Some(*parent) != required_parent))
+        {
+            return Ok(None);
+        }
+        Ok(Some((event.seq, event.id)))
+    }
+
     /// Set (or clear) this user's OWN avatar and PROPAGATE it to peers. `avatar` is the
     /// small data-URL bytes the UI produces (or `None` to clear). A SET larger than
     /// [`crate::node::MAX_AVATAR_BYTES`] is rejected. Builds a signed [`ProfilePayload`] (authenticated
@@ -178,9 +238,8 @@ impl Node {
             return None;
         }
         let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-        let sealed = crate::dm::seal(&self.identity, &peer.public.x25519_pub, wire).ok()?;
         let (_, id) = self
-            .append_event_with_profile_parent(conv, EventKind::Profile, sealed, required_parent)
+            .append_profile_publication(&peer.public, wire, required_parent)
             .ok()?;
         Some((conv, id))
     }
