@@ -484,6 +484,15 @@ samples the log and row through one nonwaiting page evaluation, returning pendin
 when either is absent. Keep its existing assertion budget and exact ID/offset,
 focus and unread checks; a slow locator operation is not proof of absent rows.
 
+For repeated lifecycle or memory churn, distinguish cumulative input-driver waits
+from the invariant being measured. The [memory guardrail](../frontend/e2e/memory.spec.ts)
+keeps a pointer round and final pointer navigation, then activates the same native
+buttons with Enter for repeated replacement. Require the exact active destination
+and loaded history; retain the original churn count, history size, watchdog and
+DOM bound. Do not replace UI activation with direct store mutations. An injected
+extra-bubble negative control must still fail the bound. Successful progress before
+a timeout does not establish why an individual driver operation was slow.
+
 Keep extracted runtimes outside diagnostic artifact roots on failure as well as
 success. Stage under an owned directory on the destination filesystem, retire it
 in the extraction owner's cleanup path, and preserve unrelated build outputs. Diagnostic preparation has the same

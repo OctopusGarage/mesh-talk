@@ -117,14 +117,27 @@ test.describe("Frontend memory-growth guardrails", () => {
 
     // Churn between conversations many times. Each switch resets the keyed,
     // virtualized list; bubbles from the previous conversation must not linger.
+    // Keep a pointer round, then activate the same real buttons with Enter.
+    // Repeating pointer stability/scroll checks 75 times measures driver frame
+    // latency as well as store isolation; every destination still has to render.
+    const activate = async (id: string, pointer: boolean) => {
+      const row = page.getByTestId(`conversation-row-${id}`);
+      await expect(row).toBeVisible();
+      if (pointer) await row.click();
+      else await row.press("Enter");
+      await expect(row).toHaveAttribute("aria-current", "true");
+    };
     for (let i = 0; i < 25; i++) {
-      await page.getByTestId(`conversation-row-${BOB.account}`).click();
+      await activate(BOB.account, i === 0);
       await expect(page.getByTestId("conversation-header")).toBeVisible();
-      await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+      await expect(
+        page.getByRole("log").getByText("history 299"),
+      ).toBeVisible();
+      await activate(CHANNEL.id, i === 0);
       await expect(
         page.getByRole("log").getByText("channel kickoff"),
       ).toBeVisible();
-      await page.getByTestId(`conversation-row-${CAROL.account}`).click();
+      await activate(CAROL.account, i === 0);
       await expect(page.getByTestId("conversation-empty")).toBeVisible();
     }
 

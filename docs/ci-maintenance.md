@@ -950,6 +950,16 @@ identity and offset together; retain the outer poll budget and all subsequent
 anchor, focus, unread and navigation assertions. A late successful observation
 does not establish a missing-row defect or identify the source of driver latency.
 
+The [memory guardrail](../frontend/e2e/memory.spec.ts) retains its seeded history,
+25 complete conversation rounds, original watchdog and rendered-bubble ceiling.
+Exercise a real pointer round, then use native button keyboard activation for
+repeated churn, with visible rows, exact active destinations and loaded-history
+assertions. This isolates repeated store/list replacement from cumulative pointer
+stability and scrolling waits without invoking a store action directly. Preserve
+the final pointer navigation and DOM bound; a deliberate extra-bubble control
+must still fail. This fixture does not measure pointer latency or prove the cause
+of hosted driver stalls.
+
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the
 intended case actually ran. Preserve existing coverage while investigating; any
