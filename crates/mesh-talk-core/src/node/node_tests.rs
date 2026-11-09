@@ -10422,15 +10422,25 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .await
         .unwrap();
     phase("new_channel_send_finished_source_history_begin");
-    let original_new = channel_texts(&a1_node)
-        .unwrap()
-        .into_iter()
-        .find(|row| row.text == b"after sibling joined")
-        .unwrap()
-        .id;
+    // Source projection readiness and sibling delivery share the original
+    // observation budget; a successful append does not lease a ready projection.
+    let new_delivery_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let original_new = tokio::time::timeout_at(new_delivery_deadline, async {
+        loop {
+            if let Some(history) = ready_history(channel_texts(&a1_node))
+                && let Some(row) = history
+                    .into_iter()
+                    .find(|row| row.text == b"after sibling joined")
+            {
+                break row.id;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("new channel plaintext is readable at its source within the delivery window");
     phase("source_history_finished_delivery_observation_begin");
     let mut first_public_arrival = None;
-    let new_delivery_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let new_channel_delivery = tokio::time::timeout_at(new_delivery_deadline, async {
         loop {
             if first_public_arrival.is_none()
@@ -10465,11 +10475,12 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             "linked plaintext branch before_new_send={before_new_send} first_public_arrival={first_public_arrival:?} finish={}",
             linked_plaintext_metadata(&a2_node, original_new)
         );
-        let original = channel_texts(&a1_node)
-            .unwrap()
-            .into_iter()
-            .find(|row| row.text == b"after sibling joined")
-            .map(|row| row.id);
+        let original = channel_texts(&a1_node).map(|history| {
+            history
+                .into_iter()
+                .find(|row| row.text == b"after sibling joined")
+                .map(|row| row.id)
+        });
         let authorization = [&a1_node, &a2_node].map(|current| {
             current.log.try_lock().ok().map(|log| {
                 crate::node::channel::ChannelBook::project_membership(
@@ -10488,15 +10499,11 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                     let log = current.log.lock().unwrap();
                     (
                         log.events(&channel).unwrap().len(),
-                        original.is_some_and(|id| log.get(&id).unwrap().is_some()),
+                        log.get(&original_new).unwrap().is_some(),
                     )
                 };
-                let surfaced = original.is_some_and(|id| {
-                    channel_texts(current)
-                        .unwrap()
-                        .iter()
-                        .any(|row| row.id == id)
-                });
+                let surfaced = channel_texts(current)
+                    .map(|history| history.iter().any(|row| row.id == original_new));
                 let queued = current
                     .channel_recovery_pending
                     .lock()

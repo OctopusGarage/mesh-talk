@@ -115,18 +115,131 @@ test.describe("Frontend memory-growth guardrails", () => {
       }
     });
 
-    // Churn between conversations many times. Each switch resets the keyed,
-    // virtualized list; bubbles from the previous conversation must not linger.
-    for (let i = 0; i < 25; i++) {
-      await page.getByTestId(`conversation-row-${BOB.account}`).click();
-      await expect(page.getByTestId("conversation-header")).toBeVisible();
-      await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-      await expect(
-        page.getByRole("log").getByText("channel kickoff"),
-      ).toBeVisible();
-      await page.getByTestId(`conversation-row-${CAROL.account}`).click();
-      await expect(page.getByTestId("conversation-empty")).toBeVisible();
-    }
+    // Keep one complete pointer round and final pointer navigation. The repeated
+    // rounds measure list replacement, not trusted-input or pointer latency.
+    const activate = async (id: string) => {
+      const row = page.getByTestId(`conversation-row-${id}`);
+      await expect(row).toBeVisible();
+      await row.click();
+      await expect(row).toHaveAttribute("aria-current", "true");
+    };
+    await activate(BOB.account);
+    await expect(page.getByTestId("conversation-header")).toBeVisible();
+    await expect(page.getByRole("log").getByText("history 299")).toBeVisible();
+    await activate(CHANNEL.id);
+    await expect(
+      page.getByRole("log").getByText("channel kickoff"),
+    ).toBeVisible();
+    await activate(CAROL.account);
+    await expect(page.getByTestId("conversation-empty")).toBeVisible();
+
+    // One browser journey avoids per-action protocol round trips. Activate the
+    // real buttons and await each committed, visible destination before moving on.
+    const churn = await page.evaluate(
+      async ({ bob, channel, carol }) => {
+        const visible = (element: Element | null): element is HTMLElement => {
+          if (!(element instanceof HTMLElement)) return false;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.visibility === "visible" &&
+            style.display !== "none"
+          );
+        };
+        const byTestId = (id: string) =>
+          document.querySelector(`[data-testid="${id}"]`);
+        const loaded = (text: string) => {
+          const log = document.querySelector('[role="log"]');
+          return (
+            visible(log) &&
+            [...log.querySelectorAll("*")].some(
+              (element) => element.textContent === text && visible(element),
+            )
+          );
+        };
+        const waitFor = (ready: () => boolean, description: string) =>
+          new Promise<void>((resolve, reject) => {
+            let frame = 0;
+            const cleanup = () => {
+              observer.disconnect();
+              clearTimeout(timer);
+              cancelAnimationFrame(frame);
+            };
+            const check = () => {
+              try {
+                if (ready()) {
+                  cleanup();
+                  resolve();
+                } else {
+                  scheduleCheck();
+                }
+              } catch (error) {
+                cleanup();
+                reject(error);
+              }
+            };
+            const scheduleCheck = () => {
+              if (!frame)
+                frame = requestAnimationFrame(() => {
+                  frame = 0;
+                  check();
+                });
+            };
+            const observer = new MutationObserver(scheduleCheck);
+            const timer = setTimeout(() => {
+              cleanup();
+              reject(
+                new Error(
+                  `Conversation readiness exceeded 5000ms: ${description}`,
+                ),
+              );
+            }, 5000);
+            observer.observe(document.body, {
+              subtree: true,
+              childList: true,
+              attributes: true,
+              characterData: true,
+            });
+            check();
+          });
+        let activations = 0;
+        for (let round = 0; round < 24; round++) {
+          for (const id of [bob, channel, carol]) {
+            const row = byTestId(`conversation-row-${id}`);
+            if (
+              !(row instanceof HTMLButtonElement) ||
+              !visible(row) ||
+              row.disabled
+            )
+              throw new Error(
+                `Conversation button unavailable: ${id}, round ${round + 2}`,
+              );
+            row.focus();
+            row.click();
+            activations++;
+            await waitFor(
+              () =>
+                visible(byTestId(`conversation-row-${id}`)) &&
+                byTestId(`conversation-row-${id}`)?.getAttribute(
+                  "aria-current",
+                ) === "true" &&
+                (id === bob
+                  ? visible(byTestId("conversation-header")) &&
+                    loaded("history 299")
+                  : id === channel
+                    ? loaded("channel kickoff")
+                    : visible(byTestId("conversation-empty"))),
+              `${id}, round ${round + 2}`,
+            );
+          }
+        }
+        return { rounds: 24, activations };
+      },
+      { bob: BOB.account, channel: CHANNEL.id, carol: CAROL.account },
+    );
+    expect(churn).toEqual({ rounds: 24, activations: 72 });
 
     // End on Bob's large-history DM; the DOM still holds only a bounded window.
     await page.getByTestId(`conversation-row-${BOB.account}`).click();

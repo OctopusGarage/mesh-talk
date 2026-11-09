@@ -332,25 +332,79 @@ async fn initialize(fixture: &Fixture) -> AccountAccessSnapshot {
     snapshot
 }
 
-async fn discover(source: &NodeRuntime, target: &NodeRuntime) {
+async fn discover(source: &NodeRuntime, target: &NodeRuntime) -> std::io::Result<()> {
     target
         .probe_endpoint(([127, 0, 0, 1], source.discovery_port()).into())
-        .await
-        .unwrap();
+        .await?;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if target
-                .peers()
+                .handle()
+                .cached_peer_snapshot_async()
+                .await?
                 .iter()
                 .any(|peer| peer.public.user_id() == source.user_id())
             {
-                break;
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("signed loopback discovery must expose source account");
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "signed loopback discovery must expose source account",
+        )
+    })?
+}
+
+#[tokio::test]
+async fn discovery_fixture_reports_peer_cache_failure_before_its_deadline() {
+    let source = Fixture::new("discovery-source", "source-password").await;
+    let target = Fixture::new("discovery-target", "target-password").await;
+    let source_guard = source.node.0.read().await;
+    let target_guard = target.node.0.read().await;
+    let cache = target
+        .root
+        .path()
+        .join("accounts")
+        .join(target.admission.lease().owner())
+        .join("peer-proofs");
+    let original = std::fs::read(&cache).unwrap();
+    std::fs::remove_file(&cache).unwrap();
+    std::fs::create_dir(&cache).unwrap();
+    let result = discover(
+        source_guard.as_ref().unwrap(),
+        target_guard.as_ref().unwrap(),
+    )
+    .await;
+    std::fs::remove_dir(&cache).unwrap();
+    std::fs::write(&cache, original).unwrap();
+    let recovered = discover(
+        source_guard.as_ref().unwrap(),
+        target_guard.as_ref().unwrap(),
+    )
+    .await;
+    drop(target_guard);
+    drop(source_guard);
+    target.stop().await;
+    source.stop().await;
+    recovered.expect("discovery must recover after the cache path is restored");
+    let error = result.expect_err("a failed peer-cache write cannot certify discovery");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::Other,
+        "the fixture must preserve the peer-cache error: {error:?}"
+    );
+    assert_eq!(
+        error
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::InvalidData),
+        "the fixture must expose the invalid cache path, not hide it until its deadline"
+    );
 }
 
 #[tokio::test]
@@ -461,7 +515,7 @@ async fn v4_pairing_adopts_login_preserving_storage_device_and_encrypted_history
             .set_device_sync_category(category, true)
             .unwrap();
     }
-    discover(source_runtime, target_runtime).await;
+    discover(source_runtime, target_runtime).await.unwrap();
     let code = source_runtime.start_linking();
     let account = target_runtime
         .link_device_with_account_access_checked_if(
@@ -614,7 +668,7 @@ async fn collision_preflight_rejects_v4_before_account_keystore_adoption() {
     let tg = target.node.0.read().await;
     let runtime = tg.as_ref().unwrap();
     let old_account = runtime.account_id().to_owned();
-    discover(source_runtime, runtime).await;
+    discover(source_runtime, runtime).await.unwrap();
     let code = source_runtime.start_linking();
     assert!(
         runtime

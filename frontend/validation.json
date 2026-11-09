@@ -2,6 +2,28 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-memory-guardrails",
+      "paths": ["frontend/e2e/memory.spec.ts"],
+      "frontend": [
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/store/conversationHistory.test.ts"
+      ],
+      "capability": {
+        "summary": "Keep virtualized message DOM bounded across loaded history and repeated real conversation activation.",
+        "guide": "docs/ci-maintenance.md",
+        "invariants": [
+          {
+            "name": "Seeded history, complete churn rounds, exact visible destinations, the original watchdog and rendered-bubble bound survive fixture optimization; an extra-bubble negative control still fails.",
+            "reference": "docs/ai-coding-reliability.md#r10-evidence-that-exercises-the-failure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
+      ]
+    },
+    {
       "id": "frontend-async-consumer-evidence",
       "paths": [
         "frontend/src/App.tsx",
@@ -2539,6 +2561,16 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-memory-guardrail-acceptance",
+      "paths": ["frontend/e2e/memory.spec.ts"],
+      "browser": ["e2e/memory.spec.ts"]
+    },
+    {
+      "id": "frontend-group-reception-acceptance",
+      "paths": ["frontend/e2e/group-reception.spec.ts"],
+      "browser": ["e2e/group-reception.spec.ts"]
+    },
     {
       "id": "frontend-dialog-focus-acceptance",
       "paths": [
