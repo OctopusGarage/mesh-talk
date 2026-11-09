@@ -25,7 +25,10 @@ test("PR creation is fast by default, supports full preparation and preserves ar
   writeFileSync(join(root, "scripts/validation/changed.mjs"), `
 import { checkSyntax } from './syntax.mjs';
 const args = process.argv.slice(2);
-if (args.length !== 4 || args[0] !== '--cheap' || args[1] !== '--base' || !['origin/main', 'origin/release'].includes(args[2]) || args[3] !== '--json') throw Error('invalid cheap-check arguments');
+const explicit = args.slice(3, -1);
+if (JSON.stringify(explicit) !== JSON.stringify([]) && JSON.stringify(explicit) !== JSON.stringify(['--owner','core-transport','--owner','pr-preparation','--reason',process.env.OWNER_REASON])) throw Error('invalid explicit owner arguments');
+(await import('node:fs')).writeFileSync('cheap-args.json',JSON.stringify(args));
+if (args[0] !== '--cheap' || args[1] !== '--base' || !['origin/main', 'origin/release'].includes(args[2]) || args.at(-1) !== '--json') throw Error('invalid cheap-check arguments');
 if (!process.env.PLAN_BLOCKED) checkSyntax({ base: args[2] });
 console.log(JSON.stringify({blockers: process.env.PLAN_BLOCKED ? ['fixture ownership blocker'] : []}));
 process.exit(process.env.PLAN_BLOCKED ? 2 : 0);
@@ -51,6 +54,32 @@ process.exit(process.env.PLAN_BLOCKED ? 2 : 0);
     assert.match(blocked.stderr, /PR readiness is blocked/);
     assert.deepEqual(JSON.parse(readFileSync(join(root, "target/validation/pr-plan.json"), "utf8")).blockers, ["fixture ownership blocker"]);
     assert.equal(readFileSync(trace, "utf8"), "", "plan blockers prevent preparation and publication");
+  }
+  const ownerReason = "Reviewed historical main-to-dev consumers $(touch unexpected)";
+  const ownerArgs = ["--owner", "core-transport", "--owner", "pr-preparation", "--reason", ownerReason, ...args];
+  for (const full of [false, true]) {
+    writeFileSync(trace, "");
+    const explicit = run(0, ownerArgs, { OWNER_REASON: ownerReason }, full);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, "cheap-args.json"), "utf8")), [
+      "--cheap", "--base", "origin/main", "--owner", "core-transport", "--owner", "pr-preparation", "--reason", ownerReason, "--json",
+    ]);
+    const records = readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(records, full ? [
+      { kind: "prepare", args: args.slice(0, 3) },
+      { kind: "gh", args: ["pr", "create", "--base", "main", ...args.slice(4)] },
+    ] : [{ kind: "gh", args: ["pr", "create", "--base", "main", ...args.slice(4)] }]);
+    writeFileSync(trace, "");
+    const blocked = run(0, ownerArgs, { OWNER_REASON: ownerReason, PLAN_BLOCKED: "1" }, full);
+    assert.notEqual(blocked.status, 0);
+    assert.equal(readFileSync(trace, "utf8"), "", "explicit owners do not bypass affected-plan failure");
+  }
+  for (const malformed of [["--owner"], ["--reason"], ["--owner", ""], ["--owner", "core-transport"], ["--reason", ""], ["--owner", "--reason"]]) {
+    writeFileSync(trace, "");
+    for (const full of [false, true]) {
+      assert.notEqual(run(0, [...malformed, ...args], {}, full).status, 0);
+      assert.equal(readFileSync(trace, "utf8"), "", "invalid ownership arguments cannot prepare or publish");
+    }
   }
   assert.equal(run(0, args, { CHEAP_STATUS: "9" }, false).status, 9);
   assert.equal(readFileSync(trace, "utf8"), "", "cheap checks fail before publication");

@@ -348,7 +348,7 @@
         "scripts/diagnostics/standards-wiring.test.mjs"
       ],
       "escalation": [
-        "Fast PR creation checks source integrity; use --full-preflight for comprehensive local preparation. Required CI must pass before merge; focused diagnostics alone do not certify native or platform execution."
+        "Fast PR creation forwards explicit --owner/--reason only to the existing affected-plan checker, retaining default ownership blockers and separate platform selectors. Validate literal argument boundaries, malformed selections and checker failure before publication. Fast PR creation checks source integrity; use --full-preflight for comprehensive local preparation. Required CI must pass before merge; focused diagnostics alone do not certify native or platform execution."
       ]
     },
     {

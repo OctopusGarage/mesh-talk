@@ -472,6 +472,13 @@ For scanner false positives, validate the exact path/value combination with the
 real pinned scanner and retain detecting controls for another path, expression
 and credential-shaped value. Keep exceptions in the [scanner owner](../.gitleaks.toml).
 
+When a CLI wrapper exposes an existing policy selector, forward its literal
+arguments to the authoritative checker and keep unrelated consumer arguments
+separate. Exercise the actual entry point in every supported preparation mode,
+including repeated selections and failed checks; do not replace a blocked
+selection with a silent default. The [PR creation regression](../scripts/diagnostics/create-pr.test.mjs)
+protects explicit ownership forwarding without changing acceptance authority.
+
 Bind executable probes to the owning package, target kind and complete test
 identity, and require exactly one runnable match. A matching binary basename is
 not authority: Cargo can emit library and binary targets with the same name,

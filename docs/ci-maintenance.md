@@ -84,7 +84,12 @@ replace the API name to satisfy a prose checker.
 
 PR creation runs `make pr-check`'s cheap-check owner against its actual comparison
 base, rejects ownership blockers and checks applicable frontend patch coverage
-before publication. Version projections, contract references and hygiene already
+before publication. The creation wrapper accepts repeated `--owner ID` and
+`--reason TEXT` before `--` and forwards them only to that existing affected-plan
+owner. Review every otherwise unmapped path before making this explicit selection;
+it records responsibility, not test acceptance. Platform selectors remain separate,
+and missing/invalid owners, absent reasons and checker failures still block creation.
+Version projections, contract references and hygiene already
 belong to structural standards; reuse that owner rather than adding duplicate
 gates. Do not install dependencies, compile Rust, launch browsers or run application suites
 implicitly in the cheap mode. Source changes during checking invalidate it.
