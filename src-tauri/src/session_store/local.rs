@@ -37,7 +37,7 @@ fn error(error: impl std::fmt::Display) -> String {
 /// supplied by the trusted desktop data-directory owner (not a renderer path).
 fn directory(root: &Path, create: bool) -> Result<bool, String> {
     if create {
-        let mut builder = fs::DirBuilder::new();
+        let builder = &mut fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
