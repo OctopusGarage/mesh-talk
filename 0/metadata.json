@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M70CZP66E9NHBFFKR17RBBNM",
+  "session_id": "01a1b9d6-e428-7a40-a439-f43aa7acb8c4",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-09T14:56:50.405118Z",
+  "branch": "fix/chat-composer-tools",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "src-tauri/Info.plist"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "1f325ca44ada",
+  "compact_transcript_start": 0,
+  "redaction": {
+    "replacements": 5089,
+    "layers": {
+      "betterleaks": 2,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 3,
+      "credentialed_uri": 0,
+      "entropy": 5084,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 12
+  }
+}
