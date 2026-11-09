@@ -338,6 +338,11 @@ Use the provider's supported asset API, bound transport attempts, verify the
 reviewed digest before extraction and preserve the scanner's exit status.
 Integrity failures must not trigger another source or unverified execution; see
 the [Gitleaks owner](../scripts/ci-gitleaks.sh) and its behavioral controls.
+Classify generic-key matches against their actual source expression before
+adding an exception. The [scanner configuration](../.gitleaks.toml) combines an
+exact fixture path and exact public-field expression with `AND`; the same value
+elsewhere, another expression and a credential-shaped value in that file must
+still be detected by the pinned scanner. Preserve full-history scanning.
 Compiling tools with `go install` or `cargo install` is recurring setup
 work; retain source installation only when the required tool has no suitable
 trusted binary or the test explicitly validates its build.
@@ -927,6 +932,14 @@ infrastructure retry is justified, keep its limit, original failure and outcomes
 visible, and ensure repeating the operation is safe. Test retries still obey the
 owning suite policy.
 
+Keep asynchronous fixture discovery observations on the existing owned async
+peer-cache API. A synchronous convenience snapshot can perform disk writes and
+hide a cache failure behind an empty roster. The account-login fixture retains
+one signed probe and its original five-second discovery budget, while a real
+cache-path failure must surface the cache API's error chain before that deadline.
+Retain the core cache writer's cancellation/profile-lease controls. A successful
+rerun does not identify the mechanism of a previous missing-peer timeout.
+
 When a UI action moves into a menu, update the existing shared interaction helper
 and its callers before publication. Exercise the real entry point; retain
 functional, permission, focus and geometry assertions at the toolbar or popup
@@ -944,6 +957,23 @@ Preserve exact geometry and cache assertions, and exercise the absent-row contro
 with a snapshot-only observer rather than extending the deadline. The media-scroll
 remount regression owns this case. Run independent adversarial sampler controls
 after the cache-remount journey, so they cannot consume its retention window.
+The [group reading-anchor fixture](../frontend/e2e/group-reception.spec.ts) uses
+the same nonwaiting page snapshot for its initial visible row. Capture its exact
+identity and offset together; retain the outer poll budget and all subsequent
+anchor, focus, unread and navigation assertions. A late successful observation
+does not establish a missing-row defect or identify the source of driver latency.
+
+The [memory guardrail](../frontend/e2e/memory.spec.ts) retains its seeded history,
+25 complete conversation rounds, original watchdog and rendered-bubble ceiling.
+Exercise a trusted pointer round, then activate the same DOM buttons through one
+browser-side journey for repeated churn, with visible rows, exact active
+destinations and loaded-history assertions after every activation. Retire each
+bounded readiness observer's timer and callback. This isolates store/list
+replacement from repeated driver round trips without invoking a store action
+directly; the repeated phase does not qualify trusted-input latency. Preserve
+the final pointer navigation and DOM bound; a deliberate extra-bubble control
+must still fail. This fixture does not measure pointer latency or prove the cause
+of hosted driver stalls.
 
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the

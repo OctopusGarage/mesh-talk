@@ -105,7 +105,11 @@ test("late history preserves reading anchor/focus and stays unread until viewed"
   let anchor = { id: "", offset: 0 };
   await expect
     .poll(async () => {
-      const visible = await log.evaluate((element) => {
+      // The poll owns readiness; selector waiting would consume its budget
+      // before a geometry sample can complete on a traced desktop runner.
+      const visible = await page.evaluate(() => {
+        const element = document.querySelector<HTMLElement>('[role="log"]');
+        if (!element) return null;
         const bounds = element.getBoundingClientRect();
         const row = [
           ...element.querySelectorAll<HTMLElement>("[data-message-id]"),
@@ -130,13 +134,17 @@ test("late history preserves reading anchor/focus and stays unread until viewed"
   await expect(page.getByTestId("composer-input")).toBeFocused();
   await expect
     .poll(async () =>
-      page
-        .locator(`[data-message-id="${anchor.id}"]`)
-        .evaluate(
-          (row) =>
-            row.getBoundingClientRect().top -
-            row.closest('[role="log"]')!.getBoundingClientRect().top,
-        ),
+      page.evaluate((id) => {
+        const log = document.querySelector<HTMLElement>('[role="log"]');
+        const row =
+          log &&
+          [...log.querySelectorAll<HTMLElement>("[data-message-id]")].find(
+            (candidate) => candidate.dataset.messageId === id,
+          );
+        return row && log
+          ? row.getBoundingClientRect().top - log.getBoundingClientRect().top
+          : null;
+      }, anchor.id),
     )
     .toBeCloseTo(anchor.offset, 0);
   // Clicking/focusing the composer cannot mark the offscreen insertion read.
