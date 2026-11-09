@@ -222,6 +222,13 @@ projection per identity. Creation and keystore restoration derive that projectio
 once; callers receive an owned clone. Public reads add no retained state and do
 not cache signature validity, membership or permissions.
 
+`core/node/account_devices.rs` owns the bounded roster of immutable account/device
+bindings. Open and insert verify certificates before publishing an entry; a
+point query checks the expected account and the complete public identity in that
+validated owner. Sibling checks do not clone/sort the roster or repeat signature
+verification. This membership observation does not replace current runtime,
+revocation or synchronization-policy checks.
+
 `core/storage/record_log.rs` owns encrypted framing and confirmation of the
 current owned file prefix. Its durability state is separate from source
 publication barriers and application authority. Reopen and failed replacement

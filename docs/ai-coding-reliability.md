@@ -174,6 +174,14 @@ of the unrelated guard or operation. Release the pause and verify the final data
 See the attachment preparation and document-scheduler regressions in
 [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs).
 
+Reuse an immutable certificate binding through the owner that validated it on
+admission and reopen. A hot membership query must not clone/sort the full roster
+and reverify signatures per row/page. Keep exact account and exchange-key checks,
+and retain current policy/revocation fences. The
+[roster regressions](../crates/mesh-talk-core/src/node/account_devices.rs) count
+actual verifier calls through `Node::certified_sibling` while rejecting forged
+admission/reopen records and substituted exchange keys.
+
 ## R03: Actual work owns its lifetime
 
 Consume the canonical process owner's result contract rather than deriving a new

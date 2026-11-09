@@ -891,12 +891,11 @@ impl Node {
     }
 
     pub(in crate::node) fn certified_sibling(&self, public: &PublicIdentity) -> bool {
-        self.linked_devices().iter().any(|device| {
-            device.public == *public
-                && device.certificate.verify()
-                && device.certificate.account_id() == self.account_id()
-                && device.certificate.device_ed25519_pub == public.ed25519_pub
-        })
+        let account = self.account_id();
+        self.account_devices
+            .lock()
+            .expect("account_devices mutex not poisoned")
+            .is_certified_device(public, &account)
     }
 
     pub(in crate::node) fn device_sync_policy_snapshot(&self) -> (DeviceSyncPolicy, u64) {

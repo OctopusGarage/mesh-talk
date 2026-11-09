@@ -306,10 +306,18 @@ impl Node {
                     .try_lock()
                     .ok()
                     .map(|c| c.revision());
+                let profile_sql = self.storage.participant_database().map(|database| {
+                    (
+                        database.work_observation_enabled(),
+                        database
+                            .read(|connection| Ok(connection.total_changes()))
+                            .ok(),
+                    )
+                });
                 emit_info(
                     log::logger(),
                     format_args!(
-                        "query_work counts={:?} labels=stamp_unknown,metadata_hit,metadata_miss,metadata_evicted,view_new,view_absent,scope_miss,stamp_miss,view_invalid,view_reused,view_retained,consent_hit,consent_main_changed,consent_policy_changed,consent_remote_changed,consent_floor_changed,consent_expired,consent_absent,consent_learned,consent_prepare_moved,reserved,reserved,reserved,reserved entries={:?} privacy={} projection={} file_scopes={:?} proofs={:?} controls={:?} device_policy={} hot_views_and_consent_hints={:?}",
+                        "query_work counts={:?} labels=stamp_unknown,metadata_hit,metadata_miss,metadata_evicted,view_new,view_absent,scope_miss,stamp_miss,view_invalid,view_reused,view_retained,consent_hit,consent_main_changed,consent_policy_changed,consent_remote_changed,consent_floor_changed,consent_expired,consent_absent,consent_learned,consent_prepare_moved,reserved,reserved,reserved,reserved entries={:?} privacy={} projection={} file_scopes={:?} proofs={:?} controls={:?} device_policy={} hot_views_and_consent_hints={:?} profile_sql_observer_and_total_changes={:?}",
                         queries,
                         entries,
                         self.privacy
@@ -322,7 +330,8 @@ impl Node {
                         proofs,
                         controls,
                         self.device_sync_policy_snapshot().1,
-                        hot_len
+                        hot_len,
+                        profile_sql
                     ),
                 );
             }
