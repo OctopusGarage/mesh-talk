@@ -669,7 +669,11 @@ alone does not bound concurrent workers. The partial-Followup regression in the
 [paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
 injects a real second-record storage failure, while the
 [serving controls](../crates/mesh-talk-core/src/node/serving.rs) hold reception work
-through cancellation, timeout and dropping outside the runtime context. Reuse
+through cancellation, timeout and dropping outside the runtime context. Apply this
+to both transport roles: a file-manifest requester can durably import a chat reply
+before checking download consent. The [delivery regression](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+requires automatic plaintext and the exact recipient receipt after that real
+bidirectional exchange, without a history read or another payload healing it. Reuse
 completed export preparation under its current source stamp. Require exact Have
 when ancestor closure depends on it; an independent plan may instead rebind its
 cursor digest and apply the fresh Have as a read filter, without persisting query
@@ -1145,6 +1149,11 @@ measures real capacity and reclaims only fixed disposable image SDK payloads;
 [its filesystem controls](../scripts/diagnostics/runner-storage.test.mjs) protect
 workspace/toolchain data, redirected paths and non-hosted environments.
 Keep secrets and private payloads out of diagnostic logs and fixtures.
+Project private API results into explicitly allowed fixed labels or bounded
+scalar counts before logging, including failure-only test output. Do not
+use `Debug` to log whole tuples or containers containing identifiers. The
+[runtime restart control](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
+retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
 
@@ -1442,7 +1451,12 @@ post-arm admission. Starting both deadlines when its thread is created lets slow
 setup release the controlled gate before the asserted blockers enter. Keep each
 phase bounded, begin its deadline at the corresponding handshake, and exercise
 that transition with a controlled clock. The profile-rewrite retirement fixture
-in `runtime_retirement_tests.rs` owns this observer regression.
+in `runtime_retirement_tests.rs` owns this observer regression. Install bounded
+readiness and task-origin observers before starting producers: unchanged input
+may never repeat an already completed transition. Arm blocking test gates after
+bootstrap so observation cannot create a setup dependency cycle. The selected-source
+and queued-source controls in `node/account_group/tests/` retain the real page,
+live-child and settlement predicates rather than substituting aggregate status.
 
 A periodic probe can miss readiness between its last check and the deadline.
 Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck

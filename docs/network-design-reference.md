@@ -3080,7 +3080,12 @@ transfers that work to the existing runtime-owned blocking boundary, retaining
 the original connection semaphore slot until processing finishes. It cannot
 create an unbounded cleanup lane. Empty queries, denied payloads and uncommitted
 invitation staging do not create reception work; delivery confirmation still
-requires the existing authenticated recipient receipt.
+requires the existing authenticated recipient receipt. Bidirectional file-manifest
+requests follow the same rule: a requester can receive a chat message while
+publishing a file. Both immediate sends and retained transfer steps drain accepted
+conversation scopes before consent/custody progression, including failed rounds.
+Cancellation retains the actual transport admission until that drain completes;
+a pending download approval does not defer chat reception.
 
 Pool lookup preserves explicit listener isolation. Up to 256 bounded route
 affinities remember an actually authenticated fallback for the same requested

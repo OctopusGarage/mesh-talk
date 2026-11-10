@@ -27,11 +27,12 @@ pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTIO
 /// Accepted payloads outlive a failed or cancelled connection future. The
 /// connection owns one admission through actual blocking cleanup; Drop never
 /// performs reception callbacks or SQL while unwinding.
-struct SyncReceptionScope<'a, 'node> {
+pub(in crate::node) struct SyncReceptionScope<'a, 'node> {
     node: Arc<Node>,
     store: &'a std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'node>>,
     permit: Option<super::runtime_work::WorkPermit>,
     capacity: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    transport_capacity: Vec<Arc<tokio::sync::OwnedSemaphorePermit>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -49,6 +50,7 @@ impl Drop for SyncReceptionScope<'_, '_> {
         };
         let node = self.node.clone();
         let capacity = self.capacity.take();
+        let transport_capacity = std::mem::take(&mut self.transport_capacity);
         // WorkPermit keeps the captured Node and SQL work inside retirement's
         // drain even though cancellation has destroyed the awaiting connection.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -56,6 +58,7 @@ impl Drop for SyncReceptionScope<'_, '_> {
             drop(permit.spawn_blocking(move || {
                 // Releasing the socket does not release SQL cleanup capacity.
                 let _capacity = capacity;
+                let _transport_capacity = transport_capacity;
                 node.dispatch_received_conversations(conversations);
             }));
         }));
@@ -688,6 +691,7 @@ impl Node {
             store: &store,
             permit: Some(permit),
             capacity,
+            transport_capacity: Vec::new(),
             runtime: tokio::runtime::Handle::current(),
         };
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
@@ -899,7 +903,25 @@ impl Node {
         }
     }
 
-    fn dispatch_received_sync_work(
+    pub(in crate::node) fn request_reception_scope<'a, 'node>(
+        self: &Arc<Self>,
+        store: &'a std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'node>>,
+        channel: &SecureChannel<TcpStream>,
+    ) -> Option<SyncReceptionScope<'a, 'node>> {
+        let node = self.clone();
+        let permit = self.runtime_work.admit()?;
+        store.lock().expect("sync store lock").track_reception();
+        Some(SyncReceptionScope {
+            node,
+            store,
+            permit: Some(permit),
+            capacity: None,
+            transport_capacity: channel.reception_capacity(),
+            runtime: tokio::runtime::Handle::current(),
+        })
+    }
+
+    pub(in crate::node) fn dispatch_received_sync_work(
         &self,
         store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
     ) {
@@ -3122,7 +3144,10 @@ mod inbound_idle_capacity_tests {
                 }
             }
         }
-        for mode in [0, 1, 2] {
+        for (requester, mode) in [false, true]
+            .into_iter()
+            .flat_map(|requester| [0, 1, 2].map(|mode| (requester, mode)))
+        {
             let source_dir = tempfile::tempdir().unwrap();
             let target_dir = tempfile::tempdir().unwrap();
             let source_identity = DeviceIdentity::generate();
@@ -3162,7 +3187,40 @@ mod inbound_idle_capacity_tests {
             let wire = event.id;
             let peer = source.identity.public();
             let capacity_slots = Arc::new(Semaphore::new(1));
-            let capacity = Arc::new(capacity_slots.clone().acquire_owned().await.unwrap());
+            let capacity = capacity_slots.clone().acquire_owned().await.unwrap();
+            let transport_before = target.sessions.test_capacity_snapshot();
+            let (channel, _remote_channel, capacity) = if requester {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (outgoing, incoming_channel) =
+                    tokio::time::timeout(Duration::from_secs(3), async {
+                        tokio::join!(
+                            async {
+                                let stream = TcpStream::connect(address).await.unwrap();
+                                SecureChannel::connect(stream, &target.identity, Some(&peer))
+                                    .await
+                                    .unwrap()
+                            },
+                            async {
+                                let (stream, _) = listener.accept().await.unwrap();
+                                SecureChannel::accept(stream, &source.identity)
+                                    .await
+                                    .unwrap()
+                            }
+                        )
+                    })
+                    .await
+                    .expect("the requester must own a real authenticated TCP channel");
+                let mut outgoing = outgoing;
+                // Retain both real Node pool permits and the one-slot pressure
+                // witness on the channel, exactly as a production requester does.
+                let mut permits = target.sessions.try_outbound().unwrap();
+                permits.push(capacity);
+                outgoing.retain_connection_permits(permits);
+                (Some(outgoing), Some(incoming_channel), None)
+            } else {
+                (None, None, Some(Arc::new(capacity)))
+            };
             let (release, released) = std::sync::mpsc::channel();
             let (locked, holding) = tokio::sync::oneshot::channel();
             let held_target = target.clone();
@@ -3182,14 +3240,25 @@ mod inbound_idle_capacity_tests {
             let (accepted, ready) = tokio::sync::oneshot::channel();
             let mut task = tokio::spawn(async move {
                 let operation = async {
-                    let permit = receiving.runtime_work.admit().unwrap();
-                    let store = receiving.serve_sync_store(&peer);
-                    let _owner = SyncReceptionScope {
-                        node: receiving.clone(),
-                        store: &store,
-                        permit: Some(permit),
-                        capacity: Some(capacity),
-                        runtime: tokio::runtime::Handle::current(),
+                    let channel = channel;
+                    let store = if requester {
+                        receiving.sync_store(&peer)
+                    } else {
+                        receiving.serve_sync_store(&peer)
+                    };
+                    let _owner = if let Some(channel) = channel.as_ref() {
+                        receiving
+                            .request_reception_scope(&store, channel)
+                            .expect("a live requester must admit reception ownership")
+                    } else {
+                        SyncReceptionScope {
+                            node: receiving.clone(),
+                            store: &store,
+                            permit: Some(receiving.runtime_work.admit().unwrap()),
+                            capacity,
+                            transport_capacity: Vec::new(),
+                            runtime: tokio::runtime::Handle::current(),
+                        }
                     };
                     NetworkSyncStore::ingest(&mut *store.lock().unwrap(), event).unwrap();
                     accepted.send(()).unwrap();
@@ -3241,6 +3310,11 @@ mod inbound_idle_capacity_tests {
                 capacity_slots.clone().try_acquire_owned().is_err(),
                 "a cancelled connection must not admit another cleanup while its real reception SQL is blocked"
             );
+            if requester {
+                let held = target.sessions.test_capacity_snapshot();
+                assert_eq!(held.0 + 1, transport_before.0, "accepted requester cleanup must retain real shared TCP capacity");
+                assert_eq!(held.2 + 1, transport_before.2, "accepted requester cleanup must retain real outbound TCP capacity");
+            }
             let drained = target.runtime_work.drain();
             tokio::pin!(drained);
             assert!(
@@ -3258,6 +3332,11 @@ mod inbound_idle_capacity_tests {
                 1,
                 "connection capacity retires only after actual reception completes"
             );
+            if requester {
+                let retired = target.sessions.test_capacity_snapshot();
+                assert_eq!(retired.0, transport_before.0, "shared TCP capacity retires after reception completes");
+                assert_eq!(retired.2, transport_before.2, "outbound TCP capacity retires after reception completes");
+            }
             let received = incoming.try_recv().expect("accepted reception must survive its suspended owner disappearing without another query");
             assert_eq!(received.message_id, Some(id));
             assert_eq!(received.text, b"accepted before cancellation");

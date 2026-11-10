@@ -3041,6 +3041,8 @@
             "cancelled_timed_out_and_external_drop_owners_retain_capacity_until_reception_drains",
             "automatic_text_and_sticker_delivery_survives_established_recipient_cold_restart",
             "bounded_runtime_automatically_delivers_text_and_sticker_after_recipient_cold_restart",
+            "bounded_runtime_private_reply_survives_public_peer_cold_restart_and_manual_regrant",
+            "file_manifest_requester_dispatches_the_remote_dm_and_queues_its_receipt",
             "participant_history_sync_stamp_",
             "participant_network_unrelated_profile_compaction_",
             "participant_network_profile_compaction_sql_failure_",

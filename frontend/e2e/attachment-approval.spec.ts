@@ -99,8 +99,24 @@ test("incoming folder waits for approval and can be declined or received", async
   await expect(
     tray.getByRole("button", { name: "Loading…", exact: true }),
   ).toBeDisabled();
-  await page.evaluate(() => {
-    (window as unknown as { __ready: boolean }).__ready = true;
+  await page.evaluate(async () => {
+    const host = window as unknown as {
+      __ready: boolean;
+      __TAURI_INTERNALS__: {
+        invoke(cmd: string, args: Record<string, unknown>): Promise<unknown>;
+      };
+      __mockEmit(event: string, payload: unknown): void;
+    };
+    host.__ready = true;
+    // Completed host-side receive work publishes its scoped files change.
+    const identity = await host.__TAURI_INTERNALS__.invoke(
+      "owner_node_identity",
+      { owner: "u_self" },
+    );
+    host.__mockEmit("node-state-changed", {
+      ...(identity as Record<string, unknown>),
+      kind: "files",
+    });
   });
   await expect(
     tray.getByRole("button", { name: "Reveal", exact: true }),

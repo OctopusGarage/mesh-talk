@@ -61,6 +61,7 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     custody_view: Option<network::RetainedSelection>,
     use_node_preparation: bool,
     received_work: std::collections::HashSet<ConversationId>,
+    track_reception: bool,
 }
 // Field order keeps the actual SQL retirement alive until its work permit ends.
 struct PreparedViewsRetirement {
@@ -70,6 +71,10 @@ struct PreparedViewsRetirement {
 
 impl GuardedSyncStore<'_> {
     /// Reception work is published by accepted payload owners, not by queries.
+    pub(in crate::node) fn track_reception(&mut self) {
+        self.track_reception = true;
+    }
+
     #[cfg(test)]
     pub(in crate::node) fn take_received_work(&mut self) -> bool {
         !self.take_received_conversations().is_empty()
@@ -124,6 +129,7 @@ impl Node {
             pending_bytes: 0,
             custody_view: None,
             use_node_preparation: false,
+            track_reception: false,
             received_work: Default::default(),
         })
     }
@@ -141,6 +147,7 @@ impl Node {
             pending_bytes: 0,
             custody_view: None,
             use_node_preparation: false,
+            track_reception: false,
             received_work: Default::default(),
         })
     }
@@ -159,6 +166,7 @@ impl Node {
             pending_bytes: 0,
             custody_view: None,
             use_node_preparation: false,
+            track_reception: true,
             received_work: Default::default(),
         })
     }
@@ -626,7 +634,7 @@ impl GuardedSyncStore<'_> {
                 .map(|()| AppendOutcome::Appended);
             if result.is_err() {
                 self.denied = true;
-            } else if self.inbound {
+            } else if self.track_reception {
                 self.received_work.insert(conversation);
             }
             return Some(result);
@@ -1599,14 +1607,12 @@ impl SyncStore for GuardedSyncStore<'_> {
         // A validated ordinary frame owns one conversation; reconstructed file
         // proof chunks can add one file conversation. Refuse excess scopes
         // before any insertion rather than dropping accepted recovery work.
-        if self.inbound
+        if self.track_reception
             && self.received_work.len() >= 2
             && !self.received_work.contains(&event.conversation_id)
         {
             self.denied = true;
-            return Err(LogError::AdmissionRejected(
-                "inbound reception scope limit".into(),
-            ));
+            return Err(LogError::AdmissionRejected("reception scope limit".into()));
         }
         let node = self.node;
         let _membership = matches!(
@@ -1791,7 +1797,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         // Accepted appends own reception work; receipt/Have owners retain their
         // existing synchronization before acknowledgement. Uninvited ancestry
         // above remains connection-local until its approved atomic commit.
-        if result.is_ok() && self.inbound {
+        if result.is_ok() && self.track_reception {
             self.received_work.insert(conversation);
         }
         result

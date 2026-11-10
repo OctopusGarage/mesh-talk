@@ -113,6 +113,41 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             }
         }
     }
+    // Observe producer admission before startup. The later hold hook still
+    // arms only after bootstrap; this bounded weak ledger never blocks setup.
+    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
+    let diagnostic_started = std::time::Instant::now();
+    let diagnostic_tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let pages = pages.clone();
+        let other_public = other.identity.public();
+        let reference_public = reference.identity.public();
+        let diagnostic_tail = diagnostic_tail.clone();
+        move |peer, event| {
+            if event.starts_with("page_end") || event.starts_with("control_owned_abort") {
+                let peer_label = if peer == other_public {
+                    "other"
+                } else if peer == reference_public {
+                    "reference"
+                } else {
+                    "unknown"
+                };
+                let mut tail = diagnostic_tail.lock().unwrap();
+                if tail.len() == 64 {
+                    tail.pop_front();
+                }
+                tail.push_back((
+                    diagnostic_started.elapsed().as_millis(),
+                    peer_label,
+                    event.clone(),
+                ));
+            }
+            if peer != other_public {
+                return;
+            }
+            pages.lock().unwrap().observe(&event);
+        }
+    }));
     let mut servers = tokio::task::JoinSet::new();
     let mut inbound_servers = Vec::new();
     for (target, listener) in listeners {
@@ -174,7 +209,6 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     assert!(reference.channel_members(group).is_empty());
 
     let received_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let held_passive = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sender = reference.identity.public();
@@ -185,38 +219,6 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
                 received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Box::pin(async {})
-        }
-    }));
-    let diagnostic_started = std::time::Instant::now();
-    let diagnostic_tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-    *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
-        let pages = pages.clone();
-        let other_public = other.identity.public();
-        let reference_public = reference.identity.public();
-        let diagnostic_tail = diagnostic_tail.clone();
-        move |peer, event| {
-            if event.starts_with("page_end") || event.starts_with("control_owned_abort") {
-                let peer_label = if peer == other_public {
-                    "other"
-                } else if peer == reference_public {
-                    "reference"
-                } else {
-                    "unknown"
-                };
-                let mut tail = diagnostic_tail.lock().unwrap();
-                if tail.len() == 64 {
-                    tail.pop_front();
-                }
-                tail.push_back((
-                    diagnostic_started.elapsed().as_millis(),
-                    peer_label,
-                    event.clone(),
-                ));
-            }
-            if peer != other_public {
-                return;
-            }
-            pages.lock().unwrap().observe(&event);
         }
     }));
     let release = Arc::new(Semaphore::new(0));

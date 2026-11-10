@@ -10,6 +10,151 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_manifest_requester_dispatches_the_remote_dm_and_queues_its_receipt() {
+    file_manifest_requester_reception(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_file_manifest_requester_dispatches_the_remote_dm_and_queues_its_receipt() {
+    file_manifest_requester_reception(true).await;
+}
+
+async fn file_manifest_requester_reception(retained: bool) {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
+    // Keep production manual file consent. No accept-loop delivery worker or
+    // verified-peer pull loop may import the reply on the requester's behalf.
+    let (a, mut incoming, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
+    let (b, _, mut offers) = super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
+    let path = ad.path().join("pending-file.txt");
+    std::fs::write(&path, b"bytes still awaiting manual consent").unwrap();
+    let (card, _) = a
+        .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let reply = b
+        .enqueue_to_account(&a.account_id(), b"reply pulled by a file requester", None)
+        .await
+        .unwrap();
+    let original = {
+        let delivery = b.delivery.lock().unwrap();
+        let pending = delivery.message(reply).unwrap();
+        assert_eq!(pending.destinations.len(), 1);
+        pending.destinations[0].event.clone()
+    };
+    assert!(a.log.lock().unwrap().get(&original.id).unwrap().is_none());
+    assert!(incoming.try_recv().is_err());
+
+    // B can only answer authenticated inbound Noise requests; it never pushes.
+    // The local JoinSet and shutdown join own every accepted connection even
+    // when the one bounded requester attempt fails or reaches its deadline.
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let serving = async {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let responder = b.clone();
+                    connections.spawn(async move {
+                        if let Ok(channel) = responder.privacy_accept(stream).await {
+                            responder.serve_connection(channel).await;
+                        }
+                    });
+                }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    result.unwrap().unwrap();
+                }
+                _ = &mut stopped => break,
+            }
+        }
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                assert!(error.is_cancelled());
+            }
+        }
+    };
+    let mut manifest_received = false;
+    let requesting = async {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            if retained {
+                let file = a.delivery.lock().unwrap().file_card(card).unwrap().clone();
+                let destination = file.destinations[0].clone();
+                let mut transfers = std::collections::HashMap::new();
+                loop {
+                    a.retry_file_step(&file, &destination, &mut transfers).await;
+                    manifest_received |= offers.try_recv().is_ok();
+                    if manifest_received
+                        && a.log.lock().unwrap().get(&original.id).unwrap().is_some()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            } else {
+                // Immediate sends use the same bidirectional manifest protocol
+                // and return while the recipient still awaits manual consent.
+                a.flush_file_delivery(card).await;
+            }
+        })
+        .await;
+        let _ = stop.send(());
+        result
+    };
+    let (attempt, ()) = tokio::join!(requesting, serving);
+    attempt.expect("the real file requester must complete its manual-consent attempt");
+    assert!(
+        manifest_received || offers.try_recv().is_ok(),
+        "the remote manifest was received"
+    );
+    assert_eq!(
+        a.log.lock().unwrap().get(&original.id).unwrap().unwrap(),
+        original,
+        "the requester durably accepted the exact original reply ciphertext"
+    );
+    // No history query, manual emit, second payload or reverse connection may
+    // heal reception between the raw-ciphertext witness and these assertions.
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), incoming.recv())
+        .await
+        .expect("file-initiated DM acceptance must dispatch plaintext")
+        .unwrap();
+    assert_eq!(received.message_id, Some(reply));
+    assert_eq!(received.text, b"reply pulled by a file requester");
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .retry_receipts(8)
+            .iter()
+            .any(|receipt| {
+                receipt.logical_id == reply
+                    && receipt.original_event_id == original.id
+                    && receipt.conversation
+                        == super::conversation::account_conversation_id(
+                            &a.account_id(),
+                            &b.account_id(),
+                        )
+                    && receipt.destination.device == bp.public()
+                    && receipt.destination.account == bp.account_id()
+            }),
+        "the receiving account must queue the exact original recipient receipt"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_delivery_reconciliation_is_quiet_and_later_remote_data_advances() {
     let receiver_dir = tempfile::tempdir().unwrap();
     let source_dir = tempfile::tempdir().unwrap();

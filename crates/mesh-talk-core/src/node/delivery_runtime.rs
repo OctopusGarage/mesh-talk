@@ -8,6 +8,7 @@ use super::session::SessionError;
 use super::*;
 use crate::eventlog::{ConversationId, Event, EventId, LogError};
 use crate::identity::device::PublicIdentity;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 // Owned by the delivery loop: cancellation drops every retained channel. Keep
@@ -3034,7 +3035,7 @@ impl Node {
     }
 
     async fn retry_file_destination(
-        &self,
+        self: &Arc<Self>,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
     ) -> bool {
@@ -3137,7 +3138,7 @@ impl Node {
 
     #[cfg(test)]
     pub(in crate::node) async fn retry_file_step(
-        &self,
+        self: &Arc<Self>,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
         transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
@@ -3148,7 +3149,7 @@ impl Node {
     }
 
     async fn retry_file_step_outcome(
-        &self,
+        self: &Arc<Self>,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
         transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
@@ -3311,7 +3312,7 @@ impl Node {
     }
 
     async fn advance_file_transfer(
-        &self,
+        self: &Arc<Self>,
         transfer: &mut FileTransfer,
     ) -> Result<bool, SessionError> {
         let file = &transfer.file;
@@ -3385,7 +3386,13 @@ impl Node {
                     &self.identity.public(),
                     &binding.device,
                 );
-                if transfer.sync.step(channel, &store, conversation).await? {
+                let reception = self
+                    .request_reception_scope(&store, channel)
+                    .ok_or(SessionError::UnexpectedMessage)?;
+                let result = transfer.sync.step(channel, &store, conversation).await;
+                self.dispatch_received_sync_work(&store);
+                drop(reception);
+                if result? {
                     transfer.sync = super::session::SyncProgress::default();
                     transfer.phase = if transfer.legacy {
                         FilePhase::Chunks
@@ -3715,8 +3722,23 @@ impl Node {
         Ok(false)
     }
 
+    async fn request_file_manifest_with_reception(
+        self: &Arc<Self>,
+        channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
+        store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
+        conversation: ConversationId,
+    ) -> Result<(), SessionError> {
+        let reception = self
+            .request_reception_scope(store, channel)
+            .ok_or(SessionError::UnexpectedMessage)?;
+        let result = super::session::request_round_paged(channel, store, conversation).await;
+        self.dispatch_received_sync_work(store);
+        drop(reception);
+        result.map(|_| ())
+    }
+
     async fn retry_file_destination_inner(
-        &self,
+        self: &Arc<Self>,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
         direct: bool,
@@ -3796,7 +3818,8 @@ impl Node {
                 let store = self.sync_store(channel.peer_identity());
                 // Publish the manifest first so private recipients/relays can
                 // durably reconstruct chunk scope before any chunk disclosure.
-                if super::session::request_round_paged(&mut channel, &store, manifest_conv)
+                if self
+                    .request_file_manifest_with_reception(&mut channel, &store, manifest_conv)
                     .await
                     .is_err()
                 {
@@ -3872,13 +3895,14 @@ impl Node {
                                 return false;
                             };
                             channel = reconnected;
-                            if super::session::request_round_paged(
-                                &mut channel,
-                                &store,
-                                manifest_conv,
-                            )
-                            .await
-                            .is_err()
+                            if self
+                                .request_file_manifest_with_reception(
+                                    &mut channel,
+                                    &store,
+                                    manifest_conv,
+                                )
+                                .await
+                                .is_err()
                             {
                                 return false;
                             }
@@ -3920,13 +3944,14 @@ impl Node {
                             {
                                 return false;
                             }
-                            if super::session::request_round_paged(
-                                &mut channel,
-                                &store,
-                                manifest_conv,
-                            )
-                            .await
-                            .is_err()
+                            if self
+                                .request_file_manifest_with_reception(
+                                    &mut channel,
+                                    &store,
+                                    manifest_conv,
+                                )
+                                .await
+                                .is_err()
                             {
                                 return false;
                             }
@@ -3982,7 +4007,7 @@ impl Node {
         false
     }
 
-    pub(in crate::node) async fn flush_file_delivery(&self, id: EventId) {
+    pub(in crate::node) async fn flush_file_delivery(self: &Arc<Self>, id: EventId) {
         let file = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
             if let Err(error) = self.recover_delivery(&mut store) {

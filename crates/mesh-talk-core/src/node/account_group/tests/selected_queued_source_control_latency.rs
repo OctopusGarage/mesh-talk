@@ -639,55 +639,6 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             }
         }
     }
-    let mut servers = tokio::task::JoinSet::new();
-    for (target, listener) in listeners {
-        servers.spawn(async move {
-            Box::pin(target.run_accept_loop(listener)).await;
-        });
-    }
-    a.publish_account_group_access(&mut None);
-    b.publish_account_group_access(&mut None);
-    super::cold_account_control_setup(
-        super::observe_account_fixture_condition(|| {
-            [
-                (&reference, &a),
-                (&a, &reference),
-                (&reference, &b),
-                (&b, &reference),
-            ]
-            .into_iter()
-            .all(|(node, peer)| {
-                super::has_account_group_operation_support(
-                    node,
-                    peer,
-                    Some(AccountGroupOperationKind::Rename),
-                )
-            })
-        }),
-        async {
-            super::message_action_reference::pull_reference_action_control(
-                &reference,
-                &a,
-                endpoints[0],
-                group_a,
-            )
-            .await;
-            super::message_action_reference::pull_reference_action_control(
-                &reference,
-                &b,
-                endpoints[1],
-                group_b,
-            )
-            .await;
-        },
-    )
-    .await;
-    assert_eq!(
-        reference.account_group_access(group_b).unwrap().role,
-        AccountGroupRole::Owner
-    );
-    assert!(!reference.channel_can_manage(group_b).unwrap());
-
     let release = Arc::new(Semaphore::new(0));
     let _release = ReleaseQueuedReads(release.clone());
     let (first_tx, first_rx) = oneshot::channel();
@@ -998,6 +949,60 @@ async fn run_queued_source(gate_terminal: bool, gate_local_maintenance: bool) {
             }
         }
     }));
+    // Observe the initial real B comparison and pair retirement before actors
+    // start. Installing readiness after the cold pulls can miss their terminal
+    // events; unchanged input need not schedule another completed comparison.
+    // Arm A's blocking hooks only after these original receiver-owned pulls,
+    // so setup cannot wait on the Wake that deliberately follows settlement.
+    let mut servers = tokio::task::JoinSet::new();
+    for (target, listener) in listeners {
+        servers.spawn(async move {
+            Box::pin(target.run_accept_loop(listener)).await;
+        });
+    }
+    a.publish_account_group_access(&mut None);
+    b.publish_account_group_access(&mut None);
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            [
+                (&reference, &a),
+                (&a, &reference),
+                (&reference, &b),
+                (&b, &reference),
+            ]
+            .into_iter()
+            .all(|(node, peer)| {
+                super::has_account_group_operation_support(
+                    node,
+                    peer,
+                    Some(AccountGroupOperationKind::Rename),
+                )
+            })
+        }),
+        async {
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &a,
+                endpoints[0],
+                group_a,
+            )
+            .await;
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &b,
+                endpoints[1],
+                group_b,
+            )
+            .await;
+        },
+    )
+    .await;
+    assert_eq!(
+        reference.account_group_access(group_b).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    assert!(!reference.channel_can_manage(group_b).unwrap());
+
     *reference.account_document_read_test_hook.lock().unwrap() = Some(Arc::new({
         let exact = a.identity.public();
         let gate = preparation_read.clone();
