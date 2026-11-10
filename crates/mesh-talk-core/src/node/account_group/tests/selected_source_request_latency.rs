@@ -168,32 +168,27 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     let mut servers = tokio::task::JoinSet::new();
     let mut inbound_servers = Vec::new();
     for (target, listener) in listeners {
-        if naturally_hinted {
-            // Receive authenticated setup exchanges without starting a control
-            // producer. A real Wake is queued before the owner's first turn.
-            inbound_servers.push(super::inbound_server(target, listener));
-        } else {
-            servers.spawn(target.run_accept_loop(listener));
-        }
+        // Keep bootstrap publications out of the original read's origin. The
+        // inbound owners still perform real authentication and hold real TCP
+        // responses; producers are admitted explicitly below.
+        inbound_servers.push(super::inbound_server(target, listener));
     }
     owner.publish_account_group_access(&mut None);
     super::cold_account_control_setup(
         async {
-            if naturally_hinted {
-                // These servers intentionally have no producers. Drive each
-                // existing setup direction before observing its real capability.
-                for (node, source) in [(&reference, &owner), (&owner, &reference)] {
-                    let peer = node.routing_peer(&source.user_id()).unwrap();
-                    let mut cursor =
-                        crate::node::account_documents::sync::DocumentSyncCursor::control();
-                    node.pull_account_documents_page(&peer, &mut cursor)
-                        .await
-                        .unwrap();
-                    assert!(
-                        cursor.error.is_none() && !cursor.requires_upgrade,
-                        "cold capability setup must not hide a protocol rejection"
-                    );
-                }
+            // These servers intentionally have no producers. Drive each
+            // existing setup direction before observing its real capability.
+            for (node, source) in [(&reference, &owner), (&owner, &reference)] {
+                let peer = node.routing_peer(&source.user_id()).unwrap();
+                let mut cursor =
+                    crate::node::account_documents::sync::DocumentSyncCursor::control();
+                node.pull_account_documents_page(&peer, &mut cursor)
+                    .await
+                    .unwrap();
+                assert!(
+                    cursor.error.is_none() && !cursor.requires_upgrade,
+                    "cold capability setup must not hide a protocol rejection"
+                );
             }
             super::observe_account_fixture_condition(|| {
                 super::has_account_group_operation_support(
@@ -348,6 +343,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     // preserve that origin without introducing another pull trigger.
     if !naturally_hinted {
         owner.request_sibling_pull_for_test(&other.identity.public());
+        servers.spawn(owner.clone().run_account_history_loop());
     }
     super::cold_account_setup(held)
         .await
@@ -372,6 +368,16 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             servers.spawn(node.clone().run_account_history_loop());
         }
         for node in [&owner, &reference, &other, &external] {
+            servers.spawn(node.clone().run_account_wake_loop());
+        }
+    } else {
+        // The requester still publishes and recovers automatically throughout
+        // the measured operation. Only the unrelated sibling's producer stays
+        // cold: its bootstrap Wake would relabel or preempt the passive read.
+        for node in [&reference, &external] {
+            servers.spawn(node.clone().run_account_history_loop());
+        }
+        for node in [&owner, &reference, &external] {
             servers.spawn(node.clone().run_account_wake_loop());
         }
     }
@@ -439,6 +445,12 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     // Always release, verify directory recovery and drain owned work before the
     // held-period assertion can fail. No direct pull or result adoption is used.
     release.close();
+    if !naturally_hinted {
+        // Recovery admits the unrelated publisher only after the original
+        // response's entire measured interval has ended.
+        servers.spawn(other.clone().run_account_history_loop());
+        servers.spawn(other.clone().run_account_wake_loop());
+    }
     let control_resumed = tokio::time::timeout(Duration::from_secs(8), async {
         while checkpoints.lock().unwrap().len() < 2 {
             tokio::time::sleep(Duration::from_millis(20)).await;
