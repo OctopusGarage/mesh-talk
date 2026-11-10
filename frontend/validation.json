@@ -65,6 +65,9 @@
       "paths": [
         "frontend/src/components/ui/dialog.tsx",
         "frontend/src/components/ui/dialog.test.ts",
+        "frontend/src/components/ui/context-menu.tsx",
+        "frontend/e2e/context-menu-focus.spec.ts",
+        "frontend/e2e/helpers/ui-audit.ts",
         "frontend/e2e/helpers/sidebar-actions.ts",
         "frontend/e2e/minimum-window.spec.ts"
       ],
@@ -72,7 +75,7 @@
         "src/components/ui/dialog.test.ts"
       ],
       "capability": {
-        "summary": "Preserve active focus ownership across deferred dialog closure and subsequent user interactions.",
+        "summary": "Preserve active focus ownership and visible keyboard indication across shared dialogs, menus and subsequent user interactions.",
         "guide": "docs/module-boundaries.md#dialog-focus-ownership",
         "invariants": [
           {
@@ -82,7 +85,7 @@
         ]
       },
       "escalation": [
-        "Use real Radix focus lifecycle tests for ordinary, nested, custom and newer-owner cases. A controlled real-browser deferred-close callback must leave a newly opened utility menu focused and open; the old owner must fail this regression. Exercise minimum-window navigation and consumers with custom focus restoration. Sidebar helpers must observe expanded/open menu state and use real scoped clicks. Preserve existing animations, focus traps, API callbacks, timeout budgets and native keyboard acceptance."
+        "Use real Radix focus lifecycle tests for ordinary, nested, custom and newer-owner cases. A controlled real-browser deferred-close callback must leave a newly opened utility menu focused and open; the old owner must fail this regression. Exercise minimum-window navigation and consumers with custom focus restoration. Sidebar helpers must observe expanded/open menu state and use real scoped clicks. Preserve existing animations, focus traps, API callbacks, timeout budgets and native keyboard acceptance. Run e2e/context-menu-focus.spec.ts and e2e/ui-audit-message-log.spec.ts with real keyboard navigation and activation in light/dark themes. Inspect resolved outline style, width and theme-token color after bounded CSS transitions; class presence alone is not focus evidence. Focus audit helpers retain their existing Escape cleanup by default; explicitly preserve a menu when the next assertion activates it."
       ]
     },
     {
@@ -2661,10 +2664,13 @@
         "frontend/src/components/",
         "frontend/src/features/chat/",
         "frontend/src/lib/theme.ts",
-        "frontend/src/store/theme.ts"
+        "frontend/src/store/theme.ts",
+        "frontend/e2e/context-menu-focus.spec.ts",
+        "frontend/e2e/helpers/ui-audit.ts"
       ],
       "browser": [
-        "e2e/ui-visual-regression.spec.ts"
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/context-menu-focus.spec.ts"
       ]
     },
     {

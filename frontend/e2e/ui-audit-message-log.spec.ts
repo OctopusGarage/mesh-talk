@@ -27,7 +27,7 @@ test("message log actions, menus, and reaction chips stay usable", async ({
   await expectActionRowVisible(replyAction);
   await firstBubble.locator("[data-context-menu]").click({ button: "right" });
   const reactAction = page.getByTestId("msg-react");
-  await expectVisibleFocus(page, reactAction);
+  await expectVisibleFocus(page, reactAction, { dismissAfter: false });
   await reactAction.click();
   await expect(page.getByTestId("reaction-picker")).toBeVisible();
   await page.getByTestId("reaction-option-🔥").click();

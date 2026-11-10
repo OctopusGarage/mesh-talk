@@ -614,6 +614,14 @@ production focus callback by sleeping through it. The `frontend-dialog-focus`
 validation owner requires real primitive lifecycle regressions and a browser
 handoff from a closing dialog to an already opened utility menu.
 
+Shared context-menu items own their visible keyboard indicator through the
+existing `--ring` theme token. Verify resolved outline style, width and color in
+both themes after the bounded color transition, with real keyboard navigation
+and activation; utility class presence alone is not evidence of visible focus.
+The shared focus audit helper dismisses with Escape by default. A caller that
+continues to activate the same menu must explicitly retain it, without changing
+cleanup for unrelated consumers. These controls share the existing focus owner.
+
 ### Focused validation ownership
 
 Module-owned `validation.json` contracts link these boundaries to development

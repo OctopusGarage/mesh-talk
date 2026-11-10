@@ -539,6 +539,14 @@ hidden rows must expire, and queued recovery with frames held must retire every
 observer and callback. This qualifies readiness observation, not the cause of a
 previous rendering delay.
 
+Keyboard focus evidence must inspect resolved style, width and theme-token color,
+not utility class names: class merging can retain `outline-style: none`. Wait
+within the existing assertion budget for declared color transitions to settle.
+Shared audit helpers must make teardown explicit when a later assertion still
+needs the open menu; preserve default cleanup for other callers. The
+[focus owner](module-boundaries.md#dialog-focus-ownership) retains real keyboard
+navigation and activation controls in both themes.
+
 For repeated lifecycle or memory churn, distinguish cumulative input-driver waits
 from the invariant being measured. The [memory guardrail](../frontend/e2e/memory.spec.ts)
 keeps a trusted pointer round and final pointer navigation, then activates the
