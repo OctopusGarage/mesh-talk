@@ -17,19 +17,17 @@ test("message log actions, menus, and reaction chips stay usable", async ({
 
   const firstBubble = page.getByTestId("message-bubble").first();
   const replyAction = firstBubble.getByTestId("message-reply");
-  const reactAction = firstBubble.getByTestId("message-react");
+  await expect(firstBubble.getByTestId("message-react")).toHaveCount(0);
   await firstBubble.hover();
   await expectMinTargetSize(replyAction, 32);
-  await expectMinTargetSize(reactAction, 32);
 
   await page.mouse.move(0, 0);
   await expectVisibleFocus(page, replyAction);
   await replyAction.focus();
   await expectActionRowVisible(replyAction);
+  await firstBubble.locator("[data-context-menu]").click({ button: "right" });
+  const reactAction = page.getByTestId("msg-react");
   await expectVisibleFocus(page, reactAction);
-  await reactAction.focus();
-  await expectActionRowVisible(reactAction);
-
   await reactAction.click();
   await expect(page.getByTestId("reaction-picker")).toBeVisible();
   await page.getByTestId("reaction-option-🔥").click();

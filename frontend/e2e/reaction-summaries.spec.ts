@@ -74,7 +74,12 @@ test("exact search context permits reaction inspection and paging without mutati
     .getByTestId("message-bubble")
     .filter({ hasText: "hey, welcome to the mesh" });
   // This is a read-only exact context within an otherwise writable chat.
-  await expect(bubble.getByTestId("message-react")).toBeDisabled();
+  await bubble.locator("[data-context-menu]").click({ button: "right" });
+  await expect(page.getByTestId("msg-react")).toHaveAttribute(
+    "data-disabled",
+    "",
+  );
+  await page.keyboard.press("Escape");
   await bubble
     .getByRole("button", { name: "More reactions", exact: true })
     .click();
@@ -106,5 +111,9 @@ test("exact search context permits reaction inspection and paging without mutati
     .getByRole("button", { name: "Jump to latest messages", exact: true })
     .first()
     .click();
-  await expect(bubble.getByTestId("message-react")).toBeEnabled();
+  await bubble.locator("[data-context-menu]").click({ button: "right" });
+  await expect(page.getByTestId("msg-react")).not.toHaveAttribute(
+    "data-disabled",
+  );
+  await page.keyboard.press("Escape");
 });

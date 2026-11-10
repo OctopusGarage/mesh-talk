@@ -617,7 +617,8 @@
         "frontend/src/store/conversationReactions.ts",
         "frontend/src/store/conversationReactions.test.ts",
         "frontend/src/features/chat/ReactionSummaryDialog.tsx",
-        "frontend/e2e/reaction-summaries.spec.ts"
+        "frontend/e2e/reaction-summaries.spec.ts",
+        "frontend/e2e/ui-audit-message-log.spec.ts"
       ],
       "frontend": [
         "src/store/conversationHistory.test.ts",
@@ -3321,10 +3322,12 @@
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/reaction-summaries.spec.ts",
+        "frontend/e2e/ui-audit-message-log.spec.ts",
         "src-tauri/src/owner_commands/reactions.rs"
       ],
       "browser": [
         "e2e/reaction-summaries.spec.ts",
+        "e2e/ui-audit-message-log.spec.ts",
         "e2e/chat.spec.ts"
       ],
       "native": [

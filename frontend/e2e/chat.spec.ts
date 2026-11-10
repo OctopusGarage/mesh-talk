@@ -466,7 +466,9 @@ test.describe("Mesh-Talk UI flow", () => {
     // React to the first (seeded) incoming message.
     const firstBubble = page.getByTestId("message-bubble").first();
     await firstBubble.hover();
-    await firstBubble.getByTestId("message-react").click();
+    await expect(firstBubble.getByTestId("message-react")).toHaveCount(0);
+    await firstBubble.locator("[data-context-menu]").click({ button: "right" });
+    await page.getByTestId("msg-react").click();
     await expect(page.getByTestId("reaction-picker")).toBeVisible();
     await page.getByTestId("reaction-option-🔥").click();
     await expect(page.getByTestId("reaction-chip").first()).toBeVisible();
