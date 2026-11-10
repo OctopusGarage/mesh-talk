@@ -1,0 +1,42 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M71VVNX4HMKDAZG552W9RJP3",
+  "strategy": "manual-commit",
+  "branch": "fix/pr-explicit-validation-owners",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/ci-maintenance.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 284151,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 36293888,
+    "output_tokens": 50159,
+    "api_call_count": 200,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 125,
+    "layers": {
+      "betterleaks": 6,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 5,
+      "credentialed_uri": 0,
+      "entropy": 121,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
