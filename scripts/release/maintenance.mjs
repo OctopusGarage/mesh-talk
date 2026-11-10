@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getReleaseByTag, getLatestPublishedStable } from "./release-api.mjs";
+import { renderReleaseNotes } from "./render-notes.mjs";
 import {
   readVersion,
   prepareVersion,
-  syncVersions,
   checkVersions,
+  compareVersions,
 } from "./version.mjs";
 
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -25,7 +32,7 @@ const legacyRelease = Object.freeze({
 
 export function assertReleaseBaseline(evidence) {
   assert.equal(
-    evidence.configuredBaseline,
+    evidence.historyFloor,
     legacyRelease.baseline,
     "release history migration floor changed",
   );
@@ -57,7 +64,6 @@ export function assertReleaseBaseline(evidence) {
 }
 
 function checkReleaseBaseline() {
-  const config = JSON.parse(readFileSync("release-please-config.json", "utf8"));
   const ancestry = spawnSync(
     "git",
     ["merge-base", "--is-ancestor", legacyRelease.baseline, "HEAD"],
@@ -68,7 +74,7 @@ function checkReleaseBaseline() {
     ancestry.stderr || "release history baseline is unavailable",
   );
   assertReleaseBaseline({
-    configuredBaseline: config["last-release-sha"],
+    historyFloor: legacyRelease.baseline,
     baselineCommit: git(["rev-parse", `${legacyRelease.baseline}^{commit}`]),
     legacyCommit: git(["rev-parse", `refs/tags/${legacyRelease.tag}^{commit}`]),
     baselineTree: git(["rev-parse", `${legacyRelease.baseline}^{tree}`]),
@@ -117,28 +123,6 @@ export function assertDraftBuild(tag, sha, release, tagSha) {
   assert.equal(tagSha, sha, "release tag source changed");
 }
 
-export function validateAutomationPR(pr, repo) {
-  assert.equal(pr.state, "OPEN", "release PR must be open");
-  assert.equal(pr.baseRefName, "main", "release PR must target main");
-  assert.equal(
-    pr.headRepository?.nameWithOwner,
-    repo,
-    "release PR must belong to this repository",
-  );
-  // gh's GraphQL formatter may display bot logins using its app/ prefix.
-  assert.ok(
-    ["github-actions[bot]", "app/github-actions"].includes(pr.author?.login),
-    "release PR must belong to the workflow bot",
-  );
-  assert.match(
-    pr.headRefName,
-    /^release-please--branches--main(?:--components--[\w.-]+)?$/,
-    "unexpected release branch",
-  );
-  assert.match(pr.headRefOid, /^[a-f\d]{40}$/, "exact PR source required");
-  return pr.headRefName;
-}
-
 function command(binary, args, cwd) {
   return execFileSync(binary, args, {
     cwd,
@@ -165,91 +149,180 @@ function tagSource(repo, tag) {
   return JSON.parse(gh(["api", `repos/${repo}/commits/${tag}`])).sha;
 }
 
-function syncPullRequest(repo, number) {
-  assert.match(number ?? "", /^[1-9]\d*$/, "release PR number required");
-  const pr = JSON.parse(
-    gh([
-      "pr",
-      "view",
-      number,
-      "--repo",
-      repo,
-      "--json",
-      "state,baseRefName,headRefName,headRefOid,headRepository,author",
-    ]),
-  );
-  const branch = validateAutomationPR(pr, repo);
-  // Execute only the trusted main copy of this helper. PR content is data; no
-  // package scripts, Cargo build scripts, or code from the PR are executed.
-  git(["fetch", "origin", `refs/heads/${branch}`]);
+/** Prepare an unpublished Stable candidate only after validating its complete intent. */
+export function prepareStableDraft(input, effects) {
+  const { repo, tag, version, sha, tagSha, release, latestStableTag } = input;
+  assert.match(repo, /^[\w.-]+\/[\w.-]+$/);
+  parts(version);
   assert.equal(
-    git(["rev-parse", "FETCH_HEAD"]),
-    pr.headRefOid,
-    "release PR changed before synchronization",
+    tag,
+    `v${version}`,
+    "tag must match the canonical Cargo version",
   );
-  const directory = mkdtempSync(join(tmpdir(), "mesh-release-pr-"));
-  try {
-    git(["worktree", "add", "--detach", directory, pr.headRefOid]);
-    syncVersions(directory);
-    checkVersions(directory);
-    const changed = git(["diff", "--name-only"], directory)
-      .split(/\r?\n/)
-      .filter(Boolean);
-    const allowed = new Set([
-      "Cargo.lock",
-      "package.json",
-      "package-lock.json",
-      "frontend/package.json",
-      "frontend/package-lock.json",
-    ]);
+  assert.match(sha, /^[a-f\d]{40}$/, "exact release source required");
+  if (latestStableTag !== null) {
+    assert.equal(
+      latestStableTag,
+      `v${parts(latestStableTag.slice(1)).join(".")}`,
+      "invalid latest Stable tag",
+    );
     assert.ok(
-      changed.every((path) => allowed.has(path)),
-      "unexpected version synchronization change",
+      compareVersions(version, latestStableTag.slice(1)) > 0,
+      "target must exceed published Stable",
     );
-    if (changed.length === 0) return;
-    git(["config", "user.name", "github-actions[bot]"], directory);
-    git(
-      [
-        "config",
-        "user.email",
-        "41898282+github-actions[bot]@users.noreply.github.com",
-      ],
-      directory,
-    );
-    git(["add", "--", ...changed], directory);
-    git(
-      [
-        "commit",
-        "-m",
-        "chore(release): synchronize generated version metadata",
-      ],
-      directory,
-    );
-    // A normal fast-forward push refuses concurrent bot or maintainer changes.
-    git(["push", "origin", `HEAD:refs/heads/${branch}`], directory);
-  } finally {
-    git(["worktree", "remove", "--force", directory]);
-    rmSync(directory, { recursive: true, force: true });
   }
+  if (tagSha !== null) assert.equal(tagSha, sha, "release tag source changed");
+  if (release !== null) assertDraftBuild(tag, sha, release, tagSha);
+  const notes = renderReleaseNotes(input.template, {
+    tag,
+    repository: repo,
+    ref: `refs/tags/${tag}`,
+    sha,
+    runId: input.runId,
+    runAttempt: input.runAttempt,
+    changelog: input.changelog,
+  });
+  effects.checkSource();
+  if (tagSha === null) effects.createTag();
+  if (release === null) effects.createDraft(notes);
+  else {
+    effects.assertDraft();
+    effects.writeNotes(notes);
+  }
+  effects.assertDraft();
+  effects.dispatchBuild();
 }
 
-function dispatchDraftBuild(repo, tag, sha) {
-  assertDraftBuild(tag, sha, getReleaseByTag(repo, tag), tagSource(repo, tag));
-  // GITHUB_TOKEN-created tags do not trigger push workflows. Dispatch the
-  // existing verifier explicitly; this path never requests publication.
-  gh([
-    "workflow",
-    "run",
-    "release.yml",
-    "--repo",
-    repo,
-    "--ref",
-    tag,
-    "-f",
-    "publish_release=false",
-    "-f",
-    "publish_nightly=false",
-  ]);
+export function existingTagSource(tag, { cwd } = {}) {
+  assert.equal(tag, `v${parts(tag.slice(1)).join(".")}`, "invalid Stable tag");
+  // Exact refs distinguish an absent tag from authentication/network errors and
+  // dereference annotated tags without accepting any other repository's ref.
+  const ref = `refs/tags/${tag}`;
+  const result = spawnSync(
+    "git",
+    ["ls-remote", "--exit-code", "--tags", "origin", ref, `${ref}^{}`],
+    { cwd, encoding: "utf8" },
+  );
+  if (result.status === 2 && result.stdout.trim() === "") return null;
+  assert.equal(result.status, 0, result.stderr || "could not read release tag");
+  const refs = new Map(
+    result.stdout
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => {
+        const [sha, name] = line.split("\t");
+        assert.match(sha, /^[a-f\d]{40}$/, "invalid remote tag source");
+        assert.ok(
+          name === ref || name === `${ref}^{}`,
+          "unexpected remote tag ref",
+        );
+        return [name, sha];
+      }),
+  );
+  return refs.get(`${ref}^{}`) ?? refs.get(ref);
+}
+
+function prepareDraft(repo, tag) {
+  const version = checkVersions();
+  assert.equal(tag, `v${version}`, "requested tag must match canonical Cargo");
+  checkReleaseBaseline();
+  const sha = git(["rev-parse", "HEAD"]);
+  const directory = mkdtempSync(join(tmpdir(), "mesh-draft-notes-"));
+  const notesFile = (notes) => {
+    const path = join(directory, "release-notes.md");
+    writeFileSync(path, notes);
+    return path;
+  };
+  try {
+    prepareStableDraft(
+      {
+        repo,
+        tag,
+        version,
+        sha,
+        tagSha: existingTagSource(tag),
+        release: getReleaseByTag(repo, tag),
+        latestStableTag: getLatestPublishedStable(repo)?.tag_name ?? null,
+        changelog: readFileSync("CHANGELOG.md", "utf8"),
+        template: readFileSync(".github/release-notes.md", "utf8"),
+        runId: process.env.GITHUB_RUN_ID,
+        runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+      },
+      {
+        checkSource: () =>
+          command(process.execPath, [
+            fileURLToPath(
+              new URL("./check-source-checks.mjs", import.meta.url),
+            ),
+            repo,
+            sha,
+          ]),
+        createTag: () =>
+          gh([
+            "api",
+            "--method",
+            "POST",
+            `repos/${repo}/git/refs`,
+            "-f",
+            `ref=refs/tags/${tag}`,
+            "-f",
+            `sha=${sha}`,
+          ]),
+        createDraft: (notes) =>
+          gh([
+            "release",
+            "create",
+            tag,
+            "--repo",
+            repo,
+            "--verify-tag",
+            "--draft",
+            "--latest=false",
+            "--target",
+            sha,
+            "--title",
+            `Mesh-Talk ${tag}`,
+            "--notes-file",
+            notesFile(notes),
+          ]),
+        assertDraft: () =>
+          assertDraftBuild(
+            tag,
+            sha,
+            getReleaseByTag(repo, tag),
+            existingTagSource(tag),
+          ),
+        writeNotes: (notes) =>
+          gh([
+            "release",
+            "edit",
+            tag,
+            "--repo",
+            repo,
+            "--notes-file",
+            notesFile(notes),
+          ]),
+        // Token-created tags do not trigger push workflows; dispatch the exact tag
+        // explicitly, retaining the separate verified Stable publication action.
+        dispatchBuild: () =>
+          gh([
+            "workflow",
+            "run",
+            "release.yml",
+            "--repo",
+            repo,
+            "--ref",
+            tag,
+            "-f",
+            "publish_release=false",
+            "-f",
+            "publish_nightly=false",
+          ]),
+      },
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function prepareDevelopment(repo, tag) {
@@ -287,11 +360,18 @@ function main() {
     "release maintenance must check out trusted main",
   );
   if (mode === "check-baseline") return checkReleaseBaseline();
-  if (mode === "sync-pr") return syncPullRequest(repo, args[0]);
-  if (mode === "draft-build") return dispatchDraftBuild(repo, args[0], args[1]);
+  if (mode === "prepare-draft") {
+    assert.equal(
+      process.env.GITHUB_EVENT_NAME,
+      "workflow_dispatch",
+      "Stable preparation requires explicit dispatch",
+    );
+    assert.equal(args.length, 1, "exactly one Stable tag required");
+    return prepareDraft(repo, args[0]);
+  }
   if (mode === "next-development") return prepareDevelopment(repo, args[0]);
   throw new Error(
-    "usage: maintenance.mjs check-baseline | sync-pr NUMBER | draft-build TAG SHA | next-development TAG",
+    "usage: maintenance.mjs check-baseline | prepare-draft TAG | next-development TAG",
   );
 }
 

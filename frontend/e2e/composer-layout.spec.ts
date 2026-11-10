@@ -1,4 +1,4 @@
-import { waitForChatShell } from "./helpers/session";
+import { revealComposerAttachments, waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // Less frequent composer actions are available from an explicit tools control.
@@ -7,12 +7,10 @@ test.use({ viewport: { width: 1100, height: 760 } });
 
 test("composer reveals secondary actions on demand", async ({ page }) => {
   await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${BOB}`).click();
   await expect(page.getByTestId("composer-input")).toBeVisible();
@@ -28,25 +26,41 @@ test("composer reveals secondary actions on demand", async ({ page }) => {
 
   for (const id of [
     "composer-screenshot",
-    "composer-attach",
-    "composer-image", // dedicated send-picture button
+    "composer-attachments",
     "composer-emoji",
     "composer-send",
   ]) {
     await expect(page.getByTestId(id)).toBeVisible();
   }
 
-  // Every action button is above the input box (its bottom edge ≤ the input's top edge).
+  // Secondary-toolbar controls remain above the input, including the attachment trigger.
   const inp = (await page.getByTestId("composer-input").boundingBox())!;
   for (const id of [
     "composer-screenshot",
-    "composer-attach",
-    "composer-image",
+    "composer-attachments",
     "composer-emoji",
   ]) {
     const b = (await page.getByTestId(id).boundingBox())!;
     expect(b.y + b.height).toBeLessThanOrEqual(inp.y + 2);
   }
+
+  const attachmentActions = [
+    "composer-attach",
+    "composer-attach-directory",
+    "composer-image",
+    "composer-camera",
+  ];
+  for (const id of attachmentActions)
+    await expect(page.getByTestId(id)).not.toBeVisible();
+  await revealComposerAttachments(page);
+  for (const id of attachmentActions)
+    await expect(page.getByTestId(id)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("composer-attachments")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(page.getByTestId("composer-attachments")).toBeFocused();
 
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-emoji-tab").focus();
@@ -67,12 +81,10 @@ test("composer reveals secondary actions on demand", async ({ page }) => {
 
 test("Enter confirms IME composition before it can send", async ({ page }) => {
   await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await page.getByTestId(`conversation-row-${BOB}`).click();
   const input = page.getByTestId("composer-input");
   await input.fill("composing a message");

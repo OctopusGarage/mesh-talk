@@ -124,11 +124,19 @@ pub fn get_log_file(app_handle: tauri::AppHandle) -> Result<String, crate::comma
 /// "copy log tail / save for bug report" affordance. Returns an empty string if the log
 /// file doesn't exist yet. Seeks to the tail so a large file isn't read whole.
 #[tauri::command]
-pub fn read_log_tail(
+pub async fn read_log_tail(
     app_handle: tauri::AppHandle,
 ) -> Result<String, crate::commands::CommandError> {
+    tokio::task::spawn_blocking(move || read_log_tail_blocking(&app_handle))
+        .await
+        .map_err(|e| crate::commands::CommandError::Internal(format!("log worker failed: {e}")))?
+}
+
+fn read_log_tail_blocking(
+    app_handle: &tauri::AppHandle,
+) -> Result<String, crate::commands::CommandError> {
     use std::io::{Read, Seek, SeekFrom};
-    let path = get_current_log_file(&app_handle).map_err(|e| e.to_string())?;
+    let path = get_current_log_file(app_handle).map_err(|e| e.to_string())?;
     let mut file = match fs::File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
@@ -139,7 +147,9 @@ pub fn read_log_tail(
     file.seek(SeekFrom::Start(start))
         .map_err(|e| e.to_string())?;
     let mut buf = Vec::with_capacity((len - start) as usize);
-    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    file.take(LOG_TAIL_BYTES)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
     // The log is UTF-8; a tail-seek can land mid-codepoint, so decode lossily.
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
@@ -148,13 +158,17 @@ pub fn read_log_tail(
 /// "save for bug report" affordance. Keeps the write on the Rust side since the frontend
 /// has no fs plugin.
 #[tauri::command]
-pub fn save_log_tail(
+pub async fn save_log_tail(
     app_handle: tauri::AppHandle,
     dest: String,
 ) -> Result<(), crate::commands::CommandError> {
-    let tail = read_log_tail(app_handle)?;
-    fs::write(&dest, tail).map_err(|e| e.to_string())?;
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let tail = read_log_tail_blocking(&app_handle)?;
+        fs::write(&dest, tail).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| crate::commands::CommandError::Internal(format!("log worker failed: {e}")))?
 }
 
 #[cfg(test)]

@@ -9,8 +9,8 @@ import type { CallSignalEvent } from "@/lib/types";
  * 1:1 voice/video calling over WebRTC, signaled across the mesh (see lib/api `calls`).
  *
  * Topology: LAN, peers know each other's IPs, so the RTCPeerConnection uses ONLY host
- * candidates (`iceServers: []`) — no STUN/TURN. ICE is NON-trickle: we wait for gathering
- * to finish (instant on a LAN) and bundle all candidates into the one offer/answer, so each
+ * candidates (`iceServers: []`) — no STUN/TURN. ICE is NON-trickle: we wait for native
+ * gathering to finish and bundle all candidates into the one offer/answer, so each
  * call is just a couple of signaling sends rather than a Noise dial per candidate.
  *
  * Security: the media leg is DTLS-SRTP (mandatory in WebRTC), but that only protects bytes
@@ -68,6 +68,8 @@ export interface CallTarget {
   deviceIds: string[];
 }
 
+export type CallFailureKind = "capture" | "connection" | "timeout";
+
 interface CallState {
   phase: CallPhase;
   peerId: string | null;
@@ -84,6 +86,14 @@ interface CallState {
   /** A terminal note for the UI (e.g. "declined", "busy", or an error), shown then cleared. */
   endedReason: string | null;
   error: string | null;
+  failureKind: CallFailureKind | null;
+  /** Explicit outgoing intent; presentation must re-resolve routes before retrying. */
+  retryTarget: {
+    target: CallTarget;
+    video: boolean;
+    owner: string;
+    generation: number;
+  } | null;
 
   startCall: (target: CallTarget, video: boolean) => Promise<void>;
   accept: () => Promise<void>;
@@ -101,6 +111,7 @@ interface CallState {
 // Non-reactive engine handles (one call at a time), kept out of store state so they don't
 // trigger re-renders and so we never serialize a live RTCPeerConnection.
 let pc: RTCPeerConnection | null = null;
+let pcPreparation: AbortController | null = null;
 let pendingOffer: { sdp: string; video: boolean } | null = null;
 let connectTimer: ReturnType<typeof setTimeout> | null = null;
 /** While an OUTGOING call is ringing, the devices still being rung (we offered to all of the
@@ -110,7 +121,6 @@ let ringingPeers: string[] = [];
 let outgoingOffered = false;
 
 const CONNECT_TIMEOUT_MS = 20_000;
-const GATHER_TIMEOUT_MS = 2_000;
 
 function send(target: string, msg: Signal): Promise<void> {
   return calls.signal(target, JSON.stringify(msg)).catch(() => {});
@@ -139,27 +149,52 @@ async function getLocalMedia(
   }
 }
 
-/** Wait until ICE gathering completes (host-only candidates finish near-instantly on a LAN),
- * with a fallback timeout so a webview that never flips to "complete" can't hang the call. */
-function gatherComplete(conn: RTCPeerConnection): Promise<void> {
-  if (conn.iceGatheringState === "complete") return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => {
+/** Non-trickle signaling requires a complete, usable description. Call retirement
+ * cancels this wait; elapsed time alone never certifies candidate readiness. */
+function gatherComplete(
+  conn: RTCPeerConnection,
+  signal: AbortSignal,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
       conn.removeEventListener("icegatheringstatechange", check);
-      resolve();
+      signal.removeEventListener("abort", cancelled);
+    };
+    const cancelled = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new DOMException("Call preparation was cancelled", "AbortError"));
     };
     const check = () => {
-      if (conn.iceGatheringState === "complete") done();
+      if (settled) return;
+      if (signal.aborted) {
+        cancelled();
+        return;
+      }
+      if (conn.iceGatheringState !== "complete") return;
+      settled = true;
+      cleanup();
+      const sdp = conn.localDescription?.sdp;
+      if (!sdp || !/^a=candidate:\S+/m.test(sdp)) {
+        reject(new Error("ICE gathering completed without a media candidate"));
+        return;
+      }
+      resolve(sdp);
     };
     conn.addEventListener("icegatheringstatechange", check);
-    setTimeout(done, GATHER_TIMEOUT_MS);
+    signal.addEventListener("abort", cancelled, { once: true });
+    check();
   });
 }
 
 export const useCalls = create<CallState>((set, get) => {
   /** Build a peer connection wired to surface the remote stream + connection state. */
-  function newPc(): RTCPeerConnection {
+  function newPc(): { conn: RTCPeerConnection; signal: AbortSignal } {
     const conn = new RTCPeerConnection({ iceServers: [] });
+    const preparation = new AbortController();
+    pcPreparation = preparation;
     const callId = get().callId;
     conn.ontrack = (e) => {
       if (get().callId !== callId || pc !== conn) return;
@@ -173,15 +208,17 @@ export const useCalls = create<CallState>((set, get) => {
         connectTimer = null;
         set({ phase: "connected" });
       } else if (s === "failed") {
-        get().hangup();
+        end("failed", "failed");
       }
     };
-    return conn;
+    return { conn, signal: preparation.signal };
   }
 
   function cleanup() {
     if (connectTimer) clearTimeout(connectTimer);
     connectTimer = null;
+    pcPreparation?.abort();
+    pcPreparation = null;
     if (pc) {
       pc.ontrack = null;
       pc.onconnectionstatechange = null;
@@ -196,7 +233,11 @@ export const useCalls = create<CallState>((set, get) => {
   }
 
   /** Reset to idle, stopping media. `reason` is surfaced briefly to the UI. */
-  function end(reason: string | null, signalReason?: ByeReason) {
+  function end(
+    reason: string | null,
+    signalReason?: ByeReason,
+    failureKind: CallFailureKind = "connection",
+  ) {
     const { callId, peerId, phase } = get();
     if (signalReason && callId) {
       const targets = ringingPeers.length
@@ -220,6 +261,8 @@ export const useCalls = create<CallState>((set, get) => {
       camOn: true,
       hasVideo: false,
       endedReason: reason,
+      failureKind: reason === "failed" ? failureKind : null,
+      retryTarget: reason === "failed" ? get().retryTarget : null,
     });
   }
 
@@ -229,7 +272,7 @@ export const useCalls = create<CallState>((set, get) => {
     connectTimer = setTimeout(() => {
       if (get().callId !== callId) return;
       if (["connecting", "outgoing", "incoming"].includes(get().phase)) {
-        end("failed", "failed");
+        end("failed", "failed", "timeout");
       }
     }, CONNECT_TIMEOUT_MS);
   }
@@ -247,6 +290,8 @@ export const useCalls = create<CallState>((set, get) => {
     hasVideo: false,
     endedReason: null,
     error: null,
+    failureKind: null,
+    retryTarget: null,
 
     startCall: async (target, video) => {
       if (get().phase !== "idle") return; // one call at a time
@@ -264,9 +309,19 @@ export const useCalls = create<CallState>((set, get) => {
         video,
         endedReason: null,
         error: null,
+        failureKind: null,
+        retryTarget: {
+          target: { ...target, deviceIds: [...target.deviceIds] },
+          video,
+          owner,
+          generation: useAuth.getState().generation,
+        },
       });
+      let captured = false;
+      let preparation: AbortSignal | null = null;
       try {
         const { stream, hasVideo } = await getLocalMedia(video);
+        captured = true;
         // The user may have hung up / logged out while the camera was opening. If so the
         // call was already torn down; release the capture we just acquired and bail, or it
         // leaks (camera light stays on) and we'd dial peers we abandoned.
@@ -276,15 +331,19 @@ export const useCalls = create<CallState>((set, get) => {
           return;
         }
         set({ localStream: stream, hasVideo, camOn: hasVideo });
+        // Preparation has the same bounded owner as ringing. Its retirement
+        // aborts an unfinished native ICE wait and releases captured media.
+        armConnectTimeout();
         // Use a local handle for negotiation so a concurrent cleanup() (which nulls the
         // module `pc`) can't turn these awaits into a null deref.
-        const conn = newPc();
+        const { conn, signal } = newPc();
+        preparation = signal;
         pc = conn;
         for (const t of stream.getTracks()) conn.addTrack(t, stream);
         const offer = await conn.createOffer();
         await conn.setLocalDescription(offer);
-        await gatherComplete(conn);
-        if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
+        const sdp = await gatherComplete(conn, signal);
+        if (signal.aborted || get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
           end("failed", "failed");
           return;
@@ -292,7 +351,7 @@ export const useCalls = create<CallState>((set, get) => {
         // Only an explicit outgoing call grants permission. Answer/ICE/bye and
         // background signals never reach this path. Persist before any offer.
         await privacy.initiateContact(owner, target.accountId);
-        if (get().callId !== callId) return;
+        if (signal.aborted || get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
           end("failed", "failed");
           return;
@@ -301,7 +360,7 @@ export const useCalls = create<CallState>((set, get) => {
         const payload = JSON.stringify({
           callId,
           kind: "offer",
-          sdp: conn.localDescription?.sdp ?? "",
+          sdp,
           name: myName,
           video,
         });
@@ -314,7 +373,7 @@ export const useCalls = create<CallState>((set, get) => {
         const results = await Promise.allSettled(
           target.deviceIds.map((d) => calls.signal(d, payload)),
         );
-        if (get().callId !== callId) return;
+        if (signal.aborted || get().callId !== callId) return;
         if (results.every((r) => r.status === "rejected")) {
           end("failed", "failed");
           return;
@@ -322,13 +381,13 @@ export const useCalls = create<CallState>((set, get) => {
       } catch (e) {
         // A cancelled operation can fail after another call owns the shared
         // media/connection. Never tear down that newer call with a stale error.
-        if (get().callId !== callId) return;
+        if (preparation?.aborted || get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
           end("failed", "failed");
           return;
         }
         set({ error: errorMessage(e) });
-        end("failed", "failed");
+        end("failed", "failed", captured ? "connection" : "capture");
       }
     },
 
@@ -337,10 +396,13 @@ export const useCalls = create<CallState>((set, get) => {
       if (phase !== "incoming" || !pendingOffer || !peerId || !callId) return;
       const offer = pendingOffer;
       pendingOffer = null;
+      let captured = false;
+      let preparation: AbortSignal | null = null;
       try {
         // Mirror the caller's media kind so the answer's m-lines match the offer
         // (non-trickle, single-shot — a mismatched track would need renegotiation).
         const { stream, hasVideo } = await getLocalMedia(offer.video);
+        captured = true;
         // The caller may have hung up (a `bye` resets us to idle) while the camera was
         // opening. If so, release the capture and bail rather than answering a dead call.
         if (get().callId !== callId) {
@@ -353,28 +415,29 @@ export const useCalls = create<CallState>((set, get) => {
           camOn: hasVideo,
           phase: "connecting",
         });
-        const conn = newPc();
+        const { conn, signal } = newPc();
+        preparation = signal;
         pc = conn;
         for (const t of stream.getTracks()) conn.addTrack(t, stream);
         await conn.setRemoteDescription({ type: "offer", sdp: offer.sdp });
         const answer = await conn.createAnswer();
         await conn.setLocalDescription(answer);
-        await gatherComplete(conn);
-        if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
+        const sdp = await gatherComplete(conn, signal);
+        if (signal.aborted || get().callId !== callId) return;
         await calls.signal(
           peerId,
           JSON.stringify({
             callId,
             kind: "answer",
-            sdp: conn.localDescription?.sdp ?? "",
+            sdp,
           }),
         );
-        if (get().callId !== callId) return;
+        if (signal.aborted || get().callId !== callId) return;
         armConnectTimeout();
       } catch (e) {
-        if (get().callId !== callId) return;
+        if (preparation?.aborted || get().callId !== callId) return;
         set({ error: errorMessage(e) });
-        end("failed", "failed");
+        end("failed", "failed", captured ? "connection" : "capture");
       }
     },
 
@@ -438,6 +501,8 @@ export const useCalls = create<CallState>((set, get) => {
           video: msg.video,
           endedReason: null,
           error: null,
+          failureKind: null,
+          retryTarget: null,
         });
         armConnectTimeout();
         return;
@@ -484,7 +549,13 @@ export const useCalls = create<CallState>((set, get) => {
       }
     },
 
-    clearEnded: () => set({ endedReason: null, error: null }),
+    clearEnded: () =>
+      set({
+        endedReason: null,
+        error: null,
+        failureKind: null,
+        retryTarget: null,
+      }),
 
     teardown: () => end(null, "hangup"),
   };

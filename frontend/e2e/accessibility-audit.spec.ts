@@ -172,12 +172,10 @@ test("empty shell at the minimum desktop size has no detectable WCAG A/AA violat
 }) => {
   await page.setViewportSize({ width: 760, height: 520 });
   await page.goto("/?data=empty");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await expectNoWcagViolations(page);
 });

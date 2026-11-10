@@ -47,6 +47,18 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# This exact source bundle declares MIT (Rust wrapper), BSD-3-Clause
+# (SQLCipher), blessing (SQLite's public-domain dedication) and WTFPL
+# (the included LibTomCrypt sources also offer a public-domain option).
+# Our vendored-OpenSSL build does not compile the LibTomCrypt provider.
+# Preserve the upstream AND expression; review new versions rather than
+# extending the global license allowlist.
+# https://docs.rs/crate/sqlcipher-src/419.0.6/source/README.md
+[[licenses.exceptions]]
+name = "sqlcipher-src"
+version = "=419.0.6"
+allow = ["MIT", "BSD-3-Clause", "blessing", "WTFPL"]
+
 [bans]
 # Tauri's tree legitimately pulls several duplicate versions; warn rather than fail.
 multiple-versions = "warn"

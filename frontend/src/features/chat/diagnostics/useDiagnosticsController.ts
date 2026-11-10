@@ -6,6 +6,7 @@ import { diag, obs } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import type { DiagNetworkInfo, DiagPeerInfo, EnvInfo } from "@/lib/types";
 import { useSerialPoll } from "../useSerialPoll";
+import { readWithDeadline } from "@/lib/readDeadline";
 const POLL_MS = 1500;
 const LOG_CAP = 200;
 interface LogLine {
@@ -77,7 +78,7 @@ export function useDiagnosticsController(open: boolean, t: TFunction) {
     setNetworkLoading(true);
     setNetworkError(null);
     try {
-      const info = await diag.networkInfo();
+      const info = await readWithDeadline(() => diag.networkInfo());
       if (current() && request === networkRequest.current) setInfo(info);
     } catch (e) {
       if (current() && request === networkRequest.current) {
@@ -97,7 +98,7 @@ export function useDiagnosticsController(open: boolean, t: TFunction) {
     setEnvironmentLoading(true);
     setEnvironmentError(null);
     try {
-      const env = await obs.envInfo();
+      const env = await readWithDeadline(() => obs.envInfo());
       if (current() && request === environmentRequest.current) setEnv(env);
     } catch (e) {
       if (current() && request === environmentRequest.current) {
@@ -141,17 +142,17 @@ export function useDiagnosticsController(open: boolean, t: TFunction) {
     });
   const revealLogs = () =>
     action("reveal", async (current) => {
-      const path = await obs.logFile();
+      const path = await readWithDeadline(() => obs.logFile());
       if (current()) await revealItemInDir(path);
     });
   const copyLogTail = () =>
     action("copy", async (current) => {
-      const tail = await obs.logTail();
+      const tail = await readWithDeadline(() => obs.logTail());
       if (current()) await navigator.clipboard.writeText(tail);
     });
   const showLogTail = () =>
     action("show", async (current) => {
-      const tail = await obs.logTail();
+      const tail = await readWithDeadline(() => obs.logTail());
       if (current()) setLogTail(tail);
     });
   const saveLogTail = () =>

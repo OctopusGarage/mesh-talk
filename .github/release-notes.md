@@ -5,45 +5,54 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### Release highlights
-
-- Recover authorized group history and retained attachments from sharing members,
-  with bounded larger-group fanout and per-member sharing controls.
-- Keep durable retry, exact recipient confirmation, file consent, byte integrity
-  and completion as separate recoverable states.
-- Exchange eligible signed presence and opaque encrypted mailboxes among equal,
-  explicitly trusted post offices; no global hub is required.
-- Separate per-device public discovery and relay send/receive controls, including
-  physical-LAN-only discovery and direct LAN/Tailscale relay preference/fallback.
-- Harden certified device linking and category-controlled sibling replay across
-  restarts without relaxing account or group authority.
-- Provide signed native relay packages.
-<!-- STABLE_ONLY_START -->
-- Provide a verified Linux container image.
-<!-- STABLE_ONLY_END -->
-
 ### Downloads
 
-Pick the zip for your platform. Each zip contains the installer(s) **plus** a `SHA256SUMS`
-file, and ships alongside a cosign signature (`.zip.bundle`) and a SLSA build-provenance
-attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
-The macOS zip contains a DMG; the app is inside that DMG.
+**Choose one download for your computer.** Each ZIP contains the installers you need.
+On Mac, choose Apple Silicon for M-series chips or Intel for older Intel-based Macs.
 
-Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Lite shows emoji fallbacks for built-in Noto stickers without bundling their animations. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
+| System | Processor | Download |
+| --- | --- | --- |
+| macOS | Apple Silicon (M-series) | [Download ZIP](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk___TAG___macos_arm64.zip) |
+| macOS | Intel | [Download ZIP](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk___TAG___macos_x86_64.zip) |
+| Windows | x64 (Intel / AMD) | [Download ZIP](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk___TAG___windows_x86_64.zip) |
+| Windows | ARM64 | [Download ZIP](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk___TAG___windows_arm64.zip) |
+| Linux | x64 (Intel / AMD) | [Download ZIP](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk___TAG___linux_x86_64.zip) |
+| Linux | ARM64 | [Download ZIP](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk___TAG___linux_aarch64.zip) |
 
-| Platform              | Asset                                  |
-| --------------------- | -------------------------------------- |
-| macOS (Apple Silicon) | `mesh-talk___TAG___macos_arm64.zip`    |
-| macOS (Intel)         | `mesh-talk___TAG___macos_x86_64.zip`   |
-| Windows (x64)         | `mesh-talk___TAG___windows_x86_64.zip` |
-| Windows (ARM64)       | `mesh-talk___TAG___windows_arm64.zip`  |
-| Linux (x64)           | `mesh-talk___TAG___linux_x86_64.zip`   |
-| Linux (ARM64)         | `mesh-talk___TAG___linux_aarch64.zip`  |
+Each platform has one desktop package. The app starts without optional avatar, theme, or sticker packs and retains light, dark, and OLED themes. Install packs from the marketplace or a local ZIP. Built-in Noto stickers show emoji fallbacks until their artwork pack is installed. Upgrading preserves packs already installed on the device.
+
+__RELEASE_HIGHLIGHTS__
+
+### Installation
+
+Quit Mesh-Talk before installing an update. Your existing local account and data
+remain in `~/.mesh-talk`; the update replaces the existing application.
+
+- **macOS**: unzip the download, open the `.dmg`, then drag `mesh-talk.app` into
+  **Applications**. Replace the existing app when upgrading, then launch it from
+  Applications. See **First run** below if macOS blocks the unsigned app.
+- **Windows**: unzip the download and run the `.exe` installer. The included `.msi`
+  is an alternative for managed installations. Launch Mesh-Talk after installation.
+- **Linux**: unzip the download, then install the `.deb` or `.rpm` with your package
+  manager. Alternatively, make the `.AppImage` executable with `chmod +x *.AppImage`
+  and run it.
 
 ### Post-office relay downloads
 
-An always-on relay has its own headless package, separate from the desktop app. Choose
-`mesh-talk-post-office___TAG___<os>_<arch>.zip` using the same platform names above.
+<details>
+<summary>Headless relay packages for always-on machines</summary>
+
+Use these packages to host a relay. For the desktop app, use the downloads above.
+
+| System | Processor | Download |
+| --- | --- | --- |
+| macOS | Apple Silicon | [Download relay](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk-post-office___TAG___macos_arm64.zip) |
+| macOS | Intel | [Download relay](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk-post-office___TAG___macos_x86_64.zip) |
+| Windows | x64 | [Download relay](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk-post-office___TAG___windows_x86_64.zip) |
+| Windows | ARM64 | [Download relay](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk-post-office___TAG___windows_arm64.zip) |
+| Linux | x64 | [Download relay](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk-post-office___TAG___linux_x86_64.zip) |
+| Linux | ARM64 | [Download relay](https://github.com/__REPOSITORY__/releases/download/__TAG__/mesh-talk-post-office___TAG___linux_aarch64.zip) |
+
 Each relay ZIP contains `mesh-talk-node`, a setup guide and `SHA256SUMS` (plus a
 Windows service installer script on Windows). Its `.zip.bundle` signature and
 build provenance are verified by the release workflow along with the app packages.
@@ -55,11 +64,19 @@ For Linux Docker Engine, the same verified Linux binaries are also published as
 an owner-only password file. See the [post-office package and container guide](https://github.com/__REPOSITORY__/blob/__TAG__/docs/post-office-release.md).
 <!-- STABLE_ONLY_END -->
 
-### Verifying your download
+</details>
+
+<details>
+<summary>Verifying your download</summary>
+
+The additional update, patch and signature assets serve automatic updates and verification.
+You do not need to select them to install the app. Each desktop ZIP includes installer
+`SHA256SUMS` and, when updates are enabled, a small `UPDATER_SHA256SUMS` manifest binding
+the separately published update assets. The ZIP's `.bundle` signature and build provenance
+authenticate both manifests; update payloads are not duplicated in the installer ZIP.
 
 These builds are **not signed by a commercial CA** (free distribution), but every artifact is
 independently verifiable. Replace `<os>_<arch>` with your platform (e.g. `macos_arm64`).
-For lite, append `_lite` after `<os>_<arch>` in the examples.
 
 **1. Checksum** — unzip, then in the extracted folder:
 
@@ -86,6 +103,8 @@ gh attestation verify mesh-talk___TAG___<os>_<arch>.zip --repo '__REPOSITORY__' 
 ```
 
 **4. SBOM** — `mesh-talk.cdx.json` is the full CycloneDX dependency inventory for auditing.
+
+</details>
 
 ### First run (unsigned app)
 

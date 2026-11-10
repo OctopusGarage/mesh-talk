@@ -1,6 +1,7 @@
 //! Revocable local messaging capabilities shared by desktop and headless hosts.
 pub mod client;
 pub mod host;
+pub mod http;
 pub mod ipc;
 pub mod model;
 pub mod policy;

@@ -1,5 +1,9 @@
 import { test, expect } from "./tauri-mock";
-import { enterChat, openBobDm } from "./helpers/session";
+import {
+  enterChat,
+  openBobDm,
+  revealComposerAttachments,
+} from "./helpers/session";
 import { seedMarketPacks } from "./helpers/packs";
 import { prepareForScreenshot, snapshotName } from "./helpers/visual-snapshot";
 import {
@@ -21,11 +25,21 @@ test("composer toolbar targets have visible keyboard focus at narrow width", asy
 
   for (const id of [
     "composer-screenshot",
-    "composer-attach",
-    "composer-image",
+    "composer-attachments",
     "composer-emoji",
     "composer-send",
   ]) {
+    await expectMinTargetSize(page.getByTestId(id), 36, id);
+    await expectVisibleFocus(page, page.getByTestId(id));
+  }
+
+  for (const id of [
+    "composer-attach",
+    "composer-attach-directory",
+    "composer-image",
+    "composer-camera",
+  ]) {
+    await revealComposerAttachments(page);
     await expectMinTargetSize(page.getByTestId(id), 36, id);
     await expectVisibleFocus(page, page.getByTestId(id));
   }
@@ -120,6 +134,16 @@ test.describe("narrow composer pane", () => {
     await openBobDm(page);
     await prepareForScreenshot(page);
     await page.getByTestId("composer-more-tools").click();
+
+    await revealComposerAttachments(page);
+    await expect(page.getByTestId("composer-image")).toBeVisible();
+    await expectElementsWithin(
+      page,
+      '[data-composer-popover][data-state="open"]',
+      "body",
+    );
+    await expectNoHorizontalOverflow(page, "narrow pane attachment menu");
+    await page.keyboard.press("Escape");
 
     await page.getByTestId("composer-emoji").click();
     await expect(page.getByTestId("emoji-picker")).toBeVisible();

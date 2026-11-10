@@ -1,5 +1,19 @@
 # Repository Guidelines
 
+## Reliability before implementation
+
+- Before implementing, refactoring, fixing or reviewing code, read the
+  [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules
+  triggered by the changed boundaries, and inspect the owning code and callers.
+  For concurrency/lifecycle changes, trace lock order, wait dependencies, actual
+  work ownership, cancellation and commit authority before editing.
+- Validate the applicable failure and recovery paths, not only the happy path.
+  Record concrete evidence and remaining limits; a timeout, successful build or
+  passing subset is not proof that UI freezes or all deadlocks are impossible.
+- When a confirmed defect exposes a reusable failure pattern, update that guide's
+  existing rule or add a distinct rule with its owner and regression evidence.
+  Maintain the owning contract and test selectors; keep incident logs out of the guide.
+
 ## Project Structure & Module Organization
 
 - Four-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
@@ -93,6 +107,10 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 
 ## Maintaining standards as requirements change
 
+- Before changing tests, fixtures, dependencies or workflows in ways that affect
+  CI cost or reliability, read [CI maintenance](docs/ci-maintenance.md). Reuse
+  existing owners, measure the affected cost, and preserve acceptance evidence;
+  keep required-check policy in its existing owner.
 - Before implementation, identify the existing decision owner, authoritative rule,
   observable acceptance criteria, affected consumers and required boundary evidence.
   Extend the owning implementation and `validation.json`; new business capabilities
@@ -131,21 +149,31 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   frontend private metadata is versionless and Tauri inherits Cargo. Never broadly replace
   matching dependency, fixture, history, wire or schema versions. Keep source builds `BASE-dev`,
   Nightlies `BASE-nightly.RUN.ATTEMPT`, official tagged builds `BASE`, and standard SemVer ordering.
-- Release proposals and next-development-target changes use reviewed PRs. Stable publication
+- Version/changelog preparation and next-development-target changes use reviewed PRs. Ordinary main
+  pushes must not create automatic release proposals or commit-derived product notes. Stable publication
   remains explicit through the existing verified tagged-release workflow; no direct main push,
   public empty release, mutable published tag or gate bypass. Nightly publication requires trusted
   `main` and a target above the latest Stable. Future changes must extend the existing version
   owner, its tests, standards/CI enforcement and capability contracts together; the owning guide
-  documents permissions, bot-PR checks, dispatch and recovery requirements. The fixed release-history
+  documents permissions, bot-PR checks, dispatch and recovery requirements. Manual Stable draft
+  preparation uses the reviewed exact-version CHANGELOG section and requires exact-source checks
+  before creating its immutable tag/draft. The fixed release-history
   migration floor is historical provenance; never advance it during ordinary version bumps.
 
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
-  `specifications/git_standards.md`. Squash WIP; link issues.
+  `specifications/git_standards.md`. Squash WIP; link issues. When asked to merge,
+  default to squash merge unless the user explicitly requests another strategy;
+  follow the [merge policy](specifications/git_standards.md#pull-request-merge-strategy)
+  and current-head required checks.
 - Create PRs through `./scripts/create-pr.sh -- <gh pr create options>`.
   The default checks the clean committed candidate, comparison base, argument safety,
-  whitespace, structural standards and repository hygiene before publication.
-  Full cross-platform CI runs after publication; all required checks must pass on the
-  current PR head before merging. Creating a PR does not certify test acceptance.
+  whitespace, cheap affected static checks, ownership blockers, structural standards,
+  repository hygiene and applicable verified frontend patch coverage before publication.
+  Use `make pr-check` for the same cheap static phase; missing current coverage
+  evidence reports its explicit generation command and never starts suites implicitly.
+  CI runs after publication; full-scope candidates retain cross-platform execution.
+  Only the proven [documentation scope](docs/ci-maintenance.md#documentation-only-pr-scope)
+  may omit unrelated product tests. All required checks must pass on the current PR head before merging. Creating a PR does not certify test acceptance.
 - To run comprehensive checks locally before publication, use
   `./scripts/create-pr.sh --full-preflight <selectors/specs> -- <gh pr create options>`.
   This invokes `prepare-pr.sh` (platform preflight plus full health). For an existing
@@ -172,6 +200,40 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   `docs/superpowers/` and the root `plans/` directory local and untracked.
 
 ## Repository Hygiene
+
+### Worktree lifecycle
+
+- Create a worktree only when isolation is needed. Before creating one, inspect
+  `git worktree list --porcelain` and record the task-owned path, branch and any
+  dedicated build directory in ignored `tmp/` task notes. Treat pre-existing
+  worktrees and unrelated changes as user-owned; never sweep them automatically.
+- The coordinating session owns cleanup of every worktree it creates or delegates,
+  including `.worktrees/` and `.claude/worktrees/agent-*`. Delegate completion does
+  not transfer that responsibility. Before ending the task, stop task-owned
+  processes and remove its worktrees, disposable branches and dedicated Cargo
+  target directories, subject to the preservation rules below. Never delete a
+  shared target directory or a directory whose ownership is uncertain.
+- Before removal, preserve the work through either a verified merge into the
+  intended integration branch under the existing PR/merge gates, or a local
+  archive. For an archive, commit only task-owned outstanding changes (including
+  intended untracked files), run the required commit checks, and create a unique
+  `archive/<worktree-name>-<timestamp>` tag at the final branch tip. Verify the tag
+  resolves to that tip and the worktree is clean before deleting anything. Never
+  overwrite an existing archive tag, include secrets/ignored build output, or
+  discard unrelated edits to make cleanup succeed. Cleanup does not authorize
+  merging, pushing, bypassing review or running `entire clean`.
+- Run removal from a surviving checkout with `git worktree remove <path>`, then
+  `git branch -d <branch>` for a merged branch. Use `git branch -D <branch>` only
+  for a task-owned archived branch after verifying its archive tag. Never use
+  forced worktree removal, hard reset or bulk directory deletion to bypass a
+  dirty worktree. Detached worktrees require the same preservation of their final
+  commit before removal; there is no branch to delete.
+- A pending PR, unresolved conflict, user decision, active concurrent session or
+  failed preservation/cleanup step is an explicit retention exception. Preserve
+  the required branch for an open PR; remove its clean worktree if no active work
+  needs it. Recheck `git worktree list --porcelain` and task-owned branches/build
+  paths before the final reply. Report cleanup performed and name every retained
+  path/branch, its reason and the next action; never silently leave task worktrees.
 
 - Keep implementation plans, research, investigation notes and scratch scripts
   under ignored `tmp/`; remove them when the work is complete.

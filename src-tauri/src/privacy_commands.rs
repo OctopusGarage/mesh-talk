@@ -3,7 +3,7 @@ use crate::{
     chat_commands::NodeState, commands::CommandError, runtime_admission::RuntimeAdmission,
     state::AppState,
 };
-use mesh_talk_core::node::PrivacySnapshot;
+use mesh_talk_core::node::{AccountBindingChange, PrivacySnapshot};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -122,12 +122,75 @@ pub async fn initiate_privacy_contact(
     dispatch(&app, &node, owner, Change::Initiate(account)).await
 }
 
+#[derive(Serialize)]
+pub struct AccountBindingChangesResponse {
+    owner: String,
+    changes: Vec<AccountBindingChange>,
+}
+
+#[tauri::command]
+pub async fn get_account_binding_changes(
+    owner: String,
+    account: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AccountBindingChangesResponse, CommandError> {
+    RuntimeAdmission::capture(&app, &node, &owner)?
+        .with_runtime(|runtime| {
+            Ok(AccountBindingChangesResponse {
+                owner,
+                changes: runtime.handle().account_binding_changes(&account),
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn accept_account_binding_change(
+    owner: String,
+    change: AccountBindingChange,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<PrivacyResponse, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                runtime
+                    .handle()
+                    .accept_account_binding_change_guarded(&change, |commit| {
+                        admission.authorize_io(runtime, commit)
+                    })
+                    .await
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::InvalidInput {
+                            CommandError::Validation(error.to_string())
+                        } else {
+                            CommandError::Io(error.to_string())
+                        }
+                    })?;
+                admission.checked(runtime, || {
+                    Ok(PrivacyResponse {
+                        owner,
+                        policy: runtime.privacy_snapshot(),
+                    })
+                })
+            })
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::{auth_service::AuthService, user::User};
     use mesh_talk_core::{identity::manager::IdentityManager, storage::file_manager::FileManager};
     use std::sync::Arc;
+
+    async fn retire_registered_privacy_runtime(node: &NodeState) {
+        let runtime = { node.0.write().await.take().unwrap() };
+        runtime.stop().await;
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_privacy_ipc_retains_lifecycle_until_rejected_commit_finishes() {
@@ -139,6 +202,7 @@ mod tests {
             "token".into(),
             User {
                 user_id: "alice".into(),
+                account_login_name: None,
                 name: "alice".into(),
                 display_name: "Alice".into(),
                 address: "fixture".into(),
@@ -164,7 +228,7 @@ mod tests {
         .await
         .unwrap();
         let node = runtime.handle();
-        *state.0.lock().await = Some(runtime);
+        *state.0.write().await = Some(runtime);
         let documents = || {
             ["privacy.policy", "peer-proofs", "peer-routes"]
                 .map(|name| std::fs::read(root.path().join("accounts/alice").join(name)).unwrap())
@@ -218,13 +282,13 @@ mod tests {
         caller.abort();
         assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
         assert!(
-            state.0.try_lock().is_err(),
+            state.0.try_write().is_err(),
             "cancelled IPC released live runtime producer"
         );
         app.session().clear();
         release.send(()).unwrap();
         assert!(holder.join().unwrap().is_err());
-        let runtime = state.0.lock().await.take().unwrap();
+        let runtime = state.0.write().await.take().unwrap();
         assert!(!runtime.privacy_snapshot().invisible);
         assert_eq!(documents(), before);
         runtime.stop().await;
@@ -232,6 +296,33 @@ mod tests {
 
     #[test]
     fn registered_privacy_commands_authorize_and_persist_real_runtime() {
+        registered_privacy_scenario(|| {}, || {});
+    }
+
+    #[test]
+    fn registered_privacy_body_panic_preserves_primary_after_verified_retirement() {
+        #[derive(Debug, PartialEq)]
+        struct EarlyPrivacyFailure(&'static str);
+        let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = retired.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registered_privacy_scenario(
+                || std::panic::panic_any(EarlyPrivacyFailure("initial authenticated snapshot")),
+                move || observed.store(true, std::sync::atomic::Ordering::SeqCst),
+            );
+        }));
+        let failure = outcome.expect_err("the original body panic must be propagated");
+        assert_eq!(
+            failure.downcast_ref::<EarlyPrivacyFailure>(),
+            Some(&EarlyPrivacyFailure("initial authenticated snapshot"))
+        );
+        assert!(
+            retired.load(std::sync::atomic::Ordering::SeqCst),
+            "the original panic must propagate only after verified runtime retirement"
+        );
+    }
+
+    fn registered_privacy_scenario(body_boundary: impl FnOnce(), after_retired: impl FnOnce()) {
         let root = tempfile::tempdir().unwrap();
         let app_state = AppState::new(AuthService::new(Arc::new(IdentityManager::new(
             FileManager::new(root.path().to_owned()),
@@ -277,6 +368,7 @@ mod tests {
             "test-token".into(),
             User {
                 user_id: "alice".into(),
+                account_login_name: None,
                 name: "alice".into(),
                 display_name: "Alice".into(),
                 address: "fixture".into(),
@@ -299,80 +391,135 @@ mod tests {
             |_| {},
         ))
         .unwrap();
-        *node.0.blocking_lock() = Some(runtime);
-        let read = invoke("get_privacy", serde_json::json!({"owner":"alice"})).unwrap();
-        assert_eq!(read.owner, "alice");
-        assert!(!read.policy.invisible);
-        let changed = invoke(
-            "set_invisible",
-            serde_json::json!({"owner":"alice", "invisible":true}),
-        )
-        .unwrap();
-        assert!(changed.policy.invisible);
-        assert!(
-            invoke(
+        let work = runtime.blocking_work();
+        let observing = runtime.handle();
+        *node.0.blocking_write() = Some(runtime);
+        let original = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let read = invoke("get_privacy", serde_json::json!({"owner":"alice"})).unwrap();
+            assert_eq!(read.owner, "alice");
+            assert!(!read.policy.invisible);
+            body_boundary();
+            let changed = invoke(
                 "set_invisible",
-                serde_json::json!({"owner":"other", "invisible":false})
+                serde_json::json!({"owner":"alice", "invisible":true}),
             )
-            .is_err()
-        );
-        assert!(
-            invoke(
-                "set_privacy_allowed",
-                serde_json::json!({"owner":"alice", "account":"invalid", "allowed":true})
-            )
-            .is_err()
-        );
-        assert!(
-            invoke(
-                "set_privacy_allowed",
-                serde_json::json!({"owner":"alice", "account":"b".repeat(32), "allowed":true})
-            )
-            .is_err()
-        );
-        assert!(
-            invoke(
-                "initiate_privacy_contact",
-                serde_json::json!({"owner":"alice", "account":"b".repeat(32)})
-            )
-            .is_err()
-        );
-        assert!(invoke("get_privacy", serde_json::json!({"ownerId":"alice"})).is_err());
-        // Poll until the operation waits for the runtime lifecycle lock, then
-        // log out. A previously authorized queued write must not become durable.
-        tauri::async_runtime::block_on(async {
-            let guard = node.0.lock().await;
-            let mut queued = std::pin::pin!(dispatch(
-                &app_state,
-                &node,
-                "alice".into(),
-                Change::Mode(false)
-            ));
-            std::future::poll_fn(|cx| {
-                assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
-                std::task::Poll::Ready(())
+            .unwrap();
+            assert!(changed.policy.invisible);
+            assert!(
+                invoke(
+                    "set_invisible",
+                    serde_json::json!({"owner":"other", "invisible":false})
+                )
+                .is_err()
+            );
+            assert!(
+                invoke(
+                    "set_privacy_allowed",
+                    serde_json::json!({"owner":"alice", "account":"invalid", "allowed":true})
+                )
+                .is_err()
+            );
+            assert!(
+                invoke(
+                    "set_privacy_allowed",
+                    serde_json::json!({"owner":"alice", "account":"b".repeat(32), "allowed":true})
+                )
+                .is_err()
+            );
+            assert!(
+                invoke(
+                    "initiate_privacy_contact",
+                    serde_json::json!({"owner":"alice", "account":"b".repeat(32)})
+                )
+                .is_err()
+            );
+            assert!(invoke("get_privacy", serde_json::json!({"ownerId":"alice"})).is_err());
+            // Poll until the operation waits for the runtime lifecycle lock, then
+            // log out. A previously authorized queued write must not become durable.
+            tauri::async_runtime::block_on(async {
+                let guard = node.0.write().await;
+                let mut queued = std::pin::pin!(dispatch(
+                    &app_state,
+                    &node,
+                    "alice".into(),
+                    Change::Mode(false)
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                app_state.session().clear();
+                drop(guard);
+                assert!(queued.await.is_err());
+            });
+            assert!(
+                invoke(
+                    "set_invisible",
+                    serde_json::json!({"owner":"alice", "invisible":false})
+                )
+                .is_err()
+            );
+            assert!(
+                node.0
+                    .blocking_write()
+                    .as_ref()
+                    .unwrap()
+                    .privacy_snapshot()
+                    .invisible
+            );
+        }));
+        let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tauri::async_runtime::block_on(async {
+                let (entered, entered_rx) = tokio::sync::oneshot::channel();
+                let (release, released) = std::sync::mpsc::channel::<()>();
+                let mut writers = tokio::task::JoinSet::new();
+                assert!(work.spawn(&mut writers, move || {
+                    let _ = entered.send(());
+                    let _ = released.recv();
+                    observing.privacy_snapshot().invisible
+                }));
+                entered_rx.await.unwrap();
+                let retirement = retire_registered_privacy_runtime(&node);
+                tokio::pin!(retirement);
+                // Poll this actual cleanup owner, without a timing-based readiness
+                // sample. Drop-only cleanup returns while admitted work is held.
+                let ready = std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(retirement.as_mut(), cx).is_ready(),
+                    )
+                })
+                .await;
+                drop(release);
+                let writer = writers.join_next().await;
+                let extra = writers.join_next().await;
+                if !ready {
+                    retirement.await;
+                }
+                // Retirement must not depend on the body's privacy value: an
+                // earlier assertion may have failed before changing that value.
+                assert!(matches!(writer, Some(Ok(_))));
+                assert!(extra.is_none());
+                ready
             })
-            .await;
-            app_state.session().clear();
-            drop(guard);
-            assert!(queued.await.is_err());
-        });
-        assert!(
-            invoke(
-                "set_invisible",
-                serde_json::json!({"owner":"alice", "invisible":false})
-            )
-            .is_err()
-        );
-        assert!(
-            node.0
-                .blocking_lock()
-                .as_ref()
-                .unwrap()
-                .privacy_snapshot()
-                .invisible
-        );
-        node.0.blocking_lock().take();
+        }));
+        if !matches!(&cleanup, Ok(false)) {
+            // Unverified cleanup has no join proof for its other producers.
+            // Keep their stores until this test process has exited.
+            let retained = root.keep();
+            eprintln!("unverified runtime cleanup retained {}", retained.display());
+            if let Err(panic) = original {
+                std::panic::resume_unwind(panic);
+            }
+            if let Err(panic) = cleanup {
+                std::panic::resume_unwind(panic);
+            }
+            panic!("registered runtime cleanup returned with admitted work held");
+        }
+        after_retired();
+        if let Err(panic) = original {
+            std::panic::resume_unwind(panic);
+        }
         let saved = mesh_talk_core::node::PrivacyPolicy::open(
             &root.path().join("accounts/alice/privacy.policy"),
             "pw",

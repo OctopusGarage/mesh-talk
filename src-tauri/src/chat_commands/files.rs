@@ -10,6 +10,34 @@ fn file_kind(media: bool) -> mesh_talk_core::file::FileKind {
     }
 }
 
+/// Session-local installed artwork can satisfy an independently authenticated sticker offer.
+#[tauri::command]
+pub async fn register_sticker_source(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    owner: String,
+    account: String,
+    name: String,
+    bytes: Vec<u8>,
+) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
+    if bytes.len() > mesh_talk_core::file::sticker::MAX_STICKER_BYTES {
+        return Err(CommandError::Validation("sticker source too large".into()));
+    }
+    admission
+        .blocking(move |runtime, _| {
+            let node = runtime.handle();
+            if node.account_id() != account {
+                return Err(CommandError::Authorization(
+                    "runtime account mismatch".into(),
+                ));
+            }
+            node.register_sticker_source(&name, &bytes)
+                .map_err(CommandError::from)
+        })
+        .await
+}
+
 #[derive(serde::Serialize)]
 pub struct FileStatus {
     file_conv: String,
@@ -34,16 +62,15 @@ pub async fn file_statuses(
         .map(|file_conv| parse_channel_id(&file_conv).map(|id| (file_conv, id)))
         .collect::<Result<Vec<_>, _>>()?;
     let node = state.node_handle().await?;
-    Ok(ids
-        .into_iter()
+    ids.into_iter()
         .map(|(file_conv, id)| {
-            let progress = node.file_progress(id);
-            let consent = node.attachment_consent_status(id);
-            FileStatus {
+            let progress = node.file_progress(id)?;
+            let consent = node.attachment_consent_status(id)?;
+            Ok(FileStatus {
                 file_conv,
                 done: progress.map_or(0, |p| p.done),
                 total: progress.map_or(0, |p| p.total),
-                ready: node.file_ready_to_save(id)
+                ready: node.file_ready_to_save(id)?
                     && !matches!(
                         consent,
                         Some(
@@ -56,9 +83,9 @@ pub async fn file_statuses(
                     mesh_talk_core::node::ReceiveDecision::Accepted => "accepted",
                     mesh_talk_core::node::ReceiveDecision::Declined => "declined",
                 }),
-            }
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, CommandError>>()
 }
 
 #[tauri::command]
@@ -81,10 +108,12 @@ pub async fn attachment_receive_policy(
 ) -> Result<AttachmentReceivePolicy, CommandError> {
     let node = state.node_handle().await?;
     Ok(AttachmentReceivePolicy {
-        global_auto: node.attachment_global_auto(),
+        global_auto: node.attachment_global_auto()?,
         contact_auto: account
             .as_deref()
-            .and_then(|id| node.attachment_contact_auto(id)),
+            .map(|id| node.attachment_contact_auto(id))
+            .transpose()?
+            .flatten(),
     })
 }
 
@@ -307,32 +336,82 @@ pub fn default_download_dir(app: tauri::AppHandle) -> Option<String> {
 /// Open only the configured download folder (or the OS default) in the file manager.
 /// The renderer cannot choose a different path for this command.
 #[tauri::command]
-pub fn open_download_dir(
+pub async fn open_download_dir(
     app: tauri::AppHandle,
     app_state: tauri::State<'_, crate::state::AppState>,
     settings: tauri::State<'_, crate::settings::SettingsState>,
     owner: String,
 ) -> Result<(), CommandError> {
-    crate::config_store::with_account(&app_state, &owner, "settings.json", |_| {
-        let configured = settings.get_for_owner(&owner)?.download_dir;
-        let dir = if configured.is_empty() {
-            default_download_dir(app)
-                .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
-        } else {
-            configured
-        };
+    let lease = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authorization)?;
+    if lease.owner() != owner {
+        return Err(CommandError::Authorization("session owner mismatch".into()));
+    }
+    let configured =
+        crate::config_store::with_account_lease(&app_state, &lease, "settings.json", |_| {
+            Ok(settings.get_for_owner(&owner)?.download_dir)
+        })?;
+    let revision = app_state.app_lock().authorization_revision()?;
+    let dir = if configured.is_empty() {
+        default_download_dir(app)
+            .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
+    } else {
+        configured
+    };
+    let state = app_state.inner().clone();
+    tokio::task::spawn_blocking(move || {
         let path = std::path::Path::new(&dir);
         if !path.is_dir() {
             return Err(CommandError::Validation(
                 "download folder unavailable".into(),
             ));
         }
-        #[cfg(target_os = "macos")]
-        let opened = tauri_plugin_opener::open_path(path, Some("Finder"));
-        #[cfg(not(target_os = "macos"))]
-        let opened = tauri_plugin_opener::open_path(path, None::<&str>);
-        opened.map_err(|error| CommandError::Service(format!("open download folder: {error}")))
+        // The path API repeats metadata() on Linux/Windows. A network folder
+        // must not block session authority: dispatch the equivalent file URL
+        // after validating the directory outside the guard.
+        #[cfg(not(target_os = "windows"))]
+        let url = tauri::Url::from_file_path(path)
+            .map_err(|_| CommandError::Validation("invalid download folder".into()))?;
+        let child =
+            crate::config_store::with_account_lease(&state, &lease, "settings.json", |_| {
+                state.app_lock().with_unchanged_revision(revision, || {
+                    // ShellExecute may perform another metadata/DDE wait. Starting
+                    // Explorer directly keeps only process creation inside authority.
+                    #[cfg(target_os = "windows")]
+                    {
+                        crate::background_command::command("explorer.exe")
+                            .arg(path)
+                            .spawn()
+                            .map(Some)
+                            .map_err(|error| {
+                                CommandError::Service(format!("open download folder: {error}"))
+                            })
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        #[cfg(target_os = "macos")]
+                        let opened = tauri_plugin_opener::open_url(url.as_str(), Some("Finder"));
+                        #[cfg(not(target_os = "macos"))]
+                        let opened = tauri_plugin_opener::open_url(url.as_str(), None::<&str>);
+                        opened
+                            .map(|()| None::<tokio::process::Child>)
+                            .map_err(|error| {
+                                CommandError::Service(format!("open download folder: {error}"))
+                            })
+                    }
+                })
+            })?;
+        if let Some(mut child) = child {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+        Ok(())
     })
+    .await
+    .map_err(|e| CommandError::Internal(format!("download folder worker failed: {e}")))?
 }
 
 #[tauri::command]
@@ -376,7 +455,7 @@ async fn save_file_to_dir_for_owner(
     // Capture before waiting, then retain runtime and session authority through
     // the actual disk write. A frontend lease check cannot protect native I/O.
     let admission = RuntimeAdmission::capture(&app, &state, owner)?;
-    let guard = state.0.clone().lock_owned().await;
+    let guard = state.0.clone().read_owned().await;
     let path = tokio::task::spawn_blocking(move || {
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
         admission.checked(runtime, || {
@@ -505,8 +584,8 @@ pub(crate) fn cleanup_pasted_file<R: tauri::Runtime>(app: &tauri::AppHandle<R>, 
 }
 
 #[tauri::command]
-pub fn delete_temp_file<R: tauri::Runtime>(app: tauri::AppHandle<R>, path: String) {
-    cleanup_pasted_file(&app, &path);
+pub async fn delete_temp_file<R: tauri::Runtime>(app: tauri::AppHandle<R>, path: String) {
+    let _ = tokio::task::spawn_blocking(move || cleanup_pasted_file(&app, &path)).await;
 }
 
 pub(crate) fn clean_stale_pasted_files(cache: &std::path::Path) {
@@ -585,7 +664,7 @@ pub async fn read_media<R: tauri::Runtime>(
         .blocking(move |runtime, _| {
             runtime
                 .handle()
-                .read_media(id)
+                .read_media_checked(id)?
                 .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))
         })
         .await?;
@@ -608,6 +687,7 @@ mod tests {
         ));
         let user = crate::services::user::User {
             user_id: "bob".into(),
+            account_login_name: None,
             name: "bob".into(),
             display_name: "Bob".into(),
             address: "local".into(),
@@ -630,6 +710,138 @@ mod tests {
             "{error}"
         );
         assert!(!root.path().join("downloads").exists());
+    }
+
+    fn sticker_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new(crate::services::auth_service::AuthService::new(
+            std::sync::Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            )),
+        ));
+        app.session().publish(
+            "session".into(),
+            crate::services::user::User {
+                user_id: "alice".into(),
+                account_login_name: None,
+                name: "alice".into(),
+                display_name: "Alice".into(),
+                address: "local".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            },
+            "pw".into(),
+        );
+        let app = tauri::test::mock_builder()
+            .manage(app)
+            .manage(NodeState::empty())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        (root, app)
+    }
+
+    #[tokio::test]
+    async fn registered_sticker_source_rejects_wrong_owner_before_waiting_for_runtime() {
+        let (_root, app) = sticker_app();
+        let state = app.state::<NodeState>();
+        let _held = state.0.write().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            register_sticker_source(
+                app.state(),
+                app.state(),
+                "bob".into(),
+                "account".into(),
+                "sticker.png".into(),
+                vec![],
+            ),
+        )
+        .await
+        .expect("wrong owner must not wait for runtime");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("session owner mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_sticker_source_requires_current_crypto_account_and_valid_image() {
+        let (root, app) = sticker_app();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "alice",
+            "Alice",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let account = runtime.handle().account_id();
+        *app.state::<NodeState>().0.write().await = Some(runtime);
+        let wrong_account = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            "another-account".into(),
+            "sticker.png".into(),
+            vec![],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            wrong_account
+                .to_string()
+                .contains("runtime account mismatch"),
+            "sticker registration must reject a different runtime account"
+        );
+        let name = "mt-sticker-v1-cGFjazpleGFtcGxlOndhdmUK8J-Riw.png";
+        let bytes = hex::decode("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082").unwrap();
+        let valid = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            account.clone(),
+            name.into(),
+            bytes,
+        )
+        .await;
+        let invalid = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            account.clone(),
+            name.into(),
+            b"not an image".to_vec(),
+        )
+        .await;
+        let oversized = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            account,
+            name.into(),
+            vec![0; mesh_talk_core::file::sticker::MAX_STICKER_BYTES + 1],
+        )
+        .await;
+        app.state::<NodeState>()
+            .0
+            .write()
+            .await
+            .take()
+            .unwrap()
+            .stop()
+            .await;
+        valid.unwrap();
+        assert!(invalid.is_err());
+        assert!(oversized.is_err());
     }
 
     #[test]

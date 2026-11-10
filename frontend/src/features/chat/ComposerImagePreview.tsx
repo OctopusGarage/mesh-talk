@@ -8,13 +8,13 @@ export function ComposerImagePreview({ file }: { file: File }) {
     setUrl(preview);
     return () => URL.revokeObjectURL(preview);
   }, [file]);
-  return url ? (
+  return (
     <img
       data-testid="composer-pending-image"
-      src={url}
+      src={url ?? undefined}
       alt=""
       aria-hidden="true"
-      className="h-20 max-w-40 rounded object-contain"
+      className="h-20 w-40 shrink-0 rounded object-contain"
     />
-  ) : null;
+  );
 }

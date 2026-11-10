@@ -8,7 +8,7 @@
 //!
 //! Every operation here is best-effort: a keychain that's locked, unavailable, or
 //! returns an error must degrade to manual login rather than break sign-in. So all
-//! functions log and swallow errors instead of propagating them.
+//! reads degrade to a missing credential; writes report whether storage succeeded.
 
 #[cfg(target_os = "macos")]
 // Unit tests exercise migration with a fake provider; they must not touch the real Keychain.
@@ -37,10 +37,16 @@ fn entry(username: &str) -> Option<keyring::Entry> {
 /// Persist the password for `username` in the OS keychain (best-effort). Overwrites
 /// any existing secret for that account.
 #[cfg(all(not(test), not(target_os = "macos")))]
-pub fn save(username: &str, password: &str) {
-    let Some(entry) = entry(username) else { return };
-    if let Err(e) = entry.set_password(password) {
-        log::warn!("failed to save stay-signed-in secret: {e}");
+pub fn save(username: &str, password: &str) -> bool {
+    let Some(entry) = entry(username) else {
+        return false;
+    };
+    match entry.set_password(password) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("failed to save stay-signed-in secret: {e}");
+            false
+        }
     }
 }
 
@@ -77,18 +83,45 @@ static TEST_SECRETS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::LazyLock::new(Default::default);
 #[cfg(test)]
-pub fn save(username: &str, password: &str) {
+type TestIoHook = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+static TEST_IO_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, &'static str), TestIoHook>>,
+> = std::sync::LazyLock::new(Default::default);
+#[cfg(test)]
+pub(crate) fn before_next_io(username: &str, operation: &'static str, hook: TestIoHook) {
+    TEST_IO_HOOKS
+        .lock()
+        .unwrap()
+        .insert((username.into(), operation), hook);
+}
+#[cfg(test)]
+fn test_io(username: &str, operation: &'static str) {
+    let hook = TEST_IO_HOOKS
+        .lock()
+        .unwrap()
+        .remove(&(username.into(), operation));
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+#[cfg(test)]
+pub fn save(username: &str, password: &str) -> bool {
+    test_io(username, "save");
     TEST_SECRETS
         .lock()
         .unwrap()
         .insert(username.into(), password.into());
+    true
 }
 #[cfg(test)]
 pub fn load(username: &str) -> Option<String> {
+    test_io(username, "load");
     TEST_SECRETS.lock().unwrap().get(username).cloned()
 }
 #[cfg(test)]
 pub fn clear(username: &str) {
+    test_io(username, "clear");
     TEST_SECRETS.lock().unwrap().remove(username);
 }
 

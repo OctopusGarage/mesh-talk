@@ -29,6 +29,51 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
+it("expires shared registration origin before the introducing route during IPC silence", async () => {
+  const snapshot: PresenceMap = {
+    duncan: {
+      online: true,
+      last_seen_secs: 0,
+      devices: [
+        {
+          user_id: "duncan-device",
+          evidence: [
+            {
+              source: "directory",
+              last_seen_secs: 0,
+              expires_in_secs: 10,
+              post_office: { name: "Mac office", endpoint: "10.0.0.1:47479" },
+              registration_origin: {
+                user_id: "windows-office",
+                name: "Windows 10 office",
+                expires_in_secs: 1.5,
+              },
+            },
+          ],
+        },
+      ],
+    },
+  };
+  expect(
+    agePresence(snapshot, 1).duncan.devices?.[0].evidence[0].registration_origin
+      ?.expires_in_secs,
+  ).toBe(0.5);
+  getPresence
+    .mockResolvedValueOnce(snapshot)
+    .mockReturnValue(new Promise(() => {}));
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1500);
+    const evidence = usePresence.getState().map.duncan.devices?.[0].evidence[0];
+    expect(evidence?.registration_origin).toBeUndefined();
+    expect(evidence?.post_office?.name).toBe("Mac office");
+    expect(usePresence.getState().map.duncan.online).toBe(true);
+  } finally {
+    stop();
+  }
+});
+
 it("refreshes online status within two seconds of discovery", async () => {
   getPresence
     .mockResolvedValueOnce({ bob: { online: false, last_seen_secs: 31 } })

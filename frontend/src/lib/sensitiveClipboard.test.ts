@@ -55,3 +55,19 @@ it("requires confirmation in Strict mode", async () => {
   expect(await copySensitiveText("secret", "confirm")).toBe(false);
   expect(writeText).not.toHaveBeenCalled();
 });
+
+it("supports synchronous native copy-event writes while retaining clipboard clearing", async () => {
+  useSettings.setState({
+    privacy: { ...balancedPrivacy, clipboard_clear_seconds: 30 },
+  });
+  const eventWrite = vi.fn((value: string) => {
+    clipboardValue = value;
+  });
+  const copied = copySensitiveText("image text", "confirm", eventWrite);
+  // Native event.clipboardData must be populated before its event returns.
+  expect(eventWrite).toHaveBeenCalledWith("image text");
+  expect(writeText).not.toHaveBeenCalled();
+  expect(await copied).toBe(true);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(clipboardValue).toBe("");
+});

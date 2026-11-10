@@ -49,12 +49,21 @@ test("publication resolves a verified build and skips compilation", () => {
 test("post-office images use verified Linux archives and publish before the release", () => {
   const build = workflow.split("  build-release:\n")[1]?.split(/^  verify-release:/m)[0];
   const publish = workflow.split("  publish-release:\n")[1];
-  assert.match(build, /name: Build headless post-office node\n\s+if: matrix\.variant == 'default'/);
+  assert.match(build, /name: Build headless post-office node\n\s+run: cargo build/);
   assert.match(build, /scripts\/release\/package-post-office\.sh/);
   assert.match(build, /subject-path: "release_zips\/\*\.zip"/);
   assert.match(publish, /packages: write/);
   assert.match(publish, /name: verified-release-evidence/);
   assert.match(publish, /scripts\/release\/prepare-post-office-container\.sh container-input verification\.txt/);
+  const artifactName = build.match(/name: (mesh-talk-.*\$\{\{ matrix\.target \}\})/)?.[1];
+  const linuxPattern = publish.match(/pattern: (.+)\n\s+merge-multiple: true\n\s+path: container-input/)?.[1];
+  assert.ok(artifactName && linuxPattern, "publication must select the uploaded Linux artifacts");
+  const selected = new RegExp(`^${linuxPattern.replaceAll("*", ".*")}$`);
+  for (const target of ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]) {
+    const uploaded = artifactName.replace("${{ matrix.os }}", "linux").replace("${{ matrix.target }}", target);
+    assert.ok(selected.test(uploaded), `container input must include ${uploaded}`);
+  }
+  assert.equal(selected.test(artifactName.replace("${{ matrix.os }}", "windows").replace("${{ matrix.target }}", "x86_64-pc-windows-msvc")), false);
   assert.match(publish, /platforms: linux\/amd64,linux\/arm64/);
   assert.match(publish, /org\.opencontainers\.image\.source=/);
   assert.ok(publish.indexOf("Publish verified multi-platform post-office image") < publish.indexOf("Publish only the verified draft"));
@@ -65,4 +74,20 @@ test("release preflight prevents overwriting published versions before building"
   assert.match(workflow, /scripts\/release\/preflight\.mjs/);
   assert.match(workflow.split("  build-release:\n")[1], /^    needs: preflight/m);
   assert.match(workflow, /concurrency:/);
+});
+
+
+test("Stable rechecks changed source checks immediately before public container and release mutations", () => {
+  const publish = workflow.split("  publish-release:\n")[1];
+  const steps = publish.split(/^      - /m).slice(1);
+  const imageIndex = steps.findIndex(step => step.startsWith("name: Publish verified multi-platform post-office image\n"));
+  const releaseIndex = steps.findIndex(step => step.startsWith("name: Publish only the verified draft\n"));
+  assert.ok(imageIndex > 0 && releaseIndex > imageIndex);
+  const imageGuard = steps[imageIndex - 1];
+  const releaseGuard = steps[releaseIndex];
+  for (const guard of [imageGuard, releaseGuard]) {
+    assert.match(guard, /node scripts\/release\/check-source-checks\.mjs "\$SOURCE_REPO" "\$SOURCE_SHA"/);
+    assert.doesNotMatch(guard, /--wait|continue-on-error/);
+  }
+  assert.ok(releaseGuard.indexOf("check-source-checks.mjs") < releaseGuard.indexOf("release-state.mjs publish"));
 });

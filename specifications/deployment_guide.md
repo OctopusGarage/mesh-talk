@@ -130,7 +130,26 @@ The headless participant and post office acquire an exclusive OS lock on
 message stores. Keep each independent node in its own data directory. Cooperating
 updated CLI processes refuse a second owner, including while the first process
 is still starting. The PID written to `node.lock` is diagnostic information;
-file contents alone do not establish ownership.
+file contents alone do not establish ownership. The CLI uses the shared core
+`ProfileStorageLease` primitive. Dedicated post-office startup transfers the
+acquired guard by value into its indexed storage owner without reacquiring the
+same lock; participant startup retains its lexical guard.
+
+The dedicated relay owns its maintenance, reconciliation, inbound sessions,
+discovery and gateway proxy tasks. Unix SIGINT/SIGTERM stop admission, cancel
+and join these tasks, and finish any admitted synchronous database slice before
+releasing storage. A faulted database exits through this owner rather than being
+advertised indefinitely; existing macOS/Windows service restart throttling remains
+in effect. Windows forced Scheduled Task termination is a crash boundary and
+needs native restart/WAL recovery verification, rather than Unix graceful-stop
+claims. Aborted or reset accepts discard only that connection and yield before
+continuing on the same listener. This includes Mio's bare macOS invalid-address
+conversion error after a peer resets a queued connection. Interrupted or
+would-block failures without progress use a persistent 20 ms to 1 s capped
+backoff with fixed retry state.
+Other errors retain their original cause and fail with accept-operation context.
+Unrelated session completions do not reset an outstanding accept retry, and
+shutdown can cancel it immediately. See [indexed relay resource bounds](../docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds).
 
 The file remains after a normal stop or crash. The OS releases ownership when
 the process's lock handle closes, including on termination. Restart the node
@@ -202,10 +221,9 @@ The GUI version of Mesh-Talk provides a desktop application with a graphical int
    cargo tauri build
    ```
 
-The default edition bundles optional avatar, theme, and sticker assets. For the
-lite edition, set `MESH_TALK_VARIANT=lite` before `cargo tauri build`; it omits
-optional bundled packs and animated Noto sticker files. Both editions can install
-packs later and use the same app identity. See
+Desktop builds start without optional avatar, theme, or sticker packs and animated
+Noto sticker files. Packs can be installed later from the marketplace or local ZIPs.
+No edition flag is required. See
 [`docs/CUSTOMIZATION_PACKS.md`](../docs/CUSTOMIZATION_PACKS.md).
 
 ### Build Options
@@ -229,7 +247,7 @@ You can customize the build with the following options:
 
 After building from `src-tauri/`, installation packages are under the workspace
 `target/release/bundle/` (or `target/<triple>/release/bundle/` for an explicit
-target). The release workflow packages each target and edition into a ZIP with
+target). The release workflow packages each target into a ZIP with
 checksums and verification artifacts:
 
 - macOS: `.app` bundle and `.dmg` disk image

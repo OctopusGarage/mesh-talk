@@ -139,6 +139,196 @@ async fn private_probe_does_not_multiply_handshakes_for_one_devices_cached_addre
     server.abort();
 }
 
+#[tokio::test]
+async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut servers = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let identity = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proof = crate::discovery::Announce::new_with_account(
+            &identity,
+            &account,
+            "Cached departed device",
+            address.port(),
+        );
+        {
+            let mut state = alice.privacy.state.write().unwrap();
+            let state = state.as_mut().unwrap();
+            state.proofs.record(&proof).unwrap();
+            state.routes.record(&proof.public(), address.ip()).unwrap();
+        }
+        let accepted = accepted.clone();
+        servers.spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                held.push(listener.accept().await.unwrap().0);
+                accepted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+    assert_eq!(alice.cached_routing_peers().len(), 8);
+    let producer = tokio::spawn({
+        let alice = alice.clone();
+        async move {
+            alice
+                .probe_private_routes_with_budget(Duration::from_secs(10))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while accepted.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // These are eight different real identity-pinned TCP attempts, rather than
+    // manually occupied permits or duplicates of one admission key.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stalled_sockets = accepted.load(Ordering::SeqCst);
+    let (healthy, _) = node(&dir.path().join("healthy"));
+    let expected = healthy.identity.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let channel = healthy.privacy_accept(socket).await.unwrap();
+        healthy.serve_connection(channel).await;
+    });
+    let round = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut channel = alice
+            .privacy_sync_dial(address, &expected)
+            .await
+            .map_err(|error| error.to_string())?;
+        let store = alice.sync_store(&expected);
+        super::session::request_round(
+            &mut channel,
+            &store,
+            crate::eventlog::ConversationId::new([231; 32]),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    })
+    .await;
+    producer.abort();
+    let _ = producer.await;
+    responder.abort();
+    let _ = responder.await;
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+    assert!(
+        round.is_ok_and(|result| result.is_ok()),
+        "healthy foreground Noise+sync missed its one-second deadline while historical probes held {stalled_sockets} real stalled TCP sockets"
+    );
+}
+
+#[tokio::test]
+async fn historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let arrivals = Arc::new(Mutex::new(Vec::new()));
+    let mut servers = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let identity = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proof = crate::discovery::Announce::new_with_account(
+            &identity,
+            &account,
+            "Cached departed device",
+            address.port(),
+        );
+        {
+            let mut state = alice.privacy.state.write().unwrap();
+            let state = state.as_mut().unwrap();
+            state.proofs.record(&proof).unwrap();
+            state.routes.record(&proof.public(), address.ip()).unwrap();
+        }
+        let arrivals = arrivals.clone();
+        servers.spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                held.push(listener.accept().await.unwrap().0);
+                arrivals.lock().unwrap().push(address);
+            }
+        });
+    }
+    for _ in 0..4 {
+        alice
+            .probe_private_routes_with_budget(Duration::from_millis(250))
+            .await;
+    }
+    let visited = arrivals
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert_eq!(
+        visited, 8,
+        "a canceled round must resume at peers it never launched rather than skipping the same cached suffix forever"
+    );
+    alice.set_invisible(true).await.unwrap();
+    let before = arrivals.lock().unwrap().len();
+    alice
+        .probe_private_routes_with_budget(Duration::from_millis(100))
+        .await;
+    assert_eq!(
+        arrivals.lock().unwrap().len(),
+        before,
+        "retained routing metadata cannot bypass the current private policy"
+    );
+    alice.set_invisible(false).await.unwrap();
+    alice
+        .probe_private_routes_with_budget(Duration::from_millis(100))
+        .await;
+    assert!(
+        arrivals.lock().unwrap().len() > before,
+        "a later permitted privacy generation must recover probing"
+    );
+    let released = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let permits = (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+                .map(|_| alice.sessions.try_outbound())
+                .collect::<Option<Vec<_>>>();
+            if let Some(permits) = permits {
+                break permits;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("whole-round cancellation must release every background TCP permit");
+    drop(released);
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+}
+
 #[test]
 fn failed_presence_cache_write_is_not_a_successful_empty_snapshot() {
     let dir = tempfile::tempdir().unwrap();
@@ -576,7 +766,7 @@ async fn cached_private_author_requires_permission_during_real_relay_rounds() {
     alice
         .append_event(conv, crate::eventlog::EventKind::Message, sealed)
         .unwrap();
-    let event = alice.log.lock().unwrap().events(&conv)[0].clone();
+    let event = alice.log.lock().unwrap().events(&conv).unwrap()[0].clone();
     store.lock().unwrap().accept(event.clone()).unwrap();
     let mut channel = bob
         .privacy_dial(addr, &relay.identity.public())
@@ -591,7 +781,7 @@ async fn cached_private_author_requires_permission_during_real_relay_rounds() {
         .await
         .is_err()
     );
-    assert!(bob.log.lock().unwrap().events(&conv).is_empty());
+    assert!(bob.log.lock().unwrap().events(&conv).unwrap().is_empty());
     assert!(rx.try_recv().is_err());
     bob.set_allowed(&alice.account_id(), true).await.unwrap();
     let mut channel = bob
@@ -621,7 +811,7 @@ async fn cached_private_author_requires_permission_during_real_relay_rounds() {
     alice
         .append_event(conv, crate::eventlog::EventKind::Message, sealed)
         .unwrap();
-    let revoked = alice.log.lock().unwrap().events(&conv)[1].clone();
+    let revoked = alice.log.lock().unwrap().events(&conv).unwrap()[1].clone();
     store.lock().unwrap().accept(revoked.clone()).unwrap();
     let mut channel = bob
         .privacy_dial(addr, &relay.identity.public())
@@ -636,8 +826,8 @@ async fn cached_private_author_requires_permission_during_real_relay_rounds() {
         .await
         .is_err()
     );
-    assert!(!bob.log.lock().unwrap().has(&revoked.id));
-    assert!(bob.log.lock().unwrap().has(&event.id));
+    assert!(!bob.log.lock().unwrap().has(&revoked.id).unwrap());
+    assert!(bob.log.lock().unwrap().has(&event.id).unwrap());
     assert!(rx.try_recv().is_err());
     assert!(bob.roster.lock().unwrap().get(&aa.user_id).is_none());
     server.abort();
@@ -693,7 +883,7 @@ async fn public_relay_delivery_survives_recipient_restart_without_sender_route()
         .send_dm(&bob.user_id(), b"held across restart")
         .await
         .unwrap();
-    let event = alice.log.lock().unwrap().events(&conv)[0].clone();
+    let event = alice.log.lock().unwrap().events(&conv).unwrap()[0].clone();
     let mailbox = crate::postoffice::opaque::RelayMailbox::new(
         &alice.identity,
         &bob.identity.public(),
@@ -825,6 +1015,7 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .iter()
         .map(|event| event.id)
         .collect::<Vec<_>>();
@@ -835,25 +1026,57 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .sync_store(&device.public())
                 .lock()
                 .unwrap()
-                .event_ids(&file),
+                .event_ids(&file)
+                .unwrap(),
             expected
         );
     }
     assert_eq!(
-        alice.account_history(&account.account_id(), 100).len(),
+        alice
+            .account_history(&account.account_id(), 100)
+            .unwrap()
+            .len(),
         1,
         "one UI bubble, not one per destination"
     );
     let keys = alice.identity.secret_bytes();
     let own = crate::identity::account::Account::from_secret_bytes(alice.account.secret_bytes());
     drop(alice);
-    // Simulate a crash during an append, then verify future scopes remain replayable.
+    // A published migration source is a downgrade barrier, not an active
+    // append log. Reject a torn legacy tail, then restore its exact original
+    // bytes and verify the indexed scopes survive the ordinary reopen below.
     use std::io::Write;
+    let scopes = base.join("sent-manifest-scopes.log");
+    let source_len = std::fs::metadata(&scopes).unwrap().len();
     std::fs::OpenOptions::new()
         .append(true)
-        .open(base.join("sent-manifest-scopes.log"))
+        .open(&scopes)
         .unwrap()
         .write_all(&[0, 0, 0, 50, 1, 2])
+        .unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let (ctx, _) = mpsc::unbounded_channel();
+    let (ftx, _) = mpsc::unbounded_channel();
+    let rejected = Node::open_with_account(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        crate::identity::account::Account::from_secret_bytes(own.secret_bytes()),
+        Arc::new(Mutex::new(crate::discovery::Roster::default())),
+        tx,
+        ctx,
+        ftx,
+        &base.join("messages.log"),
+        &base.join("sent.log"),
+        "pw",
+    );
+    assert!(matches!(
+        rejected,
+        Err(crate::eventlog::LogError::CorruptFile(_))
+    ));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&scopes)
+        .unwrap()
+        .set_len(source_len)
         .unwrap();
     let (tx, _) = mpsc::unbounded_channel();
     let (ctx, _) = mpsc::unbounded_channel();
@@ -886,13 +1109,17 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .sync_store(&device.public())
                 .lock()
                 .unwrap()
-                .event_ids(&file),
+                .event_ids(&file)
+                .unwrap(),
             expected,
             "every recipient must retain its own manifest scope after sender restart"
         );
     }
     assert_eq!(
-        reopened.account_history(&account.account_id(), 100).len(),
+        reopened
+            .account_history(&account.account_id(), 100)
+            .unwrap()
+            .len(),
         1
     );
     let server = tokio::spawn(reopened.clone().run_accept_loop(listener));
@@ -908,22 +1135,21 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         })
         .await
         .expect("restarted sender must actually serve chunks to every device");
-        assert_eq!(store.lock().unwrap().event_ids(&file), expected);
+        assert_eq!(store.lock().unwrap().event_ids(&file).unwrap(), expected);
     }
     let second = reopened
         .send_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
         .await
         .unwrap();
-    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-        &base.join("sent-manifest-scopes.log"),
+    // Live scope references use the bounded encrypted index. The authenticated
+    // legacy barrier stays fixed and must never resume append-log writes.
+    assert_eq!(std::fs::metadata(&scopes).unwrap().len(), source_len);
+    crate::node::filebook::scopes::IndexedManifestScopes::authenticate(
+        &reopened.storage,
+        &scopes,
         "pw",
-        b"MTFSC1",
     )
     .unwrap();
-    assert!(
-        scopes.is_empty(),
-        "tracked file scopes belong to bounded delivery metadata"
-    );
     {
         let delivery = reopened.delivery.lock().unwrap();
         for file_conversation in [file, second] {
@@ -932,6 +1158,29 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .find(|card| card.file_conversation == file_conversation)
                 .unwrap();
             assert_eq!(card.destinations.len(), 2);
+            let indexed_scopes = reopened
+                .manifest_scopes
+                .scopes(file_conversation)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(indexed_scopes.len(), card.destinations.len());
+            for scope in indexed_scopes {
+                assert!(
+                    card.destinations
+                        .iter()
+                        .any(|destination| destination.binding.event_id == scope.event)
+                );
+                let original = reopened
+                    .log
+                    .lock()
+                    .unwrap()
+                    .get(&scope.event)
+                    .unwrap()
+                    .unwrap();
+                assert!(original.verify_signature() && original.verify_integrity());
+                assert_eq!(scope.parent, original.conversation_id);
+                assert_eq!(scope.author, original.author);
+            }
             for device in &devices {
                 let destination = card
                     .destinations
@@ -943,7 +1192,7 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                     Some(account.account_id().as_str())
                 );
                 let log = reopened.log.lock().unwrap();
-                let manifest = log.get(&destination.binding.event_id).unwrap();
+                let manifest = log.get(&destination.binding.event_id).unwrap().unwrap();
                 assert_eq!(manifest.kind, crate::eventlog::EventKind::FileManifest);
                 assert_eq!(
                     manifest.conversation_id,
@@ -955,9 +1204,9 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 assert!(manifest.verify_signature() && manifest.verify_integrity());
                 assert_eq!(
                     card.final_chunk,
-                    log.events(&file_conversation).last().map(|e| e.id)
+                    log.events(&file_conversation).unwrap().last().map(|e| e.id)
                 );
-                for (index, chunk) in log.events(&file_conversation).iter().enumerate() {
+                for (index, chunk) in log.events(&file_conversation).unwrap().iter().enumerate() {
                     assert_eq!(chunk.seq, index as u64 + 1);
                     assert_eq!(chunk.parents.len(), usize::from(index > 0));
                 }
@@ -975,12 +1224,16 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .lock()
                 .unwrap()
                 .event_ids(&file)
+                .unwrap()
                 .is_empty(),
             "durable file scope must not bypass account revocation"
         );
     }
     assert_eq!(
-        reopened.account_history(&account.account_id(), 100).len(),
+        reopened
+            .account_history(&account.account_id(), 100)
+            .unwrap()
+            .len(),
         2
     );
     server.abort();
@@ -1002,14 +1255,6 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
     let backup = dir.path().join("scopes-backup");
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
-    alice
-        .privacy
-        .state
-        .write()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .scope_repair_needed = true;
     let file = crate::eventlog::ConversationId::new([31; 32]);
     let parent = crate::eventlog::ConversationId::new([32; 32]);
     let author = crate::eventlog::Author::from_ed25519(alice.identity.public().ed25519_pub);
@@ -1019,17 +1264,7 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
             .remember_sent_manifest_scope(file, parent, author, event)
             .is_err()
     );
-    assert!(
-        !alice
-            .privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes
-            .contains_key(&file)
-    );
+    assert!(!alice.has_file_scope(file).unwrap());
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();
     alice
@@ -1038,24 +1273,24 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
     alice
         .remember_sent_manifest_scope(file, parent, author, event)
         .unwrap();
-    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-        &path, "pw", b"MTFSC1",
-    )
-    .unwrap();
+    let count: i64 = alice
+        .storage
+        .database()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM sent_file_scopes WHERE file=?1",
+                [file.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
     assert_eq!(
-        scopes.len(),
-        1,
-        "retries must repair the journal and remain idempotent"
+        count, 1,
+        "retry preserves exact idempotent sent scope metadata"
     );
     assert!(
-        !alice
-            .privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .scope_repair_needed
+        !alice.has_file_scope(file).unwrap(),
+        "orphan metadata cannot authorize a file without a validated binding"
     );
 }
 
@@ -1121,7 +1356,7 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
                 .unwrap(),
             )
             .unwrap();
-        let event = alice.log.lock().unwrap().events(&parent)[0].id;
+        let event = alice.log.lock().unwrap().events(&parent).unwrap()[0].id;
         alice
             .remember_sent_manifest_scope(file, parent, author, event)
             .unwrap();
@@ -1133,27 +1368,73 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
         .unwrap()
         .get(&originals[0])
         .unwrap()
+        .unwrap()
         .wall_clock;
+    let original = alice
+        .log
+        .lock()
+        .unwrap()
+        .get(&originals[0])
+        .unwrap()
+        .unwrap();
     alice
         .received_files
         .lock()
         .unwrap()
-        .record_durable(&super::received_log::ReceivedEntry {
-            event_id: originals[0],
-            conversation: crate::node::conversation::account_conversation_id(
-                &alice.account_id(),
-                &account.account_id(),
-            ),
-            from: alice.user_id(),
-            wall_clock: original_wall_clock,
-            plaintext: manifest.encode(),
+        .record_file_with_reception(
+            &super::received_log::ReceivedEntry {
+                event_id: original.id,
+                conversation: crate::node::conversation::account_conversation_id(
+                    &alice.account_id(),
+                    &account.account_id(),
+                ),
+                from: alice.user_id(),
+                wall_clock: original_wall_clock,
+                plaintext: manifest.encode(),
+            },
+            Some(&original),
+            None,
+        )
+        .unwrap();
+    let old_scopes = originals
+        .iter()
+        .map(|id| {
+            let event = alice.log.lock().unwrap().get(id).unwrap().unwrap();
+            StoredManifestScope {
+                file,
+                parent: event.conversation_id,
+                author: event.author,
+                event: *id,
+            }
+        })
+        .collect::<Vec<_>>();
+    alice
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute("DELETE FROM transcript_sources WHERE kind=9", [])?;
+            c.execute_batch("DROP TABLE sent_file_scopes;DROP TABLE sent_file_scope_revision")?;
+            Ok(())
         })
         .unwrap();
-    let expected = alice.log.lock().unwrap().event_ids(&file);
+    let expected = alice.log.lock().unwrap().event_ids(&file).unwrap();
     let keys = alice.identity.secret_bytes();
     let own = crate::identity::account::Account::from_secret_bytes(alice.account.secret_bytes());
     drop(alice);
     let scope_path = dir.path().join("sent-manifest-scopes.log");
+    std::fs::remove_file(&scope_path).unwrap();
+    let (mut old_log, _) =
+        crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
+            &scope_path,
+            "pw",
+            b"MTFSC1",
+        )
+        .unwrap();
+    for scope in old_scopes {
+        old_log.append_durable(&scope).unwrap();
+    }
+    drop(old_log);
+
     std::fs::OpenOptions::new()
         .append(true)
         .open(&scope_path)
@@ -1191,7 +1472,8 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
                 .sync_store(&device.public())
                 .lock()
                 .unwrap()
-                .event_ids(&file),
+                .event_ids(&file)
+                .unwrap(),
             expected
         );
     }
@@ -1211,17 +1493,22 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
             .unwrap(),
         )
         .unwrap();
-    let event = alice.log.lock().unwrap().events(&parent)[0].id;
+    let event = alice.log.lock().unwrap().events(&parent).unwrap()[0].id;
     alice
         .remember_sent_manifest_scope(file, parent, author, event)
         .unwrap();
-    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-        &scope_path,
-        "pw",
-        b"MTFSC1",
-    )
-    .unwrap();
-    assert_eq!(scopes.len(), 3);
+    let count: i64 = alice
+        .storage
+        .database()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM sent_file_scopes WHERE file=?1",
+                [file.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(count, 3);
     let server = tokio::spawn(alice.clone().run_accept_loop(listener));
     for device in &devices {
         let store = Mutex::new(crate::eventlog::EventLog::default());
@@ -1235,7 +1522,7 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
         })
         .await
         .unwrap();
-        assert_eq!(store.lock().unwrap().event_ids(&file), expected);
+        assert_eq!(store.lock().unwrap().event_ids(&file).unwrap(), expected);
     }
     server.abort();
     let _ = server.await;
@@ -1443,7 +1730,7 @@ async fn allowed_carrier_cannot_create_a_group_owned_by_an_unknown_author() {
             .ingest(genesis)
             .is_err()
     );
-    assert!(bob.log.lock().unwrap().events(&conv).is_empty());
+    assert!(bob.log.lock().unwrap().events(&conv).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1481,8 +1768,8 @@ async fn manually_allowed_invisible_device_can_receive_later_channel_invitation(
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     let store = carol.sync_store(&alice.identity.public());
     for event in events {
@@ -1493,9 +1780,11 @@ async fn manually_allowed_invisible_device_can_receive_later_channel_invitation(
             .expect("approved inviter's channel ancestry syncs");
     }
     carol.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&carol, channel);
     assert!(
         carol
             .list_channels()
+            .unwrap()
             .iter()
             .any(|summary| summary.id == channel && summary.pending_invite)
     );
@@ -1540,17 +1829,18 @@ async fn invisible_late_invitation_can_arrive_through_an_allowed_post_office() {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     let store = carol.sync_store(&relay.identity.public());
     for event in events {
         store.lock().unwrap().ingest(event).unwrap();
     }
-    carol.process_channel(group);
+    crate::node::test_support::settle_group_metadata(&carol, group);
     assert!(
         carol
             .list_channels()
+            .unwrap()
             .iter()
             .any(|summary| summary.id == group && summary.pending_invite)
     );
@@ -1584,7 +1874,7 @@ async fn manually_allowed_member_cannot_keep_syncing_after_recipient_is_removed(
         .create_channel("Team", vec![bob.identity.public(), carol.identity.public()])
         .await
         .unwrap();
-    let genesis = alice.log.lock().unwrap().events(&group)[0].clone();
+    let genesis = alice.log.lock().unwrap().events(&group).unwrap()[0].clone();
     let removal = crate::eventlog::Event::new(
         &alice.identity,
         group,
@@ -1615,7 +1905,7 @@ async fn manually_allowed_member_cannot_keep_syncing_after_recipient_is_removed(
     store.lock().unwrap().ingest(genesis).unwrap();
     store.lock().unwrap().ingest(removal).unwrap();
     assert!(store.lock().unwrap().ingest(later.clone()).is_err());
-    assert!(!carol.log.lock().unwrap().has(&later.id));
+    assert!(!carol.log.lock().unwrap().has(&later.id).unwrap());
 }
 
 #[tokio::test]
@@ -1648,7 +1938,7 @@ async fn invisible_late_invitee_follows_an_accepted_owner_transfer() {
         .unwrap();
     let (root, lamport) = {
         let log = alice.log.lock().unwrap();
-        let events = log.events(&channel);
+        let events = log.events(&channel).unwrap();
         let last = events.last().unwrap();
         (last.id, last.lamport)
     };
@@ -1672,7 +1962,7 @@ async fn invisible_late_invitee_follows_an_accepted_owner_transfer() {
         .unwrap();
     let (transfer, lamport) = {
         let log = alice.log.lock().unwrap();
-        let events = log.events(&channel);
+        let events = log.events(&channel).unwrap();
         let last = events.last().unwrap();
         (last.id, last.lamport)
     };
@@ -1702,8 +1992,8 @@ async fn invisible_late_invitee_follows_an_accepted_owner_transfer() {
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     let invitation = events.pop().unwrap();
     assert_eq!(invitation.kind, EventKind::MembershipChange);
@@ -1718,17 +2008,33 @@ async fn invisible_late_invitee_follows_an_accepted_owner_transfer() {
             .unwrap_or_else(|error| panic!("{kind:?} seq {seq} ancestry sync failed: {error}"));
     }
     assert!(
-        carol.log.lock().unwrap().events(&channel).is_empty(),
+        carol
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .is_empty(),
         "channel ancestry must stay ephemeral until a valid invitation arrives"
     );
     carol.process_channel(channel);
-    assert!(carol.list_channels().is_empty());
+    assert!(carol.list_channels().unwrap().is_empty());
     store.lock().unwrap().ingest(invitation).unwrap();
-    assert!(!carol.log.lock().unwrap().events(&channel).is_empty());
+    assert!(
+        !carol
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .is_empty()
+    );
     carol.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&carol, channel);
     assert!(
         carol
             .list_channels()
+            .unwrap()
             .iter()
             .any(|summary| summary.id == channel && summary.pending_invite)
     );
@@ -1762,7 +2068,7 @@ async fn invisible_sync_discards_uninvited_history_and_unowned_invitation() {
         .create_channel_invited("Unrelated", vec![bob.identity.public()])
         .await
         .unwrap();
-    let genesis = alice.log.lock().unwrap().events(&channel)[0].clone();
+    let genesis = alice.log.lock().unwrap().events(&channel).unwrap()[0].clone();
     let message = crate::eventlog::Event::new(
         &alice.identity,
         channel,
@@ -1797,9 +2103,23 @@ async fn invisible_sync_discards_uninvited_history_and_unowned_invitation() {
     for event in [genesis.clone(), message, forged_invite] {
         store.lock().unwrap().ingest(event).unwrap();
     }
-    assert_eq!(store.lock().unwrap().event_ids(&channel).len(), 3);
-    assert!(!store.lock().unwrap().durable_have(&channel, &genesis.id));
-    assert!(carol.log.lock().unwrap().events(&channel).is_empty());
+    assert_eq!(store.lock().unwrap().event_ids(&channel).unwrap().len(), 3);
+    assert!(
+        !store
+            .lock()
+            .unwrap()
+            .durable_have(&channel, &genesis.id)
+            .unwrap()
+    );
+    assert!(
+        carol
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .is_empty()
+    );
     drop(store);
     assert!(
         carol
@@ -1807,6 +2127,7 @@ async fn invisible_sync_discards_uninvited_history_and_unowned_invitation() {
             .lock()
             .unwrap()
             .event_ids(&channel)
+            .unwrap()
             .is_empty()
     );
 }
@@ -1829,7 +2150,15 @@ async fn projected_group_removal_takes_effect_before_channel_book_refresh() {
     )
     .unwrap();
     bob.set_invisible(true).await.unwrap();
-    let last = bob.log.lock().unwrap().events(&group).last().unwrap().id;
+    let last = bob
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .unwrap()
+        .last()
+        .unwrap()
+        .id;
     let meta = crate::channel::ChannelMeta {
         name: "Group".into(),
         members: vec![bob.identity.public()],
@@ -1848,7 +2177,7 @@ async fn projected_group_removal_takes_effect_before_channel_book_refresh() {
     );
     bob.log.lock().unwrap().append(removal).unwrap();
     assert!(
-        !bob.group_member(&alice.identity.public()),
+        !bob.group_member(&alice.identity.public()).unwrap(),
         "stale channel book must not disclose signed listening presence to a removed member"
     );
     assert!(
@@ -1856,6 +2185,7 @@ async fn projected_group_removal_takes_effect_before_channel_book_refresh() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .is_empty()
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1894,7 +2224,15 @@ async fn invisible_sync_stops_projecting_events_after_channel_dissolution() {
         .unwrap();
     owner.set_invisible(true).await.unwrap();
 
-    let last = owner.log.lock().unwrap().events(&group).last().unwrap().id;
+    let last = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .unwrap()
+        .last()
+        .unwrap()
+        .id;
     let terminal = crate::eventlog::Event::new(
         &owner.identity,
         group,
@@ -1925,7 +2263,8 @@ async fn invisible_sync_stops_projecting_events_after_channel_dissolution() {
         .sync_store(&member.identity.public())
         .lock()
         .unwrap()
-        .event_ids(&group);
+        .event_ids(&group)
+        .unwrap();
     assert!(visible.contains(&terminal.id));
     assert!(!visible.contains(&late.id));
 }
@@ -1962,12 +2301,13 @@ async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .is_empty(),
         "the peer must be able to sync before leaving"
     );
     let (before_id, before_lamport) = {
         let log = alice.log.lock().unwrap();
-        let events = log.events(&group);
+        let events = log.events(&group).unwrap();
         let before = events.last().unwrap();
         (before.id, before.lamport)
     };
@@ -2006,18 +2346,27 @@ async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
     let leave_id = leave.id;
     alice.log.lock().unwrap().append(leave).unwrap();
     assert!(
-        !alice.group_member(&bob.identity.public()),
+        !alice.group_member(&bob.identity.public()).unwrap(),
         "admission must honor the signed leave despite the stale owner snapshot"
     );
     alice
         .append_event(group, EventKind::ChannelRename, b"After leave".to_vec())
         .unwrap();
-    let after_leave = alice.log.lock().unwrap().events(&group).last().unwrap().id;
+    let after_leave = alice
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .unwrap()
+        .last()
+        .unwrap()
+        .id;
     let visible = alice
         .sync_store(&bob.identity.public())
         .lock()
         .unwrap()
-        .event_ids(&group);
+        .event_ids(&group)
+        .unwrap();
     assert!(visible.contains(&snapshot_id));
     assert!(visible.contains(&leave_id));
     assert!(
@@ -2054,7 +2403,7 @@ async fn departed_peer_can_sync_transfer_needed_for_causal_reinvitation() {
     alice.set_invisible(true).await.unwrap();
     let (parent, lamport) = {
         let log = alice.log.lock().unwrap();
-        let events = log.events(&group);
+        let events = log.events(&group).unwrap();
         let last = events.last().unwrap();
         (last.id, last.lamport)
     };
@@ -2078,7 +2427,7 @@ async fn departed_peer_can_sync_transfer_needed_for_causal_reinvitation() {
         .unwrap();
     let (transfer_id, transfer_lamport) = {
         let log = alice.log.lock().unwrap();
-        let events = log.events(&group);
+        let events = log.events(&group).unwrap();
         let last = events.last().unwrap();
         (last.id, last.lamport)
     };
@@ -2110,6 +2459,7 @@ async fn departed_peer_can_sync_transfer_needed_for_causal_reinvitation() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .contains(&invite_id),
         "the departed peer needs the valid transfer to verify a later invitation"
     );
@@ -2160,7 +2510,10 @@ async fn manually_trusted_relay_only_delivers_cached_verified_dm_authors() {
     );
     let store = bob.sync_store(&relay.identity.public());
     assert!(store.lock().unwrap().ingest(allowed.clone()).is_ok());
-    assert_eq!(store.lock().unwrap().event_ids(&conv), vec![allowed.id]);
+    assert_eq!(
+        store.lock().unwrap().event_ids(&conv).unwrap(),
+        vec![allowed.id]
+    );
     let denied = crate::eventlog::Event::new(
         &stranger,
         conv,
@@ -2172,11 +2525,11 @@ async fn manually_trusted_relay_only_delivers_cached_verified_dm_authors() {
         b"unknown relayed device".to_vec(),
     );
     assert!(store.lock().unwrap().ingest(denied).is_err());
-    assert_eq!(bob.log.lock().unwrap().events(&conv).len(), 1);
+    assert_eq!(bob.log.lock().unwrap().events(&conv).unwrap().len(), 1);
     bob.set_allowed(&alice.account_id(), false).await.unwrap();
-    assert!(store.lock().unwrap().event_ids(&conv).is_empty());
+    assert!(store.lock().unwrap().event_ids(&conv).unwrap().is_empty());
     assert_eq!(
-        bob.log.lock().unwrap().events(&conv).len(),
+        bob.log.lock().unwrap().events(&conv).unwrap().len(),
         1,
         "revocation must not delete history"
     );
@@ -2247,11 +2600,18 @@ async fn trusted_local_account_adoption_reopens_without_relaxing_foreign_binding
         )
         .unwrap();
     original.set_invisible(true).await.unwrap();
+    let new_account = crate::identity::account::Account::generate();
+    original
+        .persist_account_adoption(
+            &new_account.public(),
+            || Ok(()),
+            || Ok(original.account.public()),
+        )
+        .unwrap();
     drop(original);
     let (tx, _) = mpsc::unbounded_channel();
     let (ctx, _) = mpsc::unbounded_channel();
     let (ftx, _) = mpsc::unbounded_channel();
-    let new_account = crate::identity::account::Account::generate();
     let node = Node::open_with_account(
         DeviceIdentity::from_secret_bytes(keys.0, keys.1),
         new_account,
@@ -2336,7 +2696,7 @@ async fn revoking_an_open_connection_rejects_late_event_without_append() {
         .unwrap()
         .is_err()
     );
-    assert!(bob.log.lock().unwrap().events(&conv).is_empty());
+    assert!(bob.log.lock().unwrap().events(&conv).unwrap().is_empty());
     server.abort();
 }
 
@@ -2366,7 +2726,7 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
     );
     let server = tokio::spawn(bob.clone().run_accept_loop(listener));
     let mut log = crate::eventlog::EventLog::default();
-    for event in bob.log.lock().unwrap().events(&group) {
+    for event in bob.log.lock().unwrap().events(&group).unwrap() {
         log.append(event.clone()).unwrap();
     }
     let (parents, lamport) = log.prepare(&group).unwrap();
@@ -2398,6 +2758,7 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .any(|e| e.id == id)
     );
@@ -2427,7 +2788,7 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
         .unwrap()
         .is_err()
     );
-    assert!(bob.log.lock().unwrap().events(&conv).is_empty());
+    assert!(bob.log.lock().unwrap().events(&conv).unwrap().is_empty());
     assert!(
         bob.send_call_signal(&alice.user_id(), b"offer")
             .await
@@ -2465,7 +2826,7 @@ async fn background_profiles_never_create_private_dm_events_or_grants() {
     let conv =
         crate::node::conversation::dm_conversation_id(&alice.identity.public(), &bob.public());
     assert!(
-        alice.log.lock().unwrap().events(&conv).is_empty(),
+        alice.log.lock().unwrap().events(&conv).unwrap().is_empty(),
         "background profile must not stage denied peer events"
     );
     assert!(alice.privacy_snapshot().allowed_accounts.is_empty());
@@ -2556,7 +2917,7 @@ async fn allowed_carrier_cannot_append_a_stranger_authored_dm_event() {
     .await
     .unwrap();
     assert!(
-        bob.log.lock().unwrap().events(&conv).is_empty(),
+        bob.log.lock().unwrap().events(&conv).unwrap().is_empty(),
         "permitted transport must not admit unknown event authors"
     );
     server.abort();
@@ -2993,6 +3354,133 @@ async fn reachable_route_is_not_blocked_by_stalled_former_lan_handshake() {
 }
 
 #[tokio::test]
+async fn liveness_dial_deadline_includes_admission_and_releases_policy_writer() {
+    dial_deadline_releases_policy_writer(super::session_pool::AuthenticationPriority::Ordinary)
+        .await;
+}
+
+#[tokio::test]
+async fn liveness_control_dial_deadline_includes_admission_and_releases_policy_writer() {
+    dial_deadline_releases_policy_writer(super::session_pool::AuthenticationPriority::Control)
+        .await;
+}
+
+async fn dial_deadline_releases_policy_writer(
+    priority: super::session_pool::AuthenticationPriority,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let expected = bob.identity.public();
+    for _ in 0..10 {
+        alice.sessions.authentication_timed_out(&expected, address);
+    }
+    let authentication = alice
+        .sessions
+        .authentication_admission(alice.peer_endpoint_key(address, &expected))
+        .await
+        .unwrap();
+    tokio::time::pause();
+    let sender = alice.clone();
+    let dial = tokio::spawn(async move {
+        sender
+            .privacy_dial_priority(address, &expected, priority)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(alice.privacy.gate.try_write().is_err());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    drop(authentication);
+    // Complete only the TCP accept using real I/O; the remote never speaks Noise.
+    tokio::time::resume();
+    let (_stalled, _) = listener.accept().await.unwrap();
+    tokio::time::pause();
+    let changing = alice.clone();
+    let writer = tokio::spawn(async move { changing.set_invisible(true).await });
+    tokio::task::yield_now().await;
+    assert!(!writer.is_finished());
+    tokio::time::advance(Duration::from_millis(19_100)).await;
+    let released = tokio::time::timeout(Duration::from_millis(100), writer).await;
+    assert!(
+        released.is_ok(),
+        "authentication extended the whole-dial deadline and retained the privacy gate"
+    );
+    released.unwrap().unwrap().unwrap();
+    assert!(matches!(
+        dial.await.unwrap(),
+        Err(TransportError::Noise(message)) if message == "dial deadline exceeded"
+    ));
+    let permits: Vec<_> = (0..crate::node::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| {
+            alice
+                .sessions
+                .try_outbound()
+                .expect("timed-out dial retained socket capacity")
+        })
+        .collect();
+    drop(permits);
+}
+
+#[tokio::test]
+async fn liveness_control_dial_cancellation_releases_authentication_and_socket_owners() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let expected = bob.identity.public();
+    let sender = alice.clone();
+    let peer = expected.clone();
+    let dial = tokio::spawn(async move {
+        sender
+            .privacy_dial_priority(
+                address,
+                &peer,
+                super::session_pool::AuthenticationPriority::Control,
+            )
+            .await
+    });
+    let (_stalled, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("the control dial must own a real socket before cancellation")
+        .unwrap();
+    assert!(alice.privacy.gate.try_write().is_err());
+    dial.abort();
+    assert!(matches!(dial.await, Err(error) if error.is_cancelled()));
+    assert!(alice.privacy.gate.try_write().is_ok());
+    let authentication = tokio::time::timeout(
+        Duration::from_millis(100),
+        alice
+            .sessions
+            .authentication_admission(alice.peer_endpoint_key(address, &expected)),
+    )
+    .await
+    .expect("cancelling control authentication must release the route to ordinary work")
+    .unwrap();
+    let permits: Vec<_> = (0..crate::node::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| {
+            alice
+                .sessions
+                .try_outbound()
+                .expect("cancelled control dial retained socket capacity")
+        })
+        .collect();
+    drop(permits);
+    drop(authentication);
+}
+
+#[tokio::test]
 async fn existing_contact_local_acceptance_does_not_wait_for_stalled_network_handshake() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alice");
@@ -3110,4 +3598,240 @@ async fn alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route() 
         "idle pooled connections must yield capacity to a reachable alternate route"
     );
     assert_eq!(result.unwrap().unwrap().peer_identity(), &expected);
+}
+
+#[tokio::test]
+async fn account_change_recovery_is_read_only_until_exact_device_acceptance() {
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let (recipient, _) = node(directory.path());
+    recipient
+        .configure_privacy(
+            directory.path(),
+            "pw",
+            &recipient.signed_announce("Recipient", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let devices = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+    let previous = Account::generate();
+    let current = Account::generate();
+    for device in &devices {
+        let old = Announce::new_with_account(device, &previous, "Before", 2);
+        recipient.roster.lock().unwrap().update(
+            &old,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &recipient.user_id(),
+        );
+    }
+    recipient.cached_peer_snapshot_async().await.unwrap();
+    let claims: Vec<_> = devices
+        .iter()
+        .map(|device| Announce::new_with_account(device, &current, "After", 2))
+        .collect();
+    for proof in &claims {
+        recipient.roster.lock().unwrap().update(
+            proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &recipient.user_id(),
+        );
+    }
+    let documents = || {
+        ["privacy.policy", "peer-proofs"]
+            .map(|name| std::fs::read(directory.path().join(name)).unwrap())
+    };
+    let before = documents();
+    let changes = recipient.account_binding_changes(&current.account_id());
+    assert_eq!(changes.len(), 2);
+    assert_eq!(
+        recipient.account_binding_changes(&previous.account_id()),
+        changes
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "diagnostics must not grant or persist new bindings"
+    );
+    assert!(
+        recipient
+            .accept_account_binding_change_guarded(&changes[0], |_| Err(denied()))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "retired host authority cannot mutate a binding"
+    );
+    let selected = changes[0].clone();
+    let third = Account::generate();
+    let device = devices
+        .iter()
+        .find(|device| device.public().user_id() == selected.device_id)
+        .unwrap();
+    let newer = Announce::new_with_account(device, &third, "Changed again", 2);
+    assert!(
+        recipient
+            .accept_account_binding_change_guarded(&selected, |commit| {
+                recipient.roster.lock().unwrap().update(
+                    &newer,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    &recipient.user_id(),
+                );
+                commit()
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "a changed proposal must fail at commit"
+    );
+    let reviewed = claims
+        .iter()
+        .find(|proof| proof.user_id == selected.device_id)
+        .unwrap();
+    recipient.roster.lock().unwrap().update(
+        reviewed,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &recipient.user_id(),
+    );
+    recipient
+        .accept_account_binding_change_guarded(&selected, |commit| commit())
+        .await
+        .unwrap();
+    let remaining = recipient.account_binding_changes(&current.account_id());
+    assert_eq!(
+        remaining.len(),
+        1,
+        "accepting one device must not accept a second unreviewed change"
+    );
+    assert_ne!(remaining[0].device_id, selected.device_id);
+    assert!(
+        recipient
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|account| account.id == current.account_id())
+    );
+    let state = recipient.privacy.state.read().unwrap();
+    let proofs = &state.as_ref().unwrap().proofs;
+    assert!(proofs.accepts_binding(reviewed));
+    assert!(
+        !proofs.accepts_binding(
+            claims
+                .iter()
+                .find(|proof| proof.user_id == remaining[0].device_id)
+                .unwrap()
+        )
+    );
+}
+
+#[tokio::test]
+async fn authenticated_preferred_route_keeps_last_slot_ahead_of_known_stalled_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    // One wildcard listener accepts two loopback destination IPs on one port.
+    // The stale IP accepts TCP but pauses before Noise authentication.
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let good = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let stale = std::net::SocketAddr::from(([127, 0, 0, 2], port));
+    let proof = bob.signed_announce("Bob", port);
+    let expected = bob.identity.public();
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, good.ip(), &alice.user_id());
+    let (connected, accepted) = tokio::join!(alice.privacy_dial(good, &expected), async {
+        let (stream, _) = listener.accept().await.unwrap();
+        bob.privacy_accept(stream).await.unwrap()
+    },);
+    drop(connected.unwrap());
+    drop(accepted);
+    assert_eq!(
+        alice.preferred_routes.lock().unwrap().get(&bob.user_id()),
+        Some(&good)
+    );
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update_routed(&proof, stale.ip(), &alice.user_id());
+    let held: Vec<_> = (1..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| alice.sessions.try_outbound().unwrap())
+        .collect();
+    let stalled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_stalls = stalled.clone();
+    let server = tokio::spawn(async move {
+        let mut stalled_sockets = Vec::new();
+        let mut accepted_channels = Vec::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            if stream.local_addr().unwrap().ip() == stale.ip() {
+                observed_stalls.fetch_add(1, Ordering::SeqCst);
+                stalled_sockets.push(stream);
+            } else {
+                accepted_channels.push(bob.privacy_accept(stream).await.unwrap());
+            }
+        }
+    });
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(700),
+        alice.privacy_dial(stale, &expected),
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    assert!(
+        outcome.is_ok(),
+        "a known stale supplied endpoint consumed the last outbound slot before the authenticated preferred route"
+    );
+    let channel = outcome.unwrap().unwrap();
+    assert_eq!(channel.peer_identity(), &expected);
+    assert_eq!(
+        stalled.load(Ordering::SeqCst),
+        0,
+        "the known stale endpoint should never lead the healthy authenticated path"
+    );
+    drop(channel);
+    drop(held);
+}
+
+#[test]
+fn fresh_one_off_routes_lead_and_signed_ports_supersede_cached_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = bob.identity.public();
+    let old = std::net::SocketAddr::from(([127, 0, 0, 1], 41001));
+    let replacement = std::net::SocketAddr::from(([127, 0, 0, 1], 41002));
+    let one_off = std::net::SocketAddr::from(([127, 0, 0, 3], 41003));
+    let proof = bob.signed_announce("Bob", replacement.port());
+    alice
+        .preferred_routes
+        .lock()
+        .unwrap()
+        .insert(bob.user_id(), old);
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, replacement.ip(), &alice.user_id());
+    let candidates = alice.privacy_route_candidates(replacement, &expected, Some(&proof));
+    assert_eq!(candidates[0], replacement);
+    assert!(
+        !candidates.contains(&old),
+        "a newer signed listening port supersedes a cached port on the same IP"
+    );
+    let candidates = alice.privacy_route_candidates(one_off, &expected, Some(&proof));
+    assert_eq!(
+        candidates[0], one_off,
+        "a genuinely new one-off listener retains explicit priority"
+    );
+    assert!(candidates.contains(&replacement));
+    assert!(!candidates.contains(&old));
 }

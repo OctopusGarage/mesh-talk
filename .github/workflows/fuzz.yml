@@ -6,7 +6,7 @@ name: Fuzz
 # (The cheap always-on guard is the `decoder_smoke` test, run by the normal CI.)
 on:
   schedule:
-    - cron: "0 5 * * 2" # Tuesdays 05:00 UTC (mutation testing runs Mondays)
+    - cron: "0 5 * * 2" # Weekly decoder sweep
   workflow_dispatch:
     inputs:
       max_total_time:
@@ -18,15 +18,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  group: fuzz-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '120' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Validate dispatch budget and manifest before tool installation
+        run: python3 -B scripts/ci/fuzz-targets.py --validate
 
       # cargo-fuzz requires a nightly toolchain (libFuzzer + sanitizer instrumentation).
       - name: Install Rust nightly
@@ -38,7 +47,7 @@ jobs:
           workspaces: "fuzz -> target"
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-fuzz
 
@@ -47,19 +56,12 @@ jobs:
         # libFuzzer sanitizer (ASan) is incompatible with statically-linked musl libc
         # ("sanitizer is incompatible with statically linked libc"). gnu = dynamic libc,
         # and it's the runner's host target so its std is already present.
-        run: |
-          set -euo pipefail
-          TIME="${{ github.event.inputs.max_total_time || '120' }}"
-          TARGET="x86_64-unknown-linux-gnu"
-          for target in $(cargo +nightly fuzz list); do
-            echo "::group::fuzz $target (${TIME}s)"
-            cargo +nightly fuzz run --target "$TARGET" "$target" -- -max_total_time="$TIME" -rss_limit_mb=4096
-            echo "::endgroup::"
-          done
+        run: python3 -B scripts/ci/fuzz-targets.py
 
       # A crash leaves a reproducer under fuzz/artifacts/<target>/ — keep it for triage.
       - name: Upload crash artifacts
         if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes

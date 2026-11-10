@@ -173,7 +173,7 @@ interface ThemeState {
   set: (t: Theme) => void;
   setWallpaperEnabled: (enabled: boolean) => void;
   setPackWallpaper: (id: string) => void;
-  refresh: () => void;
+  refresh: (preserveMissing?: boolean) => void;
 }
 
 function persist(
@@ -216,9 +216,13 @@ export const useTheme = create<ThemeState>((set, get) => ({
     apply(get().theme, true, selections);
     set({ packWallpaperIds: selections });
   },
-  refresh: () => {
+  refresh: (preserveMissing = false) => {
     const current = get().theme;
-    if (!ALL_THEMES.includes(current) && !installedTheme(current)) {
+    if (
+      !preserveMissing &&
+      !ALL_THEMES.includes(current) &&
+      !installedTheme(current)
+    ) {
       persist("dark", false, get().packWallpaperIds);
       set({ theme: "dark" });
     } else apply(current, false, get().packWallpaperIds);
@@ -252,7 +256,12 @@ export function savedAppearanceValues(): Record<string, string> {
 }
 
 export function applyLinkedAppearance(key: string, value: string | null): void {
-  if (value === null) return;
+  if (value === null) {
+    if (key === "theme") value = "dark";
+    else if (key === "wallpaper_enabled") value = "on";
+    else if (key === "pack_wallpaper_ids") value = "{}";
+    else return;
+  }
   const state = useTheme.getState();
   if (key === "theme") {
     if (/^[a-z0-9][a-z0-9._-]{2,79}$/.test(value) && state.theme !== value)

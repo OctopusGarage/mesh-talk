@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Mutex, OnceLock},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_GRANTS: usize = 256;
@@ -36,6 +37,19 @@ pub struct AuditEntry {
     pub operation_id: Option<String>,
     pub message_id: Option<String>,
 }
+/// Content-free projection for the desktop settings owner. No retry keys or message IDs.
+#[derive(Clone, Debug, Serialize)]
+pub struct RecentSendActivity {
+    pub at_ms: u64,
+    pub destination: Destination,
+    pub action: SendActivityAction,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendActivityAction {
+    Accepted,
+    Retried,
+}
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
     version: u32,
@@ -52,13 +66,31 @@ pub struct GrantRegistry {
     audit: Vec<AuditEntry>,
     rate: HashMap<String, (u64, u32)>,
 }
+// Persisted deadlines require a trustworthy system clock across launches. Within
+// this process a wall-clock rollback cannot extend authority, even after a host restart.
+fn advance_time(previous: u64, elapsed: u128, wall: u64) -> u64 {
+    wall.max(previous.saturating_add(elapsed.min(u64::MAX as u128) as u64))
+}
 pub fn now_ms() -> u64 {
-    SystemTime::now()
+    static CLOCK: OnceLock<Mutex<(u64, Instant)>> = OnceLock::new();
+    let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-        .min(u64::MAX as u128) as u64
+        .min(u64::MAX as u128) as u64;
+    let mut clock = CLOCK
+        .get_or_init(|| Mutex::new((wall, Instant::now())))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = advance_time(clock.0, clock.1.elapsed().as_millis(), wall);
+    // Preserve fractional elapsed time between observations; only wall advances
+    // beyond the monotonic projection require a new anchor.
+    if wall > advance_time(clock.0, clock.1.elapsed().as_millis(), 0) {
+        *clock = (now, Instant::now());
+    }
+    now
 }
+
 pub fn new_token() -> String {
     let mut bytes = [0; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -323,6 +355,33 @@ impl GrantRegistry {
             .cloned()
             .collect())
     }
+    /// Bounded settings projection; callable without an active client grant.
+    pub fn recent_send_activity(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<RecentSendActivity>, IntegrationError> {
+        Ok(self
+            .audit()?
+            .into_iter()
+            .rev()
+            .filter_map(|entry| {
+                if entry.client_id != client_id {
+                    return None;
+                }
+                let action = match entry.action.as_str() {
+                    "message.accept" => SendActivityAction::Accepted,
+                    "message.retry" => SendActivityAction::Retried,
+                    _ => return None,
+                };
+                Some(RecentSendActivity {
+                    at_ms: entry.at_ms,
+                    destination: entry.destination?,
+                    action,
+                })
+            })
+            .take(20)
+            .collect())
+    }
     pub(crate) fn charge_send(&mut self, grant: &Grant) -> Result<(), IntegrationError> {
         let now = now_ms();
         let bucket = self.rate.entry(grant.id.clone()).or_insert((now, 5000));
@@ -347,6 +406,72 @@ impl GrantRegistry {
 mod tests {
     use super::*;
     use crate::Destination;
+    #[test]
+    fn logical_clock_never_revives_authority_after_forward_then_backward_jump() {
+        assert_eq!(advance_time(1_000, 100, 900), 1_100);
+        let forward = advance_time(1_100, 100, 100_000);
+        assert_eq!(forward, 100_000);
+        assert_eq!(advance_time(forward, 100, 1_000), 100_100);
+        assert_eq!(advance_time(u64::MAX - 1, 100, 0), u64::MAX);
+    }
+
+    #[test]
+    fn recent_activity_is_bounded_filtered_and_content_free_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grants");
+        let account = "ab".repeat(16);
+        let destination = Destination::Channel {
+            id: "cd".repeat(32),
+        };
+        let mut registry = GrantRegistry::open(&path, "pw", &account).unwrap();
+        for index in 0..30 {
+            registry.push_audit(AuditEntry {
+                at_ms: now_ms() + index,
+                action: "message.accept".into(),
+                client_id: "desktop-local-agent".into(),
+                destination: Some(destination.clone()),
+                operation_id: Some("private-retry-id".into()),
+                message_id: Some("private-message-id".into()),
+            });
+        }
+        for (client, action) in [
+            ("other-agent", "message.accept"),
+            ("desktop-local-agent", "grant.create"),
+        ] {
+            registry.push_audit(AuditEntry {
+                at_ms: now_ms(),
+                action: action.into(),
+                client_id: client.into(),
+                destination: Some(destination.clone()),
+                operation_id: None,
+                message_id: None,
+            });
+        }
+        registry.persist().unwrap();
+        drop(registry);
+        let registry = GrantRegistry::open(&path, "pw", &account).unwrap();
+        let activity = registry
+            .recent_send_activity("desktop-local-agent")
+            .unwrap();
+        assert_eq!(activity.len(), 20);
+        assert!(
+            activity
+                .windows(2)
+                .all(|pair| pair[0].at_ms >= pair[1].at_ms)
+        );
+        let json = serde_json::to_string(&activity).unwrap();
+        for private in [
+            "private-retry-id",
+            "private-message-id",
+            "client_id",
+            "operation_id",
+            "message_id",
+            "grant.create",
+        ] {
+            assert!(!json.contains(private));
+        }
+    }
+
     #[test]
     fn grants_bind_client_to_exact_destination_and_never_imply_description() {
         let dir = tempfile::tempdir().unwrap();

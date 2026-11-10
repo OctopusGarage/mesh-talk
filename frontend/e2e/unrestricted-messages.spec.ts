@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
@@ -7,6 +8,7 @@ test("display-language settings remain available without message-language restri
 }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("settings-language-select")).toBeEnabled();
   await expect(page.getByTestId("settings-dm-language-select")).toHaveCount(0);
   await page

@@ -1,3 +1,19 @@
+import i18n from "./i18n";
+
+const relativeFormats = new Map<string, Intl.RelativeTimeFormat>();
+function relativeTime() {
+  const language = i18n.resolvedLanguage ?? "en";
+  let format = relativeFormats.get(language);
+  if (!format) {
+    format = new Intl.RelativeTimeFormat(language, {
+      numeric: "auto",
+      style: "narrow",
+    });
+    relativeFormats.set(language, format);
+  }
+  return format;
+}
+
 /** First n hex chars of an id, for compact display. */
 export function shortId(id: string, n = 8): string {
   return id.length > n ? id.slice(0, n) : id;
@@ -10,7 +26,10 @@ function toMillis(wall: number): number {
 
 export function formatTime(wall: number): string {
   const d = new Date(toMillis(wall));
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString(i18n.resolvedLanguage, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export function formatDay(wall: number): string {
@@ -18,17 +37,38 @@ export function formatDay(wall: number): string {
   const today = new Date();
   const yest = new Date();
   yest.setDate(today.getDate() - 1);
-  if (d.toDateString() === today.toDateString()) return "Today";
-  if (d.toDateString() === yest.toDateString()) return "Yesterday";
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  const offset =
+    d.toDateString() === today.toDateString()
+      ? 0
+      : d.toDateString() === yest.toDateString()
+        ? -1
+        : null;
+  if (offset !== null) {
+    const label = relativeTime().format(offset, "day");
+    return label.replace(/^./u, (initial) =>
+      initial.toLocaleUpperCase(i18n.resolvedLanguage),
+    );
+  }
+  return d.toLocaleDateString(i18n.resolvedLanguage, {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 /** Compact "Ns ago" / "Nm ago" for a whole-seconds elapsed value. */
 export function formatAgo(secs: number): string {
-  if (secs < 1) return "just now";
-  if (secs < 60) return `${secs}s ago`;
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
-  return `${Math.floor(secs / 3600)}h ago`;
+  if (secs < 1) {
+    return i18n.resolvedLanguage?.startsWith("en")
+      ? "just now"
+      : relativeTime().format(0, "second");
+  }
+  const [value, unit] =
+    secs < 60
+      ? ([Math.floor(secs), "second"] as const)
+      : secs < 3600
+        ? ([Math.floor(secs / 60), "minute"] as const)
+        : ([Math.floor(secs / 3600), "hour"] as const);
+  return relativeTime().format(-value, unit);
 }
 
 export function humanSize(bytes: number): string {

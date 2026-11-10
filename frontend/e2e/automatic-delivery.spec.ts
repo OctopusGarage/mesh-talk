@@ -3,11 +3,15 @@ import {
   enterChat,
   openBobDm,
   revealComposerTools,
+  revealComposerAttachments,
   BOB,
 } from "./helpers/session";
 import { seedMarketPacks } from "./helpers/packs";
 import { seedThemeBeforeLoad } from "./helpers/session";
 import type { Page } from "@playwright/test";
+
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
 
 async function observeLocalDelivery(page: Page) {
   await page.evaluate(() => {
@@ -19,7 +23,7 @@ async function observeLocalDelivery(page: Page) {
         ) => Promise<unknown>;
       };
       __deliveryDetailsFixture: {
-        observation: { kind: string; age_ms: number } | null;
+        observation: { kind: string; age_ms: number; reason?: string } | null;
         hold: boolean;
         entered: boolean;
         seenKind: string | null;
@@ -27,9 +31,14 @@ async function observeLocalDelivery(page: Page) {
       };
     };
     const state = {
-      observation: { kind: "retry_scheduled", age_ms: 180000 } as {
+      observation: {
+        kind: "retry_scheduled",
+        age_ms: 180000,
+        reason: "post_office_disabled",
+      } as {
         kind: string;
         age_ms: number;
+        reason?: string;
       } | null,
       hold: false,
       entered: false,
@@ -71,6 +80,13 @@ for (const viewport of [
     await seedThemeBeforeLoad(page, viewport.theme);
     await enterChat(page);
     await openBobDm(page);
+    if (viewport.width < 760) {
+      // Native windows have a 760px minimum. Isolate the conversation to stress
+      // inline details at 320px without the desktop rail consuming its width.
+      await page.getByTestId("sidebar").evaluate((element) => {
+        element.style.display = "none";
+      });
+    }
     await observeLocalDelivery(page);
     await page
       .getByTestId("composer-input")
@@ -87,21 +103,57 @@ for (const viewport of [
     await expect(details).toBeVisible();
     await expect(details).toHaveAccessibleName("Delivery details");
     await expect(details).toContainText(/Retry was scheduled .*minutes ago\./);
+    await expect(details).toContainText(
+      "Post-office sending was disabled on this device",
+    );
+    await expect(
+      details.getByRole("button", { name: "Review delivery settings" }),
+    ).toBeVisible();
     await expect(details.locator("[aria-live]")).toHaveCount(0);
     await expect(bubble.getByRole("button", { name: /resend/i })).toHaveCount(
       0,
     );
+    const timeBounds = await bubble.getByTestId("message-time").boundingBox();
+    const triggerBounds = await trigger.boundingBox();
+    expect(timeBounds!.x + timeBounds!.width).toBeLessThanOrEqual(
+      triggerBounds!.x,
+    );
     const bounds = await details.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
-    expect(bounds!.y).toBeGreaterThanOrEqual(0);
-    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
-    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
+    expect(
+      await details.evaluate((element) => getComputedStyle(element).position),
+    ).toBe("static");
     expect(
       await details.evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
+        (element) => element.closest('[data-testid="message-bubble"]') !== null,
       ),
     ).toBe(true);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+    const layout = await details.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      width: element.getBoundingClientRect().width,
+      overflowingChildren: Array.from(element.querySelectorAll("*"))
+        .filter((child) => child.scrollWidth > child.clientWidth)
+        .map((child) => ({
+          tag: child.tagName,
+          left:
+            child.getBoundingClientRect().left -
+            element.getBoundingClientRect().left,
+          right:
+            child.getBoundingClientRect().right -
+            element.getBoundingClientRect().left,
+          classes: child.getAttribute("class"),
+          scrollWidth: child.scrollWidth,
+          clientWidth: child.clientWidth,
+          width: child.getBoundingClientRect().width,
+        })),
+    }));
+    expect(layout.scrollWidth, JSON.stringify(layout)).toBeLessThanOrEqual(
+      layout.clientWidth,
+    );
+    expect(layout.overflowingChildren, JSON.stringify(layout)).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath("delivery-details-open.png"),
     });
@@ -110,6 +162,43 @@ for (const viewport of [
     await expect(trigger).toBeFocused();
     await trigger.press("Space");
     await expect(details).toBeVisible();
+    await details
+      .getByRole("button", { name: "Review delivery settings" })
+      .click();
+    const settings = page
+      .getByRole("dialog")
+      .filter({ has: page.locator("#setting-post-office") });
+    await expect(settings).toBeVisible();
+    await expect(page.locator("#setting-post-office")).toBeFocused();
+    await settings.press("Escape");
+    await expect(settings).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          __deliveryDetailsFixture: { observation: unknown };
+        }
+      ).__deliveryDetailsFixture.observation = {
+        kind: "retry_scheduled",
+        age_ms: 0,
+        reason: "no_known_route",
+      };
+    });
+    await trigger.focus();
+    await trigger.press("Enter");
+    await expect(details).toContainText(
+      "No eligible route was known to this device",
+    );
+    await details
+      .getByRole("button", { name: "Open connection diagnostics" })
+      .click();
+    const diagnostics = page.getByRole("dialog");
+    await expect(diagnostics).toBeVisible();
+    await diagnostics.press("Escape");
+    await expect(diagnostics).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.focus();
+    await trigger.press("Enter");
     await page.evaluate(() => {
       (
         window as unknown as {
@@ -240,76 +329,94 @@ test("delivery details close on navigation and app lock, including a late status
   await expect(page.getByTestId("delivery-details-trigger")).toHaveCount(0);
 });
 
-test("text, sticker and file card stay Awaiting until explicit authoritative mock projection", async ({
-  page,
-}) => {
-  await seedMarketPacks(page, ["cats"]);
-  await enterChat(page);
-  await openBobDm(page);
-  await page.evaluate(() => {
-    const w = window as unknown as Record<string, unknown>;
-    const internals = w.__TAURI_INTERNALS__ as {
-      invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
-    };
-    const original = internals.invoke;
-    const accepted: string[] = [];
-    w.__acceptedDeliveryIds = accepted;
-    internals.invoke = async (cmd, args) => {
-      if (cmd === "plugin:dialog|open") return "/tmp/card.txt";
-      const result = await original(cmd, args);
-      if (cmd === "owner_enqueue_text" || cmd === "owner_enqueue_sticker")
-        accepted.push(result as string);
-      if (cmd === "owner_enqueue_file")
-        accepted.push((result as { id: string }).id);
-      return result;
-    };
+for (const kind of ["text", "sticker", "file card"] as const) {
+  test(`${kind} stays Awaiting until explicit authoritative mock projection`, async ({
+    page,
+  }) => {
+    if (kind === "sticker") await seedMarketPacks(page, ["cats"]);
+    await enterChat(page);
+    await openBobDm(page);
+    await page.evaluate(() => {
+      const w = window as unknown as Record<string, unknown>;
+      const internals = w.__TAURI_INTERNALS__ as {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      const original = internals.invoke;
+      const accepted: string[] = [];
+      w.__acceptedDeliveryIds = accepted;
+      internals.invoke = async (cmd, args) => {
+        if (cmd === "plugin:dialog|open") return "/tmp/card.txt";
+        const result = await original(cmd, args);
+        if (cmd === "owner_enqueue_text" || cmd === "owner_enqueue_sticker")
+          accepted.push(result as string);
+        if (cmd === "owner_enqueue_file")
+          accepted.push((result as { id: string }).id);
+        return result;
+      };
+    });
+    if (kind === "text") {
+      await page.getByTestId("composer-input").fill("automatic delivery");
+      await page.getByTestId("composer-send").click();
+    } else if (kind === "sticker") {
+      await revealComposerTools(page);
+      await page.getByTestId("composer-emoji").click();
+      await page.getByTestId("composer-stickers").click();
+      await page.getByTestId("sticker-pack-cats").click();
+      await page.getByTestId("sticker-option-pack:cats:cat-01-01").click();
+    } else {
+      await revealComposerAttachments(page);
+      await page.getByTestId("composer-attach").click();
+      await expect(
+        page.getByTestId("message-bubble").filter({ hasText: "card.txt" }),
+      ).toBeVisible();
+    }
+    await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(1);
+    await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(0);
+    const awaitingCard = page
+      .getByTestId("message-bubble")
+      .filter({ hasText: "card.txt" });
+    if (kind === "file card") {
+      await awaitingCard.getByTestId("delivery-details-trigger").click();
+      const fileDetails = page.getByTestId("delivery-details");
+      await expect(fileDetails).toContainText(
+        "File download and reading are separate.",
+      );
+      await expect(fileDetails).not.toContainText("File card delivered.");
+      await fileDetails.press("Escape");
+    }
+    // This is a UI presentation mock, not authenticated receipt protocol evidence.
+    await page.evaluate((account) => {
+      const w = window as unknown as {
+        __acceptedDeliveryIds: string[];
+        __mockSetDelivery: (
+          account: string,
+          id: string,
+          status: string,
+        ) => void;
+      };
+      for (const id of w.__acceptedDeliveryIds)
+        w.__mockSetDelivery(account, id, "delivered");
+    }, BOB.account);
+    await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(1);
+    if (kind === "file card") {
+      const cardReceipt = page
+        .getByTestId("message-bubble")
+        .filter({ hasText: "card.txt" })
+        .locator('[data-delivery="delivered"]');
+      await expect(cardReceipt).toHaveAccessibleName("File offer received");
+      await cardReceipt.focus();
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
+      await expect(cardReceipt).toHaveAttribute("aria-expanded", "false");
+      await cardReceipt.press("Enter");
+      await expect(awaitingCard.getByTestId("message-status")).toContainText(
+        "File card delivered",
+      );
+    }
   });
-  await page.getByTestId("composer-input").fill("automatic delivery");
-  await page.getByTestId("composer-send").click();
-  await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(1);
-  await revealComposerTools(page);
-  await page.getByTestId("composer-emoji").click();
-  await page.getByTestId("composer-stickers").click();
-  await page.getByTestId("sticker-pack-cats").click();
-  await page.getByTestId("sticker-option-pack:cats:cat-01-01").click();
-  await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(2);
-  await revealComposerTools(page);
-  await page.getByTestId("composer-attach").click();
-  await expect(
-    page.getByTestId("message-bubble").filter({ hasText: "card.txt" }),
-  ).toBeVisible();
-  await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(3);
-  await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(0);
-  const awaitingCard = page
-    .getByTestId("message-bubble")
-    .filter({ hasText: "card.txt" });
-  await awaitingCard.getByTestId("delivery-details-trigger").click();
-  const fileDetails = page.getByTestId("delivery-details");
-  await expect(fileDetails).toContainText(
-    "File download and reading are separate.",
-  );
-  await expect(fileDetails).not.toContainText("File card delivered.");
-  await fileDetails.press("Escape");
-  // This is a UI presentation mock, not authenticated receipt protocol evidence.
-  await page.evaluate((account) => {
-    const w = window as unknown as {
-      __acceptedDeliveryIds: string[];
-      __mockSetDelivery: (account: string, id: string, status: string) => void;
-    };
-    for (const id of w.__acceptedDeliveryIds)
-      w.__mockSetDelivery(account, id, "delivered");
-  }, BOB.account);
-  await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(3);
-  const cardReceipt = page
-    .getByTestId("message-bubble")
-    .filter({ hasText: "card.txt" })
-    .locator('[data-delivery="delivered"]');
-  await cardReceipt.focus();
-  await expect(cardReceipt.getByRole("tooltip")).toBeVisible();
-  await expect(cardReceipt.getByRole("tooltip")).toContainText(
-    "File card delivered",
-  );
-});
+}
 
 test("a native picker completed after conversation navigation cannot send to the new conversation", async ({
   page,
@@ -339,7 +446,7 @@ test("a native picker completed after conversation navigation cannot send to the
       return original(cmd, args);
     };
   });
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   await expect
     .poll(() =>
@@ -351,18 +458,50 @@ test("a native picker completed after conversation navigation cannot send to the
     )
     .toBe(true);
   await page.getByTestId("conversation-row-acc_carol_cccc3333").click();
-  const enqueues = await page.evaluate(async () => {
+  // Exact retired-picker completion is covered through ConversationView in conversationIntake.test.ts.
+  const enqueues = await page.evaluate(() => {
     const state = (
       window as unknown as {
         __pickerRace: { enqueues: number; release: (path: string) => void };
       }
     ).__pickerRace;
     state.release("/tmp/stale.txt");
-    await new Promise((resolve) => setTimeout(resolve, 0));
     return state.enqueues;
   });
   expect(enqueues).toBe(0);
   await expect(page.getByText("stale.txt")).toHaveCount(0);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __pickerRace: { entered: boolean } }
+    ).__pickerRace.entered = false;
+  });
+  await revealComposerAttachments(page);
+  await page.getByTestId("composer-attach").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __pickerRace: { entered: boolean } })
+            .__pickerRace.entered,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __pickerRace: { release: (path: string) => void } }
+    ).__pickerRace.release("/tmp/current.txt");
+  });
+  await expect(
+    page.getByRole("log").getByText("current.txt", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("conversation-header")).toContainText("carol");
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __pickerRace: { enqueues: number } })
+          .__pickerRace.enqueues,
+    ),
+  ).toBe(1);
 });
 
 test("a pending local text acceptance moves the submitted text out of the composer", async ({
@@ -517,4 +656,274 @@ test("a scoped native delivery invalidation refreshes status without a polling r
           .__pushDelivery.reads,
     ),
   ).toBe(1);
+});
+
+test("delivery recovery survives its receipt and returns focus safely, then retires on logout", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await observeLocalDelivery(page);
+  await page
+    .getByTestId("composer-input")
+    .fill("Keep recovery open through receipt");
+  await page.getByTestId("composer-send").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Keep recovery open through receipt" });
+  const trigger = bubble.getByTestId("delivery-details-trigger");
+  await trigger.focus();
+  await trigger.press("Enter");
+  await page
+    .getByTestId("delivery-details")
+    .getByRole("button", { name: "Review delivery settings" })
+    .click();
+  const settings = page.getByTestId("settings-dialog");
+  await expect(settings).toBeVisible();
+  await page.evaluate(async (account) => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<{ id: string }[]>;
+      };
+      __mockSetDelivery(account: string, id: string, status: string): void;
+    };
+    const rows = await scope.__TAURI_INTERNALS__.invoke(
+      "owner_account_history",
+      { owner: "u_self", account, limit: 500 },
+    );
+    scope.__mockSetDelivery(account, rows[rows.length - 1].id, "delivered");
+  }, BOB.account);
+  await expect(trigger).toHaveCount(0);
+  await expect(settings).toBeVisible();
+  await settings.press("Escape");
+  await expect(settings).toBeHidden();
+  await expect(page.getByTestId("chat-shell")).toBeFocused();
+  await page.getByTestId("composer-input").fill("Retire recovery on logout");
+  await page.getByTestId("composer-send").click();
+  const next = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Retire recovery on logout" })
+    .getByTestId("delivery-details-trigger");
+  await next.focus();
+  await next.press("Enter");
+  await page
+    .getByTestId("delivery-details")
+    .getByRole("button", { name: "Review delivery settings" })
+    .click();
+  await expect(settings).toBeVisible();
+  await page.evaluate(async () => {
+    const modulePath = "/src/store/auth.ts";
+    const { useAuth } = await import(/* @vite-ignore */ modulePath);
+    await useAuth.getState().logout();
+  });
+  await expect(settings).toBeHidden();
+  await expect(page.getByTestId("chat-shell")).toHaveCount(0);
+});
+
+test("channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __channelCustody: boolean;
+    };
+    const original = w.__TAURI_INTERNALS__.invoke;
+    w.__channelCustody = false;
+    w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "send_channel_message")
+        throw new Error("Legacy fanout IPC must not gate local acceptance");
+      if (cmd === "channel_custody_statuses")
+        return (args.ids as string[]).map((id) => ({
+          id,
+          replicas: 0,
+          post_offices: w.__channelCustody ? 1 : 0,
+        }));
+      return original(cmd, args);
+    };
+  });
+  for (let i = 0; i < 2; i++) {
+    await page.getByTestId("composer-input").fill("same channel text");
+    await page.getByTestId("composer-send").click();
+  }
+  const bubbles = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "same channel text" });
+  await expect(bubbles).toHaveCount(2);
+  await expect(bubbles.filter({ hasText: "sending…" })).toHaveCount(0);
+  await expect(bubbles.locator('[data-custody="0"]')).toHaveCount(2);
+  await page.evaluate(() => {
+    (window as unknown as { __channelCustody: boolean }).__channelCustody =
+      true;
+  });
+  await expect(bubbles.locator('[data-custody="1"]')).toHaveCount(2);
+  await expect(
+    bubbles.getByRole("button", {
+      name: "Post office confirmed a stored copy",
+    }),
+  ).toHaveCount(2);
+  await expect(bubbles).toHaveCount(2);
+});
+
+test("linked-device channel history waits for copy confirmation before showing a check", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __linkedCopyConfirmed: boolean;
+    };
+    const original = scope.__TAURI_INTERNALS__.invoke;
+    scope.__linkedCopyConfirmed = false;
+    scope.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "channel_custody_statuses")
+        return scope.__linkedCopyConfirmed
+          ? [{ id: "sibling-authored", replicas: 1, post_offices: 0 }]
+          : [];
+      if (command === "channel_history") {
+        const history = (await original(command, args)) as unknown[];
+        return [
+          ...history,
+          {
+            id: "sibling-authored",
+            from_me: true,
+            who: "device_linked_sibling",
+            text: "Group message synced from my linked device",
+            wall_clock: 1_700_000_200_000,
+            reply_to: null,
+          },
+        ];
+      }
+      return original(command, args);
+    };
+  });
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Group message synced from my linked device" });
+  await expect(bubble.locator('[data-custody="unknown"]')).toBeVisible();
+  await expect(bubble.locator("[data-custody]")).toHaveAccessibleName(
+    "Copy status unavailable",
+  );
+  await expect(bubble).not.toContainText("No member copy confirmed");
+  await expect(bubble).not.toContainText("✓");
+  await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
+  await bubble.locator("[data-custody]").focus();
+  await expect(bubble.getByTestId("message-status")).toHaveCount(0);
+  await bubble.locator("[data-custody]").press("Enter");
+  await expect(bubble.getByTestId("message-status")).toContainText(
+    "Another linked device may have newer information.",
+  );
+  await page.evaluate(() => {
+    (
+      window as unknown as { __linkedCopyConfirmed: boolean }
+    ).__linkedCopyConfirmed = true;
+  });
+  await expect(bubble.locator('[data-custody="1"]')).toBeVisible();
+  await expect(
+    bubble.getByRole("button", { name: "Last confirmed: 1 member copy" }),
+  ).toBeVisible();
+  await expect(bubble.locator("[data-status-count]")).toHaveText("1");
+  await expect(bubble.getByTestId("message-status")).toHaveCount(0);
+  await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
+});
+
+test("typed channel File stays pending until canonical metadata commits and original-ID replay stays singular", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __mockDeferNext(command: string): void;
+      __typedFileArgs?: Record<string, unknown>;
+    };
+    const original = host.__TAURI_INTERNALS__.invoke;
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "plugin:dialog|open")
+        return "/tmp/account-group-upload.bin";
+      if (command === "owner_submit_account_group_file")
+        host.__typedFileArgs = { ...args };
+      return original(command, args);
+    };
+    host.__mockDeferNext("owner_submit_account_group_file");
+  });
+  await revealComposerAttachments(page);
+  await page.getByTestId("composer-attach").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "account-group-upload.bin" });
+  await expect(bubble).toHaveCount(1);
+  await expect(
+    bubble.getByText("File details pending", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "The result is unconfirmed. Check this operation before retrying.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Check status", exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __mockReleaseDeferred(): void }
+    ).__mockReleaseDeferred(),
+  );
+  await expect(
+    bubble.getByText("File details pending", { exact: true }),
+  ).toHaveCount(0);
+  await expect(bubble.getByText("123 B", { exact: true })).toBeVisible();
+  const result = await page.evaluate(async () => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __typedFileArgs: Record<string, unknown>;
+    };
+    const args = host.__typedFileArgs;
+    const replay = (await host.__TAURI_INTERNALS__.invoke(
+      "owner_submit_account_group_file",
+      args,
+    )) as { phase: { kind: string }; primary_event: string };
+    const rows = (await host.__TAURI_INTERNALS__.invoke("channel_history", {
+      channelId: args.channelId,
+    })) as Array<{ id: string; file?: { file_conv: string } }>;
+    return {
+      operationId: args.operationId,
+      phase: replay.phase.kind,
+      canonical: rows.filter((row) => row.id === replay.primary_event),
+    };
+  });
+  expect(result.operationId).toMatch(/^[a-f0-9]{64}$/);
+  expect(result.phase).toBe("committed");
+  expect(result.canonical).toHaveLength(1);
+  expect(result.canonical[0].file?.file_conv).toMatch(/^fc_/);
+  await expect(bubble).toHaveCount(1);
 });

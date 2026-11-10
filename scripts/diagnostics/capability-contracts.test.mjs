@@ -45,22 +45,30 @@ function assertDocumentReference(reference) {
 }
 
 test("delivery details select projection, disclosure and browser acceptance", () => {
-  const plan = buildAffectedPlan([
-    "frontend/src/features/chat/DeliveryDetails.tsx",
-  ], { contracts });
+  const plan = buildAffectedPlan(
+    ["frontend/src/features/chat/DeliveryDetails.tsx"],
+    { contracts },
+  );
   assert.deepEqual(plan.blockers, []);
-  const selected = plan.owners.find(({ id }) => id === "frontend-delivery-details");
+  const selected = plan.owners.find(
+    ({ id }) => id === "frontend-delivery-details",
+  );
   assert.ok(selected, "delivery details need an explicit business owner");
   assertDocumentReference(selected.capability.guide);
   for (const path of [
     "src/store/outgoingIntent.test.ts",
     "src/features/chat/deliveryFooter.test.ts",
     "src/features/chat/DeliveryDetails.test.ts",
-  ]) assert.ok(plan.frontend.includes(path), path);
+  ])
+    assert.ok(plan.frontend.includes(path), path);
   const scenarios = JSON.parse(read("frontend/validation.json")).prScenarios;
-  assert.ok(scenarios.some(({ paths, browser }) =>
-    paths.includes("frontend/src/features/chat/DeliveryDetails.tsx") &&
-    browser?.includes("e2e/automatic-delivery.spec.ts")));
+  assert.ok(
+    scenarios.some(
+      ({ paths, browser }) =>
+        paths.includes("frontend/src/features/chat/DeliveryDetails.tsx") &&
+        browser?.includes("e2e/automatic-delivery.spec.ts"),
+    ),
+  );
 });
 
 test("capability pilots link maintained domain and architecture rules", () => {
@@ -101,6 +109,14 @@ test("outgoing capability selects tests for acceptance projection and retired fr
       "Retired frontend owners cannot publish send completion",
       "ignores acceptance completed after its owner generation retires",
     ],
+    [
+      "File offer receipt does not stop approval and byte-progress refresh",
+      "continues polling file approval and bytes after the file offer is delivered",
+    ],
+    [
+      "Channel durable IDs settle acceptance independently of fanout and custody",
+      "projects member and post-office custody separately for exact channel IDs",
+    ],
   ]);
   assert.deepEqual(
     owner("frontend-outgoing").capability.invariants.map(({ name }) => name),
@@ -125,6 +141,21 @@ test("outgoing capability selects tests for acceptance projection and retired fr
 test("session capability retains executable generation and retirement obligations", () => {
   const obligations = [
     [
+      "Profile acceptance releases the UI before admitted network fanout completes",
+      "owner_commands::tests::account_profile_save_returns_after_local_commit_with_a_stalled_peer",
+      "src-tauri/src/owner_commands.rs",
+    ],
+    [
+      "Nickname publication does not block observations behind stalled network work",
+      "commands::tests::nickname_change_during_a_stalled_send_preserves_node_observations",
+      "src-tauri/src/commands.rs",
+    ],
+    [
+      "Channel acceptance returns exact IDs before admitted network fanout finishes",
+      "owner_commands::tests::registered_channel_enqueues_return_exact_ids_and_reject_retired_owners",
+      "src-tauri/src/owner_commands.rs",
+    ],
+    [
       "Replacement and logout invalidate captured session authority",
       "desktop_session::session_generation_tests::owner_replacement_and_logout_invalidate_queued_operations_but_rename_does_not",
       "src-tauri/src/desktop_session.rs",
@@ -138,6 +169,49 @@ test("session capability retains executable generation and retirement obligation
       "Runtime replacement awaits prior runtime retirement",
       "commands::tests::replacement_begin_awaits_real_host_stop_and_latest_same_owner_ticket_wins",
       "src-tauri/src/commands.rs",
+    ],
+    [
+      "Startup serialization outlives canceled construction and actual blocking captures/results; retired profile handles drop before replacement admission opens. Runtime handoffs retain the original non-cryptographic host local-user label.",
+      "commands::tests::actual_preinstall_rejection_stops_runtime_before_releasing_startup_serialization",
+      "src-tauri/src/commands.rs",
+    ],
+    [
+      "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
+      "runtime_admission::integration_lease_tests::stalled_producer_allows_observation_but_prevents_runtime_retirement",
+      "src-tauri/src/runtime_admission.rs",
+    ],
+    [
+      "Typed device-linking errors preserve the failed stage and safe diagnostics across IPC without weakening desktop admission or account adoption",
+      "commands::tests::device_link_errors_preserve_the_stage_and_diagnostic_in_ipc",
+      "src-tauri/src/commands.rs",
+    ],
+    [
+      "A renderer reload restores an unlocked live session without reauthentication, credential reads or runtime replacement; cold saved login retains consent, lock, logout and owner-generation guards.",
+      [
+        "commands::tests::registered_auto_login_preserves_unlocked_live_session_and_runtime",
+        "commands::tests::registered_auto_login_after_logout_resumes_only_a_newly_authenticated_owner",
+      ],
+      "src-tauri/src/commands.rs",
+    ],
+    [
+      "Saved login requires both credential and resume metadata writes; retry uses the private canonical account login secret under current unlocked session authority",
+      "commands::tests::registered_login_reports_unsaved_when_resume_metadata_cannot_be_written",
+      "src-tauri/src/commands.rs",
+    ],
+    [
+      "Signed account nicknames project into persisted desktop and frontend state only for the current installed session; old completed markers without a signed card repair the already-bound profile, while a pending adoption never publishes its unrelated previous local nickname across restart",
+      "runtime_bootstrap::tests::signed_account_nickname_persists_emits_and_rejects_retired_owner",
+      "src-tauri/src/runtime_bootstrap.rs",
+    ],
+    [
+      "Inbound callbacks queue main-thread publication before acquiring exact-session and runtime authority, preventing native-window rendezvous from inverting the session lock.",
+      "runtime_bootstrap::tests::inbound_dispatch_does_not_acquire_session_until_main_thread_execution",
+      "src-tauri/src/runtime_bootstrap.rs",
+    ],
+    [
+      "Inbound DM, channel and file presentation queues before acquiring desktop-session authority; UI-thread execution revalidates the exact session and runtime without a worker/main-thread focus-query deadlock.",
+      "events::notification_policy_tests::notification_presentation_queues_without_waiting_for_the_main_thread_session_lock",
+      "src-tauri/src/events.rs",
     ],
   ];
   assert.deepEqual(
@@ -153,20 +227,22 @@ test("session capability retains executable generation and retirement obligation
     const rust = plan.rust.find(
       ({ package: packageName }) => packageName === "mesh-talk",
     );
-    for (const [obligation, qualifiedName, sourcePath] of obligations) {
-      assert.ok(
-        rust.filters.some((filter) => qualifiedName.includes(filter)),
-        `${path} lost ${obligation}`,
-      );
-      const name = qualifiedName.split("::").at(-1);
-      assert.match(
-        read(sourcePath),
-        new RegExp(
-          `#\\[(?:tokio::)?test(?:\\([^\\]]*\\))?\\]\\s*(?:async\\s+)?fn\\s+${name}\\s*\\(`,
-          "u",
-        ),
-        obligation,
-      );
+    for (const [obligation, qualifiedNames, sourcePath] of obligations) {
+      for (const qualifiedName of [qualifiedNames].flat()) {
+        assert.ok(
+          rust.filters.some((filter) => qualifiedName.includes(filter)),
+          `${path} lost ${obligation}: ${qualifiedName}`,
+        );
+        const name = qualifiedName.split("::").at(-1);
+        assert.match(
+          read(sourcePath),
+          new RegExp(
+            `#\\[(?:tokio::)?test(?:\\([^\\]]*\\))?\\]\\s*(?:async\\s+)?fn\\s+${name}\\s*\\(`,
+            "u",
+          ),
+          `${obligation}: ${qualifiedName}`,
+        );
+      }
     }
     for (const consumer of [
       "desktop-integrations",
@@ -178,5 +254,66 @@ test("session capability retains executable generation and retirement obligation
         `${path} lost ${consumer}`,
       );
     assert.match(plan.escalation.join(" "), /native/u);
+  }
+});
+
+test("private account login boundaries retain pairing, relogin and retirement evidence", () => {
+  const all = [
+    ...contracts,
+    ...JSON.parse(read("crates/mesh-talk-core/validation.json")).contracts,
+  ];
+  for (const [path, id, packageName, filter, testSource, testName] of [
+    [
+      "crates/mesh-talk-core/src/identity/account_login.rs",
+      "core-account-login",
+      "mesh-talk-core",
+      "identity::account_login::tests::",
+      "crates/mesh-talk-core/src/identity/account_login.rs",
+      "account_login_guard_denial_preserves_existing_credential_envelope",
+    ],
+    [
+      "crates/mesh-talk-core/src/node/account_access.rs",
+      "core-account-login",
+      "mesh-talk-core",
+      "node::account_access::tests::",
+      "crates/mesh-talk-core/src/node/account_access.rs",
+      "direct_siblings_converge_with_optional_sync_disabled_and_unrelated_cannot_fetch",
+    ],
+    [
+      "src-tauri/src/shared_account_login.rs",
+      "desktop-account-login",
+      "mesh-talk",
+      "shared_account_login::tests::",
+      "src-tauri/src/shared_account_login/tests.rs",
+      "v4_pairing_adopts_login_preserving_storage_device_and_encrypted_history",
+    ],
+    [
+      "src-tauri/src/linked_account.rs",
+      "desktop-account-login",
+      "mesh-talk",
+      "shared_account_login::tests::",
+      "src-tauri/src/shared_account_login/tests.rs",
+      "reconciliation_shutdown_releases_auth_when_waiting_for_runtime",
+    ],
+  ]) {
+    const plan = buildAffectedPlan([path], { contracts: all });
+    assert.deepEqual(plan.blockers, [], path);
+    assert.ok(
+      plan.owners.some((entry) => entry.id === id),
+      `${path} lost ${id}`,
+    );
+    assert.ok(
+      plan.rust.some(
+        (entry) =>
+          entry.package === packageName && entry.filters.includes(filter),
+      ),
+    );
+    assert.match(
+      read(testSource),
+      new RegExp(`(?:async\\s+)?fn\\s+${testName}\\s*\\(`, "u"),
+    );
+    for (const invariant of all.find((entry) => entry.id === id).capability
+      .invariants)
+      assertDocumentReference(invariant.reference);
   }
 });

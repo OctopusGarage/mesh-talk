@@ -1,3 +1,19 @@
+import {
+  reception as receptionApi,
+  type HostReception,
+} from "@/lib/api/reception";
+import { createReceptionDelivery } from "./receptionDelivery";
+import {
+  loadReceptionSnapshot,
+  saveReceptionSnapshot,
+} from "@/lib/receptionSnapshot";
+import type { PersonalConversationState } from "@/lib/types";
+import { useDrafts } from "./drafts";
+import { usePacks } from "./packs";
+import { stickerById } from "@/lib/stickerPacks";
+import { snapshotSticker } from "@/lib/stickerMedia";
+import { mentionsName } from "@/lib/mentions";
+import { useAuth } from "./auth";
 import { createRosterRefresh } from "./rosterRefresh";
 import {
   notifySyncInvalidation,
@@ -17,15 +33,18 @@ import { subscribeNodeEvents } from "@/lib/events";
 import {
   loadPendingUnread,
   loadUnread,
+  queueReceptionPersistence,
+  flushReceptionPersistence,
   loadReceptionLedger,
-  saveReceptionLedger,
   loadUnreadOverflow,
-  saveUnreadOverflow,
   loadFullHistoryBaselines,
-  saveFullHistoryBaselines,
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
+  markConversationsRead,
+  suppressIdentities,
+  expireReception,
+  applyAccountSeen,
   mergeReception,
   receiveIdentity,
   viewIdentities,
@@ -36,6 +55,7 @@ import {
   applyChatCallSignal,
   applyChatFileProgress,
   applyChatProfile,
+  finishChatAvatarIdentity,
   resetChatFileAvailability,
   resetChatFiles,
   stopChatCalls,
@@ -52,11 +72,17 @@ import {
   beginSendIntent,
   dispatchIntent,
   refreshDeliveryStatuses,
+  refreshGroupOperationIntents,
+  cancelGroupOperationIntent,
+  settleGroupSendIntents,
+  submitGroupControlIntent,
 } from "./outgoingIntent";
+import type { GroupOperationOutcome } from "./accountGroupOperations";
 import {
   type ConversationHistoryState,
   emptyConversationHistory,
   reloadConversation,
+  requestConversationReload,
   revealConversationIdentity,
   scanConversationHistory,
 } from "./conversationHistory";
@@ -77,6 +103,9 @@ import type {
   FavoriteInfo,
   FileReceivedEvent,
   PeerInfo,
+  ReactionInfo,
+  ReceptionCursor,
+  ReceptionScope,
 } from "@/lib/types";
 
 import type {
@@ -95,6 +124,7 @@ export type {
 const INCOMING_FILES_CAP = 300;
 
 export interface IncomingFile {
+  protection?: import("@/lib/types").MessageProtection | null;
   expiresAtMs?: number | null;
   fromName: string;
   name: string;
@@ -117,9 +147,100 @@ export function displayName(
   return favorites[id]?.custom_alias || announced;
 }
 
-/** Number of boot poll attempts (≈30s at BOOT_POLL_MS). */
-const BOOT_POLL_TRIES = 60;
+/** Total boot window, including time spent waiting for native reads. */
+const BOOT_TIMEOUT_MS = 30_000;
 const BOOT_POLL_MS = 500;
+const BOOT_RECOVERY_INTERVAL_MS = 10_000;
+
+/** Both startup and full runtime identities bind persisted reception exactly once. */
+function applyVerifiedIdentity(
+  set: Set,
+  identity: {
+    owner: string;
+    account_id: string;
+    device_id: string;
+    history_revision?: number;
+    supports_bounded_delivery?: boolean;
+    runtime_id?: string;
+  },
+  ready: boolean,
+) {
+  const owner = identity.owner;
+  const acct = identity.account_id;
+  const committed =
+    identity.supports_bounded_delivery && identity.runtime_id
+      ? loadReceptionSnapshot({
+          owner,
+          account_id: acct,
+          device_id: identity.device_id,
+          runtime_id: identity.runtime_id,
+        })
+      : null;
+  const persistedUnread = committed?.unread ?? loadUnread(owner, acct);
+  const persistedPendingUnread =
+    committed?.pendingUnknownUnread ?? loadPendingUnread(owner, acct);
+  const persistedReception = emptyReception(
+    committed?.ledger ?? loadReceptionLedger(owner, acct),
+    committed?.overflowUnread ?? loadUnreadOverflow(owner, acct),
+  );
+  set((state) => {
+    const sameScope = state.unreadOwner === owner && state.myAccountId === acct;
+    const invalidateScope = state.unreadOwner !== "" && !sameScope;
+    const replacedScope =
+      invalidateScope ||
+      (state.myAccountId !== "" && state.myAccountId !== acct);
+    const hydrated = sameScope
+      ? state
+      : mergeReception(
+          { ...persistedReception, unread: persistedUnread },
+          replacedScope ? { ...emptyReception(), unread: {} } : state,
+        );
+    const expiryPatch = receptionPatch(
+      hydrated,
+      expireReception(hydrated, Date.now()),
+    );
+    const reception = { ...hydrated, ...expiryPatch };
+    const unread = reception.unread;
+    const pendingUnknownUnread = sameScope
+      ? state.pendingUnknownUnread
+      : { ...persistedPendingUnread };
+    if (!sameScope && !replacedScope)
+      for (const [sender, count] of Object.entries(state.pendingUnknownUnread))
+        pendingUnknownUnread[sender] = Math.min(
+          1_000_000,
+          (pendingUnknownUnread[sender] ?? 0) + count,
+        );
+    return {
+      ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
+      ...expiryPatch,
+      ...(!sameScope
+        ? {
+            ...reception,
+            accountSeen: reception.accountSeen,
+            historyBaselines: Object.keys(persistedReception.ledger),
+            historyFullBaselines:
+              committed?.historyFullBaselines ??
+              loadFullHistoryBaselines(owner, acct),
+            ...(committed ? { reception: committed.reception } : {}),
+          }
+        : {}),
+      identityEpoch: invalidateScope
+        ? state.identityEpoch + 1
+        : state.identityEpoch,
+      historyRevision: identity.history_revision ?? null,
+      myId: identity.device_id,
+      myAccountId: acct,
+      unread,
+      pendingUnknownUnread,
+      unreadOwner: owner,
+      deliveryRuntime: identity.supports_bounded_delivery
+        ? (identity.runtime_id ?? null)
+        : null,
+      ready,
+      bootFailed: false,
+    };
+  });
+}
 
 /**
  * Poll my_id/account_id until the node finishes opening (post-login KDF unlock takes a
@@ -131,91 +252,160 @@ async function pollUntilReady(
   set: Set,
   get: Get,
   isCancelled: () => boolean,
+  singleAttempt = false,
 ): Promise<boolean> {
-  for (let i = 0; i < BOOT_POLL_TRIES && !isCancelled(); i++) {
+  const deadline = performance.now() + BOOT_TIMEOUT_MS;
+  while (performance.now() < deadline && !isCancelled()) {
+    const owner = captureOwner().owner;
+    if (!owner) return false;
+    const identityEpoch = get().identityEpoch;
+    const superseded = () =>
+      isCancelled() || get().identityEpoch !== identityEpoch;
+    let observedStartup:
+      Awaited<ReturnType<typeof chat.ownerStartupIdentity>> | undefined;
     try {
-      const owner = captureOwner().owner;
-      if (!owner) return false;
-      const identity = await readWithDeadline(() => chat.ownerIdentity(owner));
-      if (isCancelled()) return false;
+      const identity = await readWithDeadline(
+        () => chat.ownerIdentity(owner),
+        Math.min(10_000, deadline - performance.now()),
+      );
+      if (superseded() || performance.now() >= deadline) return false;
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
+      // Remember the native ticket even when the node was already ready at the
+      // first poll, so a later transient outage cannot look like a new startup.
+      const startup = await readWithDeadline(
+        () => chat.ownerStartupIdentity(owner),
+        Math.max(1, Math.min(2_000, deadline - performance.now())),
+      ).catch(() => undefined);
+      if (superseded() || performance.now() >= deadline) return false;
+      if (startup === null && get().startupId !== null) {
+        observedStartup = null;
+        throw new Error("Runtime startup retired during identity observation");
+      }
+      if (startup?.owner === owner && startup.startup_id) {
+        if (
+          startup.phase !== "ready" ||
+          startup.account_id !== identity.account_id ||
+          startup.device_id !== identity.device_id
+        ) {
+          observedStartup = startup;
+          throw new Error(
+            "Runtime startup changed during identity observation",
+          );
+        }
+        set({ startupId: startup.startup_id });
+      }
+      if (identity.display_name && useAuth.getState().user?.id === owner)
+        useAuth.setState((state) => ({
+          user: state.user
+            ? { ...state.user, display_name: identity.display_name! }
+            : null,
+        }));
+      applyVerifiedIdentity(set, identity, true);
       const acct = identity.account_id;
-      const persistedUnread = loadUnread(owner, acct);
-      const persistedPendingUnread = loadPendingUnread(owner, acct);
-      const persistedReception = emptyReception(
-        loadReceptionLedger(owner, acct),
-        loadUnreadOverflow(owner, acct),
-      );
-      set((state) => {
-        const sameScope =
-          state.unreadOwner === owner && state.myAccountId === acct;
-        const invalidateScope = state.unreadOwner !== "" && !sameScope;
-        const replacedScope =
-          invalidateScope ||
-          (state.myAccountId !== "" && state.myAccountId !== acct);
-        const reception = sameScope
-          ? state
-          : mergeReception(
-              { ...persistedReception, unread: persistedUnread },
-              replacedScope ? { ...emptyReception(), unread: {} } : state,
-            );
-        const unread = reception.unread;
-        const pendingUnknownUnread = sameScope
-          ? state.pendingUnknownUnread
-          : { ...persistedPendingUnread };
-        if (!sameScope && !replacedScope)
-          for (const [sender, count] of Object.entries(
-            state.pendingUnknownUnread,
-          ))
-            pendingUnknownUnread[sender] = Math.min(
-              1_000_000,
-              (pendingUnknownUnread[sender] ?? 0) + count,
-            );
-        return {
-          ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
-          ...(!sameScope
-            ? {
-                ...reception,
-                historyBaselines: Object.keys(persistedReception.ledger),
-                historyFullBaselines: loadFullHistoryBaselines(owner, acct),
-              }
-            : {}),
-          identityEpoch: invalidateScope
-            ? state.identityEpoch + 1
-            : state.identityEpoch,
-          historyRevision: identity.history_revision ?? null,
-          myId: identity.device_id,
-          myAccountId: acct,
-          unread,
-          pendingUnknownUnread,
-          unreadOwner: owner,
-          ready: true,
-        };
-      });
       setPushStateSupport(identity.supports_push_state ? owner : null);
-      syncChatAvatarIdentity(acct, () => !isCancelled());
-      await get().refreshRoster();
+      syncChatAvatarIdentity(
+        acct,
+        () => !isCancelled(),
+        !!identity.supports_bounded_delivery,
+      );
+      // Identity completes boot. Roster/history hydration owns its separate
+      // bounded lane and must not extend the startup deadline or hold bootBusy.
+      void get().refreshRoster();
       return true;
     } catch {
-      if (isCancelled()) return false;
-      await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
+      if (superseded()) return false;
+      try {
+        const startup =
+          observedStartup !== undefined
+            ? observedStartup
+            : await readWithDeadline(
+                () => chat.ownerStartupIdentity(owner),
+                Math.max(1, Math.min(2_000, deadline - performance.now())),
+              );
+        if (superseded() || performance.now() >= deadline) return false;
+        if (startup === null && get().startupId !== null) {
+          resetChatFileAvailability();
+          set((state) => ({
+            ...invalidateConversationIdentity(state),
+            identityEpoch: state.identityEpoch + 1,
+            myId: "",
+            myAccountId: "",
+            startupId: null,
+          }));
+        }
+        if (startup?.owner === owner && startup.startup_id) {
+          const hasIdentity =
+            (startup.phase === "identity" || startup.phase === "ready") &&
+            Boolean(startup.account_id && startup.device_id);
+          const changed = get().startupId !== startup.startup_id;
+          if ((changed || !hasIdentity) && get().myAccountId) {
+            resetChatFileAvailability();
+            set((state) => ({
+              ...invalidateConversationIdentity(state),
+              identityEpoch: state.identityEpoch + 1,
+              myId: "",
+              myAccountId: "",
+            }));
+          }
+          set({ startupId: startup.startup_id });
+          if (hasIdentity)
+            applyVerifiedIdentity(
+              set,
+              {
+                owner,
+                device_id: startup.device_id!,
+                account_id: startup.account_id!,
+              },
+              false,
+            );
+        }
+      } catch {
+        // Older native hosts and transient observation failures retain the
+        // existing full-runtime retry path; they never grant startup identity.
+      }
+      if (isCancelled() || singleAttempt) return false;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return false;
+      await new Promise((r) =>
+        setTimeout(r, Math.min(BOOT_POLL_MS, remaining)),
+      );
     }
   }
   return false;
 }
 
+/** Invalidate every history projection after durable account-personal deletion. */
+function deletedChatState(state: ChatState, key: string): Partial<ChatState> {
+  const without = <T>(values: Record<string, T>): Record<string, T> =>
+    Object.fromEntries(Object.entries(values).filter(([id]) => id !== key));
+  return {
+    ...clearConversationMessages(state, key),
+    reactions: without(state.reactions),
+    unread: without(state.unread),
+    unreadIds: without(state.unreadIds),
+    lateUnreadIds: without(state.lateUnreadIds),
+    overflowUnread: without(state.overflowUnread),
+    ledger: without(state.ledger),
+    reception: without(state.reception),
+    ...(state.accountSeen ? { accountSeen: without(state.accountSeen) } : {}),
+    cacheOrder: state.cacheOrder.filter((id) => id !== key),
+    historyBaselines: state.historyBaselines.filter((id) => id !== key),
+    historyFullBaselines: state.historyFullBaselines.filter((id) => id !== key),
+    historyScanQueue: state.historyScanQueue.filter(
+      (conversation) => convKey(conversation) !== key,
+    ),
+  };
+}
+
 // --- per-conversation API dispatch ----------------------------------------
 
-function reactFor(
-  c: Conversation,
-  target: string,
-  emoji: string,
-  remove: boolean,
-) {
-  return c.kind === "account"
-    ? chat.reactAccount(c.id, target, emoji, remove)
-    : chat.reactChannel(c.id, target, emoji, remove);
+/** Native account ownership is authoritative, including certified sibling devices. */
+export function reactionFromMe(
+  reaction: ReactionInfo,
+  _selfId?: string,
+): boolean {
+  return reaction.from_me;
 }
 /** Whether this conversation is a channel (drives the `is_channel` flag on the lifecycle
  * commands; 1:1 chats are account-addressed). */
@@ -225,9 +415,14 @@ export interface ChatState
   extends ConversationHistoryState, OutgoingIntentContext, ChannelActions {
   bootBusy: boolean;
   bootRequest: number;
+  /** Native startup ticket; distinct from the frontend run and account identity. */
+  startupId: string | null;
+  deliveryRuntime: string | null;
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
+  personalConversationStates: Record<string, PersonalConversationState>;
+  personalHistoryFloors: Record<string, string>;
   myAccountId: string;
   expiryNow: number;
   peers: PeerInfo[];
@@ -246,11 +441,13 @@ export interface ChatState
   // on the Rust side; mirrored here so the sidebar can sort/rename without a roundtrip.
   favorites: Record<string, FavoriteInfo>;
   error: string | null; // transient action error (file/reaction send), surfaced to the user
-  bootFailed: boolean; // the node never came up within the boot window
+  bootFailed: boolean; // identity did not resolve within the latest boot window
 
   resetForLock: () => void;
+  cancelGroupOperation: (id: string) => Promise<GroupOperationOutcome>;
+  refreshGroupOperations: () => Promise<void>;
   start: () => () => void;
-  retryBoot: () => void;
+  retryBoot: (background?: boolean) => void;
   loadFavorites: () => Promise<void>;
   togglePinned: (id: string, pinned: boolean) => Promise<void>;
   setChannelHidden: (id: string, hidden: boolean) => Promise<void>;
@@ -259,9 +456,19 @@ export interface ChatState
   clearError: () => void;
   refreshRoster: () => Promise<void>;
   refreshChannels: (channelId?: string | null) => Promise<void>;
-  deleteContact: (account: string) => Promise<boolean>;
+  deleteContact: (account: string, clearHistory?: boolean) => Promise<boolean>;
+  deleteLeftChannel: (channelId: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
+  markConversationRead: (key: string) => void;
+  markAllRead: () => void;
+  dismissPendingUnread: (sender: string) => void;
+  applyAccountReadReceipts: (
+    owner: string,
+    accountId: string,
+    key: string,
+    ids: string[],
+  ) => void;
   markLegacyActiveRead: () => void;
   markMessagesViewed: (key: string, ids: string[]) => void;
   revealUnread: (key: string, id: string) => Promise<boolean>;
@@ -270,11 +477,13 @@ export interface ChatState
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => Promise<boolean>;
   admitText: (
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => boolean;
   retry: (clientId: string) => Promise<void>;
   sendFile: (
@@ -282,8 +491,18 @@ export interface ChatState
     media: boolean,
     expiresAtMs?: number | null,
   ) => Promise<void>;
+  admitImage: (
+    path: string,
+    protection: import("@/lib/types").MessageProtection,
+    expiresAtMs?: number | null,
+    onAccepted?: () => void,
+  ) => Promise<"refused" | "failed" | "accepted">;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
-  toggleReaction: (target: string, emoji: string) => Promise<void>;
+  toggleReaction: (
+    target: string,
+    emoji: string,
+    remove?: boolean,
+  ) => Promise<void>;
   /** Delete one message from this device only (local). */
   deleteMessage: (target: string) => Promise<void>;
   /** Recall (unsend) one of my own messages within the 2-minute window. */
@@ -300,6 +519,9 @@ export interface ChatState
 
 function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
   return {
+    accountSeen: undefined,
+    personalConversationStates: {},
+    personalHistoryFloors: {},
     ...emptyConversationHistory(),
     historyRevision: state.historyRevision,
     activeRequest: state.activeRequest,
@@ -311,18 +533,27 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
     members: [],
     channelOwner: "",
     statusBusy: false,
+    groupOperations: {},
+    groupOperationIssue: undefined,
   };
 }
 
 /** One empty session snapshot for initial state, login, and app lock. */
 function emptySessionData() {
   return {
+    accountSeen: undefined,
+    personalConversationStates: {},
+    personalHistoryFloors: {},
     ...emptyConversationHistory(),
     expiryNow: Date.now(),
     identityEpoch: 0,
     bootBusy: false,
     bootRequest: 0,
+    startupId: null,
+    deliveryRuntime: null,
     statusBusy: false,
+    groupOperations: {},
+    groupOperationIssue: undefined,
     rosterRequest: 0,
     favoritesRequest: 0,
     ready: false,
@@ -349,7 +580,16 @@ function emptySessionData() {
 const channelRefresh = createChannelRefresh({
   read: () => useChat.getState(),
   write: (patch) => {
-    useChat.setState(patch);
+    useChat.setState((state) => {
+      const next = patch(state);
+      if (next.channels)
+        next.channels = next.channels.filter((channel) => {
+          const personal =
+            state.personalConversationStates[`channel:${channel.channel_id}`];
+          return !(personal?.hidden && personal.local_cleanup_complete);
+        });
+      return next;
+    });
     refreshChannelRecovery(useChat.setState, useChat.getState);
   },
   capture: () => captureChat(useChat.getState),
@@ -362,6 +602,85 @@ const rosterRefresh = createRosterRefresh({
     refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending),
 });
 
+/** Apply explicit local-complete floors before archive work can refill deleted caches. */
+function applyPersonalConversationStates(
+  rawSet: Set,
+  get: Get,
+  lease: ReturnType<typeof captureChat>,
+  rows: PersonalConversationState[] | null,
+): { changed: boolean; reloadActive: boolean } {
+  if (
+    !lease.current() ||
+    !lease.owner ||
+    !Array.isArray(rows) ||
+    rows.some(
+      (row) =>
+        !row ||
+        !["account", "channel"].includes(row.conversation?.kind) ||
+        typeof row.conversation.id !== "string" ||
+        typeof row.hidden !== "boolean" ||
+        typeof row.local_cleanup_complete !== "boolean" ||
+        (row.history_floor !== null && typeof row.history_floor !== "string"),
+    )
+  )
+    return { changed: false, reloadActive: false };
+  const states = Object.fromEntries(
+    rows.map((row) => [convKey({ ...row.conversation, name: "" }), row]),
+  );
+  if (
+    JSON.stringify(states) === JSON.stringify(get().personalConversationStates)
+  )
+    return { changed: false, reloadActive: false };
+  let reloadActive = false;
+  rawSet((state) => {
+    let next = {
+      ...state,
+      personalConversationStates: states,
+      personalHistoryFloors: { ...state.personalHistoryFloors },
+    };
+    for (const [key, personal] of Object.entries(states)) {
+      if (!personal.local_cleanup_complete) continue;
+      if (
+        personal.history_floor &&
+        next.personalHistoryFloors[key] !== personal.history_floor
+      ) {
+        reloadActive ||=
+          !personal.hidden && !!next.active && convKey(next.active) === key;
+        useDrafts.getState().discard(lease.owner!, lease.generation, key);
+        next = { ...next, ...deletedChatState(next, key) };
+        next.personalHistoryFloors[key] = personal.history_floor;
+      }
+      if (personal.hidden) {
+        const { kind, id } = personal.conversation;
+        if (kind === "account")
+          next.accounts = next.accounts.filter(
+            (account) => account.account_id !== id,
+          );
+        else
+          next.channels = next.channels.filter(
+            (channel) => channel.channel_id !== id,
+          );
+        const unread = { ...next.unread };
+        delete unread[key];
+        next.unread = unread;
+        if (next.active && convKey(next.active) === key)
+          next = {
+            ...next,
+            active: null,
+            members: [],
+            channelOwner: "",
+            searchTarget: null,
+            historyError: null,
+            activeRequest: next.activeRequest + 1,
+            loading: false,
+          };
+      }
+    }
+    return next;
+  });
+  return { changed: true, reloadActive };
+}
+
 async function refreshRosterSnapshot(
   rawSet: Set,
   get: Get,
@@ -370,7 +689,7 @@ async function refreshRosterSnapshot(
   const lease = captureChat(get);
   const set = guardedSet(rawSet, lease.current);
   if (!lease.current()) return;
-  if (!get().ready || get().historyScanBusy) return;
+  if (!get().ready) return;
   const request = get().rosterRequest + 1;
   set({ rosterRequest: request });
   try {
@@ -382,10 +701,13 @@ async function refreshRosterSnapshot(
         set({ ready: false });
       return;
     }
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     if (
       identity.device_id !== get().myId ||
-      identity.account_id !== get().myAccountId
+      identity.account_id !== get().myAccountId ||
+      (identity.runtime_id !== undefined &&
+        identity.runtime_id !== get().deliveryRuntime)
     ) {
       // Runtime/account replacement can happen without a host logout. Invalidate
       // old in-flight conversation work; the run's owned ticker performs fresh boot.
@@ -401,13 +723,36 @@ async function refreshRosterSnapshot(
       get().retryBoot();
       return;
     }
-    const [peers, accounts] = await Promise.all([
+    if (identity.display_name && useAuth.getState().user?.id === lease.owner)
+      useAuth.setState((state) => ({
+        user: state.user
+          ? { ...state.user, display_name: identity.display_name! }
+          : null,
+      }));
+    const [peers, listedAccounts, personal] = await Promise.all([
       readWithDeadline(() => chat.listPeers()),
       readWithDeadline(() => chat.listAccounts()),
+      readWithDeadline(() =>
+        chat.personalConversationStates(lease.owner!, identity.account_id),
+      ).catch(() => null),
     ]);
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
+    const personalEffects = applyPersonalConversationStates(
+      rawSet,
+      get,
+      lease,
+      personal,
+    );
+    const accounts = listedAccounts.filter((account) => {
+      const personal =
+        get().personalConversationStates[`account:${account.account_id}`];
+      return !(personal?.hidden && personal.local_cleanup_complete);
+    });
     setPushStateSupport(identity.supports_push_state ? lease.owner : null);
-    const channelWork = channelRefresh.ifDue();
+    const channelWork = personalEffects.changed
+      ? channelRefresh.invalidate()
+      : channelRefresh.ifDue();
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
     const previous = get();
@@ -431,17 +776,28 @@ async function refreshRosterSnapshot(
       });
     }
     await channelWork;
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     const channels = get().channels;
     refreshChannelRecovery(rawSet, get);
+    if (personalEffects.reloadActive && get().active) await get().reload();
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     if (identity.history_revision !== undefined) {
       await scanConversationHistory(
         rawSet,
         get,
         [
-          ...accounts.map((account): Conversation => ({
+          // Saved Messages belongs to the runtime even when the contact
+          // directory has no row for our own account.
+          ...Array.from(
+            new Set([
+              ...accounts.map((account) => account.account_id),
+              identity.account_id,
+            ]),
+          ).map((accountId): Conversation => ({
             kind: "account",
-            id: account.account_id,
+            id: accountId,
             name: "",
           })),
           ...channels.map((channel): Conversation => ({
@@ -453,7 +809,8 @@ async function refreshRosterSnapshot(
         identity.history_revision,
         () => lease.current() && get().rosterRequest === request,
       );
-      if (!lease.current() || get().rosterRequest !== request) return;
+      if (!lease.current() || get().rosterRequest !== request || hasPending())
+        return;
     }
   } catch {
     // node may still be starting; ignore
@@ -465,6 +822,40 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   runEpoch: 0,
 
   clearError: () => rawSet({ error: null }),
+  cancelGroupOperation: (id) => cancelGroupOperationIntent(rawSet, get, id),
+  refreshGroupOperations: () => refreshGroupOperationIntents(rawSet, get),
+  onGroupOperationTerminal: (status) => {
+    const lease = captureChat(get);
+    const accountId = get().myAccountId;
+    if (!lease.current() || accountId !== status.account_id) return;
+    settleGroupSendIntents(rawSet, get, status);
+    if (!lease.current() || status.phase.kind !== "committed") return;
+    const active = get().active;
+    const activeGroup =
+      active?.kind === "channel" && active.id === status.group;
+    const messageOperation = ["text", "sticker", "file"].includes(status.kind);
+    if (
+      activeGroup &&
+      (messageOperation ||
+        status.kind === "reaction" ||
+        status.kind === "recall")
+    )
+      void get()
+        .reload()
+        .then(() => {
+          if (lease.current() && get().myAccountId === accountId)
+            settleGroupSendIntents(rawSet, get, status);
+        })
+        .catch(() => {});
+    if (
+      !messageOperation &&
+      status.kind !== "reaction" &&
+      status.kind !== "recall"
+    )
+      void get()
+        .reconcileCommitted(status)
+        .catch(() => {});
+  },
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
@@ -484,7 +875,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const request = get().favoritesRequest + 1;
     set({ favoritesRequest: request });
     try {
-      const list = await favoritesApi.get(lease.owner!);
+      const list = await readWithDeadline(() => favoritesApi.get(lease.owner!));
       if (!lease.current() || get().favoritesRequest !== request) return;
       const map: Record<string, FavoriteInfo> = {};
       for (const f of list) map[f.id] = f;
@@ -589,14 +980,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   // Re-attempt the node-id poll after a boot failure (events + roster interval from the
   // original start() are still live, so we only need to re-resolve my_id/account_id).
-  retryBoot: () => {
-    const lease = captureChat(get);
+  retryBoot: (background = false) => {
+    const lease = captureChat(get, false);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     if (get().bootBusy) return;
     const request = get().bootRequest + 1;
     set({
-      bootFailed: false,
+      bootFailed: background && get().bootFailed,
       ready: false,
       bootBusy: true,
       bootRequest: request,
@@ -607,7 +998,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set,
         get,
         () => !lease.current() || get().bootRequest !== request,
+        background,
       );
+      if (ok && lease.current() && get().bootRequest === request)
+        void get().loadFavorites();
       if (get().bootRequest === request)
         set({ bootBusy: false, bootFailed: !ok });
     })();
@@ -669,6 +1063,163 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set({ bootFailed: true });
     })();
 
+    let delivery: ReturnType<
+      typeof createReceptionDelivery<HostReception>
+    > | null = null;
+    let deliveryRuntime: string | null = null;
+    let receiptCursor: ReceptionCursor | null = null;
+    let receiptScope: ReceptionScope | null = null;
+    let receiptPending = false;
+    const snapshot = (cursor: ReceptionCursor) => {
+      const state = get();
+      return {
+        cursor,
+        ledger: state.ledger,
+        overflowUnread: state.overflowUnread,
+        unread: state.unread,
+        pendingUnknownUnread: state.pendingUnknownUnread,
+        historyFullBaselines: state.historyFullBaselines,
+        reception: state.reception,
+      };
+    };
+    const failReception = (error: unknown) => {
+      const message = `Couldn't save received messages: ${errorMessage(error)}`;
+      if (lease.current() && get().error !== message) set({ error: message });
+    };
+    const synchronizeDelivery = () => {
+      const state = get();
+      const runtime = state.ready ? state.deliveryRuntime : null;
+      if (runtime === deliveryRuntime) return;
+      delivery?.stop();
+      delivery = null;
+      deliveryRuntime = runtime;
+      receiptCursor = null;
+      receiptScope = null;
+      receiptPending = false;
+      if (!runtime || !lease.current() || !lease.owner) return;
+      const scope: ReceptionScope = {
+        owner: lease.owner,
+        account_id: state.myAccountId,
+        device_id: state.myId,
+        runtime_id: runtime,
+      };
+      try {
+        receiptCursor = loadReceptionSnapshot(scope)?.cursor ?? null;
+        receiptScope = scope;
+        let firstPull = true;
+        let avatarIdentityLoaded = false;
+        delivery = createReceptionDelivery({
+          scope,
+          cursor: receiptCursor,
+          current: () =>
+            lease.current() &&
+            get().ready &&
+            get().deliveryRuntime === runtime &&
+            get().myAccountId === scope.account_id &&
+            get().myId === scope.device_id,
+          pull: async (after, through) => {
+            try {
+              const page = await receptionApi.pull(
+                scope,
+                after,
+                through,
+                firstPull,
+              );
+              firstPull = false;
+              return page;
+            } catch (error) {
+              // The host may have reserved a page whose IPC reply was lost.
+              // No page was applied, so replace that reservation on retry.
+              firstPull = true;
+              throw error;
+            }
+          },
+          apply: (page) => {
+            receiptPending = true;
+            if (receiptCursor === null) {
+              // Establish recovery state before the first effects can touch
+              // older per-field persistence, including legacy rows without IDs.
+              saveReceptionSnapshot(scope, snapshot(page.after));
+              receiptCursor = page.after;
+            }
+            for (const receipt of page.receipts) {
+              switch (receipt.kind) {
+                case "dm":
+                  get_handleDm(set, get, receipt.event);
+                  break;
+                case "channel":
+                  get_handleChannel(set, get, receipt.event);
+                  break;
+                case "file":
+                  get_handleFile(set, get, receipt.event);
+                  break;
+                case "profile":
+                  applyChatProfile(receipt.event);
+                  break;
+                case "call":
+                  applyChatCallSignal(receipt.event);
+                  break;
+                case "progress":
+                  applyChatFileProgress(receipt.event);
+                  break;
+                case "state":
+                  void get().refreshRoster();
+                  void get().refreshChannels();
+                  void get().refreshStatuses(undefined, true);
+                  notifySyncInvalidation({ owner: scope.owner, kind: "state" });
+                  break;
+              }
+            }
+            if (page.complete && !avatarIdentityLoaded) {
+              avatarIdentityLoaded = true;
+              finishChatAvatarIdentity(
+                () =>
+                  lease.current() &&
+                  get().deliveryRuntime === runtime &&
+                  get().myAccountId === scope.account_id &&
+                  get().myId === scope.device_id,
+              );
+            }
+          },
+          persist: (cursor) => {
+            saveReceptionSnapshot(scope, snapshot(cursor));
+            receiptCursor = cursor;
+            receiptPending = false;
+          },
+          acknowledge: (page) => receptionApi.acknowledge(scope, page),
+          failed: failReception,
+        });
+        void delivery.wake();
+      } catch (error) {
+        failReception(error);
+      }
+    };
+    const stopReceptionObservation = useChat.subscribe((state, previous) => {
+      synchronizeDelivery();
+      if (
+        receiptScope &&
+        receiptCursor &&
+        !receiptPending &&
+        lease.current() &&
+        (state.ledger !== previous.ledger ||
+          state.overflowUnread !== previous.overflowUnread ||
+          state.unread !== previous.unread ||
+          state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
+          state.historyFullBaselines !== previous.historyFullBaselines ||
+          state.reception !== previous.reception)
+      ) {
+        try {
+          saveReceptionSnapshot(receiptScope, snapshot(receiptCursor));
+        } catch (error) {
+          failReception(error);
+        }
+      }
+    });
+    const wakeReception = () => {
+      synchronizeDelivery();
+      void delivery?.wake();
+    };
+    synchronizeDelivery();
     const expiryWallStart = Date.now();
     const expiryMonotonicStart = performance.now();
     const expire = () => {
@@ -683,6 +1234,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       );
       set((state) => ({
         ...expireConversationMessages(state, now),
+        ...receptionPatch(state, expireReception(state, now)),
         incomingFiles: state.incomingFiles.filter(
           (file) => file.expiresAtMs == null || file.expiresAtMs > now,
         ),
@@ -692,9 +1244,24 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         notifyIncomingFileDismissed(file.fileConv);
     };
     const expiry = setInterval(expire, 1000);
-    if (typeof window !== "undefined") window.addEventListener("focus", expire);
-    if (typeof document !== "undefined")
+    const resumeReception = () => {
+      if (
+        typeof document === "undefined" ||
+        document.visibilityState !== "hidden"
+      )
+        wakeReception();
+    };
+    const flushReceipts = () => flushReceptionPersistence();
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", flushReceipts);
+      window.addEventListener("focus", expire);
+      window.addEventListener("focus", resumeReception);
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener?.("visibilitychange", flushReceipts);
       document.addEventListener?.("visibilitychange", expire);
+      document.addEventListener?.("visibilitychange", resumeReception);
+    }
 
     let rosterBusy = false;
     let rosterDirty = false;
@@ -715,22 +1282,49 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     };
     let nextRosterFallback = 0;
     let nextStatusFallback = 0;
+    let nextBootRecovery = 0;
+    let bootFailureObserved = false;
     const roster = setInterval(() => {
       if (lease.current() && get().ready) {
+        bootFailureObserved = false;
+        void refreshGroupOperationIntents(rawSet, get);
         const now = performance.now();
         if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
           nextRosterFallback = now + 30000;
+          wakeReception();
           void refreshRoster();
         }
         if (!supportsPushState(lease.owner) || now >= nextStatusFallback) {
           nextStatusFallback = now + 30000;
           void get().refreshStatuses();
         }
-      } else if (lease.current() && !get().bootBusy && !get().bootFailed)
-        get().retryBoot();
+      } else if (lease.current() && !get().bootBusy) {
+        const failed = get().bootFailed;
+        const now = performance.now();
+        if (failed && !bootFailureObserved) {
+          bootFailureObserved = true;
+          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
+        }
+        if (!failed || now >= nextBootRecovery) {
+          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
+          // A failed boot remains visible while one bounded background read checks
+          // for recovery. Never let a transient identity timeout become terminal.
+          get().retryBoot(failed);
+        }
+      }
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
+      onReceptionWake: (scope) => {
+        if (
+          lease.current() &&
+          scope.owner === lease.owner &&
+          scope.account_id === get().myAccountId &&
+          scope.device_id === get().myId &&
+          scope.runtime_id === get().deliveryRuntime
+        )
+          wakeReception();
+      },
       onStateChanged: (e) => {
         const state = get();
         if (
@@ -742,6 +1336,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         )
           return;
         notifySyncInvalidation({ owner: e.owner, kind: e.kind });
+        if (["state", "roster", "delivery", "files"].includes(e.kind))
+          void refreshGroupOperationIntents(rawSet, get);
         if (e.kind === "state" || e.kind === "roster") void refreshRoster(true);
         if (e.kind === "delivery" || e.kind === "files")
           void state.refreshStatuses(undefined, true);
@@ -760,7 +1356,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           return;
         // Outgoing delegated sends do not count as inbound notifications. Fetch
         // their content through the same guarded history path as ordinary sends.
-        void state.reload();
+        void requestConversationReload(rawSet, get);
       },
 
       onDm: (e) => {
@@ -777,6 +1373,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         )
           return;
         void state.refreshChannels(e.channel_id);
+        void refreshGroupOperationIntents(rawSet, get);
       },
       onChannelMessage: (e) => {
         if (lease.current()) get_handleChannel(set, get, e);
@@ -786,6 +1383,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       },
       onFileProgress: (e) => {
         if (lease.current()) applyChatFileProgress(e);
+      },
+      onAccountProfile: (event) => {
+        const state = get();
+        if (
+          lease.current() &&
+          useAuth.getState().user?.id === event.user.id &&
+          state.myAccountId === event.account_id &&
+          state.myId === event.device_id
+        )
+          useAuth.setState({
+            user: event.user,
+            ...(event.saved_session != null
+              ? { savedSession: event.saved_session }
+              : {}),
+          });
       },
       onProfile: (e) => {
         if (lease.current()) applyChatProfile(e);
@@ -797,40 +1409,72 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
     return () => {
       cancelled = true;
+      delivery?.stop();
+      stopReceptionObservation();
+      flushReceptionPersistence();
+      if (typeof window !== "undefined")
+        window.removeEventListener("pagehide", flushReceipts);
+      if (typeof document !== "undefined")
+        document.removeEventListener?.("visibilitychange", flushReceipts);
       clearInterval(roster);
       clearInterval(expiry);
-      if (typeof window !== "undefined")
+      if (typeof window !== "undefined") {
         window.removeEventListener("focus", expire);
-      if (typeof document !== "undefined")
+        window.removeEventListener("focus", resumeReception);
+      }
+      if (typeof document !== "undefined") {
         document.removeEventListener?.("visibilitychange", expire);
+        document.removeEventListener?.("visibilitychange", resumeReception);
+      }
       unlisten();
       if (get().runEpoch === lease.run) {
         stopChatCalls();
-        rawSet((s) => ({ runEpoch: s.runEpoch + 1, ready: false }));
+        rawSet((s) => ({
+          runEpoch: s.runEpoch + 1,
+          ready: false,
+          groupOperations: {},
+          groupOperationIssue: undefined,
+        }));
       }
     };
   },
 
-  deleteContact: async (account) => {
+  deleteContact: async (account, clearHistory = true) => {
     const lease = captureChat(get);
+    const expectedAccount = get().myAccountId;
     if (
       !lease.current() ||
       !lease.owner ||
       !get().ready ||
-      account === get().myAccountId
+      !expectedAccount.trim() ||
+      account === expectedAccount
     )
       return false;
     try {
-      await contactPolicy.delete(lease.owner, account);
-      if (!lease.current()) return false;
+      await contactPolicy.delete(
+        lease.owner,
+        expectedAccount,
+        account,
+        clearHistory,
+      );
+      if (!lease.current() || get().myAccountId !== expectedAccount)
+        return false;
+      if (clearHistory)
+        useDrafts
+          .getState()
+          .discard(lease.owner, lease.generation, `account:${account}`);
       rawSet((state) => {
         const unread = { ...state.unread };
         delete unread[`account:${account}`];
         const closing =
           state.active?.kind === "account" && state.active.id === account;
         return {
-          ...clearConversationMessages(state, `account:${account}`),
-          reactions: { ...state.reactions, [`account:${account}`]: [] },
+          ...(clearHistory
+            ? deletedChatState(state, `account:${account}`)
+            : {}),
+          ...(clearHistory
+            ? { reactions: { ...state.reactions, [`account:${account}`]: [] } }
+            : {}),
           accounts: state.accounts.filter((a) => a.account_id !== account),
           unread,
           rosterRequest: state.rosterRequest + 1,
@@ -851,6 +1495,47 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }
   },
 
+  deleteLeftChannel: async (channelId) => {
+    const lease = captureChat(get);
+    const account = get().myAccountId;
+    if (!lease.current() || !lease.owner || !account || !get().ready)
+      return false;
+    try {
+      await chat.deleteLeftChannel(lease.owner, account, channelId);
+      if (!lease.current() || get().myAccountId !== account) return false;
+      const key = `channel:${channelId}`;
+      useDrafts.getState().discard(lease.owner, lease.generation, key);
+      rawSet((state) => {
+        const unread = { ...state.unread };
+        delete unread[key];
+        const closing =
+          state.active?.kind === "channel" && state.active.id === channelId;
+        return {
+          ...deletedChatState(state, key),
+          channels: state.channels.filter((c) => c.channel_id !== channelId),
+          rosterRequest: state.rosterRequest + 1,
+          reactions: { ...state.reactions, [key]: [] },
+          unread,
+          ...(closing
+            ? {
+                active: null,
+                members: [],
+                channelOwner: "",
+                searchTarget: null,
+                historyError: null,
+                activeRequest: state.activeRequest + 1,
+                loading: false,
+              }
+            : {}),
+        };
+      });
+      void channelRefresh.invalidate();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   refreshChannels: (channelId = null) => channelRefresh.request(channelId),
 
   refreshRoster: () => rosterRefresh(),
@@ -864,6 +1549,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     await get().reload();
     if (!lease.current() || get().activeRequest !== request) return;
     if (
+      (!target || !("reference" in target)) &&
       !get().loading &&
       get().historyError !== convKey(c) &&
       isConversationVisible()
@@ -880,7 +1566,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       try {
         const baseline = get().members;
         const ownerBaseline = get().channelOwner;
-        const info = await chat.channelMembers(c.id);
+        const info = await readWithDeadline(() => chat.channelMembers(c.id));
         if (!lease.current() || get().activeRequest !== request) return;
         // A newer active-view refresh wins; a background avatar-only update
         // from before navigation must not discard this navigation's details.
@@ -908,6 +1594,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       rawSet({ unread: { ...state.unread, [key]: tracked } });
   },
 
+  applyAccountReadReceipts: (owner, accountId, key, ids) => {
+    const state = get();
+    if (
+      !state.ready ||
+      state.unreadOwner !== owner ||
+      state.myAccountId !== accountId
+    )
+      return;
+    rawSet(receptionPatch(state, applyAccountSeen(state, key, ids)));
+  },
+
   markActiveRead: () => {
     const { active, loading, historyError } = get();
     if (
@@ -918,10 +1615,36 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     )
       return;
     const key = convKey(active);
+    rawSet((state) => markConversationsRead(state, [key]));
+  },
+
+  markConversationRead: (key) => {
+    if (!canReviewUnread(get()) || !/^(account|channel):.+/u.test(key)) return;
+    rawSet((state) => markConversationsRead(state, [key]));
+  },
+
+  markAllRead: () => {
+    if (!canReviewUnread(get())) return;
     rawSet((state) => ({
-      ...viewIdentities(state, key, Object.keys(state.ledger[key] ?? {})),
-      overflowUnread: { ...state.overflowUnread, [key]: 0 },
-      unread: { ...state.unread, [key]: 0 },
+      ...markConversationsRead(state, [
+        ...new Set([
+          ...Object.keys(state.unread),
+          ...Object.keys(state.ledger),
+          ...Object.keys(state.overflowUnread),
+        ]),
+      ]),
+      pendingUnknownUnread: {},
+    }));
+  },
+
+  dismissPendingUnread: (sender) => {
+    if (!canReviewUnread(get())) return;
+    rawSet((state) => ({
+      pendingUnknownUnread: Object.fromEntries(
+        Object.entries(state.pendingUnknownUnread).filter(
+          ([id]) => id !== sender,
+        ),
+      ),
     }));
   },
 
@@ -940,7 +1663,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       (state.messages[key] ?? []).flatMap((row) => (row.id ? [row.id] : [])),
     );
     const viewed = ids.filter(
-      (id) => present.has(id) && state.ledger[key]?.[id]?.seen !== true,
+      (id) =>
+        present.has(id) &&
+        state.ledger[key]?.[id]?.seen !== true &&
+        !state.ledger[key]?.[id]?.suppressed,
     );
     if (!viewed.length) return;
     rawSet((state) =>
@@ -950,51 +1676,66 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   revealUnread: (key, id) => revealConversationIdentity(rawSet, get, key, id),
 
-  reload: () => reloadConversation(rawSet, get),
+  reload: async () => {
+    const lease = captureChat(get);
+    const accountId = get().myAccountId;
+    const loaded = await reloadConversation(rawSet, get);
+    if (!loaded || !lease.current() || get().myAccountId !== accountId)
+      return loaded;
+    const active = get().active;
+    // A terminal receipt may precede canonical history or conversation reopening.
+    // Reuse its exact public identity after history supplies the source metadata.
+    if (active?.kind === "channel")
+      for (const ticket of Object.values(get().groupOperations ?? {})) {
+        if (!lease.current()) break;
+        if (
+          ticket.account_id === accountId &&
+          ticket.group === active.id &&
+          ticket.status?.phase.kind === "committed"
+        )
+          settleGroupSendIntents(rawSet, get, ticket.status);
+      }
+    return loaded;
+  },
   refreshStatuses: (conversation, invalidate) =>
     refreshDeliveryStatuses(rawSet, get, conversation, invalidate),
 
   send: async (text, replyTo) => {
     const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return;
-    await sendIntent(set, get, c, { kind: "text", text, replyTo });
+    await sendIntent(rawSet, get, c, { kind: "text", text, replyTo });
   },
 
   // The composer needs an immediate admission answer so it never clears a draft that
   // could not enter the local optimistic queue. Delivery still settles asynchronously.
-  admitText: (text, replyTo, expiresAtMs) => {
+  admitText: (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return false;
-    const dispatch = beginSendIntent(
-      guardedSet(rawSet, lease.current),
-      get,
-      c,
-      {
-        kind: "text",
-        text,
-        replyTo,
-        expiresAtMs,
-      },
-    );
+    const dispatch = beginSendIntent(rawSet, get, c, {
+      kind: "text",
+      text,
+      replyTo,
+      expiresAtMs,
+      protection,
+    });
     if (!dispatch) return false;
     void dispatch;
     return true;
   },
 
   // Account composers retain the draft until the core has durably accepted it.
-  admitTextAndWait: async (text, replyTo, expiresAtMs) => {
+  admitTextAndWait: async (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return false;
     return (
       beginSendIntent(
-        guardedSet(rawSet, lease.current),
+        rawSet,
         get,
         c,
         {
@@ -1002,8 +1743,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           text,
           replyTo,
           expiresAtMs,
+          protection,
         },
-        { waitForHydration: false },
+        { waitForHydration: false, retainFailure: !protection },
       ) ?? false
     );
   },
@@ -1042,34 +1784,64 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         ),
       },
     }));
-    await dispatchIntent(set, get, { ...intent, message: pending });
+    await dispatchIntent(rawSet, get, { ...intent, message: pending });
   },
 
+  admitImage: async (path, protection, expiresAtMs, onAccepted) => {
+    const lease = captureChat(get);
+    const c = get().active;
+    if (!lease.current() || !get().ready || !c) return "refused";
+    const admission = beginSendIntent(
+      rawSet,
+      get,
+      c,
+      { kind: "file", path, media: true, expiresAtMs, protection },
+      { waitForHydration: false, onAccepted },
+    );
+    if (!admission) return "refused";
+    // Local transfer gives the bubble sole retry ownership, including native failure.
+    return (await admission) ? "accepted" : "failed";
+  },
   sendFile: async (path, media, expiresAtMs) => {
     const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(set, get, c, { kind: "file", path, media, expiresAtMs });
+    await sendIntent(rawSet, get, c, {
+      kind: "file",
+      path,
+      media,
+      expiresAtMs,
+    });
   },
 
-  toggleReaction: async (target, emoji) => {
+  toggleReaction: async (target, emoji, remove) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
-    // Reaction `who` is keyed by account id for account conversations, device user-id for
-    // channels — so "did I already react?" must compare against the matching id, or an
-    // account-conversation reaction can never be detected as ours (never toggles off).
+    // Native channel ownership includes certified siblings, even when they are offline.
     const selfId = c.kind === "account" ? get().myAccountId : get().myId;
     const mine = (get().reactions[key] ?? []).find(
-      (r) => r.target === target && r.emoji === emoji && r.who.includes(selfId),
+      (r) =>
+        r.target === target && r.emoji === emoji && reactionFromMe(r, selfId),
     );
     try {
-      await reactFor(c, target, emoji, Boolean(mine));
+      if (c.kind === "channel") {
+        const outcome = await submitGroupControlIntent(rawSet, get, c.id, {
+          kind: "react",
+          target,
+          emoji,
+          remove: remove ?? Boolean(mine),
+        });
+        if (outcome.kind === "not_admitted") throw outcome.error;
+        if (outcome.kind === "capacity")
+          throw new Error("Too many pending group actions.");
+        return;
+      }
+      await chat.reactAccount(c.id, target, emoji, remove ?? Boolean(mine));
       // Only reload if still on this conversation (matches send/sendFile).
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();
@@ -1088,7 +1860,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     try {
       await chat.deleteMessage(c.id, target, isChannelConv(c));
       if (!lease.current()) return;
-      set((state) => deleteConversationMessage(state, key, target));
+      set((state) => ({
+        ...deleteConversationMessage(state, key, target),
+        ...receptionPatch(state, suppressIdentities(state, key, [target])),
+      }));
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't delete message: ${errorMessage(e)}` });
@@ -1103,7 +1878,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!c) return;
     const key = convKey(c);
     try {
-      await chat.recallMessage(c.id, target, isChannelConv(c));
+      if (c.kind === "channel") {
+        const outcome = await submitGroupControlIntent(rawSet, get, c.id, {
+          kind: "recall",
+          target,
+        });
+        if (outcome.kind === "not_admitted") throw outcome.error;
+        if (outcome.kind === "capacity")
+          throw new Error("Too many pending group actions.");
+        return;
+      }
+      await chat.recallMessage(c.id, target, false);
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();
     } catch (e) {
@@ -1118,10 +1903,44 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const c = get().active;
     if (!c) return false;
     const key = convKey(c);
+    const snapshot = get();
+    const ids = Object.keys(snapshot.ledger[key] ?? {});
+    const overflow = snapshot.overflowUnread[key] ?? 0;
+    const legacy = Math.max(
+      0,
+      (snapshot.unread[key] ?? 0) -
+        (snapshot.unreadIds[key]?.length ?? 0) -
+        overflow,
+    );
     try {
       await chat.clearConversation(c.id, isChannelConv(c));
       if (!lease.current()) return false;
-      set((state) => clearConversationMessages(state, key));
+      set((state) => {
+        const next = suppressIdentities(state, key, ids);
+        const remainingOverflow = Math.max(
+          0,
+          (state.overflowUnread[key] ?? 0) - overflow,
+        );
+        const patch = receptionPatch(state, {
+          ...emptyReception(
+            next.ledger,
+            { ...next.overflowUnread, [key]: remainingOverflow },
+            next.accountSeen,
+          ),
+          reception: next.reception,
+        });
+        return {
+          ...clearConversationMessages(state, key),
+          ...patch,
+          unread: {
+            ...(patch.unread ?? state.unread),
+            [key]: Math.max(
+              0,
+              (patch.unread?.[key] ?? state.unread[key] ?? 0) - legacy,
+            ),
+          },
+        };
+      });
       if (get().active && convKey(get().active!) === key) await get().reload();
       return true;
     } catch (e) {
@@ -1136,7 +1955,47 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(set, get, c, {
+    const installed = stickerById(stickerId, usePacks.getState().packs);
+    if (installed) {
+      let stagedPath: string | undefined;
+      let transferred = false;
+      try {
+        const snapshot = snapshotSticker(installed, fallback);
+        stagedPath = await chat.writeTempFile(
+          Array.from(snapshot.bytes),
+          snapshot.ext,
+          snapshot.name,
+        );
+        if (
+          !lease.current() ||
+          !get().active ||
+          convKey(get().active!) !== convKey(c)
+        )
+          return;
+        const sending = beginSendIntent(rawSet, get, c, {
+          kind: "file",
+          path: stagedPath,
+          media: true,
+          expiresAtMs,
+          stickerMedia: {
+            name: snapshot.name,
+            size: snapshot.bytes.length,
+            mime: snapshot.mime,
+          },
+        });
+        if (!sending) return;
+        // The ordinary file intent owns this immutable path through retry.
+        transferred = true;
+        await sending;
+      } catch (error) {
+        set({ error: `Couldn't send sticker: ${errorMessage(error)}` });
+      } finally {
+        if (stagedPath && !transferred)
+          await chat.deleteTempFile(stagedPath).catch(() => {});
+      }
+      return;
+    }
+    await sendIntent(rawSet, get, c, {
       kind: "sticker",
       stickerId,
       fallback,
@@ -1149,6 +2008,23 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     write: rawSet,
     capture: () => captureChat(get),
     commands: chat,
+    deleteCommittedHistory: (group) => {
+      const lease = captureChat(get);
+      if (!lease.current() || !lease.owner) return;
+      const key = `channel:${group}`;
+      useDrafts.getState().discard(lease.owner, lease.generation, key);
+      rawSet((state) => ({
+        ...deletedChatState(state, key),
+        reactions: { ...state.reactions, [key]: [] },
+        channels: state.channels.filter(
+          (channel) => channel.channel_id !== group,
+        ),
+        rosterRequest: state.rosterRequest + 1,
+      }));
+      void channelRefresh.invalidate();
+    },
+    submitControl: (group, operation) =>
+      submitGroupControlIntent(rawSet, get, group, operation),
     refreshRoster: async () => {
       await get().refreshChannels();
       await get().refreshRoster();
@@ -1216,6 +2092,7 @@ function captureChat(get: Get, identitySensitive = true) {
 registerRuntimeSnapshot(() => ({
   runEpoch: useChat.getState().runEpoch,
   identityEpoch: useChat.getState().identityEpoch,
+  accountId: useChat.getState().myAccountId,
 }));
 
 export function captureChatOwnership() {
@@ -1236,6 +2113,14 @@ function bump(set: Set, key: string, active: boolean) {
   if (!active) {
     set((s) => ({ unread: { ...s.unread, [key]: (s.unread[key] ?? 0) + 1 } }));
   }
+}
+
+function canReviewUnread(state: ChatState): boolean {
+  return (
+    Boolean(state.myAccountId) &&
+    state.unreadOwner === useAuth.getState().user?.id &&
+    isConversationVisible()
+  );
 }
 
 function isConversationVisible(): boolean {
@@ -1302,7 +2187,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // Compatibility for event providers predating logical DM identities.
     bump(set, key, isActive && isConversationVisible());
   }
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
@@ -1328,11 +2213,22 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
     set((state) =>
       receptionPatch(
         state,
-        receiveIdentity(state, key, { ...e, own_device: own }),
+        receiveIdentity(
+          state,
+          key,
+          { ...e, own_device: own },
+          !e.protection &&
+            mentionsName(
+              e.text,
+              useAuth.getState().user?.display_name ||
+                useAuth.getState().user?.username ||
+                "",
+            ),
+        ),
       ),
     );
   } else if (!e.own_device) bump(set, key, isActive && isConversationVisible());
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
@@ -1363,7 +2259,10 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
     set((state) =>
       receptionPatch(
         state,
-        receiveIdentity(state, key, { ...e, own_device: own }),
+        expireReception(
+          receiveIdentity(state, key, { ...e, own_device: own }),
+          Math.max(Date.now(), state.expiryNow),
+        ),
       ),
     );
   if (!e.event_id && knownTray) return;
@@ -1379,6 +2278,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
           mime: e.mime,
           fileConv: e.file_conv,
           media: e.media,
+          protection: e.protection,
         },
         ...state.incomingFiles,
       ].slice(0, INCOMING_FILES_CAP),
@@ -1396,34 +2296,35 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   }
   const isActive = get().active !== null && convKey(get().active!) === key;
   if (!e.event_id && !own) bump(set, key, isActive && isConversationVisible());
-  if (isActive && !knownIdentity) void get().reload();
+  if (isActive && !knownIdentity) void requestConversationReload(set, get);
 }
 
 useChat.subscribe((state, previous) => {
   if (
-    state.ledger !== previous.ledger &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.unreadOwner !== previous.unreadOwner ||
+    state.myAccountId !== previous.myAccountId ||
+    state.runEpoch !== previous.runEpoch
   )
-    saveReceptionLedger(state.unreadOwner, state.myAccountId, state.ledger);
+    flushReceptionPersistence();
+  if (!state.unreadOwner || !state.myAccountId) return;
+  queueReceptionPersistence(state.unreadOwner, state.myAccountId, {
+    ...(state.unread !== previous.unread ? { unread: state.unread } : {}),
+    ...(state.pendingUnknownUnread !== previous.pendingUnknownUnread
+      ? { pendingUnknownUnread: state.pendingUnknownUnread }
+      : {}),
+    ...(state.ledger !== previous.ledger ? { ledger: state.ledger } : {}),
+    ...(state.overflowUnread !== previous.overflowUnread
+      ? { overflowUnread: state.overflowUnread }
+      : {}),
+    ...(state.historyFullBaselines !== previous.historyFullBaselines
+      ? { historyFullBaselines: state.historyFullBaselines }
+      : {}),
+  });
+});
+useAuth.subscribe((state, previous) => {
   if (
-    state.overflowUnread !== previous.overflowUnread &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.user?.id !== previous.user?.id ||
+    state.generation !== previous.generation
   )
-    saveUnreadOverflow(
-      state.unreadOwner,
-      state.myAccountId,
-      state.overflowUnread,
-    );
-  if (
-    state.historyFullBaselines !== previous.historyFullBaselines &&
-    state.unreadOwner &&
-    state.myAccountId
-  )
-    saveFullHistoryBaselines(
-      state.unreadOwner,
-      state.myAccountId,
-      state.historyFullBaselines,
-    );
+    flushReceptionPersistence();
 });

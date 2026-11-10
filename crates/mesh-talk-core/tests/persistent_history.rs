@@ -13,17 +13,27 @@
 //! Nodes are also started SEQUENTIALLY (start one, await its line, then the next) so a
 //! slow machine never has to run two KDF-heavy cold starts concurrently.
 
+#[path = "support/history_observer.rs"]
+mod history_observer;
+#[path = "support/peer_observer.rs"]
+mod peer_observer;
 mod support;
 
-use std::io::{BufRead, BufReader, Write};
+use history_observer::{read_cli_lines, retain_line, wait_for_history_line};
+
+use std::collections::VecDeque;
+use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 struct CliNode {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<String>,
+    transcript: Arc<Mutex<VecDeque<String>>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl CliNode {
@@ -41,32 +51,32 @@ impl CliNode {
             .arg(discovery_port.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn mesh-talk-node");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = child.stdout.take().expect("child stdout");
+        let stderr = child.stderr.take().expect("child stderr");
+        let transcript = Arc::new(Mutex::new(VecDeque::new()));
+        retain_line(&transcript, format!("spawn {name} pid={}", child.id()));
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        let output_trace = transcript.clone();
+        let error_trace = transcript.clone();
+        let readers = vec![
+            std::thread::spawn(move || read_cli_lines(stdout, "stdout", &output_trace, Some(tx))),
+            std::thread::spawn(move || read_cli_lines(stderr, "stderr", &error_trace, None)),
+        ];
         CliNode {
             child,
             stdin,
             lines: rx,
+            transcript,
+            readers,
         }
     }
 
     fn send(&mut self, line: &str) {
+        retain_line(&self.transcript, format!("stdin: {line}"));
         writeln!(self.stdin, "{line}").expect("write to child stdin");
         self.stdin.flush().expect("flush child stdin");
     }
@@ -90,6 +100,19 @@ impl CliNode {
 impl Drop for CliNode {
     fn drop(&mut self) {
         support::stop_cli(&mut self.child, &mut self.stdin);
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        // The first Alice lifetime ends before a later restart/query failure.
+        // Emit its bounded evidence now; the test harness retains successful
+        // output too. Exit status shows success versus signal termination, but
+        // does not claim which side won a concurrent graceful-exit/kill race.
+        eprintln!(
+            "CLI pid={} exit={:?} bounded transcript={:?}",
+            self.child.id(),
+            self.child.try_wait(),
+            self.transcript.lock().unwrap()
+        );
     }
 }
 
@@ -109,7 +132,10 @@ fn await_peer(node: &mut CliNode, want_uid: &str, who: &str) {
     while Instant::now() < deadline {
         node.send("/peers");
         if node
-            .wait_for(|l| l.contains(want_uid), Duration::from_secs(1))
+            .wait_for(
+                |l| peer_observer::is_peer_listing(l, want_uid),
+                Duration::from_secs(1),
+            )
             .is_some()
         {
             return;
@@ -165,11 +191,20 @@ fn message_history_survives_restart() {
 
     // /history shows BOTH directions, restored from disk.
     alice.send(&format!("/history {} 20", &bob_uid[..8]));
-    let sent = alice
-        .wait_for(|l| l.contains("ping-from-alice"), Duration::from_secs(10))
-        .expect("history shows Alice's sent message after restart");
+    let mut pending = VecDeque::new();
+    let sent = wait_for_history_line(
+        &alice.lines,
+        &mut pending,
+        "ping-from-alice",
+        Duration::from_secs(10),
+    )
+    .expect("history shows Alice's sent message after restart");
     assert!(sent.contains("you:"), "sent line attributed to you: {sent}");
-    alice
-        .wait_for(|l| l.contains("pong-from-bob"), Duration::from_secs(10))
-        .expect("history shows Bob's received reply after restart");
+    wait_for_history_line(
+        &alice.lines,
+        &mut pending,
+        "pong-from-bob",
+        Duration::from_secs(10),
+    )
+    .expect("history shows Bob's received reply after restart");
 }

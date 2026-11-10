@@ -2,16 +2,9 @@ name: Linux tray geometry diagnostics
 
 on:
   workflow_dispatch:
-  push:
-    branches: [dev]
-    paths:
-      - .github/workflows/linux-tray-diagnostics.yml
-      - scripts/diagnostics/tray-geometry*.mjs
-      - scripts/diagnostics/linux-tray-host.py
-      - src-tauri/src/tray.rs
-      - src-tauri/src/lib.rs
-      - src-tauri/src/window_visibility.rs
-      - src-tauri/src/chat_commands/**
+
+# Incident-specific comparison rigs are opt-in; ordinary native acceptance is
+# owned by hidden-contacts-native.yml and its required backend caller.
 
 permissions:
   contents: read

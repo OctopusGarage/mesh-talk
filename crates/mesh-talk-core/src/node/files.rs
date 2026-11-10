@@ -4,6 +4,12 @@
 //! the chunk events ride the normal bounded sync, which already re-requests only the
 //! events a peer is missing — so transfer RESUMES across reconnects for free.
 
+mod channel_receive;
+pub(in crate::node) use channel_receive::ChannelFileTurn;
+mod chunks;
+mod reception;
+pub(in crate::node) use chunks::ChunkChain;
+
 use super::node::MAX_FILE_SIZE;
 use super::*;
 
@@ -11,34 +17,52 @@ pub(in crate::node) fn same_file_transfer(
     left: &crate::file::AnyManifest,
     right: &crate::file::AnyManifest,
 ) -> bool {
-    use crate::file::AnyManifest;
-    fn v1(mut manifest: crate::file::FileManifest) -> crate::file::FileManifest {
-        manifest.name.clear();
-        manifest.mime.clear();
-        manifest
-    }
-    fn v2(mut manifest: crate::file::FileManifestV2) -> crate::file::FileManifestV2 {
-        manifest.name.clear();
-        manifest.mime.clear();
-        manifest
-    }
-    match (left, right) {
-        (AnyManifest::V1(left), AnyManifest::V1(right)) => v1(left.clone()) == v1(right.clone()),
-        (AnyManifest::V2(left), AnyManifest::V2(right)) => v2(left.clone()) == v2(right.clone()),
-        (AnyManifest::V3(left), AnyManifest::V3(right)) => {
-            v2(left.v2.clone()) == v2(right.v2.clone())
-        }
-        (AnyManifest::V4(left), AnyManifest::V4(right)) => {
-            v2(left.v3.v2.clone()) == v2(right.v3.v2.clone())
-        }
-        _ => false,
-    }
+    file_transfer_fingerprint(left)
+        .zip(file_transfer_fingerprint(right))
+        .is_some_and(|(left, right)| left == right)
 }
+
+/// The existing transfer-binding rule ignores presentation names and MIME but
+/// preserves the manifest version, protection and immutable transfer fields.
+/// The indexed file owner uses this same rule for its persisted fingerprint.
+pub(in crate::node) fn file_transfer_fingerprint(
+    manifest: &crate::file::AnyManifest,
+) -> Option<[u8; 32]> {
+    use crate::file::AnyManifest;
+    fn v1(mut manifest: crate::file::FileManifest) -> Vec<u8> {
+        manifest.name.clear();
+        manifest.mime.clear();
+        manifest.encode()
+    }
+    fn v2(mut manifest: crate::file::FileManifestV2) -> Vec<u8> {
+        manifest.name.clear();
+        manifest.mime.clear();
+        manifest.encode()
+    }
+    let (version, body) = match manifest.unprotected() {
+        AnyManifest::V1(manifest) => (1, v1(manifest.clone())),
+        AnyManifest::V2(manifest) => (2, v2(manifest.clone())),
+        AnyManifest::V3(manifest) => (3, v2(manifest.v2.clone())),
+        AnyManifest::V4(manifest) => (4, v2(manifest.v3.v2.clone())),
+        AnyManifest::Protected { .. } => return None,
+    };
+    let protection = match manifest.protection() {
+        None => 0,
+        Some(MessageProtection::Click) => 1,
+        Some(MessageProtection::Authenticate) => 2,
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"mesh-talk/file-transfer-binding/v1\0");
+    hash.update([version, protection]);
+    hash.update(body);
+    Some(hash.finalize().into())
+}
+use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::file::{
     AnyManifest, CHUNK_SIZE, FileKey, FileKind, FileManifestV2, FileManifestV3, FileManifestV4,
     chunk_count_for, chunk_hash, file_checksum, generate_file_nonce, open_chunk_for,
-    reassemble_and_verify, seal_chunk_indexed,
+    seal_chunk_indexed,
 };
 use crate::node::conversation::dm_conversation_id;
 use sha2::{Digest, Sha256};
@@ -75,7 +99,9 @@ pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
         .with_fixint_encoding()
         .with_limit(crate::transport::MAX_PLAINTEXT as u64)
         .reject_trailing_bytes();
-    let manifest = if let Some(body) = bytes.strip_prefix(b"MFM4") {
+    let manifest = if bytes.starts_with(b"MFP") {
+        crate::file::decode_manifest(bytes)?
+    } else if let Some(body) = bytes.strip_prefix(b"MFM4") {
         AnyManifest::V4(decode.deserialize::<FileManifestV4>(body).ok()?)
     } else if let Some(body) = bytes.strip_prefix(b"MFM3") {
         AnyManifest::V3(decode.deserialize::<FileManifestV3>(body).ok()?)
@@ -88,10 +114,26 @@ pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
                 .ok()?,
         )
     };
+    if manifest.protection().is_some()
+        && !crate::node::media_store::automatic_inline_image(&manifest)
+    {
+        return None;
+    }
     if manifest.size() > MAX_FILE_SIZE || manifest.chunk_count() == 0 {
         return None;
     }
-    match &manifest {
+    if crate::file::sticker::is_sticker_name(manifest.name())
+        && (manifest.protection().is_some()
+            || !crate::file::sticker::valid_manifest(
+                manifest.name(),
+                manifest.mime(),
+                manifest.size(),
+                manifest.kind() == Some(FileKind::Media),
+            ))
+    {
+        return None;
+    }
+    match manifest.unprotected() {
         AnyManifest::V1(m) if m.chunk_count != chunk_count_for(m.size) => return None,
         AnyManifest::V2(m) | AnyManifest::V3(FileManifestV3 { v2: m, .. })
             if m.chunk_size == 0
@@ -249,6 +291,68 @@ pub(in crate::node) fn eligible_manifest_row(
     .then_some(manifest)
 }
 
+/// Import the prior local FILES cache once. A warm open reads only the persisted
+/// checkpoint; accepted live writes already install their projection atomically.
+pub(in crate::node) fn import_file_book(
+    book: &super::filebook::indexed::IndexedFileBook,
+    records: &super::received_store::ReceivedStore,
+    log: &crate::eventlog::persist::PersistentEventLog,
+    proofs: &super::account_file_repository::IndexedAccountFileProofs,
+    delivery: &super::delivery_store::DeliveryStore,
+    identities: &super::file_message_identity::IndexedFileMessageIdentities,
+    suppression: &super::account_suppression::IndexedAccountSuppression,
+) -> Result<(), LogError> {
+    while let Some(before) = book.import_position()? {
+        let page = records.header_scan_page(
+            None,
+            before,
+            super::transcript_repository::TranscriptPageLimit::new(1, 4096)?,
+        )?;
+        let Some(header) = page.rows.first() else {
+            book.profile()
+                .database()
+                .transaction(|c| book.advance_import_on(c, before, None))?;
+            break;
+        };
+        let ordinal = header.ordinal;
+        let accepted = if book.eligible_ordinal(ordinal)? {
+            None
+        } else if let Some(entry) = records.row_by_ordinal(ordinal)? {
+            if delivery.file_erased(entry.conversation, entry.event_id)
+                || delivery.manifest_event_erased(entry.event_id)
+                || identities.row_suppressed(&entry, suppression)?
+            {
+                None
+            } else {
+                let original = match log.get(&entry.event_id)? {
+                    Some(event) => Some(event),
+                    None => proofs.get(&entry.event_id)?,
+                };
+                match original {
+                    Some(original)
+                        if eligible_manifest_row(&entry, Some(&original), None)
+                            .map(|manifest| book.accepts(&manifest))
+                            .transpose()?
+                            .unwrap_or(false) =>
+                    {
+                        Some((entry, original))
+                    }
+                    _ => None,
+                }
+            }
+        } else {
+            return Err(LogError::CorruptFile("file import row disappeared".into()));
+        };
+        book.profile().database().transaction(|c| {
+            if let Some((entry, original)) = &accepted {
+                super::filebook::indexed::install_on(c, entry, original)?;
+            }
+            book.advance_import_on(c, before, Some(ordinal))
+        })?;
+    }
+    Ok(())
+}
+
 /// Progress of a file transfer: `done`/`total` chunks. The terminal callback always
 /// has `done == total`.
 #[derive(Debug, Clone, Copy)]
@@ -271,116 +375,47 @@ impl Node {
     pub(in crate::node) fn reseed_live_file_book(
         &self,
         delivery: &super::delivery_store::DeliveryStore,
-    ) {
-        let mut book = FileBook::new();
-        let mut rows = Vec::new();
-        {
-            let records = self.received_files.lock().expect("files lock not poisoned");
-            let log = self.log.lock().expect("log lock not poisoned");
-            let proofs = self
-                .account_file_proofs
+    ) -> Result<(), NodeError> {
+        let book = self.files.lock().expect("files lock").clone();
+        let revision = book.begin_reconcile()?;
+        for offer in book.offers(None, None) {
+            let offer = offer?;
+            let row = self
+                .received_files
                 .lock()
-                .expect("file proofs lock not poisoned");
-            for conversation in records.conversations() {
-                for entry in records.entries(&conversation) {
-                    if delivery.file_erased(entry.conversation, entry.event_id)
-                        || delivery.manifest_event_erased(entry.event_id)
-                    {
-                        continue;
-                    }
-                    let original = log
-                        .get(&entry.event_id)
-                        .or_else(|| proofs.get(&entry.event_id));
-                    let decoded = validated_manifest(&entry.plaintext);
-                    let existing = decoded.as_ref().and_then(|m| book.manifest(&m.file_conv()));
-                    if let Some(manifest) = eligible_manifest_row(&entry, original, existing) {
-                        rows.push((manifest.file_conv(), entry.event_id));
-                        book.record_event(entry.event_id, original.unwrap().author, manifest);
-                        book.mark_emitted(entry.event_id);
-                    }
-                }
-            }
-        }
-        let live = book
-            .file_convs()
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        let legacy = self
-            .privacy
-            .state
-            .read()
-            .expect("privacy lock not poisoned")
-            .as_ref()
-            .map(|state| {
-                state
-                    .file_scopes
-                    .iter()
-                    .flat_map(|(file, scopes)| {
-                        scopes
-                            .iter()
-                            .filter(|scope| state.legacy_scope_ids.contains(&scope.event))
-                            .map(|scope| (*file, scope.clone()))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let mut scopes: std::collections::HashMap<_, Vec<_>> = Default::default();
-        {
-            let log = self.log.lock().expect("log lock not poisoned");
-            let mut own_files = std::collections::HashSet::new();
-            for (file, id) in rows {
-                if let Some(event) = log.get(&id).filter(|event| {
-                    event.kind == EventKind::FileManifest
-                        && event.verify_integrity()
-                        && event.verify_signature()
-                }) {
-                    if event.author.ed25519_pub() == &self.identity.public().ed25519_pub {
-                        own_files.insert(file);
-                    }
-                    scopes
-                        .entry(file)
-                        .or_default()
-                        .push(super::privacy_runtime::ManifestScope {
-                            parent: event.conversation_id,
-                            author: event.author,
-                            event: id,
-                        });
-                }
-            }
-            for (file, scope) in legacy {
-                if own_files.contains(&file)
-                    && !delivery.manifest_event_erased(scope.event)
-                    && log.get(&scope.event).is_some_and(|event| {
-                        event.kind == EventKind::FileManifest
-                            && event.author == scope.author
-                            && event.conversation_id == scope.parent
-                            && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
-                            && event.verify_integrity()
-                            && event.verify_signature()
-                    })
+                .expect("files lock")
+                .row_by_ordinal(offer.ordinal)?;
+            let valid = if let Some(row) = row {
+                if delivery.file_erased(row.conversation, row.event_id)
+                    || delivery.manifest_event_erased(row.event_id)
+                    || self.file_message_row_suppressed(&row)?
                 {
-                    let retained = scopes.entry(file).or_default();
-                    if !retained.contains(&scope) {
-                        retained.push(scope);
-                    }
+                    false
+                } else {
+                    let original = match self.log.lock().expect("log lock").get(&row.event_id)? {
+                        Some(event) => Some(event),
+                        None => self
+                            .account_file_proofs
+                            .lock()
+                            .expect("proof lock")
+                            .get(&row.event_id)?,
+                    };
+                    eligible_manifest_row(&row, original.as_ref(), None)
+                        .map(|manifest| book.accepts(&manifest))
+                        .transpose()?
+                        .unwrap_or(false)
                 }
+            } else {
+                false
+            };
+            if !valid {
+                book.stage_revoke(offer.ordinal)?;
             }
         }
-        *self.files.lock().expect("files lock not poisoned") = book;
-        self.pending_files
-            .lock()
-            .expect("pending files lock not poisoned")
-            .retain(|file| live.contains(file));
-        if let Some(state) = self
-            .privacy
-            .state
-            .write()
-            .expect("privacy lock not poisoned")
-            .as_mut()
-        {
-            state.file_scopes = scopes;
-        }
-        self.install_file_card_scopes(delivery);
+        // Every fallible observation precedes publication. A storage failure or
+        // concurrent accepted binding leaves the prior projection intact.
+        book.finish_reconcile(revision)?;
+        Ok(())
     }
     /// Send the file at `path` to a DM peer. Streams + seals it into a fresh per-file
     /// conversation, seals the manifest to the recipient, posts a `FileManifest`
@@ -589,6 +624,50 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
         expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_to_account_progress_expiring_if_inner(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            None,
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn enqueue_protected_file_to_account_progress_expiring_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: MessageProtection,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_to_account_progress_expiring_if_inner(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            Some(protection),
+            authorize,
+        )
+        .await
+    }
+
+    async fn enqueue_file_to_account_progress_expiring_if_inner(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
@@ -612,17 +691,37 @@ impl Node {
                 .await?;
         }
 
-        let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        if protection.is_some() {
+            validate_protected_image_path(path, kind)?;
+        }
         let account_conv = super::conversation::account_conversation_id(
             &self.account.account_id(),
             target_account_id,
         );
-        let id = self.accept_staged_manifest_if(
+        let (mut manifest, file_conv) = self
+            .stage_file_for_host_blocking(
+                path,
+                kind,
+                on_progress,
+                account_conv,
+                Some(target_account_id.to_owned()),
+                expires_at_ms,
+            )
+            .await?;
+        if protection.is_some() {
+            self.validate_staged_protected_image(&manifest)?;
+            manifest.v2.name = format!(
+                "protected-image.{}",
+                path.extension().and_then(|s| s.to_str()).unwrap_or("img")
+            );
+        }
+        let id = self.accept_staged_manifest_with_protection_if(
             &dests,
             account_conv,
             Some(target_account_id.to_owned()),
             &manifest,
             expires_at_ms,
+            protection,
             &mut authorize,
         )?;
         Ok((id, file_conv))
@@ -650,6 +749,60 @@ impl Node {
         expires_at_ms: Option<u64>,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
+        self.accept_staged_manifest_with_protection_if(
+            peers,
+            host,
+            target_account,
+            manifest,
+            expires_at_ms,
+            None,
+            authorize,
+        )
+    }
+
+    fn accept_staged_manifest_with_protection_if(
+        &self,
+        peers: &[crate::discovery::PeerRecord],
+        host: ConversationId,
+        target_account: Option<String>,
+        manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
+        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<crate::eventlog::EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        let mut target_account = Some(target_account);
+        let mut accepted = None;
+        authorize(&mut || {
+            let target = target_account
+                .take()
+                .ok_or_else(|| NodeError::Authorization("accept is single-use".into()))?;
+            accepted = Some(self.accept_staged_manifest_authorized(
+                peers,
+                host,
+                target,
+                manifest,
+                expires_at_ms,
+                protection,
+                None,
+            )?);
+            Ok(())
+        })?;
+        accepted.ok_or_else(|| {
+            NodeError::Authorization("authorization did not execute acceptance".into())
+        })
+    }
+
+    pub(in crate::node) fn accept_staged_manifest_authorized(
+        &self,
+        peers: &[crate::discovery::PeerRecord],
+        host: ConversationId,
+        target_account: Option<String>,
+        manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
+        request: Option<super::delivery_store::RequestRecord>,
+    ) -> Result<crate::eventlog::EventId, NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
@@ -657,7 +810,10 @@ impl Node {
         let own = self.identity.public();
         let author = Author::from_ed25519(own.ed25519_pub);
         let clock = super::node::now_millis();
-        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
+        let plaintext = crate::expiry::wrap(
+            &protected_manifest_bytes(manifest, protection),
+            expires_at_ms,
+        );
         let mut destinations = Vec::with_capacity(peers.len());
         {
             let log = self.log.lock().expect("log lock not poisoned");
@@ -734,15 +890,16 @@ impl Node {
             )
         }
         .map_err(NodeError::Log)?;
-        if self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
-            let mut book = self.files.lock().expect("files lock not poisoned");
-            book.mark_emitted(id);
-            book.record_event(
-                id,
-                Author::from_ed25519(self.identity.public().ed25519_pub),
-                outgoing_manifest(manifest),
-            );
-        }
+        let transaction = if let Some(mut request) = request {
+            request.message_id = id;
+            super::delivery_store::DeliveryTransaction::Requested {
+                request,
+                transaction: Box::new(transaction),
+            }
+        } else {
+            transaction
+        };
+        self.commit_outgoing_transaction(&mut store, transaction)?;
         self.account_sync_notify.notify_one();
         Ok(id)
     }
@@ -837,63 +994,148 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
         expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<ConversationId, NodeError> {
+        let (_, file) = self
+            .enqueue_file_channel_progress_expiring_if(
+                channel,
+                path,
+                kind,
+                on_progress,
+                expires_at_ms,
+                authorize,
+            )
+            .await?;
+        self.flush_channel_file(channel, file).await;
+        Ok(file)
+    }
+
+    pub async fn enqueue_file_channel_progress_expiring_if(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<(EventId, ConversationId), NodeError> {
+        self.enqueue_file_channel_progress_expiring_if_inner(
+            channel,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            None,
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn enqueue_protected_file_channel_progress_expiring_if(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: MessageProtection,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<(EventId, ConversationId), NodeError> {
+        self.enqueue_file_channel_progress_expiring_if_inner(
+            channel,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            Some(protection),
+            authorize,
+        )
+        .await
+    }
+
+    async fn enqueue_file_channel_progress_expiring_if_inner(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
-    ) -> Result<ConversationId, NodeError> {
+    ) -> Result<(EventId, ConversationId), NodeError> {
         authorize(&mut || Ok(()))?;
+        self.await_channel_metadata(channel).await?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.is_member(&self.user_id()) || state.pending_invite() {
+            if !self.channel_identity_is_current(state)? {
                 return Err(NodeError::Channel("not an accepted channel member".into()));
             }
         }
-        let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        if protection.is_some() {
+            validate_protected_image_path(path, kind)?;
+        }
+        let (mut manifest, file_conv) = self
+            .stage_file_for_host_blocking(path, kind, on_progress, channel, None, expires_at_ms)
+            .await?;
+        if protection.is_some() {
+            self.validate_staged_protected_image(&manifest)?;
+            manifest.v2.name = format!(
+                "protected-image.{}",
+                path.extension().and_then(|s| s.to_str()).unwrap_or("img")
+            );
+        }
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        let id = self.enqueue_channel_payload_if(
+            channel,
+            crate::expiry::wrap(
+                &protected_manifest_bytes(&manifest, protection),
+                expires_at_ms,
+            ),
+            EventKind::FileManifest,
+            None,
+            &mut authorize,
+        )?;
+        if let Err(error) = self.queue_group_file_delivery(file_conv, id) {
+            // The manifest is already committed. The durable row scan retries
+            // scheduling; a transient lookup failure must not reject its send.
+            log::warn!("Group file scheduling deferred after storage failure: {error}");
+        }
+        Ok((id, file_conv))
+    }
+
+    /// Fan out an already accepted channel offer and its automatically permitted bytes.
+    pub async fn flush_channel_file(&self, channel: ConversationId, file: ConversationId) {
         let members = self
             .channels
             .lock()
             .expect("channels lock")
             .state(&channel)
-            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
-            .members()
-            .to_vec();
-        let id = self.enqueue_channel_payload_if(
-            channel,
-            crate::expiry::wrap(&outgoing_manifest_bytes(&manifest), expires_at_ms),
-            EventKind::FileManifest,
-            None,
-            &mut authorize,
-        )?;
-        let seq = self
-            .log
-            .lock()
-            .expect("log lock")
-            .get(&id)
-            .ok_or_else(|| NodeError::File("accepted manifest awaits recovery".into()))?
-            .seq;
-        authorize(&mut || {
-            self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)
-        })?;
-        // A file/folder manifest is an offer. Members pull its chunks only after
-        // their own receive policy permits it; pushing the chunk conversation here
-        // would transmit the bytes before they could approve. Inline media keeps
-        // the existing automatic transfer behavior.
-        self.distribute_channel(channel, &members).await;
-        if crate::node::media_store::automatic_inline_image(&outgoing_manifest(&manifest)) {
-            self.distribute_channel(file_conv, &members).await;
+            .map(|state| state.recipient_members());
+        let automatic_inline = match self.files.lock().expect("files lock").manifest(file) {
+            Ok(manifest) => manifest
+                .as_ref()
+                .is_some_and(crate::node::media_store::automatic_inline_image),
+            Err(error) => {
+                log::warn!("channel file fanout deferred: {error}");
+                return;
+            }
+        };
+        if let Some(members) = members {
+            self.distribute_channel_file(channel, file, &members, automatic_inline)
+                .await;
         }
-        Ok(file_conv)
     }
 
     /// Off-reactor wrapper around [`Node::stage_file`]: staging is a synchronous burst of
     /// disk reads + per-chunk AEAD + per-chunk encrypted-log appends/flushes, so run it on
     /// the blocking pool to keep it off a tokio worker (the receive/save path is offloaded
     /// the same way). The result is identical — just executed on a blocking thread.
-    async fn stage_file_blocking(
+    pub(in crate::node) async fn stage_file_blocking(
         self: &Arc<Self>,
         path: &Path,
         kind: FileKind,
@@ -907,12 +1149,58 @@ impl Node {
         let path = path.to_path_buf();
         // The async sender may be aborted during retirement. Keep admission in
         // the actual writer, whose blocking operation cannot be canceled.
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            node.stage_file(&path, kind, on_progress)
-        })
-        .await
-        .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
+        permit
+            .spawn_blocking(move || node.stage_file(&path, kind, on_progress))
+            .await
+            .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
+            .into_inner()
+    }
+
+    pub(in crate::node) async fn stage_file_for_host_blocking(
+        self: &Arc<Self>,
+        path: &Path,
+        kind: FileKind,
+        mut on_progress: impl FnMut(FileProgress) + Send + 'static,
+        host: ConversationId,
+        account: Option<String>,
+        deadline: Option<u64>,
+    ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !crate::file::sticker::is_sticker_name(name) {
+            return self.stage_file_blocking(path, kind, on_progress).await;
+        }
+        let permit = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| NodeError::File("participant runtime is stopping".into()))?;
+        let node = Arc::clone(self);
+        let path = path.to_path_buf();
+        permit
+            .spawn_blocking(move || {
+                let bytes = super::sticker_media::snapshot(&path, kind)?
+                    .ok_or_else(|| NodeError::InvalidInput("invalid sticker name".into()))?;
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                if let Some(manifest) =
+                    node.reusable_sticker(host, account.as_deref(), name, &bytes, deadline)?
+                {
+                    on_progress(FileProgress {
+                        done: manifest.v2.chunk_count,
+                        total: manifest.v2.chunk_count,
+                    });
+                    let file = manifest.v2.file_conv;
+                    return Ok((manifest, file));
+                }
+                node.stage_sticker_snapshot(name, &bytes, on_progress)
+            })
+            .await
+            .map_err(|error| NodeError::File(format!("stage join error: {error}")))?
+            .into_inner()
     }
 
     /// Stream `path` from disk, sealing each `CHUNK_SIZE` piece (deterministic-nonce v2
@@ -925,6 +1213,13 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        if let Some(bytes) = super::sticker_media::snapshot(path, kind)? {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            return self.stage_sticker_snapshot(name, &bytes, on_progress);
+        }
         if path.is_dir() {
             let archive = crate::file::directory::pack(path)?;
             let name = crate::file::directory::archive_name(path)?;
@@ -938,7 +1233,7 @@ impl Node {
         self.stage_regular_file(path, kind, on_progress, None)
     }
 
-    fn stage_regular_file(
+    pub(super) fn stage_regular_file(
         &self,
         path: &Path,
         kind: FileKind,
@@ -999,6 +1294,9 @@ impl Node {
         let mut buf = vec![0u8; CHUNK_SIZE];
 
         for index in 0..chunk_count {
+            if self.runtime_work.is_closed() {
+                return Err(NodeError::File("participant runtime is stopping".into()));
+            }
             let n = read_full(&mut reader, &mut buf)
                 .map_err(|e| NodeError::File(format!("read: {e}")))?;
             let plain = &buf[..n];
@@ -1043,63 +1341,47 @@ impl Node {
         Ok((manifest, file_conv))
     }
 
-    /// Record a manifest we just SENT into the durable file stores so the file shows as an
-    /// outgoing message in OUR history (and is previewable/saveable), persisting across
-    /// restart. Records into `received_files` keyed by `record_conv` (the UI's host
-    /// conversation: the DM/channel conv, or the ACCOUNT conv for an account send) with
-    /// `from = our own user-id` (so `conversation_files` derives `from_me`), and into the
-    /// FileBook so `read_file`/`save_file` resolve the manifest (our own chunks are in the
-    /// file_conv log). The manifest event's id + wall-clock are read from `event_conv` by
-    /// `seq` (the value `append_event` returned) — for a DM/channel send `event_conv ==
-    /// record_conv`; for an account send the event lives in a per-device DM conv while we
-    /// file it under the account conv. Idempotent: the `received_files`/FileBook dedup on
-    /// the event id, so the account path's repeated calls (one per device, same manifest)
-    /// record it once.
-    pub(in crate::node) fn record_sent_manifest(
+    pub(in crate::node) fn validate_staged_protected_image(
         &self,
-        record_conv: ConversationId,
-        event_conv: ConversationId,
-        seq: u64,
         manifest: &FileManifestV3,
-        expires_at_ms: Option<u64>,
     ) -> Result<(), NodeError> {
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        // Resolve the just-appended manifest event's content-addressed id + wall-clock.
-        let appended = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&event_conv)
-                .into_iter()
-                .find(|e| {
-                    e.kind == EventKind::FileManifest && e.author == self_author && e.seq == seq
-                })
-                .map(|e| (e.id, e.wall_clock))
-        };
-        let Some((event_id, wall_clock)) = appended else {
-            return Err(NodeError::File("sent manifest event unavailable".into()));
-        };
-        self.remember_sent_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id)
-            .map_err(NodeError::Log)?;
-        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
-        self.received_files
+        let manifest = outgoing_manifest(manifest);
+        if !super::media_store::automatic_inline_image(&manifest) {
+            return Err(NodeError::InvalidInput(
+                "protected media must be a supported raster image within 16 MiB".into(),
+            ));
+        }
+        let first = self
+            .chunk_ids(manifest.file_conv())?
+            .next()
+            .transpose()?
+            .ok_or_else(|| NodeError::File("staged image unavailable".into()))?;
+        let ciphertext = self.chunk_ciphertext(first)?;
+        let bytes = open_chunk_for(&manifest, 0, &ciphertext)
+            .map_err(|_| NodeError::File("staged image unavailable".into()))?;
+        if !super::media_store::raster_signature_matches(manifest.mime(), &bytes) {
+            return Err(NodeError::InvalidInput(
+                "protected image signature differs from media type".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn file_is_protected(&self, file: ConversationId) -> Result<bool, NodeError> {
+        Ok(self
+            .files
             .lock()
-            .expect("received_files mutex not poisoned")
-            .record(
-                record_conv,
-                self.identity.public().user_id(),
-                wall_clock,
-                &plaintext,
-                event_id,
-            )
-            .map_err(NodeError::Log)?;
-        let mut files = self.files.lock().expect("files mutex not poisoned");
-        files.mark_emitted(event_id);
-        files.record_event(
-            event_id,
-            Author::from_ed25519(self.identity.public().ed25519_pub),
-            outgoing_manifest(manifest),
-        );
-        drop(files);
-        self.note_account_local_change();
+            .expect("files lock")
+            .manifest(file)?
+            .is_some_and(|m| m.protection().is_some()))
+    }
+
+    fn reject_protected_file(&self, file: ConversationId) -> Result<(), NodeError> {
+        if self.file_is_protected(file)? {
+            return Err(NodeError::Authorization(
+                "protected image requires an exact authorized reveal".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1108,7 +1390,37 @@ impl Node {
     /// not yet received-complete). This is the DURABLE display path — distinct from
     /// [`Node::read_file`], which reassembles the transient chunks (gone after prune).
     pub fn read_media(&self, file_conv: ConversationId) -> Option<Vec<u8>> {
-        self.media.read(file_conv)
+        self.read_media_checked(file_conv).unwrap_or_else(|error| {
+            log::warn!("media read deferred: {error}");
+            None
+        })
+    }
+
+    pub fn read_media_checked(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<Option<Vec<u8>>, NodeError> {
+        // Cleanup retires manifest metadata before removing the encrypted blob.
+        // Missing policy metadata must never turn a protected image into ordinary media.
+        let Some(manifest) = self.files.lock().expect("files lock").manifest(file_conv)? else {
+            return Ok(None);
+        };
+        if manifest.protection().is_some() || self.expired_received_file(file_conv)? {
+            return Ok(None);
+        }
+        let Some(bytes) = self.media.read(file_conv) else {
+            return Ok(None);
+        };
+        if crate::file::sticker::is_sticker_name(manifest.name()) {
+            if bytes.len() as u64 != manifest.size() || file_checksum(&bytes) != manifest.checksum()
+            {
+                return Ok(None);
+            }
+            if super::sticker_media::validate(manifest.name(), manifest.mime(), &bytes).is_err() {
+                return Ok(None);
+            }
+        }
+        Ok(Some(bytes))
     }
 
     /// Whether durable media bytes for `file_conv` exist (drives the UI's store-vs-chunk
@@ -1123,98 +1435,169 @@ impl Node {
 
     /// Receive-complete persist for MEDIA: if `file_conv` is a media file (image/video by
     /// name) we hold ALL chunks of but haven't yet copied into the durable media store,
-    /// reassemble + verify it (`read_file`) and write the bytes into the store. After this
-    /// the media is durable, so its transient chunks are safe to prune. A no-op for a
-    /// generic attachment (never stored), an incomplete file, or one already stored.
-    /// Returns true iff it newly persisted media. Best-effort — failures are swallowed and
-    /// retried on the next sync tick.
+    /// stream verified chunks into encrypted storage. After this the media is durable,
+    /// so its transient chunks follow the existing reclamation policy. A no-op for a
+    /// generic attachment (never stored) or an incomplete file. Returns true when it
+    /// persists media or the completion/reclamation owner reports completion.
+    /// Stored bytes are not rewritten; reclamation remains best-effort.
     pub(in crate::node) fn persist_media_if_complete(&self, file_conv: ConversationId) -> bool {
         // Decide media-vs-attachment by the sender's INTENT (manifest kind); for legacy
         // manifests with no kind, fall back to the filename heuristic. Only media is copied
         // to the durable store; an attachment keeps the chunks + manual-save flow.
-        let (name, media) = {
+        let manifest = {
             let files = self.files.lock().expect("files mutex not poisoned");
-            let Some(m) = files.manifest(&file_conv) else {
-                return false;
-            };
-            (
-                m.name().to_string(),
-                crate::node::media_store::manifest_is_media(m),
-            )
-        };
-        if !media {
-            return false; // attachment — never written to the media store
-        }
-        if self.media.contains(file_conv) && self.has_verified_file_completion(file_conv) {
-            return false; // already durable
-        }
-        let candidates = self.completion_candidates(file_conv);
-        // Need all chunks present; `read_file` enforces completeness + verifies integrity.
-        match self.read_file(file_conv) {
-            Ok(bytes) => {
-                if self.media.store_bytes(file_conv, &name, &bytes).is_ok() {
-                    // The durable media copy now exists, so the transient chunks are
-                    // reclaimable — mirror save_file's prune (history still shows the bubble
-                    // from the FileBook + received_files; the preview loads from the store).
-                    self.commit_file_completion(file_conv, &candidates);
-                    self.pending_files
-                        .lock()
-                        .expect("pending_files mutex not poisoned")
-                        .remove(&file_conv);
-                    true
-                } else {
-                    false
+            match files.manifest(file_conv) {
+                Ok(Some(manifest)) => manifest,
+                Ok(None) => return false,
+                Err(error) => {
+                    log::warn!("media completion lookup deferred: {error}");
+                    return false;
                 }
             }
-            Err(_) => false, // not all chunks yet (or verify failed) — retry next tick
+        };
+        if !crate::node::media_store::manifest_is_media(&manifest) {
+            return false; // attachment — never written to the media store
         }
+        let locally_complete = match self.local_media_recovery_complete(file_conv) {
+            Ok(complete) => complete,
+            Err(error) => {
+                log::warn!("media recovery lookup deferred: {error}");
+                return false;
+            }
+        };
+        if locally_complete {
+            if let Err(error) = self.complete_sticker_aliases(file_conv) {
+                log::warn!("sticker completion deferred: {error}");
+                return false;
+            }
+            let pending = match self.pending_sticker_aliases(file_conv) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    log::warn!("sticker completion deferred: {error}");
+                    return false;
+                }
+            };
+            if !pending {
+                return self
+                    .commit_file_completion(file_conv, &[])
+                    .unwrap_or_else(|error| {
+                        log::warn!("media reclamation deferred: {error}");
+                        false
+                    });
+            }
+        }
+        let candidates = match self.completion_candidates(file_conv) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                log::warn!("media completion lookup deferred: {error}");
+                return false;
+            }
+        };
+        if let Err(error) = self.store_received_media(&manifest) {
+            log::debug!("media persistence deferred: {error}");
+            return false;
+        }
+        if let Err(error) = self.commit_file_completion(file_conv, &candidates) {
+            log::warn!("media reclamation deferred: {error}");
+            return false;
+        }
+        true
+    }
+
+    fn store_received_media(&self, manifest: &AnyManifest) -> Result<(), NodeError> {
+        let file = manifest.file_conv();
+        if self.expired_received_file(file)? {
+            return Err(NodeError::File("file expired".into()));
+        }
+        if crate::file::sticker::is_sticker_name(manifest.name()) {
+            // Sticker image admission has its own small established size cap.
+            // Preserve that decoded-format check before publication.
+            self.read_file_internal(file)?;
+        }
+        let mut reader = chunks::PlaintextChunks::new(self, manifest)?;
+        let prepared = self
+            .media
+            .prepare_from_reader_if(file, manifest.name(), &mut reader, manifest.size(), || {
+                Ok(())
+            })
+            .map_err(|error| NodeError::File(format!("prepare media: {error}")))?;
+        reader
+            .finish()
+            .map_err(|error| NodeError::File(format!("verify media: {error}")))?;
+        // File-row deletion and media maintenance use this same reference lock.
+        // A changed/deleted accepted manifest cannot publish prepared bytes.
+        let _rows = self.received_files.lock().expect("received files lock");
+        let files = self.files.lock().expect("files lock");
+        if files.manifest(file)?.as_ref() != Some(manifest) {
+            return Err(NodeError::File(
+                "file changed during media preparation".into(),
+            ));
+        }
+        self.media
+            .publish_prepared(prepared)
+            .map_err(|error| NodeError::File(format!("publish media: {error}")))?;
+        Ok(())
     }
 
     /// How many chunks of `file_conv` we hold vs. how many the manifest expects.
     /// `None` if the manifest hasn't synced yet. Drives resume + progress in the UI.
-    pub fn file_progress(&self, file_conv: ConversationId) -> Option<FileProgress> {
-        if self.expired_received_file(file_conv) {
-            return None;
+    pub fn file_progress(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<Option<FileProgress>, NodeError> {
+        if self.expired_received_file(file_conv)? {
+            return Ok(None);
         }
-        let total = self
+        let manifest = self
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)?
-            .chunk_count();
+            .manifest(file_conv)?;
+        let Some(manifest) = manifest else {
+            return Ok(None);
+        };
+        let total = manifest.chunk_count();
         let have = {
             let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&file_conv)
-                .into_iter()
-                .filter(|e| e.kind == EventKind::Message)
-                .count() as u32
+            log.count_kind(&file_conv, EventKind::Message)?
         };
-        Some(FileProgress {
-            done: have.min(total),
-            total,
-        })
+        let done = if have < u64::from(total)
+            && self
+                .managed_media_for_export(file_conv, &manifest)?
+                .is_some()
+        {
+            total
+        } else {
+            have.min(u64::from(total)) as u32
+        };
+        Ok(Some(FileProgress { done, total }))
     }
 
     /// Whether a save can attempt current chunks or a retained managed-media copy.
     /// Historical exports alone do not imply that this node still holds the bytes.
     /// This bounded metadata/path check does not read content: save verifies the
     /// complete managed copy's size and checksum on the blocking export path.
-    pub fn file_ready_to_save(&self, file_conv: ConversationId) -> bool {
-        self.file_progress(file_conv).is_some_and(|progress| {
-            if progress.done == progress.total {
-                return true;
-            }
-            let manifest = self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .manifest(&file_conv)
-                .cloned();
-            manifest.is_some_and(|manifest| {
-                self.managed_media_for_export(file_conv, &manifest)
-                    .is_some()
-            })
-        })
+    pub fn file_ready_to_save(&self, file_conv: ConversationId) -> Result<bool, NodeError> {
+        if self.file_is_protected(file_conv)? {
+            return Ok(false);
+        }
+        let Some(progress) = self.file_progress(file_conv)? else {
+            return Ok(false);
+        };
+        if progress.done == progress.total {
+            return Ok(true);
+        }
+        let manifest = self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .manifest(file_conv)?;
+        let Some(manifest) = manifest else {
+            return Ok(false);
+        };
+        Ok(self
+            .managed_media_for_export(file_conv, &manifest)?
+            .is_some())
     }
 
     /// Reassemble + verify a received file into its decrypted bytes (whole, in memory
@@ -1222,46 +1605,54 @@ impl Node {
     /// chunks have synced, or verification fails. For large files prefer
     /// [`Node::save_file`], which streams to disk.
     pub fn read_file(&self, file_conv: ConversationId) -> Result<Vec<u8>, NodeError> {
-        if self.expired_received_file(file_conv) {
+        self.reject_protected_file(file_conv)?;
+        self.read_file_internal(file_conv)
+    }
+
+    pub(in crate::node) fn read_file_internal(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<Vec<u8>, NodeError> {
+        if self.expired_received_file(file_conv)? {
             return Err(NodeError::File("file expired".into()));
         }
         let manifest = self
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .cloned()
+            .manifest(file_conv)?
             .ok_or_else(|| NodeError::File("unknown file".into()))?;
-        let chunks: Vec<Vec<u8>> = self.collect_chunks(file_conv);
-        if chunks.len() as u32 != manifest.chunk_count() {
+        if manifest.size() > super::media_store::MAX_INLINE_MEDIA_BYTES {
+            return Err(NodeError::File(
+                "file exceeds inline read budget; save it to disk".into(),
+            ));
+        }
+        let chunks = self.chunk_ids(file_conv)?;
+        if chunks.total != u64::from(manifest.chunk_count()) {
             return Err(NodeError::File(format!(
                 "file incomplete: {}/{} chunks",
-                chunks.len(),
+                chunks.total,
                 manifest.chunk_count()
             )));
         }
-        match &manifest {
-            AnyManifest::V1(m) => reassemble_and_verify(m, &chunks)
-                .map_err(|e| NodeError::File(format!("reassemble: {e}"))),
-            AnyManifest::V2(_) | AnyManifest::V3(_) | AnyManifest::V4(_) => {
-                let mut out = Vec::new();
-                for (i, ct) in chunks.iter().enumerate() {
-                    let plain = open_chunk_for(&manifest, i as u32, ct)
-                        .map_err(|e| NodeError::File(format!("open chunk {i}: {e}")))?;
-                    if (out.len() as u64).saturating_add(plain.len() as u64) > manifest.size() {
-                        return Err(NodeError::File("file size mismatch".into()));
-                    }
-                    out.extend_from_slice(&plain);
-                }
-                if out.len() as u64 != manifest.size() {
-                    return Err(NodeError::File("file size mismatch".into()));
-                }
-                if file_checksum(&out) != manifest.checksum() {
-                    return Err(NodeError::File("checksum mismatch".into()));
-                }
-                Ok(out)
+        let mut out = Vec::new();
+        for (i, id) in chunks.enumerate() {
+            let ciphertext = self.chunk_ciphertext(id?)?;
+            let plain = open_chunk_for(&manifest, i as u32, &ciphertext)
+                .map_err(|e| NodeError::File(format!("open chunk {i}: {e}")))?;
+            if (out.len() as u64).saturating_add(plain.len() as u64) > manifest.size() {
+                return Err(NodeError::File("file size mismatch".into()));
             }
+            out.extend_from_slice(&plain);
         }
+        if out.len() as u64 != manifest.size() {
+            return Err(NodeError::File("file size mismatch".into()));
+        }
+        if file_checksum(&out) != manifest.checksum() {
+            return Err(NodeError::File("checksum mismatch".into()));
+        }
+        super::sticker_media::validate(manifest.name(), manifest.mime(), &out)?;
+        Ok(out)
     }
 
     /// Save a received file into `dir`, deriving the filename from the (remote-supplied)
@@ -1278,15 +1669,15 @@ impl Node {
         file_conv: ConversationId,
         dir: &Path,
     ) -> Result<std::path::PathBuf, NodeError> {
-        if self.expired_received_file(file_conv) {
+        self.reject_protected_file(file_conv)?;
+        if self.expired_received_file(file_conv)? {
             return Err(NodeError::File("file expired".into()));
         }
         let manifest = self
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .cloned()
+            .manifest(file_conv)?
             .ok_or_else(|| NodeError::File("unknown file".into()))?;
         if manifest.mime() == crate::file::directory::MIME {
             return crate::file::directory::save(self, file_conv, dir, &manifest);
@@ -1302,7 +1693,7 @@ impl Node {
     /// Save a received file to `dest`, streaming chunk-by-chunk so the whole file is
     /// never buffered. Writes to `dest.part`, verifying each chunk's hash + AEAD on the
     /// way and the whole-file checksum at the end, then atomically renames into place.
-    /// A v1 (legacy) file falls back to the in-memory reassemble path.
+    /// Legacy v1 chunks also stream; their whole-file checksum authenticates the result.
     pub fn save_file(&self, file_conv: ConversationId, dest: &Path) -> Result<(), NodeError> {
         self.save_file_progress(file_conv, dest, |_| {})
     }
@@ -1315,7 +1706,8 @@ impl Node {
         dest: &Path,
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(), NodeError> {
-        if self.expired_received_file(file_conv) {
+        self.reject_protected_file(file_conv)?;
+        if self.expired_received_file(file_conv)? {
             return Err(NodeError::File("file expired".into()));
         }
         self.save_file_progress_inner(file_conv, dest, on_progress, true)
@@ -1331,9 +1723,13 @@ impl Node {
         self.save_file_progress_inner(file_conv, dest, |_| {}, false)
     }
 
-    pub(crate) fn complete_directory_save(&self, file_conv: ConversationId) {
-        let candidates = self.completion_candidates(file_conv);
-        self.commit_file_completion(file_conv, &candidates);
+    pub(crate) fn complete_directory_save(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<(), NodeError> {
+        let candidates = self.completion_candidates(file_conv)?;
+        self.commit_file_completion(file_conv, &candidates)?;
+        Ok(())
     }
 
     fn save_file_progress_inner(
@@ -1347,15 +1743,14 @@ impl Node {
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .cloned()
+            .manifest(file_conv)?
             .ok_or_else(|| NodeError::File("unknown file".into()))?;
         let total = manifest.chunk_count();
-        let candidates = self.completion_candidates(file_conv);
-        let chunk_ids = self.chunk_ids(file_conv);
-        if chunk_ids.len() as u32 != total {
+        let candidates = self.completion_candidates(file_conv)?;
+        let chunk_ids = self.chunk_ids(file_conv)?;
+        if chunk_ids.total != u64::from(total) {
             if self
-                .managed_media_for_export(file_conv, &manifest)
+                .managed_media_for_export(file_conv, &manifest)?
                 .is_some()
             {
                 let part = part_path(dest);
@@ -1389,26 +1784,12 @@ impl Node {
             }
             return Err(NodeError::File(format!(
                 "file incomplete: {}/{} chunks",
-                chunk_ids.len(),
-                total
+                chunk_ids.total, total
             )));
         }
 
-        // v1 has no per-chunk hash / deterministic nonce: reassemble in memory (these
-        // are the old <=8 MB single-blob-era files) and write.
-        if let AnyManifest::V1(m) = &manifest {
-            let chunks = chunk_ids
-                .iter()
-                .map(|id| self.chunk_ciphertext(*id))
-                .collect::<Result<Vec<_>, _>>()?;
-            let data = reassemble_and_verify(m, &chunks)
-                .map_err(|e| NodeError::File(format!("reassemble: {e}")))?;
-            std::fs::write(dest, data).map_err(|e| NodeError::File(format!("write: {e}")))?;
-            on_progress(FileProgress { done: total, total });
-            return Ok(());
-        }
-
-        // v2: stream each verified chunk straight to a temp .part file. Guard the temp so
+        let legacy = matches!(manifest.unprotected(), AnyManifest::V1(_));
+        // Stream each verified chunk straight to a temp .part file. Guard the temp so
         // ANY early-return error path (chunk open, write/flush IO error, checksum mismatch,
         // even the final rename) removes it instead of orphaning a `.part` on disk; the
         // guard is disarmed only once the file is committed into place.
@@ -1420,8 +1801,8 @@ impl Node {
             let f = std::fs::File::create(&part)
                 .map_err(|e| NodeError::File(format!("create part: {e}")))?;
             let mut writer = std::io::BufWriter::new(f);
-            for (i, id) in chunk_ids.iter().enumerate() {
-                let ct = self.chunk_ciphertext(*id)?;
+            for (i, id) in chunk_ids.enumerate() {
+                let ct = self.chunk_ciphertext(id?)?;
                 let plain = open_chunk_for(&manifest, i as u32, &ct)
                     .map_err(|e| NodeError::File(format!("open chunk {i}: {e}")))?;
                 size = size.saturating_add(plain.len() as u64);
@@ -1478,39 +1859,10 @@ impl Node {
                 .map_err(|e| NodeError::File(format!("preserve personal file: {e}")))?;
         }
         // The file is fully reassembled + verified on disk: reclaim its chunk events.
-        if commit_completion {
-            self.commit_file_completion(file_conv, &candidates);
+        if commit_completion && !legacy {
+            self.commit_file_completion(file_conv, &candidates)?;
         }
         Ok(())
-    }
-
-    /// The chunk-event ciphertexts of a per-file conversation, in log order.
-    fn collect_chunks(&self, file_conv: ConversationId) -> Vec<Vec<u8>> {
-        let log = self.log.lock().expect("log mutex not poisoned");
-        log.events(&file_conv)
-            .into_iter()
-            .filter(|e| e.kind == EventKind::Message)
-            .map(|e| e.ciphertext.clone())
-            .collect()
-    }
-
-    fn chunk_ids(&self, file_conv: ConversationId) -> Vec<EventId> {
-        let log = self.log.lock().expect("log mutex not poisoned");
-        log.events(&file_conv)
-            .into_iter()
-            .filter(|event| event.kind == EventKind::Message)
-            .map(|event| event.id)
-            .collect()
-    }
-
-    fn chunk_ciphertext(&self, id: EventId) -> Result<Vec<u8>, NodeError> {
-        self.log
-            .lock()
-            .expect("log mutex not poisoned")
-            .get(&id)
-            .filter(|event| event.kind == EventKind::Message)
-            .map(|event| event.ciphertext.clone())
-            .ok_or_else(|| NodeError::File("file chunk is no longer available".into()))
     }
 }
 
@@ -1639,3 +1991,320 @@ mod part_guard_tests {
 #[cfg(test)]
 #[path = "personal_files_tests.rs"]
 mod personal_files_tests;
+
+pub(in crate::node) fn validate_protected_image_path(
+    path: &Path,
+    kind: FileKind,
+) -> Result<(), NodeError> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(crate::file::sticker::is_sticker_name)
+    {
+        return Err(NodeError::InvalidInput(
+            "protected stickers are unsupported".into(),
+        ));
+    }
+    let mime = mime_from_name(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    );
+    if kind != FileKind::Media
+        || path.is_dir()
+        || !mime.starts_with("image/")
+        || std::fs::metadata(path).map_or(true, |m| m.len() > 16 * 1024 * 1024)
+    {
+        return Err(NodeError::InvalidInput(
+            "protected media must be an image".into(),
+        ));
+    }
+    let mut prefix = [0u8; 32];
+    let mut input = std::fs::File::open(path)
+        .map_err(|_| NodeError::InvalidInput("protected image is unavailable".into()))?;
+    let n = input
+        .read(&mut prefix)
+        .map_err(|_| NodeError::InvalidInput("protected image is unavailable".into()))?;
+    if !super::media_store::raster_signature_matches(&mime, &prefix[..n]) {
+        return Err(NodeError::InvalidInput(
+            "protected media must be a supported raster image".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(in crate::node) fn protected_manifest_bytes(
+    manifest: &FileManifestV3,
+    protection: Option<MessageProtection>,
+) -> Vec<u8> {
+    let bytes = outgoing_manifest_bytes(manifest);
+    match protection {
+        Some(mode) => crate::file::manifest::protect_image_manifest(bytes, mode),
+        None => bytes,
+    }
+}
+
+#[cfg(test)]
+mod indexed_file_payload_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        eventlog::Event,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+
+    fn retained_file(directory: &Path, count: u32) -> (std::sync::Arc<Node>, ConversationId) {
+        retained_file_with_size(
+            directory,
+            count,
+            CHUNK_SIZE as u64 * u64::from(count),
+            count,
+        )
+    }
+
+    fn retained_file_with_size(
+        directory: &Path,
+        count: u32,
+        size: u64,
+        retained: u32,
+    ) -> (std::sync::Arc<Node>, ConversationId) {
+        let source = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&source, &Account::generate(), "source", 4000);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory,
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let host = super::super::conversation::dm_conversation_id(
+            &source.public(),
+            &node.identity.public(),
+        );
+        let file = ConversationId::new([41; 32]);
+        let data = vec![7; CHUNK_SIZE * retained as usize];
+        let manifest = crate::file::FileManifest {
+            name: "retained.bin".into(),
+            size,
+            mime: "application/octet-stream".into(),
+            checksum: crate::file::file_checksum(&data),
+            file_key: [3; 32],
+            file_conv: file,
+            chunk_count: count,
+        };
+        let event = Event::new(
+            &source,
+            host,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::FileManifest,
+            crate::dm::seal(
+                &source,
+                &node.identity.public().x25519_pub,
+                &manifest.encode(),
+            )
+            .unwrap(),
+        );
+        node.accept_manifest_event(
+            &event,
+            &proof,
+            super::super::received_log::ReceivedEntry {
+                event_id: event.id,
+                conversation: host,
+                from: source.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            },
+        )
+        .unwrap();
+        let mut previous = None;
+        for (index, bytes) in data.chunks(CHUNK_SIZE).enumerate() {
+            let chunk = Event::new(
+                &source,
+                file,
+                index as u64 + 1,
+                previous.into_iter().collect(),
+                index as u64 + 1,
+                1,
+                EventKind::Message,
+                crate::file::seal_chunk(&manifest.key(), bytes).unwrap(),
+            );
+            previous = Some(chunk.id);
+            node.log.lock().unwrap().append(chunk).unwrap();
+        }
+        (node, file)
+    }
+
+    #[test]
+    fn indexed_file_progress_reads_metadata_without_chunk_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, file) = retained_file(directory.path(), 128);
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        let progress = node.file_progress(file).unwrap().unwrap();
+        assert_eq!((progress.done, progress.total), (128, 128));
+        assert!(node.file_ready_to_save(file).unwrap());
+        let after = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert_eq!(
+            after.1 - before.1,
+            0,
+            "progress observations cannot decode retained chunk bodies"
+        );
+    }
+
+    #[test]
+    fn indexed_file_save_id_selection_does_not_hydrate_chunks() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, file) = retained_file(directory.path(), 128);
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        let ids = node.chunk_ids(file).unwrap();
+        assert_eq!(ids.total, 128);
+        let mut selected = 0;
+        for id in ids {
+            id.unwrap();
+            selected += 1;
+        }
+        assert_eq!(selected, 128);
+        let after = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert_eq!(
+            after.1 - before.1,
+            0,
+            "streaming save must select bounded identifiers before individual chunk bodies"
+        );
+    }
+
+    #[test]
+    fn indexed_file_chunk_cursor_rejects_changes_between_metadata_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, file) = retained_file(directory.path(), 128);
+        let mut ids = node.chunk_ids(file).unwrap();
+        for _ in 0..32 {
+            ids.next().unwrap().unwrap();
+        }
+        let appended = Event::new(
+            &DeviceIdentity::generate(),
+            file,
+            1,
+            vec![],
+            10_000,
+            1,
+            EventKind::Message,
+            vec![1],
+        );
+        node.log.lock().unwrap().append(appended).unwrap();
+        assert!(matches!(
+            ids.next().unwrap(),
+            Err(NodeError::Log(LogError::StaleCursor))
+        ));
+        assert!(ids.next().is_none());
+    }
+
+    #[test]
+    fn indexed_file_inline_budget_precedes_chunk_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let size = super::super::media_store::MAX_INLINE_MEDIA_BYTES + 1;
+        let (node, file) =
+            retained_file_with_size(directory.path(), chunk_count_for(size), size, 0);
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert!(
+            matches!(node.read_file(file),Err(NodeError::File(message)) if message.contains("inline read budget"))
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before
+        );
+    }
+
+    #[test]
+    fn indexed_file_legacy_save_streams_and_preserves_retained_chunks() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, file) = retained_file(directory.path(), 3);
+        let destination = directory.path().join("export.bin");
+        node.save_file(file, &destination).unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            vec![7; CHUNK_SIZE * 3]
+        );
+        assert_eq!(node.chunk_ids(file).unwrap().total, 3);
+        assert!(!part_path(&destination).exists());
+        assert_eq!(node.read_file(file).unwrap(), vec![7; CHUNK_SIZE * 3]);
+    }
+
+    #[test]
+    fn indexed_file_streamed_media_verifies_checksum_before_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, file) = retained_file(directory.path(), 3);
+        let manifest = node.files.lock().unwrap().manifest(file).unwrap().unwrap();
+        let mut invalid = manifest.clone();
+        let AnyManifest::V1(value) = &mut invalid else {
+            panic!("v1 fixture");
+        };
+        value.checksum = [0; 32];
+        assert!(node.store_received_media(&invalid).is_err());
+        assert!(!node.media.contains(file));
+        node.store_received_media(&manifest).unwrap();
+        assert_eq!(node.media.read(file).unwrap(), vec![7; CHUNK_SIZE * 3]);
+    }
+
+    #[test]
+    fn indexed_file_media_preparation_cannot_resurrect_deleted_offer() {
+        let directory = tempfile::tempdir().unwrap();
+        let (node, file) = retained_file(directory.path(), 3);
+        let manifest = node.files.lock().unwrap().manifest(file).unwrap().unwrap();
+        let offer = node
+            .files
+            .lock()
+            .unwrap()
+            .offers(Some(file), None)
+            .next()
+            .unwrap()
+            .unwrap();
+        let deleting = node.clone();
+        node.media.before_prepare_for_test(Box::new(move || {
+            assert!(
+                deleting
+                    .delete_message(offer.parent, offer.event, false)
+                    .unwrap()
+                    > 0
+            );
+        }));
+        assert!(node.store_received_media(&manifest).is_err());
+        assert!(!node.media.contains(file));
+        assert!(node.files.lock().unwrap().manifest(file).unwrap().is_none());
+    }
+}

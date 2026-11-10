@@ -9,7 +9,6 @@ on:
   push:
     branches: ["main", "dev"]
   pull_request:
-    branches: ["main", "dev"]
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
@@ -23,183 +22,171 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
-  e2e:
-    name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
-        shard: [1, 2, 3, 4]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup Node.js
-        uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
-      # Fresh browser contexts repeatedly load Vite's module graph. Windows'
-      # default 16K outbound ports can exhaust before TIME_WAIT sockets expire,
-      # leaving unrelated tests with ERR_NO_BUFFER_SPACE and a blank login page.
-      # Keep the server's port 5173 outside this disposable runner's client pool.
-      - name: Reserve Windows browser connection capacity
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          netsh int ipv4 set dynamicport tcp start=10000 num=55535
-          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
-          netsh int ipv4 show dynamicport tcp
-      # One browser per runner preserves the existing resource budget. Spread
-      # tests across machines rather than competing with Vite on one runner.
-      - name: Run UI E2E
-        run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/4 --reporter=list,blob
-        env:
-          MESH_TALK_E2E_COVERAGE: ${{ runner.os == 'Linux' && '1' || '0' }}
-      - name: Diagnose Windows browser connection failures
-        if: failure() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          netsh int ipv4 show dynamicport tcp
-          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
-      - name: Record Linux coverage identity
-        if: runner.os == 'Linux'
-        run: >-
-          node --input-type=module -e
-          'import { writeFileSync } from "node:fs";
-          writeFileSync("coverage/shard.json", JSON.stringify({ sourceSha: process.env.SOURCE_SHA, shard: Number(process.env.SHARD), total: 4 }));'
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-          SHARD: ${{ matrix.shard }}
-      - name: Upload Linux coverage parts
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ui-coverage-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: |
-            frontend/coverage/shard.json
-            frontend/coverage/e2e-parts/*.json
-          if-no-files-found: error
-          retention-days: 7
-      - name: Upload UI evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: playwright-ui-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
-          compression-level: 0 # Blob ZIPs, traces and screenshots are already compressed.
-          path: |
-            frontend/blob-report/
-            frontend/test-results/
-          if-no-files-found: error
-          retention-days: 7
+  scope:
+    uses: ./.github/workflows/ci-scope.yml
 
-  unit-coverage:
-    # Both Linux browser variants use the same default-mode unit line map.
-    # Keep this producer in this workflow: no cross-workflow evidence reuse.
-    name: Linux unit coverage for browser line maps
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - name: Prepare shared coverable line map
-        run: npm run test:coverage
-      - name: Seal unit coverage provenance
-        run: node ../scripts/ci/unit-coverage-artifact.mjs seal coverage/lcov.info ../target/ui-unit-coverage
-      - name: Upload source-pinned unit coverage
-        uses: actions/upload-artifact@v7
-        with:
-          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ui-unit-coverage/
-          if-no-files-found: error
-          retention-days: 7
+  health:
+    if: ${{ !cancelled() }}
+    needs: [scope]
+    uses: ./.github/workflows/check-health.yml
+    with:
+      full: ${{ needs.scope.outputs.full }}
+      upstream_result: ${{ needs.scope.result }}
+    secrets: inherit
+
+  linux:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
+    uses: ./.github/workflows/ui-shards.yml
+    with:
+      operating_systems: '["ubuntu-24.04"]'
+
+  desktop:
+    if: needs.scope.outputs.full == 'true'
+    # Preserve native Mac admission; reuse the four-slot per-OS browser budget.
+    needs: [health, portable, scope]
+    uses: ./.github/workflows/ui-shards.yml
+    with:
+      operating_systems: '["macos-26-intel"]'
+      shards: '[1,2,3,4,5,6,7,8]'
+      shard_total: 8
+
+  desktop-windows:
+    if: needs.scope.outputs.full == 'true'
+    needs: [health, scope]
+    uses: ./.github/workflows/ui-shards.yml
+    with:
+      operating_systems: '["windows-latest"]'
+      shards: '[1,2,3,4]'
+      shard_total: 4
 
   coverage:
     # This existing name is required by branch protection. It now certifies
     # successful shards plus their complete current-source coverage upload.
     name: Full Linux UI regression
-    needs: [e2e, unit-coverage]
-    if: always()
+    needs: [linux, health, scope]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
         working-directory: frontend
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
       - name: Require all browser shards
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: .
         env:
-          BASELINE: ${{ needs.e2e.result }}
-          UNIT_COVERAGE: ${{ needs.unit-coverage.result }}
+          BASELINE: ${{ needs.linux.result }}
+          UNIT_COVERAGE: ${{ needs.health.result }}
         run: |
           test "$BASELINE" = success
           test "$UNIT_COVERAGE" = success
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+        if: ${{ steps.scope.outputs.full == 'true' }}
       - name: Download every Linux coverage shard
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
           pattern: ui-coverage-*-${{ github.run_attempt }}
           path: target/ui-coverage
       - name: Download this run's unit coverage
+        if: ${{ steps.scope.outputs.full == 'true' }}
         uses: actions/download-artifact@v8
         with:
           name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/ui-unit-coverage
       - name: Validate unit coverage provenance and restore line map
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
       - name: Validate and collect all coverage parts
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node ../scripts/ci/collect-ui-coverage.mjs ../target/ui-coverage coverage/e2e-parts "$SOURCE_SHA" 4
         env:
           SOURCE_SHA: ${{ github.sha }}
       - name: Merge browser coverage
+        if: ${{ steps.scope.outputs.full == 'true' }}
         run: node scripts/merge-e2e-coverage.mjs
       - name: Upload browser coverage
-        if: >-
-          !(github.event_name == 'pull_request' &&
-            github.base_ref == 'dev' &&
-            github.event.pull_request.user.login == 'dependabot[bot]')
+        if: ${{ steps.scope.outputs.full == 'true' && (!(github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.user.login == 'dependabot[bot]')) }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
+          version: v11.3.2
           files: frontend/coverage/e2e.lcov
           flags: ui-e2e
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
+  portable-evidence:
+    name: Chromium portable evidence
+    needs: [linux, desktop, desktop-windows, scope]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
+      - name: Require all full Chromium shards
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          LINUX: ${{ needs.linux.result }}
+          DESKTOP: ${{ needs.desktop.result }}
+          WINDOWS: ${{ needs.desktop-windows.result }}
+        run: |
+          test "$LINUX" = success
+          test "$DESKTOP" = success
+          test "$WINDOWS" = success
+      - uses: actions/setup-node@v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          pattern: chromium-portable-*-${{ github.run_attempt }}
+          path: target/chromium-portable
+      - name: Validate every OS and the complete portable inventory
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: node scripts/evals/chromium-evidence.mjs collect-artifacts target/chromium-portable target/chromium-collected
+      - name: Preserve validated portable reports
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: chromium-portable-validated-${{ github.run_attempt }}
+          path: target/chromium-collected/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  # HTML presentation is independent of acceptance; raw traces/blob reports
+  # remain mandatory artifacts on the test shards themselves.
   reports:
-    name: Merged UI report (${{ matrix.os }})
-    needs: e2e
-    if: always() && !cancelled()
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+    name: Merged UI reports
+    needs: [linux, desktop, desktop-windows, scope]
+    if: ${{ !cancelled() && needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -215,22 +202,27 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v8
         with:
-          pattern: playwright-ui-${{ matrix.os }}-*-${{ github.run_attempt }}
+          pattern: playwright-ui-*-${{ github.run_attempt }}
           path: target/ui-reports
-          merge-multiple: true
-      # Artifact roots include blob-report/ and test-results/. An explicit
-      # testDir in this config also normalizes Windows/macOS source paths.
-      - run: npx playwright merge-reports --config playwright.config.ts --reporter=html ../target/ui-reports/blob-report
+      - name: Render each OS report from its raw blobs
+        env:
+          LINUX_RESULT: ${{ needs.linux.result }}
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
+          WINDOWS_RESULT: ${{ needs.desktop-windows.result }}
+        run: node ../scripts/evals/chromium-evidence.mjs render-artifacts ../target/ui-reports ../target/ui-report-blobs
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
+        if: always() && hashFiles('frontend/playwright-report/**') != ''
         with:
-          name: merged-ui-${{ matrix.os }}-${{ github.run_attempt }}
+          name: merged-ui-${{ github.run_attempt }}
           path: frontend/playwright-report/
           if-no-files-found: error
           retention-days: 7
 
-  lite:
-    name: Lite UI and asset check
-    needs: unit-coverage
+  packs:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
+    name: Optional pack UI and asset check
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -244,60 +236,138 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - name: Verify lite build has no bundled packs
-        run: npm run build:lite && node ../scripts/release/check-variant-assets.mjs lite
-      - name: Check lite JavaScript for macOS 12 WKWebView
+      - name: Verify desktop build has no bundled packs
+        run: npm run build && node ../scripts/release/check-variant-assets.mjs
+      - name: Check JavaScript for macOS 12 WKWebView
         run: npm run check:build-syntax
-      - name: Download this run's unit coverage
-        uses: actions/download-artifact@v8
-        with:
-          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ui-unit-coverage
-      - name: Validate unit coverage provenance and restore line map
-        run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
-      - name: Run lite sticker and installation flows
-        run: npx playwright test e2e/stickers.spec.ts e2e/packs-lite.spec.ts --grep "lite sends built-in stickers|lite starts without" --workers=1 --retries=0
-        env:
-          MESH_TALK_VARIANT: lite
-          MESH_TALK_E2E_COVERAGE: "1"
-      - name: Merge lite browser coverage
-        run: node scripts/merge-e2e-coverage.mjs
-      - name: Upload lite browser coverage
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5.5.1
-        with:
-          files: frontend/coverage/e2e.lcov
-          flags: ui-e2e-lite
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
 
-  portable:
-    name: Portable UI (${{ matrix.os }}, ${{ matrix.browser }})
+  portable-shards:
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
+    name: WebKit portable partition (${{ matrix.shard }}/2)
+    runs-on: macos-26-intel
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-24.04, browser: chromium }
-          - { os: windows-2022, browser: chromium }
-          - { os: macos-latest, browser: chromium }
-          - { os: macos-latest, browser: webkit }
+        shard: [1, 2]
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      EVAL_BROWSER: webkit
+      EVAL_SOURCE_SHA: ${{ github.sha }}
+      EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
+      EVAL_EVIDENCE_ROOT: eval-results/webkit/raw
+      PLAYWRIGHT_JSON_OUTPUT_FILE: eval-results/webkit/raw/results.json
+    steps:
+      - name: Reserve partition cleanup and evidence time
+        working-directory: .
+        shell: bash
+        run: echo "MESH_UI_DEADLINE_MS=$(( $(date +%s) * 1000 + 18 * 60000 ))" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps webkit
+      - name: Run real React portable workflows (mocked IPC boundary)
+        run: node ../scripts/ci/ui-runner.mjs --config=playwright.portable.config.ts --workers=1 --retries=0 --shard=${{ matrix.shard }}/2 --reporter=list,json,../scripts/ci/ui-runner.mjs
+      - name: Seal source-pinned partition evidence
+        run: node ../scripts/evals/portable-runner.mjs seal-partition eval-results/webkit/raw/results.json eval-results/webkit/sealed ${{ matrix.shard }}
+      - name: Preserve partition evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: webkit-partition-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: frontend/eval-results/webkit/sealed/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve interrupted partition diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: webkit-diagnostics-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            frontend/eval-results/webkit/raw/
+            frontend/ui-runner-evidence/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  portable:
+    name: Portable UI (macos-26-intel, webkit)
+    needs: [portable-shards, scope]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EVAL_SOURCE_SHA: ${{ github.sha }}
+      EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
+      - name: Require both WebKit partitions
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          PRODUCER: ${{ needs.portable-shards.result }}
+        run: test "$PRODUCER" = success
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v8
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          pattern: webkit-partition-*-${{ github.run_attempt }}
+          path: target/webkit-partitions
+      - name: Validate complete WebKit evidence union
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: node scripts/evals/portable-runner.mjs collect-partitions target/webkit-partitions
+      - uses: actions/upload-artifact@v7
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        with:
+          name: portable-ui-macos-26-intel-webkit-${{ github.run_attempt }}
+          path: target/webkit-partitions/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  chromium-extended:
+    name: Extended Chromium portable (${{ matrix.os }})
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26-intel, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: "22"
+          node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npx playwright install --with-deps ${{ matrix.browser }}
-      # Portable workflows load the same Vite module graph as the full UI suite.
-      # Preserve its Windows client-port budget here as well; the server's
-      # default portable port (5174) stays outside the disposable client pool.
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
+      - run: npx playwright install --with-deps chromium
       - name: Reserve Windows browser connection capacity
         if: runner.os == 'Windows'
         shell: pwsh
@@ -305,36 +375,32 @@ jobs:
           netsh int ipv4 set dynamicport tcp start=10000 num=55535
           if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
           netsh int ipv4 show dynamicport tcp
-      - name: Run real React portable workflows (mocked IPC boundary)
-        run: node ../scripts/evals/portable-runner.mjs
+      - name: Run and validate extended Chromium evidence
+        run: |
+          node ../scripts/evals/portable-runner.mjs
+          node ../scripts/evals/browser-report.mjs eval-results/portable/chromium/extended/results.json
         env:
-          EVAL_BROWSER: ${{ matrix.browser }}
+          EVAL_BROWSER: chromium
+          EVAL_TIER: extended
           EVAL_SOURCE_SHA: ${{ github.sha }}
-          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
       - name: Diagnose Windows browser connection failures
         if: (failure() || cancelled()) && runner.os == 'Windows'
         shell: pwsh
         run: |
           netsh int ipv4 show dynamicport tcp
           Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
-      - name: Validate scenario evidence and reject partial or skipped execution
-        run: node ../scripts/evals/browser-report.mjs eval-results/portable/${{ matrix.browser }}/${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}/results.json
-        env:
-          EVAL_BROWSER: ${{ matrix.browser }}
-          EVAL_SOURCE_SHA: ${{ github.sha }}
-          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
-      - name: Preserve scenario reports screenshots and traces
-        if: always()
+      - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: portable-ui-${{ matrix.os }}-${{ matrix.browser }}-${{ github.run_attempt }}
+          name: extended-chromium-${{ matrix.os }}-${{ github.run_attempt }}
           path: frontend/eval-results/portable/
           if-no-files-found: error
           retention-days: 14
 
   firefox-extended:
-    name: Extended Firefox UI
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)
+    if: needs.scope.outputs.full == 'true'
+    needs: [scope]
+    name: Firefox portable UI
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
@@ -348,17 +414,21 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
       - run: npx playwright install --with-deps firefox
       - run: node ../scripts/evals/portable-runner.mjs
         env:
           EVAL_BROWSER: firefox
-          EVAL_TIER: extended
+          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
           EVAL_SOURCE_SHA: ${{ github.sha }}
-      - name: Validate extended Firefox evidence
-        run: node ../scripts/evals/browser-report.mjs eval-results/portable/firefox/extended/results.json
+      - name: Validate complete Firefox evidence
+        run: node ../scripts/evals/browser-report.mjs eval-results/portable/firefox/${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}/results.json
         env:
           EVAL_BROWSER: firefox
-          EVAL_TIER: extended
+          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
           EVAL_SOURCE_SHA: ${{ github.sha }}
       - if: always()
         uses: actions/upload-artifact@v7
@@ -370,27 +440,47 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [e2e, coverage, reports, lite, portable, firefox-extended]
-    if: always()
+    needs: [linux, desktop, desktop-windows, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended, health, scope]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Require complete selected UI matrices
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ needs.scope.outputs.full }}
+          upstream_result: ${{ needs.scope.result }}
+      - name: Require scoped source and health acceptance
+        if: steps.scope.outputs.full == 'false'
         env:
-          BASELINE: ${{ needs.e2e.result }}
+          HEALTH: ${{ needs.health.result }}
+        run: test "$HEALTH" = success
+      - name: Require complete selected UI matrices
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        env:
+          LINUX: ${{ needs.linux.result }}
+          DESKTOP: ${{ needs.desktop.result }}
+          WINDOWS: ${{ needs.desktop-windows.result }}
           COVERAGE: ${{ needs.coverage.result }}
-          REPORTS: ${{ needs.reports.result }}
-          LITE: ${{ needs.lite.result }}
+          PACKS: ${{ needs.packs.result }}
+          CHROMIUM: ${{ needs.portable-evidence.result }}
           PORTABLE: ${{ needs.portable.result }}
+          EXTENDED_CHROMIUM: ${{ needs.chromium-extended.result }}
           FIREFOX: ${{ needs.firefox-extended.result }}
           EXTENDED: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended) }}
         run: |
-          test "$BASELINE" = success
+          test "$LINUX" = success
+          test "$DESKTOP" = success
+          test "$WINDOWS" = success
           test "$COVERAGE" = success
-          test "$REPORTS" = success
-          test "$LITE" = success
+          test "$PACKS" = success
+          test "$CHROMIUM" = success
           test "$PORTABLE" = success
+          test "$FIREFOX" = success
           if [ "$EXTENDED" = true ]; then
-            test "$FIREFOX" = success
+            test "$EXTENDED_CHROMIUM" = success
           else
-            test "$FIREFOX" = skipped
+            test "$EXTENDED_CHROMIUM" = skipped
           fi

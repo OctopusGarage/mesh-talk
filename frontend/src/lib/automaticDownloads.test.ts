@@ -401,3 +401,18 @@ it("preserves tray-evicted work when restarting during a paused native export", 
   stop();
   vi.unstubAllGlobals();
 });
+it("never automatically exports protected images even when mislabeled as generic files", async () => {
+  useChat.setState({
+    incomingFiles: [
+      { ...file, protection: "click", mime: "image/png", media: false },
+    ],
+  });
+  useFileAvailability.setState({
+    statuses: { file: { ready: true, total: 1, done: 1 } },
+  } as never);
+  const stop = startAutomaticDownloads();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(mocks.save).not.toHaveBeenCalled();
+  stop();
+});

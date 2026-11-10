@@ -5,10 +5,13 @@ import { useFileObjectUrl } from "../src/features/chat/mediaFile";
 import { useAuth } from "../src/store/auth";
 
 /** Browser-only real hook harness; no jsdom or mocked React lifecycle. */
-export function mountMediaProbe(container: HTMLElement) {
+export function mountMediaProbe(
+  container: HTMLElement,
+  options?: { reuse?: boolean },
+) {
   const root = createRoot(container);
   function Probe({ enabled }: { enabled: boolean }) {
-    const url = useFileObjectUrl("hook-probe", enabled, "image/png");
+    const url = useFileObjectUrl("hook-probe", enabled, "image/png", options);
     return <span data-testid="media-hook-url" data-url={url ?? ""} />;
   }
   return {

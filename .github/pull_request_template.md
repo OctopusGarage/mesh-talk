@@ -22,6 +22,16 @@ For a CI miss or flaky fixture, identify the owning correction and focused regre
 - [ ] Networking changes ship an integration assertion (discovery/relay)
 - [ ] AI eval / smoke gate run when code, prompts, model config, agent rules, or core flows changed (`make eval-smoke`; `make ai-eval` for prompt/model/agent changes; `make smoke-full` for release-critical flow changes)
 - [ ] Specs under `specifications/` updated if protocol/flows changed
+- [ ] Applicable maintenance inventory items reviewed, with evidence, justified exclusions and owned follow-ups recorded below
+
+## Change alignment
+
+<!-- Use docs/maintenance-checklist.md. List only applicable M01–M20 items.
+For each, record aligned / action required / not applicable / not checked,
+the reviewed source/scope, evidence and justified exclusions. Name an owner/role,
+tracking issue or companion PR, and completion condition for unresolved work.
+Keep local validation, deployed publication and external/native/model evidence
+separate. A follow-up does not waive required merge or release gates. -->
 
 ## Validation
 

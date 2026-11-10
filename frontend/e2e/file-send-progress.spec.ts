@@ -1,5 +1,12 @@
 import { test, expect } from "./helpers/portable-evidence";
-import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
+import {
+  enterChat,
+  openBobDm,
+  revealComposerAttachments,
+} from "./helpers/session";
+
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
 
 for (const attachment of [
   { kind: "file", path: "/tmp/large.bin", button: "composer-attach" },
@@ -12,7 +19,12 @@ for (const attachment of [
     await openBobDm(page);
     await page.evaluate((path) => {
       const win = window as unknown as Window & {
-        __upload: { id: string; done: number; delivered: boolean };
+        __upload: {
+          id: string;
+          done: number;
+          delivered: boolean;
+          consent: "pending" | "accepted";
+        };
         __TAURI_INTERNALS__: {
           invoke: (
             cmd: string,
@@ -21,7 +33,12 @@ for (const attachment of [
         };
       };
       const original = win.__TAURI_INTERNALS__.invoke;
-      win.__upload = { id: "", done: 0, delivered: false };
+      win.__upload = {
+        id: "",
+        done: 0,
+        delivered: false,
+        consent: path.endsWith(".bin") ? "pending" : "accepted",
+      };
       win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         if (cmd === "plugin:dialog|open") return path;
         const result = await original(cmd, args);
@@ -32,11 +49,14 @@ for (const attachment of [
             row.id === win.__upload.id
               ? {
                   ...row,
-                  status: win.__upload.delivered ? "delivered" : "awaiting",
+                  // The offer arrives before approval or file bytes. Its
+                  // receipt must not retire the file's progress refresh.
+                  status: "delivered",
                   file_progress: {
                     done: win.__upload.done,
                     total: 8,
                     delivered: win.__upload.delivered,
+                    consent: win.__upload.consent,
                   },
                 }
               : row,
@@ -44,11 +64,26 @@ for (const attachment of [
         return result;
       };
     }, attachment.path);
-    await revealComposerTools(page);
+    await revealComposerAttachments(page);
     await page.getByTestId(attachment.button).click();
     const bubble = page.getByTestId("message-bubble").last();
     await expect(
-      bubble.getByRole("progressbar", { name: /Waiting for recipient/ }),
+      bubble.locator('[data-delivery="delivered"]'),
+    ).toHaveAccessibleName("File offer received");
+    if (attachment.kind === "file") {
+      await expect(
+        bubble.getByText("Waiting for recipient approval…", { exact: true }),
+      ).toBeVisible();
+      await page.evaluate(() => {
+        (
+          window as unknown as { __upload: { consent: string } }
+        ).__upload.consent = "accepted";
+      });
+    }
+    await expect(
+      bubble.getByRole("progressbar", {
+        name: /Waiting for file transfer to start/,
+      }),
     ).toHaveAttribute("aria-valuenow", "0");
     await page.evaluate(
       () =>
@@ -83,9 +118,7 @@ for (const attachment of [
         .__upload;
       state.delivered = true;
     });
-    await expect(
-      bubble.getByRole("progressbar", { name: /Sending/ }),
-    ).toHaveCount(0);
+    await expect(bubble.getByRole("progressbar")).toHaveCount(0);
   });
 
 test("concurrent sends keep progress with their own file bubbles", async ({
@@ -134,9 +167,9 @@ test("concurrent sends keep progress with their own file bubbles", async ({
     };
   });
 
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   await expect
     .poll(() =>
@@ -244,7 +277,7 @@ test("a failed folder send removes preparing progress and offers retry", async (
       "invalid input: file manifest exceeds transport frame",
     );
   });
-  await revealComposerTools(page);
+  await revealComposerAttachments(page);
   await page.getByTestId("composer-attach").click();
   const bubble = page.getByTestId("message-bubble").last();
   await expect(bubble.getByText("Failed to send")).toBeVisible();
@@ -259,4 +292,71 @@ test("a failed folder send removes preparing progress and offers retry", async (
   );
   await bubble.getByRole("button", { name: "Retry" }).click();
   await expect(bubble.getByText("Failed to send")).toHaveCount(0);
+});
+
+test("receive progress follows measured chunks with the shared motion cadence", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await enterChat(page);
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = win.__TAURI_INTERNALS__.invoke;
+    win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "file_statuses")
+        return (args.fileConvs as string[]).map((file_conv) => ({
+          file_conv,
+          ready: false,
+          done: 4,
+          total: 10,
+          consent: "accepted",
+        }));
+      const value = await original(cmd, args);
+      if (
+        cmd === "owner_account_history" &&
+        args.account === "acc_bob_bbbb2222"
+      )
+        return [
+          ...(value as unknown[]),
+          {
+            id: "receive-cadence",
+            from_me: false,
+            who: "device_bob_2222",
+            text: "",
+            wall_clock: Date.now(),
+            reply_to: null,
+            file: {
+              file_conv: "receive-cadence",
+              name: "receiving.bin",
+              size: 10,
+              mime: "application/octet-stream",
+              media: false,
+            },
+          },
+        ];
+      return value;
+    };
+  });
+  await openBobDm(page);
+  const progress = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "receiving.bin" })
+    .getByRole("progressbar");
+  await expect(progress).toHaveAttribute("aria-valuenow", "40");
+  const fill = progress.locator("div");
+  await expect(fill).toHaveCSS("transition-duration", "0.1s");
+  await expect(fill).toHaveCSS("transition-timing-function", "linear");
+  await expect(fill).toHaveCSS("transform", "matrix(0.4, 0, 0, 1, 0, 0)");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(fill).toHaveCSS(
+    "transition-property",
+    "color, background-color, border-color, opacity",
+  );
 });

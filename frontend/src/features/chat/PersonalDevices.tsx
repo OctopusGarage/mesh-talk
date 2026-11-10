@@ -45,6 +45,15 @@ function AccountDevices({
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(accountId);
   const [statuses, setStatuses] = useState<DeviceSyncStatus[] | null>(null);
+  const [hostnames, setHostnames] = useState<Record<string, string>>({});
+  useSerialPoll(
+    true,
+    5_000,
+    () => chat.getDeviceHostnames(owner, accountId),
+    setHostnames,
+    () => setHostnames({}),
+    "state",
+  );
   const [failed, setFailed] = useState(false);
   useSerialPoll(
     true,
@@ -109,8 +118,10 @@ function AccountDevices({
           aria-label={t("personal.devices")}
         >
           <li data-device-id={deviceId}>
-            <div className="text-sm font-medium">
-              {t("personal.thisDevice")}
+            <div className="break-all text-sm font-medium">
+              {hostnames[deviceId]
+                ? `${hostnames[deviceId]} · ${t("personal.thisDevice")}`
+                : t("personal.thisDevice")}
             </div>
             <div className="select-text break-all font-mono text-xs text-muted-foreground">
               {deviceId}
@@ -126,8 +137,10 @@ function AccountDevices({
             return (
               <li key={device.device_id} data-device-id={device.device_id}>
                 <div className="flex items-start justify-between gap-3 text-sm">
-                  <span className="min-w-0 break-words font-medium">
-                    {peer?.name || t("personal.linkedDevice")}
+                  <span className="min-w-0 break-all font-medium">
+                    {hostnames[device.device_id] ||
+                      peer?.name ||
+                      t("personal.linkedDevice")}
                   </span>
                   <span className="shrink-0 text-xs text-muted-foreground">
                     {t(

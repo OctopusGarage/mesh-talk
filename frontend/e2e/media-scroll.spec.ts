@@ -1,0 +1,356 @@
+import { test, expect } from "./helpers/portable-evidence";
+import { enterChat, BOB } from "./helpers/session";
+
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
+type MediaScrollProbe = {
+  reads: Record<string, number>;
+  pending: Array<() => void>;
+  released: boolean;
+};
+type ProbeWindow = Window & {
+  __mediaScroll: MediaScrollProbe;
+  __TAURI_INTERNALS__: {
+    invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+};
+
+async function seedImages(
+  page: import("@playwright/test").Page,
+  count = 60,
+  media = { width: 800, height: 600, video: false, invalid: false },
+) {
+  await enterChat(page);
+  await page.evaluate(
+    ({ count, media }) => {
+      const win = window as unknown as ProbeWindow;
+      win.__mediaScroll = { reads: {}, pending: [], released: false };
+      const canvas = document.createElement("canvas");
+      canvas.width = media.width;
+      canvas.height = media.height;
+      canvas.getContext("2d")!.fillRect(0, 0, media.width, media.height);
+      const png = Uint8Array.from(
+        atob(canvas.toDataURL().split(",")[1]),
+        (char) => char.charCodeAt(0),
+      ).buffer;
+      const original = win.__TAURI_INTERNALS__.invoke;
+      win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        const probe = win.__mediaScroll;
+        if (
+          cmd === "read_media" &&
+          String(args.fileConv).startsWith("scroll-image-")
+        ) {
+          const id = String(args.fileConv);
+          probe.reads[id] = (probe.reads[id] ?? 0) + 1;
+          if (!probe.released)
+            await new Promise<void>((resolve) => probe.pending.push(resolve));
+          return media.invalid ? new ArrayBuffer(1) : png;
+        }
+        if (
+          cmd === "owner_account_history" &&
+          args.account === "acc_bob_bbbb2222"
+        ) {
+          return Array.from({ length: count }, (_, i) => ({
+            id: `scroll-message-${i}`,
+            from_me: false,
+            who: "device_bob_2222",
+            text: "",
+            wall_clock: 1700000000000 + i * 1000,
+            reply_to: null,
+            file: {
+              name: `image-${i}.${media.video ? "webm" : "png"}`,
+              size: png.byteLength,
+              mime: media.video ? "video/webm" : "image/png",
+              file_conv: `scroll-image-${i}`,
+              media: true,
+            },
+          }));
+        }
+        return original(cmd, args);
+      };
+    },
+    { count, media },
+  );
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+}
+async function releaseImages(page: import("@playwright/test").Page) {
+  await page.evaluate(() => {
+    const probe = (window as unknown as ProbeWindow).__mediaScroll;
+    probe.released = true;
+    for (const resolve of probe.pending.splice(0)) resolve();
+  });
+}
+
+// A virtualized row may be absent between renders. Sample decode and geometry
+// in one browser task; the outer assertion owns readiness, not a locator wait.
+async function readMediaRow(
+  page: Pick<import("@playwright/test").Page, "evaluate">,
+  messageId: string,
+) {
+  return page.evaluate((id) => {
+    const rows = document.querySelectorAll(`[data-message-id="${id}"]`);
+    if (rows.length > 1) throw new Error(`Duplicate message row: ${id}`);
+    const row = rows[0];
+    if (!row) return undefined;
+    const images = row.querySelectorAll<HTMLImageElement>(
+      '[data-testid="file-image"]',
+    );
+    if (images.length > 1) throw new Error(`Duplicate media image: ${id}`);
+    const image = images[0];
+    const box = image?.getBoundingClientRect();
+    return {
+      height: row.getBoundingClientRect().height,
+      naturalWidth: image?.naturalWidth,
+      imageAspectRatio:
+        box && box.height > 0 ? box.width / box.height : undefined,
+    };
+  }, messageId);
+}
+
+test("image rows reserve their final geometry before bytes load", async ({
+  page,
+}) => {
+  await seedImages(page, 1);
+  const row = page.locator('[data-message-id="scroll-message-0"]');
+  await expect(row.getByRole("status")).toBeVisible();
+  let before = 0;
+  await expect
+    .poll(async () => {
+      before = (await row.boundingBox())?.height ?? 0;
+      return before;
+    })
+    .toBeGreaterThan(0);
+  await releaseImages(page);
+  const image = row.getByTestId("file-image");
+  await expect
+    .poll(() => image.evaluate((el) => (el as HTMLImageElement).naturalWidth))
+    .toBe(800);
+  await expect
+    .poll(
+      async () => {
+        const box = await row.boundingBox();
+        return box ? Math.abs(box.height - before) : undefined;
+      },
+      { message: "Loading must not resize a media row" },
+    )
+    .toBeLessThanOrEqual(1);
+  await image.click();
+  await expect(page.getByTestId("file-image-lightbox")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("file-image-lightbox")).toHaveCount(0);
+});
+
+test("scrolling away and returning to latest reuses media without changing row height", async ({
+  page,
+}) => {
+  await seedImages(page, 60, {
+    width: 1600,
+    height: 200,
+    video: false,
+    invalid: false,
+  });
+  const row = page.locator('[data-message-id="scroll-message-59"]');
+  // Fixture preparation must reach the visible newest row before the decode
+  // assertion's budget begins; initial virtualizer layout is still pending here.
+  await expect(row.getByRole("status")).toBeVisible();
+  await releaseImages(page);
+  await expect
+    .poll(
+      async () => (await readMediaRow(page, "scroll-message-59"))?.naturalWidth,
+    )
+    .toBe(1600);
+  await expect(row).toBeVisible();
+  await expect
+    .poll(
+      async () =>
+        (await readMediaRow(page, "scroll-message-59"))?.imageAspectRatio,
+    )
+    .toBeCloseTo(8, 1);
+  const log = page.getByRole("log");
+  // The newest row can render before the virtualizer finishes its initial
+  // scroll. Establish the actual live-edge position before navigating history.
+  await expect
+    .poll(() => log.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      log.evaluate((element) =>
+        Math.abs(
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+  const initialHeight = (await readMediaRow(page, "scroll-message-59"))?.height;
+  expect(initialHeight).toBeGreaterThan(0);
+  const readsBefore = await page.evaluate(
+    () =>
+      (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],
+  );
+  // This fixture owns a cache-remount boundary, not browser paging behavior.
+  // Let trusted input reach React's reader handler, then set that boundary in
+  // the same event task so queued layout corrections cannot consume the intent.
+  await log.focus();
+  await expect(log).toBeFocused();
+  await log.evaluate((scroller) => {
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.target !== scroller || event.key !== "Home") return;
+        event.preventDefault();
+        scroller.scrollTo({ top: 0, behavior: "instant" });
+      },
+      { once: true },
+    );
+  });
+  await log.press("Home");
+  await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBe(0);
+  await expect(row).toHaveCount(0);
+  // This observer exposes one DOM snapshot, so a future attachment-waiting
+  // implementation fails this absent-row control immediately.
+  const snapshotOnly = {
+    evaluate: page.evaluate.bind(page),
+  };
+  expect(await readMediaRow(snapshotOnly, "scroll-message-59")).toBeUndefined();
+  await page.getByTestId("jump-to-latest").click();
+  await expect(row.getByTestId("file-image")).toBeVisible();
+  // The virtualizer can replace this row after visibility but before geometry
+  // is read. A missing box is pending, never a successful height measurement.
+  await expect
+    .poll(async () => (await readMediaRow(page, "scroll-message-59"))?.height)
+    .toBe(initialHeight);
+  const readsAfter = await page.evaluate(
+    () =>
+      (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],
+  );
+  expect(readsAfter, "Virtualized remount must reuse the live media URL").toBe(
+    readsBefore,
+  );
+  // Independent sampler controls must not consume the cache retention window.
+  // Preserve the strict locator's duplicate rejection even for hidden images.
+  await page.evaluate(() => {
+    const control = document.createElement("div");
+    control.dataset.messageId = "media-snapshot-control";
+    control.hidden = true;
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 16;
+    canvas.getContext("2d")!.fillRect(0, 0, 16, 16);
+    for (let index = 0; index < 2; index++) {
+      const image = document.createElement("img");
+      image.src = canvas.toDataURL();
+      image.alt = "Duplicate-image validation fixture";
+      image.dataset.testid = "file-image";
+      control.append(image);
+    }
+    document.body.append(control);
+  });
+  try {
+    await expect(
+      readMediaRow(snapshotOnly, "media-snapshot-control"),
+    ).rejects.toThrow("Duplicate media image");
+  } finally {
+    await page.evaluate(() => {
+      document
+        .querySelector('[data-message-id="media-snapshot-control"]')
+        ?.remove();
+    });
+  }
+});
+
+for (const [label, width, height] of [
+  ["portrait", 300, 900],
+  ["panorama", 1600, 200],
+  ["square", 640, 640],
+  ["small", 48, 32],
+] as const) {
+  test(`${label} images fit their original proportions in a short window`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 820, height: 620 });
+    await seedImages(page, 1, { width, height, video: false, invalid: false });
+    const row = page.locator('[data-message-id="scroll-message-0"]');
+    await expect(row.getByRole("status")).toBeVisible();
+    await releaseImages(page);
+    const image = row.getByTestId("file-image");
+    await expect
+      .poll(() =>
+        image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
+      )
+      .toBe(width);
+    const measurement = {
+      current: null as {
+        image: { width: number; height: number };
+        frame: { width: number; height: number };
+      } | null,
+    };
+    await expect
+      .poll(async () => {
+        // Keep image and frame geometry from the same visible, decoded instance.
+        measurement.current = await image.evaluate(
+          (element: HTMLImageElement, expectedWidth) => {
+            const box = element.getBoundingClientRect();
+            const frame = element.parentElement?.getBoundingClientRect();
+            if (
+              getComputedStyle(element).visibility !== "visible" ||
+              element.naturalWidth !== expectedWidth ||
+              box.width === 0 ||
+              box.height === 0 ||
+              !frame ||
+              frame.width === 0 ||
+              frame.height === 0
+            )
+              return null;
+            return {
+              image: { width: box.width, height: box.height },
+              frame: { width: frame.width, height: frame.height },
+            };
+          },
+          width,
+        );
+        const box = measurement.current?.image;
+        return box ? box.width / box.height : undefined;
+      })
+      .toBeCloseTo(width / height, 1);
+    const { image: box, frame } = measurement.current!;
+    expect(box.width).toBeLessThanOrEqual(Math.min(width, 320));
+    expect(box.height).toBeLessThanOrEqual(Math.min(height, 320));
+    expect(frame.width).toBeCloseTo(box.width, 0);
+    expect(frame.height).toBeCloseTo(box.height, 0);
+    await expect(image).toHaveCSS("object-fit", "contain");
+    await page.screenshot({ path: test.info().outputPath(`${label}.png`) });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  });
+}
+for (const video of [false, true]) {
+  test(`unsupported ${video ? "video" : "image"} retains its loading geometry`, async ({
+    page,
+  }) => {
+    await seedImages(page, 1, {
+      width: 800,
+      height: 600,
+      video,
+      invalid: true,
+    });
+    const row = page.locator('[data-message-id="scroll-message-0"]');
+    await expect(row.getByRole("status")).toBeVisible();
+    const before = await row.evaluate(
+      (element) => element.getBoundingClientRect().height,
+    );
+    await releaseImages(page);
+    await expect(
+      row.getByTestId(
+        video ? "file-video-unsupported" : "file-image-unsupported",
+      ),
+    ).toBeVisible();
+    expect(
+      await row.evaluate((element) => element.getBoundingClientRect().height),
+    ).toBe(before);
+    await expect(row.getByTestId("media-fallback-save")).toBeEnabled();
+  });
+}

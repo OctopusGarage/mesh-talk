@@ -312,7 +312,10 @@ it("reports an unavailable unread target rather than pretending navigation succe
   await render("channel:group");
   expect(viewport.jumpToMessage("outside-loaded-history")).toBe(false);
   const scrollToIndex = vi.fn();
-  viewport.virtuosoRef.current = { scrollToIndex } as unknown as VirtuosoHandle;
+  viewport.virtuosoRef.current = {
+    scrollToIndex,
+    scrollTo: vi.fn(),
+  } as unknown as VirtuosoHandle;
   await act(async () => expect(viewport.jumpToMessage("target")).toBe(true));
   expect(scrollToIndex).toHaveBeenCalledWith({
     index: 1,
@@ -590,4 +593,349 @@ it("reveals a measured content-growth gap without giving up live-edge following"
   expect(scrollTo).toHaveBeenCalled();
   expect(scroller.scrollTop).toBe(2165);
   expect(viewport.showJump).toBe(false);
+});
+
+it("distinguishes identical search hits by canonical identity and never falls back", async () => {
+  const rows = [messages[1], { ...messages[1], id: "duplicate" }];
+  await act(async () =>
+    root.render(
+      createElement(Harness, { conversation: "account:alice", rows }),
+    ),
+  );
+  const scrollToIndex = vi.fn();
+  viewport.virtuosoRef.current = {
+    scrollToIndex,
+    scrollTo: vi.fn(),
+  } as unknown as VirtuosoHandle;
+  await act(async () =>
+    root.render(
+      createElement(Harness, {
+        conversation: "account:alice",
+        rows,
+        search: {
+          key: "account:alice",
+          request: 10,
+          reference: {
+            kind: "account",
+            target: "alice",
+            message_id: "duplicate",
+          },
+          context: [],
+        },
+      }),
+    ),
+  );
+  await nextAnimationFrame();
+  expect(scrollToIndex).toHaveBeenCalledWith({
+    index: 1,
+    align: "center",
+    behavior: "auto",
+  });
+  expect(viewport.highlightedKey).toBe("duplicate");
+  await act(async () =>
+    root.render(
+      createElement(Harness, {
+        conversation: "account:alice",
+        rows,
+        search: {
+          key: "account:alice",
+          request: 11,
+          reference: {
+            kind: "account",
+            target: "alice",
+            message_id: "missing",
+          },
+          context: [],
+        },
+      }),
+    ),
+  );
+  expect(viewport.searchMiss).toBe(true);
+  expect(scrollToIndex).toHaveBeenCalledTimes(1);
+});
+
+it("initializes the virtual list at the selected canonical search identity", async () => {
+  await render("account:alice", {
+    key: "account:alice",
+    request: 1,
+    reference: { kind: "account", target: "alice", message_id: "target" },
+    context: messages,
+  });
+  expect(viewport.initialIndex).toBe(1);
+  await render("account:alice", {
+    key: "account:alice",
+    request: 2,
+    reference: { kind: "account", target: "alice", message_id: "first" },
+    context: messages,
+  });
+  expect(viewport.initialIndex).toBe(0);
+});
+
+it("does not follow the live edge while exact search context is being measured", async () => {
+  await render("account:alice", {
+    key: "account:alice",
+    request: 1,
+    reference: { kind: "account", target: "alice", message_id: "first" },
+    context: messages,
+  });
+  const scroller = container.firstElementChild as HTMLElement;
+  const scrollTo = vi.fn();
+  Object.assign(viewport.virtuosoRef, {
+    current: { scrollTo, scrollToIndex: vi.fn() },
+  });
+  await nextAnimationFrame();
+  // A newly mounted virtual list initially fits before measuring all its rows.
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 300, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  await act(async () => viewport.atBottomStateChange(true));
+  Object.defineProperty(scroller, "scrollHeight", {
+    value: 1000,
+    configurable: true,
+  });
+  scrollTo.mockClear();
+  window.dispatchEvent(new Event("focus"));
+  await nextAnimationFrame();
+  expect(scrollTo).not.toHaveBeenCalled();
+});
+
+it("does not restore a stale anchor on an insertion while a user scroll event is pending", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1500, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: 300 }) as DOMRect;
+  let rowTop = 150;
+  const row = document.createElement("div");
+  row.dataset.messageId = "target";
+  row.getBoundingClientRect = () =>
+    ({
+      top: rowTop - scroller.scrollTop,
+      bottom: rowTop + 300 - scroller.scrollTop,
+    }) as DOMRect;
+  scroller.append(row);
+  viewport.stopRestoring();
+  scroller.scrollTop = 100;
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  // Input has arrived, but the browser has not delivered its new scroll event.
+  viewport.stopRestoring();
+  rowTop += 80;
+  await act(async () =>
+    root.render(
+      createElement(Harness, {
+        conversation: "account:alice",
+        rows: [...messages, { ...messages[2], id: "appended" }],
+      }),
+    ),
+  );
+  expect(scroller.scrollTop).toBe(100);
+});
+
+it("keeps explicit jump-to-latest intent through delayed row measurements after recent input", async () => {
+  await render("account:images");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  scroller.scrollTop = 300;
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  const scrollTo = vi.fn();
+  Object.assign(viewport.virtuosoRef, { current: { scrollTo } });
+  viewport.jumpToLatest();
+  await nextAnimationFrame();
+  // The requested bottom position is still being measured, so an intermediate
+  // atBottom=false arrives before the virtualizer's correction finishes.
+  await act(async () => viewport.atBottomStateChange(false));
+  scrollTo.mockClear();
+  window.dispatchEvent(new Event("focus"));
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalled();
+});
+
+it("does not apply a resize correction before pending user scroll input is consumed", async () => {
+  let resized!: ResizeObserverCallback;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        resized = callback;
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  await render("account:images");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1500, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  let top = 0;
+  scroller.getBoundingClientRect = () => ({ top, bottom: 300 }) as DOMRect;
+  const row = document.createElement("div");
+  row.dataset.messageId = "target";
+  row.getBoundingClientRect = () =>
+    ({
+      top: 150 - scroller.scrollTop,
+      bottom: 450 - scroller.scrollTop,
+    }) as DOMRect;
+  scroller.append(row);
+  viewport.stopRestoring();
+  scroller.scrollTop = 100;
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  viewport.stopRestoring();
+  top = 29;
+  await act(async () => resized([], {} as ResizeObserver));
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(100);
+});
+
+it("retains a reading target when row geometry arrives after the frame budget", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  let height = 1000;
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: () => height },
+    clientHeight: { value: 300 },
+  });
+  scroller.scrollTop = 120;
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  await render("account:bob");
+  height = 300;
+  scroller.scrollTop = 0;
+  await render("account:alice");
+  for (let i = 0; i < 35; i++) await nextAnimationFrame();
+  expect(frames.size).toBe(0);
+  height = 1000;
+  await act(async () => {
+    scroller.appendChild(document.createElement("div"));
+  });
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(120);
+});
+
+it("lets reader intent cancel a queued geometry restoration", async () => {
+  const callbacks: ResizeObserverCallback[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  let height = 1000;
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: () => height },
+    clientHeight: { value: 300 },
+  });
+  scroller.scrollTop = 120;
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  await render("account:bob");
+  height = 300;
+  scroller.scrollTop = 0;
+  const previousObservers = callbacks.length;
+  await render("account:alice");
+  for (let i = 0; i < 35; i++) await nextAnimationFrame();
+  expect(frames.size).toBe(0);
+  height = 1000;
+  // Notify both viewport measurement and restoration observers as a browser does.
+  await act(async () => {
+    for (const callback of callbacks.slice(previousObservers))
+      callback([], {} as ResizeObserver);
+  });
+  viewport.stopRestoring();
+  scroller.scrollTop = 40;
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(40);
+});
+
+it("owns live-edge pinning for row insertion and resize until reader input", async () => {
+  const callbacks: ResizeObserverCallback[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  await render("account:images");
+  const scroller = container.firstElementChild as HTMLElement;
+  let height = 1000;
+  Object.defineProperties(scroller, {
+    scrollHeight: { get: () => height },
+    clientHeight: { value: 300 },
+  });
+  scroller.scrollTop = 700;
+  const scrollTo = vi.fn(() => {
+    scroller.scrollTop = height - scroller.clientHeight;
+  });
+  Object.assign(viewport.virtuosoRef, { current: { scrollTo } });
+  await act(async () => viewport.atBottomStateChange(true));
+  await nextAnimationFrame();
+  scrollTo.mockClear();
+
+  height = 1200;
+  // Use the actual mutation observer, as an inserted message does.
+  await act(async () => scroller.append(document.createElement("div")));
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalledWith({
+    top: Number.MAX_SAFE_INTEGER,
+    behavior: "auto",
+  });
+  expect(scroller.scrollTop).toBe(900);
+  scrollTo.mockClear();
+
+  height = 1400;
+  await act(async () => {
+    for (const callback of callbacks) callback([], {} as ResizeObserver);
+  });
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalled();
+  expect(scroller.scrollTop).toBe(1100);
+  scrollTo.mockClear();
+
+  viewport.stopRestoring();
+  height = 1600;
+  await act(async () => {
+    for (const callback of callbacks) callback([], {} as ResizeObserver);
+    scroller.append(document.createElement("div"));
+  });
+  await nextAnimationFrame();
+  expect(scrollTo).not.toHaveBeenCalled();
+  expect(scroller.scrollTop).toBe(1100);
 });

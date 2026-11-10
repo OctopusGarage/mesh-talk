@@ -92,14 +92,16 @@ fn clear_protected(username: &str) {
 }
 
 /// Save the raw login password in the OS Keychain for the next launch.
-pub fn save(username: &str, password: &str) {
-    save_to(&MacKeychain, username, password);
+pub fn save(username: &str, password: &str) -> bool {
+    save_to(&MacKeychain, username, password)
 }
 
-fn save_to(store: &impl CredentialStore, username: &str, password: &str) {
+fn save_to(store: &impl CredentialStore, username: &str, password: &str) -> bool {
     if let Err(error) = store.save_legacy(username, password) {
         log::warn!("failed to save stay-signed-in credential: {error}");
+        return false;
     }
+    true
 }
 
 /// Read a standard Keychain item without prompting. An old Touch ID item can
@@ -182,6 +184,17 @@ mod tests {
             reads: Cell::new(0),
             legacy_reads: Cell::new(0),
         }
+    }
+
+    #[test]
+    fn save_reports_keychain_denial_without_claiming_success() {
+        let mut store = fake(None, None);
+        store.deny_save = true;
+        assert!(!save_to(&store, "alice", "raw password"));
+        assert!(store.legacy.borrow().is_none());
+        store.deny_save = false;
+        assert!(save_to(&store, "alice", " raw password "));
+        assert_eq!(store.legacy.borrow().as_deref(), Some(" raw password "));
     }
 
     #[test]

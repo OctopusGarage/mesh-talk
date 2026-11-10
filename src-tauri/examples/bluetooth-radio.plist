@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>org.mesh-talk.bluetooth-rehearsal</string>
+<key>CFBundleName</key><string>Mesh-Talk Bluetooth Rehearsal</string>
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>This explicit rehearsal discovers nearby Mesh-Talk test devices and exchanges encrypted test messages over Bluetooth.</string>
+</dict></plist>

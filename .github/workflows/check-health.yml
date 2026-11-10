@@ -1,21 +1,24 @@
 name: Code Quality and Health Check
 
-# Static checks run independently of native builds and browsers. CI owns Rust
-# compilation/unit tests; UI E2E owns full Chromium on all desktop platforms.
+# Portable checks run independently of native builds and browsers. CI owns Rust
+# workspace compilation/unit tests; UI E2E owns full Chromium on all platforms.
 # scripts/check-health.sh remains the standalone comprehensive local gate.
 on:
-  merge_group:
-    types: [checks_requested]
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      full:
+        type: string
+        default: 'true'
+      upstream_result:
+        type: string
+        default: success
   schedule:
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
 concurrency:
-  group: health-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: health-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 permissions:
   contents: read
@@ -25,40 +28,154 @@ env:
 
 jobs:
   platform:
-    name: Static checks (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    if: ${{ !cancelled() }}
+    name: Portable checks (${{ matrix.os }})
+    runs-on: ${{ (inputs.full || 'true') == 'true' && matrix.os || 'ubuntu-latest' }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-26-intel, windows-latest]
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ (inputs.full || 'true') }}
+          upstream_result: ${{ inputs.upstream_result || 'success' }}
+      - name: Reserve Health cleanup and diagnostic evidence time
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: echo "MESH_HEALTH_DEADLINE_MS=$(( $(date +%s) * 1000 + 23 * 60000 ))" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v7.1.0
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - uses: actions/setup-python@v7
+        if: ${{ steps.scope.outputs.full == 'true' }}
         with:
           python-version: '3.12'
+      - name: Install pinned native inspection toolchain
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: python scripts/release/sevenzip.py install
       - name: Install frontend dependencies
+        if: ${{ steps.scope.outputs.full == 'true' }}
         working-directory: frontend
         run: npm ci
+      - name: Check full-source standards and hygiene
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        run: |
+          node scripts/validation/standards.mjs
+          node scripts/check-repository-hygiene.mjs
       - name: Frontend static checks
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         working-directory: frontend
         run: |
           npm run format:check
           npm run lint
           npm run typecheck
       - name: Audit frontend dependencies
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
         working-directory: frontend
-        run: npx --yes audit-ci --config audit-ci.json
+        run: npm run audit:ci
+
+      - name: Validate public help and MCP
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: |
+          npm ci --prefix tools/help --ignore-scripts
+          node --test tools/help/*.test.mjs
+
+      - name: Audit help dependencies
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        run: npm audit --prefix tools/help --audit-level=high
+
+      - name: Frontend unit tests and coverage
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        working-directory: frontend
+        run: npm run test:coverage
+
+      - name: Seal browser unit line map from this run
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        run: node scripts/ci/unit-coverage-artifact.mjs seal frontend/coverage/lcov.info target/ui-unit-coverage
+
+      - name: Upload browser unit line map
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ui-unit-coverage/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload frontend coverage
+        if: ${{ steps.scope.outputs.full == 'true' && (always() && matrix.os == 'ubuntu-latest') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-coverage-${{ github.run_attempt }}
+          path: frontend/coverage/
+          if-no-files-found: warn
+
+      - name: Delivery and AI eval smoke
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest') }}
+        run: |
+          make eval-smoke
+          node --test scripts/test-ai-eval.mjs
+
+      - name: Install Rust for diagnostic Cargo fixtures
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Native release inspection regression
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nsis
+
+      - name: Verify native NSIS payload equivalence
+        if: ${{ steps.scope.outputs.full == 'true' && (runner.os == 'Linux') }}
+        run: python scripts/release/test_native_nsis.py -v
+
+      - name: Diagnostic and release gate regressions (all platforms)
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        shell: bash
+        run: |
+          node scripts/validation/stage.mjs diagnostics --profile shared --deadline "$MESH_HEALTH_DEADLINE_MS" --result tmp/health-diagnostics.json -- node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/diagnostics/node-test-progress.mjs --test-reporter-destination=target/validation/health-progress.jsonl scripts/diagnostics/*.test.mjs
+
+      - name: Preserve diagnostic execution evidence
+        if: ${{ steps.scope.outputs.full == 'true' && (always()) }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: health-diagnostics-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            tmp/health-diagnostics.json
+            target/validation/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build retention safeguards (all platforms)
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        run: python3 -m unittest discover -s scripts -p test_build_retention.py -v
+
+      - name: Publish frontend coverage
+        if: ${{ steps.scope.outputs.full == 'true' && (matrix.os == 'ubuntu-latest' && !(github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.user.login == 'dependabot[bot]')) }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          version: v11.3.2
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: frontend/coverage/lcov.info
+          name: frontend-${{ matrix.os }}-${{ github.run_attempt }}
+          fail_ci_if_error: true
 
   source:
+    if: ${{ !cancelled() }}
     name: Source and supply-chain checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -66,47 +183,60 @@ jobs:
       - uses: actions/checkout@v7.0.1
       # Source/policy scanners have identical inputs on each OS; run them once.
       # Gitleaks owns the full-history secret scan in its independent workflow.
+        with:
+          fetch-depth: 2
+      - id: scope
+        uses: ./.github/actions/ci-scope
+        with:
+          full: ${{ (inputs.full || 'true') }}
+          upstream_result: ${{ inputs.upstream_result || 'success' }}
+      - name: Cache documentation validator dependencies
+        if: steps.scope.outputs.full == 'false'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install documentation validator dependencies
+        if: steps.scope.outputs.full == 'false'
+        run: npm ci --prefix frontend --ignore-scripts
+      - name: Check documentation ownership, whitespace and hygiene
+        if: steps.scope.outputs.full == 'false'
+        run: |
+          git diff --check HEAD^1 HEAD
+          node scripts/validation/standards.mjs
+          node scripts/check-repository-hygiene.mjs
       - name: Install Rust
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Rust formatting
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         run: cargo fmt --all -- --check
       - name: Install source scanners
-        uses: taiki-e/install-action@v2.87.28
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
+        uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.25'
-          cache: false
-      - name: Install workflow scanner
+      - name: Install pinned prebuilt workflow scanner
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
+        shell: bash
         run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          scanner_dir="$RUNNER_TEMP/actionlint"
+          mkdir -p "$scanner_dir"
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$scanner_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $scanner_dir/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$scanner_dir/actionlint.tar.gz" -C "$scanner_dir" actionlint
+          "$scanner_dir/actionlint" -version
+          echo "$scanner_dir" >> "$GITHUB_PATH"
       - name: Source and supply-chain policy
+        if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
         run: |
           typos
           cargo deny check
           cargo machete
           shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/*
           actionlint
-
-  check:
-    # Every protected/release check requires scanners AND all platform checks.
-    name: Code Quality and Health Check (${{ matrix.os }})
-    needs: [source, platform]
-    if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require complete health checks
-        env:
-          SOURCE: ${{ needs.source.result }}
-          PLATFORM: ${{ needs.platform.result }}
-        run: |
-          test "$SOURCE" = success
-          test "$PLATFORM" = success

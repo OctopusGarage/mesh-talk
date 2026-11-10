@@ -34,6 +34,14 @@ it("announces preparation without inventing a percentage", () => {
   expect(html).not.toContain("aria-valuenow");
 });
 
+it("names the pending file transfer without suggesting the recipient is offline", () => {
+  state.transfer = { ...transfer(0, 10), consent: "accepted" };
+  const html = render();
+  expect(html).toContain("Waiting for file transfer to start…");
+  expect(html).toContain('aria-valuenow="0"');
+  expect(html).not.toContain("Waiting for recipient…");
+});
+
 it.each([
   [0, 0],
   [1, -1],

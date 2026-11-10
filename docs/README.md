@@ -5,6 +5,10 @@ validation guidance. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information
 belongs and how to keep the site, README, and guides aligned.
 
+For feature changes or a maintenance sweep, use the
+[change alignment checklist](maintenance-checklist.md). It maps maintained
+surfaces to their owners, change triggers, evidence and follow-up records.
+
 | I want to…                                    | Start here                                                   | Continue with                                                                                                                                    |
 | --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Install or try the desktop app                | [Project overview](../README.md)                             | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                                                 |
@@ -12,9 +16,12 @@ belongs and how to keep the site, README, and guides aligned.
 | Link devices or recover an account            | [Linked devices](help/topics/link-devices.md)                | [Backup and recovery](backup-recovery.md) · [Settings](settings.md)                                                                              |
 | Connect a bot or local assistant              | [Bot integrations](bot-integrations.md)                      | [Public documentation MCP](../tools/help/README.md)                                                                                              |
 | Connect peers across networks                 | [Network architecture baseline](network-design-reference.md) | [Current topologies](network-topologies.md) · [Routed discovery](routed-network-discovery.md) · [Relay privacy](post-office-metadata-privacy.md) |
+| Rehearse native Bluetooth links               | [Native Bluetooth](native-bluetooth.md)                     | Experimental macOS BLE transport, pinned encrypted echo, and required physical-device evidence.                                                   |
 | Run a headless node or relay                  | [Deployment](../specifications/deployment_guide.md)          | [Relay releases](post-office-release.md)                                                                                                         |
 | Understand or change the protocol             | [Architecture](ARCHITECTURE.md)                              | [Domain glossary](../CONTEXT.md) · [DDD conventions](domain-design.md) · [Testing feedback loop](testing-feedback-loop.md)                       |
 | Contribute to the desktop app                 | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                           |
+| Implement or review a reliable change         | [AI coding reliability guide](ai-coding-reliability.md)      | [Module ownership](module-boundaries.md) · [Testing feedback loop](testing-feedback-loop.md)                                                     |
+| Keep CI fast and reliable                     | [CI maintenance](ci-maintenance.md)                           | [Documentation-only PR scope](ci-maintenance.md#documentation-only-pr-scope) · [Testing feedback loop](testing-feedback-loop.md) · [Quality gates](quality-gates.md) |
 | Review security or past validation            | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Validation and evaluation](#validation-and-evaluation)            |
 
 For menu locations and everyday tasks, start with the [user guide](help/README.md).
@@ -41,33 +48,37 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/backup-recovery.md`](backup-recovery.md)                           | Manual encrypted backup, offline restore, recovery key handling, and coverage limits.                                                                       |
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md)       | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks.                                                                |
 | [`docs/updates.md`](updates.md)                                           | Stable/Nightly selection, verified downloads, native installation, canonical product-version ownership, reviewed release/next-target automation, and publication recovery. |
+| [`docs/favorites.md`](favorites.md)                                       | Independent saved message collections, grouped capture, searchable personal notes, retention and linked-device permissions.                                  |
 | [`docs/settings.md`](settings.md)                                         | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
-| [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
+| [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, protected messages, invisible mode, hidden contacts, and limits.                                                                 |
 | [`specifications/TODO.md`](../specifications/TODO.md)                     | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
 
 The [group reception guide](group-conversation-reception.md) owns ordering, unread
 tracking, catch-up notifications and local recovery observations. For embedding
 the UI-free protocol core, see the [core crate guide](../crates/mesh-talk-core/README.md).
 
-[Peer trust cards](peer-trust.md) explains signed public profiles, creation claims,
-independent witness receipts and private relationship evidence.
+[Profiles and contact verification](peer-trust.md) explains automatic profile
+signatures, immutable account creation metadata and private relationship evidence.
 
 ## Bots and local agents
 
 [Bot integrations](bot-integrations.md) explains the dedicated headless bot host,
-opt-in desktop delegation, scoped CLI credentials and local MCP tools. Text/reply
-sending is implemented; interactive subscriptions and HTTP ingress are later stages.
+the desktop local-agent switch and self-describing loopback HTTP API, scoped CLI
+credentials and local MCP tools. Text/reply sending is implemented; interactive
+subscriptions and incoming HTTP webhooks are later stages.
 
 ## Contributor workflow and design
 
 | Doc                                                                                           | What it covers                                                                                           |
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | [`AGENTS.md`](../AGENTS.md)                                                                   | Repository guidelines for AI agents / contributors — structure, build/test commands, conventions.        |
+| [`docs/ai-coding-reliability.md`](ai-coding-reliability.md)                                     | Risk-triggered coding and review rules, deadlock prevention, failure-path evidence and continuous improvement. |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md)                                                       | How to set up, build, test, and submit changes.                                                          |
 | [`docs/module-boundaries.md`](module-boundaries.md)                                           | Maintained feature owners, reuse seams, sidebar modules and coordination rules for parallel development. |
 | [`specifications/development_conventions.md`](../specifications/development_conventions.md)   | Coding standards, naming, error handling, performance, cross-platform conventions.                       |
 | [`specifications/testing_guidelines.md`](../specifications/testing_guidelines.md)             | The three test layers — inline unit, multi-process backend E2E, Playwright UI E2E.                       |
 | [`docs/testing-feedback-loop.md`](testing-feedback-loop.md)                                   | Focused local test commands, module boundaries, and full-gate triggers.                                  |
+| [`docs/ci-maintenance.md`](ci-maintenance.md)                                                   | CI cost and reliability decisions, safe reuse, coverage-preserving refactoring and regression prevention. |
 | [`docs/build-retention.md`](build-retention.md)                                               | Shared build archives, compiler-cache budget, worktree discovery, and cleanup coordination.              |
 | [`specifications/git_standards.md`](../specifications/git_standards.md)                       | Conventional-commit format, scopes, and GPG signing / hook enforcement.                                  |
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements.                            |
@@ -77,6 +88,10 @@ sending is implemented; interactive subscriptions and HTTP ingress are later sta
 | [`docs/screenshots/README.md`](screenshots/README.md)                                         | How current demo screenshots are captured and shared with the site.                                      |
 | [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md)                                       | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing.               |
 | [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
+| [`docs/maintenance-checklist.md`](maintenance-checklist.md)                                 | Cross-surface maintenance inventory, change triggers, alignment review and unresolved follow-ups.        |
+
+[Message forwarding](message-forwarding.md) owns selection, source admission,
+batch retry and merged chat-record behavior.
 
 ## Design boundaries
 

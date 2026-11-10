@@ -13,17 +13,29 @@ pub(crate) enum SessionTransitionError {
     InvalidToken,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SessionInfo {
     pub token: String,
     pub user: User,
-    /// The user's password, retained in memory for the lifetime of the session.
-    ///
-    /// The node opens its per-account encrypted stores (keystore, event log,
-    /// ratchet sessions, …) with a key derived from this password, so it must be
-    /// available without re-prompting while the session is live. It is never serialized
-    /// to disk — it lives only in the in-memory session.
+    /// Retained identity-store secret. It may differ from the shared login password
+    /// and raw node-storage secret for an upgraded installation.
     pub password: String,
+    /// Retained raw secret for existing node stores.
+    pub node_storage_password: String,
+    /// Shared account login secret used by saved login and private linking.
+    pub account_login_password: String,
+}
+
+impl std::fmt::Debug for SessionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionInfo")
+            .field("token", &"[REDACTED]")
+            .field("user", &self.user)
+            .field("password", &"[REDACTED]")
+            .field("node_storage_password", &"[REDACTED]")
+            .field("account_login_password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -50,6 +62,19 @@ impl SessionLease {
 }
 
 impl SessionState {
+    /// Retain exact signed-out authority through a synchronous publication.
+    pub(crate) fn without_session<T>(
+        &self,
+        generation: u64,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        let guard = self.inner.lock().map_err(|_| "Session lock unavailable")?;
+        if guard.is_some() || self.generation() != generation {
+            return Err("session replaced".into());
+        }
+        Ok(operation())
+    }
+
     pub(crate) fn unchanged<T>(
         &self,
         generation: u64,
@@ -110,6 +135,8 @@ impl SessionState {
         *guard = Some(SessionInfo {
             token,
             user,
+            node_storage_password: password.clone(),
+            account_login_password: password.clone(),
             password,
         });
         lease
@@ -117,11 +144,13 @@ impl SessionState {
 
     /// Install an authenticated user atomically with its host admission generation.
     /// Reauthentication replaces the token, even when the owner is unchanged.
-    pub(crate) fn activate(
+    pub(crate) fn activate_with_credentials(
         &self,
         token: String,
         user: User,
-        password: String,
+        identity_password: String,
+        node_storage_password: String,
+        account_login_password: String,
     ) -> Result<SessionLease, SessionTransitionError> {
         let mut guard = self.inner.lock().unwrap();
         if guard
@@ -130,7 +159,10 @@ impl SessionState {
         {
             return Err(SessionTransitionError::AlreadyLoggedIn);
         }
-        let lease = self.replace(&mut guard, token, user, password);
+        let lease = self.replace(&mut guard, token, user, identity_password);
+        let info = guard.as_mut().expect("session was just activated");
+        info.node_storage_password = node_storage_password;
+        info.account_login_password = account_login_password;
         Ok(lease)
     }
 
@@ -184,6 +216,7 @@ mod session_generation_tests {
         let user = User {
             user_id: "alice".into(),
             name: "alice".into(),
+            account_login_name: None,
             display_name: "Alice".into(),
             address: "fixture".into(),
             created_at: 0,
@@ -214,6 +247,7 @@ mod session_generation_tests {
         let user = User {
             user_id: "alice".into(),
             name: "alice".into(),
+            account_login_name: None,
             display_name: "Alice".into(),
             address: "fixture".into(),
             created_at: 0,

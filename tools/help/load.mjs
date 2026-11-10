@@ -15,6 +15,8 @@ const settings = [
   "general",
   "appearance",
   "notifications",
+  "shortcuts",
+  "integrations",
   "connection",
   "privacy",
   "files",

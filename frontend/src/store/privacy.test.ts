@@ -15,6 +15,30 @@ beforeEach(() => {
   usePrivacy.getState().reset();
 });
 describe("invisible-mode session policy", () => {
+  it("exposes a stalled privacy read for retry and ignores its late snapshot", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    invoke.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const pending = usePrivacy.getState().load("alice");
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(usePrivacy.getState().loading).toBe(false);
+      expect(usePrivacy.getState().error).toBe("load");
+      invoke.mockResolvedValue(snapshot("alice", false));
+      await usePrivacy.getState().load("alice");
+      finish(snapshot());
+      await pending;
+      expect(usePrivacy.getState().snapshot?.invisible).toBe(false);
+    } finally {
+      finish(snapshot());
+      await pending;
+      vi.useRealTimers();
+    }
+  });
   it("rejects IDs that only become valid through string coercion", async () => {
     invoke.mockResolvedValue({
       ...snapshot(),

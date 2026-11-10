@@ -1,0 +1,280 @@
+import assert from "node:assert/strict";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+
+const root = () => readFileSync(new URL("../../.github/workflows/e2e-ui.yml", import.meta.url), "utf8");
+const job = name => root().split(`  ${name}:\n`)[1]?.split(/^  [a-z][\w-]*:\n/m)[0];
+function gate(name, env) {
+  const block = root().split(/^      - /m).find(step => step.startsWith(`name: ${name}\n`));
+  assert.ok(block, name);
+  const script = block.split("        run: |\n")[1].replace(/^          /gm, "");
+  return spawnSync("bash", ["-e", "-c", script], { encoding: "utf8", env: { ...process.env, ...env } }).status;
+}
+
+test("Linux coverage requires Linux and Health without waiting for desktop shards", () => {
+  assert.match(job("coverage"), /needs: \[linux, health, scope\]/);
+  assert.doesNotMatch(job("coverage"), /needs:.*desktop/);
+  for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
+    assert.equal(gate("Require all browser shards", { BASELINE: linux, UNIT_COVERAGE: "success", DESKTOP: "failure" }) === 0, linux === "success");
+  }
+});
+
+test("portable acceptance and final UI gate reject every unsuccessful Linux or desktop result", () => {
+  const env = { LINUX: "success", DESKTOP: "success", WINDOWS: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
+  for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop, desktop-windows, scope\]/);
+  assert.match(job("portable-evidence"), /node scripts\/evals\/chromium-evidence\.mjs collect-artifacts/);
+  assert.match(job("ui-gate"), /needs: \[linux, desktop,/);
+  for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
+    for (const desktop of ["success", "failure", "cancelled", "skipped", ""]) {
+      const expected = linux === "success" && desktop === "success";
+      assert.equal(gate("Require all full Chromium shards", { LINUX: linux, DESKTOP: desktop, WINDOWS: "success" }) === 0, expected);
+      assert.equal(gate("Require complete selected UI matrices", { ...env, LINUX: linux, DESKTOP: desktop }) === 0, expected);
+    }
+  }
+});
+
+test("one reusable shard implementation retains platform-sized runners and all evidence identities", () => {
+  const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
+  assert.match(reusable, /operating_systems:\n        type: string\n        required: true/);
+  assert.match(reusable, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
+  assert.match(reusable, /shard: \$\{\{ fromJSON\(inputs.shards\) \}\}/);
+  assert.match(job("linux"), /operating_systems: '\["ubuntu-24.04"\]'/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel"\]'\n      shards: '\[1,2,3,4,5,6,7,8\]'\n      shard_total: 8/);
+  assert.match(job("desktop-windows"), /operating_systems: '\["windows-latest"\]'\n      shards: '\[1,2,3,4\]'\n      shard_total: 4/);
+  assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 3);
+  assert.ok(!root().includes("name: Run UI E2E"));
+  assert.match(reusable, /node \.\.\/scripts\/ci\/ui-runner\.mjs --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ inputs.shard_total \}\} --reporter=list,blob,json,\.\.\/scripts\/ci\/ui-runner\.mjs/);
+  assert.match(reusable, /MESH_TALK_E2E_COVERAGE: \$\{\{ runner.os == 'Linux' && '1' \|\| '0' \}\}/);
+  for (const prefix of ["playwright-ui", "chromium-portable"]) assert.ok(reusable.includes(`name: ${prefix}-`));
+  assert.match(reusable, /SOURCE_SHA: \$\{\{ github.sha \}\}/);
+  assert.match(reusable, /if: always\(\)/);
+  assert.match(reusable, /if-no-files-found: error/);
+});
+
+test("browser job budget reserves cleanup before dependency work and persists interruption evidence", () => {
+  const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
+  assert.match(reusable, /timeout_minutes:\n        type: number\n        default: 25/);
+  assert.match(reusable, /timeout-minutes: \$\{\{ inputs.timeout_minutes \}\}/);
+  assert.ok(reusable.indexOf("name: Reserve browser cleanup") < reusable.indexOf("name: Install dependencies"));
+  assert.match(reusable, /frontend\/ui-runner-evidence\//);
+  const block = reusable.split(/^      - /m).find(value => value.startsWith("name: Reserve browser cleanup and evidence time\n"));
+  assert.match(block, /shell: bash/);
+  const script = block.split("        run: |\n")[1].replace(/^          /gm, "");
+  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-budget-"));
+  try {
+    for (const minutes of ["25", "2", "invalid"]) {
+      const envFile = path.join(directory, "environment");
+      writeFileSync(envFile, "");
+      const result = spawnSync("bash", ["-e", "-c", script], { cwd: directory, encoding: "utf8", env: { ...process.env, UI_JOB_MINUTES: minutes, GITHUB_ENV: envFile } });
+      assert.equal(result.status === 0, minutes === "25", result.stderr);
+      if (minutes === "25") {
+        const budget = JSON.parse(readFileSync(path.join(directory, "ui-runner-evidence/budget.json"), "utf8"));
+        assert.equal(budget.deadline - budget.startedAt, 23 * 60000);
+        assert.equal(readFileSync(envFile, "utf8"), `MESH_UI_DEADLINE_MS=${budget.deadline}\n`);
+      }
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test("desktop browser burst waits for Health and WebKit with bounded admission while Linux starts independently", () => {
+  const reusable = readFileSync(new URL("../../.github/workflows/ui-shards.yml", import.meta.url), "utf8");
+  assert.match(job("desktop"), /needs: \[health, portable, scope\]/);
+  assert.match(job("desktop-windows"), /needs: \[health, scope\]/);
+  assert.doesNotMatch(job("desktop-windows"), /portable|max_parallel:/);
+  for (const name of ["desktop", "desktop-windows"]) assert.match(job(name), /if: needs.scope.outputs.full == 'true'/);
+  assert.doesNotMatch(job("desktop"), /max_parallel:/, "desktop inherits the same four-slot owner without a Mac-specific Windows restriction");
+  assert.match(reusable, /max_parallel:\n        type: number\n        default: 4/);
+  assert.match(reusable, /max-parallel: \$\{\{ inputs.max_parallel \}\}/);
+  assert.doesNotMatch(job("linux"), /max_parallel:/);
+  assert.doesNotMatch(job("desktop"), /if: always\(\)/);
+  assert.match(job("linux"), /needs: \[scope\]/);
+});
+
+test("HTML reports require all platform-specific current-attempt shards", () => {
+  const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
+  const complete = { desktop: "success", platforms };
+  assert.equal(renderReports(complete).status, 0);
+  for (const os of platforms) {
+    const partial = renderReports({ ...complete, missing: [`${os}-2`, `${os}-3`, `${os}-4`] });
+    assert.notEqual(partial.status, 0, `${os} accepted only one shard`);
+  }
+  assert.notEqual(renderReports({ ...complete, missing: ["macos-26-intel-8"] }).status, 0, "macOS eighth shard is mandatory");
+  const discovery = renderReports({ ...complete, discoveryFailure: true });
+  assert.notEqual(discovery.status, 0);
+  assert.deepEqual(discovery.rendered, [], "failed layout discovery cannot silently render an incomplete report");
+  assert.notEqual(renderReports({ ...complete, attempt: "2" }).status, 0, "another attempt cannot satisfy current artifacts");
+});
+
+test("HTML presentation never substitutes for successful producer acceptance", () => {
+  const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
+  for (const producer of ["LINUX", "DESKTOP"]) {
+    for (const result of ["failure", "cancelled", "skipped", ""]) {
+      assert.notEqual(gate("Require all full Chromium shards", { LINUX: "success", DESKTOP: "success", WINDOWS: "success", [producer]: result }), 0, `accepted ${producer} ${result}`);
+    }
+  }
+  assert.notEqual(renderReports({ desktop: "success", platforms, renderExit: "1" }).status, 0);
+});
+
+// GitHub documents that reusable workflows inherit the caller's github context:
+// https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
+function concurrency(file, github) {
+  const source = readFileSync(new URL(`../../.github/workflows/${file}.yml`, import.meta.url), "utf8");
+  const block = source.split("concurrency:\n")[1].split(/\n\S/)[0];
+  const evaluate = text => text.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) => String(Function("github", `return (${expression})`)(github)));
+  return { group: evaluate(block.match(/^  group: (.+)$/m)[1]).toLowerCase(), cancel: evaluate(block.match(/^  cancel-in-progress: (.+)$/m)[1]) === "true" };
+}
+
+test("UI and reusable Health isolate caller/event streams while superseded candidates cancel", () => {
+  const context = { workflow: "UI E2E", event_name: "schedule", ref: "refs/heads/main", event: { pull_request: {} } };
+  const ui = concurrency("e2e-ui", context), called = concurrency("check-health", context);
+  const standalone = concurrency("check-health", { ...context, workflow: "Code Quality and Health Check" });
+  assert.notEqual(ui.group, called.group, "a called workflow must never cancel its caller");
+  assert.notEqual(called.group, standalone.group, "standalone Health cannot replace same-run UI evidence");
+  for (const owner of ["check-health", "e2e-ui"]) {
+    assert.notEqual(concurrency(owner, context).group, concurrency(owner, { ...context, event_name: "push" }).group);
+    assert.notEqual(concurrency(owner, context).group, concurrency(owner, { ...context, event_name: "workflow_dispatch" }).group);
+    assert.equal(concurrency(owner, context).cancel, false);
+    assert.equal(concurrency(owner, { ...context, event_name: "workflow_dispatch" }).cancel, false);
+    for (const event_name of ["pull_request", "merge_group", "push"]) {
+      const candidate = { ...context, event_name, ref: event_name === "push" ? "refs/heads/main" : "refs/merge-queue/main/candidate", event: event_name === "pull_request" ? { pull_request: { number: 42 } } : { pull_request: {} } };
+      assert.equal(concurrency(owner, candidate).cancel, event_name !== "push");
+      assert.equal(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, sha: "replacement" }).group);
+      assert.notEqual(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, ref: event_name === "push" ? "refs/heads/dev" : "refs/merge-queue/main/other", event: event_name === "pull_request" ? { pull_request: { number: 43 } } : { pull_request: {} } }).group);
+    }
+  }
+});
+
+for (const owner of ["ci", "e2e-backend"]) test(`${owner} isolates evidence events while superseded candidates cancel`, () => {
+  const context = { workflow: owner, ref: "refs/heads/main", event: { pull_request: {} } };
+  const groups = [];
+  for (const event_name of ["push", "pull_request", "merge_group", "schedule", "workflow_dispatch"]) {
+    const event = { ...context, event_name };
+    const observed = concurrency(owner, event);
+    groups.push(observed.group);
+    assert.equal(observed.cancel, ["pull_request", "merge_group"].includes(event_name));
+    assert.equal(observed.group, concurrency(owner, { ...event, sha: "replacement" }).group);
+    assert.notEqual(observed.group, concurrency(owner, { ...event, ref: "refs/heads/other" }).group);
+  }
+  assert.equal(new Set(groups).size, groups.length, "independent event streams must not share a cancellation group");
+  const pr = { ...context, event_name: "pull_request", event: { pull_request: { number: 42 } } };
+  assert.notEqual(concurrency(owner, pr).group, concurrency(owner, { ...pr, event: { pull_request: { number: 43 } } }).group);
+});
+
+test("scheduled and manual fuzz executions remain separate without cancellation", () => {
+  const context = { workflow: "Fuzz", event_name: "schedule", ref: "refs/heads/main", event: {} };
+  const scheduled = concurrency("fuzz", context);
+  const manual = concurrency("fuzz", { ...context, event_name: "workflow_dispatch" });
+  assert.notEqual(scheduled.group, manual.group);
+  assert.equal(scheduled.cancel, false);
+  assert.equal(manual.cancel, false);
+});
+
+test("Firefox core runs on ordinary candidates and the final gate requires its real success", () => {
+  const firefox = job("firefox-extended");
+  assert.match(firefox, /^    if: needs.scope.outputs.full == 'true'$/m, "core Firefox runs on every full candidate");
+  assert.match(firefox, /timeout-minutes: 20/);
+  assert.match(firefox, /EVAL_TIER:.*'extended' \|\| 'core'/);
+  assert.match(firefox, /browser-report\.mjs.*'extended' \|\| 'core'/);
+  const env = { LINUX: "success", DESKTOP: "success", WINDOWS: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
+  assert.equal(gate("Require complete selected UI matrices", env), 0);
+  for (const EXTENDED of ["false", "true"]) for (const FIREFOX of ["failure", "cancelled", "skipped", ""]) {
+    assert.notEqual(gate("Require complete selected UI matrices", { ...env, EXTENDED, FIREFOX, EXTENDED_CHROMIUM: EXTENDED === "true" ? "success" : "skipped" }), 0);
+  }
+});
+
+function renderReports({ linux = "success", desktop = "skipped", windows = desktop, platforms = ["ubuntu-24.04"], omit = "", missing = [], attempt = "3", renderExit = "0", discoveryFailure = false } = {}) {
+  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-inventory-"));
+  try {
+    mkdirSync(path.join(directory, "frontend"));
+    mkdirSync(path.join(directory, "scripts/evals"), { recursive: true });
+    for (const file of ["chromium-evidence.mjs", "browser-report.mjs", "png-evidence.mjs", "trace-evidence.mjs"]) copyFileSync(new URL(`../evals/${file}`, import.meta.url), path.join(directory, "scripts/evals", file));
+    if (discoveryFailure) writeFileSync(path.join(directory, "scripts/evals/chromium-evidence.mjs"), "process.exit(37);\n");
+    for (const os of platforms) for (const shard of os === "macos-26-intel" ? [1, 2, 3, 4, 5, 6, 7, 8] : [1, 2, 3, 4]) {
+      if (`${os}-${shard}` === omit || missing.includes(`${os}-${shard}`)) continue;
+      const blob = path.join(directory, "target", "ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
+      mkdirSync(blob, { recursive: true });
+      writeFileSync(path.join(blob, `report-${shard}.zip`), "actual shard blob placeholder");
+    }
+    const module = pathToFileURL(path.join(directory, "scripts/evals/chromium-evidence.mjs")).href;
+    const script = `import {renderDownloadedReports} from ${JSON.stringify(module)};
+      import {appendFileSync} from 'node:fs';
+      try { await renderDownloadedReports('../target/ui-reports', '../target/ui-report-blobs',
+        {runAttempt:'3', linuxResult:process.env.LINUX_RESULT, desktopResult:process.env.DESKTOP_RESULT, windowsResult:process.env.WINDOWS_RESULT},
+        {merge:async(_directory,os)=>{appendFileSync(process.env.RENDERED,'playwright-report/'+os+'\\n');if(process.env.RENDER_EXIT!=='0')throw Error('renderer failed')}});
+      } catch(error) { console.error(error.message); process.exitCode=1; }`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: path.join(directory, "frontend"), encoding: "utf8",
+      env: { ...process.env, LINUX_RESULT: linux, DESKTOP_RESULT: desktop, WINDOWS_RESULT: windows, RENDERED: path.join(directory, "rendered"), RENDER_EXIT: renderExit },
+    });
+    let rendered = [];
+    try { rendered = readFileSync(path.join(directory, "rendered"), "utf8").trim().split("\n"); } catch {}
+    return { ...result, rendered };
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+}
+
+test("HTML reports render admitted producers and distinguish skipped desktop from missing evidence", () => {
+  assert.match(job("reports"), /LINUX_RESULT: \$\{\{ needs\.linux\.result \}\}/);
+  assert.match(job("reports"), /DESKTOP_RESULT: \$\{\{ needs\.desktop\.result \}\}/);
+  const linuxOnly = renderReports();
+  assert.equal(linuxOnly.status, 0, linuxOnly.stderr);
+  assert.deepEqual(linuxOnly.rendered, ["playwright-report/ubuntu-24.04"]);
+  const platforms = ["ubuntu-24.04", "macos-26-intel", "windows-latest"];
+  const complete = renderReports({ desktop: "success", platforms });
+  assert.equal(complete.status, 0, complete.stderr);
+  assert.deepEqual(complete.rendered, platforms.map(os => `playwright-report/${os}`));
+  for (const linux of ["success", "failure", "cancelled"]) {
+    assert.equal(renderReports({ linux }).status, 0, `admitted ${linux} producer retains its report`);
+    assert.notEqual(renderReports({ linux, omit: "ubuntu-24.04-2" }).status, 0, `${linux} must retain all four raw blobs`);
+  }
+  for (const desktop of ["success", "failure", "cancelled"]) {
+    assert.equal(renderReports({ desktop, platforms }).status, 0, `${desktop} retains every admitted platform report`);
+    assert.notEqual(renderReports({ desktop }).status, 0, `${desktop} cannot silently omit desktop artifacts`);
+    for (const os of platforms) assert.notEqual(renderReports({ desktop, platforms, omit: `${os}-3` }).status, 0, `${os} missing shard`);
+  }
+  assert.notEqual(renderReports({ renderExit: "37" }).status, 0, "renderer failure remains a presentation failure");
+  assert.notEqual(renderReports({ attempt: "2" }).status, 0, "previous-attempt blobs cannot replace this attempt");
+  for (const result of ["", "unknown", "in_progress"]) {
+    assert.notEqual(renderReports({ linux: result }).status, 0, `unknown Linux conclusion ${result}`);
+    assert.notEqual(renderReports({ desktop: result, platforms }).status, 0, `unknown desktop conclusion ${result}`);
+  }
+  assert.equal(renderReports({ linux: "skipped", desktop: "success", platforms: ["macos-26-intel", "windows-latest"] }).status, 0);
+  assert.notEqual(renderReports({ linux: "skipped", desktop: "skipped", platforms: [] }).status, 0, "empty presentation cannot claim a rendered report");
+});
+
+test("the stable required WebKit check admits only both successful partitions", () => {
+  const producer = job("portable-shards"), collector = job("portable");
+  assert.match(producer, /runs-on: macos-26-intel/);
+  assert.match(producer, /shard: \[1, 2\]/);
+  assert.match(producer, /timeout-minutes: 20/);
+  assert.match(producer, /ui-runner.mjs.*--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/2/);
+  assert.match(collector, /name: Portable UI \(macos-26-intel, webkit\)/);
+  assert.match(collector, /needs: \[portable-shards, scope\]/);
+  assert.match(collector, /portable-runner.mjs collect-partitions/);
+  const block = root().split(/^      - /m).find(value => value.startsWith("name: Require both WebKit partitions\n"));
+  const script = block.match(/        run: (.*)/)[1];
+  for (const status of ["success", "failure", "cancelled", "skipped", "", "in_progress"]) {
+    const result = spawnSync("bash", ["-e", "-c", script], { encoding: "utf8", env: { ...process.env, PRODUCER: status } });
+    assert.equal(result.status === 0, status === "success");
+  }
+});
+
+ test("independent Windows acceptance rejects every non-success conclusion", () => {
+   const env = { LINUX:"success", DESKTOP:"success", WINDOWS:"success", COVERAGE:"success", PACKS:"success", CHROMIUM:"success", PORTABLE:"success", EXTENDED_CHROMIUM:"skipped", FIREFOX:"success", EXTENDED:"false" };
+   for (const WINDOWS of ["success", "failure", "cancelled", "skipped", "", "unknown"]) for (const name of ["Require all full Chromium shards", "Require complete selected UI matrices"]) assert.equal(gate(name, {...env, WINDOWS}) === 0, WINDOWS === "success");
+ });
+ test("independent desktop report conclusions preserve available diagnostics", () => {
+   assert.match(job("reports"), /WINDOWS_RESULT: \$\{\{ needs\.desktop-windows\.result \}\}/);
+   const windows = renderReports({desktop:"skipped", windows:"success", platforms:["ubuntu-24.04","windows-latest"]});
+   assert.equal(windows.status,0, windows.stderr);
+   assert.deepEqual(windows.rendered,["playwright-report/ubuntu-24.04","playwright-report/windows-latest"]);
+   const mac = renderReports({desktop:"success", windows:"skipped", platforms:["ubuntu-24.04","macos-26-intel"]});
+   assert.equal(mac.status,0, mac.stderr);
+   assert.deepEqual(mac.rendered,["playwright-report/ubuntu-24.04","playwright-report/macos-26-intel"]);
+   for (const windows of ["failure","cancelled"]) assert.equal(renderReports({windows, platforms:["ubuntu-24.04","windows-latest"]}).status,0);
+   for (const windows of ["", "unknown", "in_progress"]) assert.notEqual(renderReports({windows}).status,0);
+ });

@@ -6,6 +6,84 @@ use crate::identity::{account::Account, device::DeviceIdentity};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
+#[test]
+fn opaque_file_consent_batches_bound_payloads_and_rotate_retained_offers() {
+    use crate::{
+        eventlog::{Event, EventKind},
+        file::FileManifest,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let sender = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&sender, &Account::generate(), "sender", 4000);
+    let (node, _, _) = node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.set_attachment_global_auto(true).unwrap();
+    let host = super::conversation::dm_conversation_id(&sender.public(), &node.identity.public());
+    for index in 1..=33u8 {
+        let manifest = FileManifest {
+            name: "empty.txt".into(),
+            size: 0,
+            mime: "text/plain".into(),
+            checksum: crate::file::file_checksum(&[]),
+            file_key: [3; 32],
+            file_conv: ConversationId::new([index; 32]),
+            chunk_count: 1,
+        };
+        let original = Event::new(
+            &sender,
+            host,
+            u64::from(index),
+            vec![],
+            u64::from(index),
+            1,
+            EventKind::FileManifest,
+            crate::dm::seal(
+                &sender,
+                &node.identity.public().x25519_pub,
+                &manifest.encode(),
+            )
+            .unwrap(),
+        );
+        node.accept_manifest_event(
+            &original,
+            &proof,
+            super::received_log::ReceivedEntry {
+                event_id: original.id,
+                conversation: host,
+                from: sender.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            },
+        )
+        .unwrap();
+    }
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..6 {
+        let controls = node.file_consent_events(&sender.public()).unwrap();
+        assert!(
+            controls.len() <= 8,
+            "one mailbox batch cannot retain every consent payload"
+        );
+        assert!(
+            controls
+                .iter()
+                .map(|event| bincode::serialized_size(event).unwrap())
+                .sum::<u64>()
+                <= 16 * 1024
+        );
+        seen.extend(controls.into_iter().map(|event| event.id));
+    }
+    assert_eq!(
+        seen.len(),
+        33,
+        "bounded batches must eventually revisit every retained offer"
+    );
+}
+
 struct RejectingDirectEndpoint {
     address: std::net::SocketAddr,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -64,6 +142,288 @@ async fn unavailable_direct_endpoint_closes_without_waiting_for_protocol_bytes()
     .await
     .expect("unavailable direct endpoints must close without protocol progress");
     rejecting.shutdown().await;
+}
+
+#[tokio::test]
+async fn offline_dm_file_custody_precedes_consent_and_survives_sender_shutdown() {
+    use crate::postoffice::{PostOffice, opaque::RelayMailbox};
+    use std::time::Duration;
+
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let rejecting = RejectingDirectEndpoint::bind().await;
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let alice_keys = alice.secret_bytes();
+    let alice_account_key = alice_account.secret_bytes();
+    let ap = Announce::new_with_account(&alice, &alice_account, "Alice", rejecting.address.port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", rejecting.address.port());
+    let (sender, _, _) = node_with_files(sender_dir.path(), alice, alice_account, &bp);
+
+    let relay = DeviceIdentity::generate();
+    let relay_keys = relay.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_address = listener.local_addr().unwrap();
+    let relay_proof = Announce::new_post_office(&relay, "Relay", relay_address.port());
+    let retained = Arc::new(Mutex::new(
+        PostOffice::open(&relay_dir.path().join("relay"), "pw", relay).unwrap(),
+    ));
+    let relay_task = tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+        listener,
+        retained.clone(),
+    ));
+    sender
+        .roster
+        .lock()
+        .unwrap()
+        .update(&relay_proof, relay_address.ip(), &sender.user_id());
+    let source = sender_dir.path().join("offline-document.bin");
+    let bytes = vec![47; crate::file::CHUNK_SIZE + 73];
+    std::fs::write(&source, &bytes).unwrap();
+    let (card, file) = sender
+        .enqueue_file_to_account(
+            &bp.account_id().unwrap(),
+            &source,
+            crate::file::FileKind::File,
+        )
+        .await
+        .unwrap();
+    let (manifest, final_chunk) = {
+        let delivery = sender.delivery.lock().unwrap();
+        let card = delivery.file_card(card).unwrap();
+        (
+            card.destinations[0].binding.event_id,
+            card.final_chunk.unwrap(),
+        )
+    };
+    assert_eq!(
+        sender.outgoing_file_consent_status(card, manifest).unwrap(),
+        None
+    );
+    let mailbox = RelayMailbox::new(&sender.identity, &bp.public(), &relay_proof.public()).unwrap();
+    let outer_final = mailbox
+        .wrap(
+            &sender
+                .log
+                .lock()
+                .unwrap()
+                .get(&final_chunk)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .id;
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    let custody = tokio::time::timeout(Duration::from_secs(8), async {
+        while !retained.lock().unwrap().has(&outer_final) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
+    assert!(
+        custody.is_ok(),
+        "the post office must hold the encrypted final chunk before the recipient starts or approves"
+    );
+    assert!(!retained.lock().unwrap().has(&final_chunk));
+    assert_eq!(
+        sender.outgoing_file_consent_status(card, manifest).unwrap(),
+        None
+    );
+    assert!(!sender.outgoing_file_progress(card).unwrap().delivered);
+    drop(sender);
+
+    let (recipient, _, mut offers) = node_with_files(recipient_dir.path(), bob, bob_account, &ap);
+    recipient.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+    recipient
+        .roster
+        .lock()
+        .unwrap()
+        .update(&relay_proof, relay_address.ip(), &recipient.user_id());
+    recipient.drain_from_post_office().await;
+    assert_eq!(offers.try_recv().unwrap().file_conv, file);
+    assert_eq!(recipient.file_progress(file).unwrap().unwrap().done, 0);
+    assert!(recipient.read_file(file).is_err());
+    recipient.decide_attachment(file, true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            recipient.drain_from_post_office().await;
+            if recipient.file_ready_to_save(file).unwrap() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("approval must retrieve retained bytes while the sender stays offline");
+    let saved = recipient_dir.path().join("saved-document.bin");
+    recipient.save_file(file, &saved).unwrap();
+    assert_eq!(std::fs::read(saved).unwrap(), bytes);
+    recipient.drain_from_post_office().await;
+
+    let (sender, _, _) = node_with_files(
+        sender_dir.path(),
+        DeviceIdentity::from_secret_bytes(alice_keys.0, alice_keys.1),
+        Account::from_secret_bytes(alice_account_key),
+        &bp,
+    );
+    sender.replace_verified_dm_pull_peers(vec![bp.user_id.clone()]);
+    sender
+        .roster
+        .lock()
+        .unwrap()
+        .update(&relay_proof, relay_address.ip(), &sender.user_id());
+    sender.drain_from_post_office().await;
+    sender.flush_file_delivery(card).await;
+    assert!(
+        sender.outgoing_file_progress(card).unwrap().delivered,
+        "only the exact recipient's verified-save control completes the transfer"
+    );
+    relay_task.abort();
+    let _ = relay_task.await;
+    rejecting.shutdown().await;
+}
+
+#[tokio::test]
+async fn pending_direct_dm_file_also_deposits_opaque_relay_custody() {
+    use crate::postoffice::{PostOffice, opaque::RelayMailbox};
+    use std::time::Duration;
+
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
+    let ap = Announce::new_with_account(&alice, &alice_account, "Alice", 1);
+    let (sender, _, _) = node_with_files(sender_dir.path(), alice, alice_account, &bp);
+    let (recipient, _, mut offers) = node_with_files(recipient_dir.path(), bob, bob_account, &ap);
+    let recipient_task = tokio::spawn(recipient.clone().run_accept_loop(listener));
+    let relay = DeviceIdentity::generate();
+    let keys = relay.secret_bytes();
+    let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_address = relay_listener.local_addr().unwrap();
+    let relay_proof = Announce::new_post_office(&relay, "Relay", relay_address.port());
+    let retained = Arc::new(Mutex::new(
+        PostOffice::open(&relay_dir.path().join("relay"), "pw", relay).unwrap(),
+    ));
+    let relay_task = tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        relay_listener,
+        retained.clone(),
+    ));
+    sender
+        .roster
+        .lock()
+        .unwrap()
+        .update(&relay_proof, relay_address.ip(), &sender.user_id());
+    let source = sender_dir.path().join("approval-later.bin");
+    std::fs::write(&source, vec![71; crate::file::CHUNK_SIZE + 9]).unwrap();
+    let (card, file) = sender
+        .enqueue_file_to_account(
+            &recipient.account_id(),
+            &source,
+            crate::file::FileKind::File,
+        )
+        .await
+        .unwrap();
+    let final_chunk = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let mailbox = RelayMailbox::new(&sender.identity, &bp.public(), &relay_proof.public()).unwrap();
+    let outer_final = mailbox
+        .wrap(
+            &sender
+                .log
+                .lock()
+                .unwrap()
+                .get(&final_chunk)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .id;
+    // The immediate API and the retained worker must both be able to park bytes
+    // without turning a recipient's pending decision into direct chunk consent.
+    sender.flush_file_delivery(card).await;
+    assert!(
+        retained.lock().unwrap().has(&outer_final),
+        "a reachable recipient awaiting approval must not prevent immediate relay custody"
+    );
+    assert_eq!(offers.try_recv().unwrap().file_conv, file);
+    assert_eq!(recipient.file_progress(file).unwrap().unwrap().done, 0);
+    assert!(!sender.outgoing_file_progress(card).unwrap().delivered);
+
+    // A second immutable send exercises the production worker's independent
+    // transition from direct Pending to the same custody route.
+    let (second, second_file) = sender
+        .enqueue_file_to_account(
+            &recipient.account_id(),
+            &source,
+            crate::file::FileKind::File,
+        )
+        .await
+        .unwrap();
+    let second_final = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(second)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let second_outer = mailbox
+        .wrap(
+            &sender
+                .log
+                .lock()
+                .unwrap()
+                .get(&second_final)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .id;
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    let custody = tokio::time::timeout(Duration::from_secs(8), async {
+        while !retained.lock().unwrap().has(&second_outer) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
+    assert!(
+        custody.is_ok(),
+        "the retained file worker must try relay custody after a direct pending answer"
+    );
+    assert_eq!(
+        recipient.file_progress(second_file).unwrap().unwrap().done,
+        0
+    );
+    assert!(!sender.outgoing_file_progress(second).unwrap().delivered);
+    recipient_task.abort();
+    relay_task.abort();
+    let _ = recipient_task.await;
+    let _ = relay_task.await;
 }
 
 #[tokio::test]
@@ -153,6 +513,34 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     b.drain_from_post_office().await;
     assert_eq!(offers.try_recv().unwrap().file_conv, file);
     assert!(b.read_file(file).is_err());
+    let identity = a.file_message_identity_bundle(card).unwrap().unwrap();
+    let mut malformed = identity.ciphertext.clone();
+    malformed.push(255);
+    let malformed = crate::eventlog::Event::new(
+        &a.identity,
+        identity.conversation_id,
+        identity.seq,
+        identity.parents.clone(),
+        identity.lamport,
+        identity.wall_clock,
+        identity.kind,
+        malformed,
+    );
+    let identity_mailbox =
+        crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap();
+    let malformed_outer = identity_mailbox.wrap(&malformed).unwrap();
+    qs.lock().unwrap().accept(malformed_outer.clone()).unwrap();
+    b.drain_from_post_office().await;
+    assert!(
+        b.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .seen(identity_mailbox.id(), &b.log.lock().unwrap())
+            .unwrap()
+            .contains(&malformed_outer.id),
+        "malformed reserved identity controls must be consumed, not retained in the deferred queue"
+    );
+    assert!(!b.log.lock().unwrap().has(&malformed.id).unwrap());
     b.decide_attachment(file, true).unwrap();
     let pending_controls = b.file_consent_events(&ap.public()).unwrap();
     assert!(!pending_controls.is_empty());
@@ -190,6 +578,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         .unwrap()
         .published_control(binding)
         .unwrap()
+        .unwrap()
         .clone();
     let original = super::file_consent::Decision::open(&control).unwrap();
     for wrong_binding in 0..5 {
@@ -206,13 +595,13 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             a.accept_file_consent_event(&unrelated, &bp.public())
                 .unwrap()
         );
-        assert_eq!(a.outgoing_file_consent_status(card, binding), None);
+        assert_eq!(a.outgoing_file_consent_status(card, binding).unwrap(), None);
     }
     a.delivery_suspended
         .store(true, std::sync::atomic::Ordering::Release);
     a.accept_file_consent_event(&control, &bp.public()).unwrap();
     assert_eq!(
-        a.outgoing_file_consent_status(card, binding),
+        a.outgoing_file_consent_status(card, binding).unwrap(),
         None,
         "a retired account runtime must not accept new file controls"
     );
@@ -244,16 +633,17 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             .any(|text| text == b"chat survives consent storage failure"),
         "failed consent persistence must not block unrelated chat events"
     );
-    assert_eq!(a.outgoing_file_consent_status(card, binding), None);
+    assert_eq!(a.outgoing_file_consent_status(card, binding).unwrap(), None);
     let retry_mailbox =
         crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap();
     let deferred_control = retry_mailbox.wrap(&control).unwrap().id;
     assert!(
-        a.opaque_seen
+        !a.opaque_receive_cache
             .lock()
             .unwrap()
-            .get(&retry_mailbox.id())
-            .is_none_or(|seen| !seen.contains(&deferred_control)),
+            .seen(retry_mailbox.id(), &a.log.lock().unwrap())
+            .unwrap()
+            .contains(&deferred_control),
         "failed controls must not enter the node-wide seen cache"
     );
     tokio::time::timeout(
@@ -262,7 +652,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     )
     .await
     .expect("a second drain during the outage must remain bounded");
-    assert_eq!(a.outgoing_file_consent_status(card, binding), None);
+    assert_eq!(a.outgoing_file_consent_status(card, binding).unwrap(), None);
     a.file_consent
         .lock()
         .unwrap()
@@ -278,7 +668,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         Some(crate::eventlog::sync::FileConsentStatus::Accepted),
         "the exact recipient's consent must return through federation",
     );
-    assert!(!a.log.lock().unwrap().has(&control.id));
+    assert!(!a.log.lock().unwrap().has(&control.id).unwrap());
     assert!(!ps.lock().unwrap().has(&control.id));
     assert!(!qs.lock().unwrap().has(&control.id));
     b.decide_attachment(file, false).unwrap();
@@ -301,11 +691,22 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             vec![],
         );
         b.log.lock().unwrap().append(event.clone()).unwrap();
-        let manifest = b.files.lock().unwrap().manifest(&file).unwrap().clone();
-        b.files
+        let original_id = b.files.lock().unwrap().manifest_events(file)[0];
+        let mut row = b
+            .received_files
             .lock()
             .unwrap()
-            .record_event(event.id, event.author, manifest);
+            .entry(original_id)
+            .unwrap()
+            .unwrap();
+        row.event_id = event.id;
+        row.conversation = event.conversation_id;
+        row.wall_clock = event.wall_clock;
+        b.received_files
+            .lock()
+            .unwrap()
+            .record_file_with_reception(&row, Some(&event), None)
+            .unwrap();
         event.id
     };
     assert!(
@@ -334,7 +735,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     );
     assert!(a.outgoing_file_consents.lock().unwrap().is_empty());
     assert_eq!(
-        a.outgoing_file_consent_status(card, binding),
+        a.outgoing_file_consent_status(card, binding).unwrap(),
         Some(crate::eventlog::sync::FileConsentStatus::Accepted),
         "sender restart must retain the authenticated decision"
     );
@@ -353,7 +754,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
                 .await
                 .unwrap();
             b.drain_from_post_office().await;
-            if b.file_ready_to_save(file) {
+            if b.file_ready_to_save(file).unwrap() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -365,7 +766,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     assert!(
         received.is_ok(),
         "federated bytes did not converge: recipient={:?}, sender={:?}",
-        b.file_progress(file),
+        b.file_progress(file).unwrap(),
         a.outgoing_file_progress(card)
     );
     assert!(
@@ -373,6 +774,21 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         "relay custody before recipient save must not confirm completion"
     );
     assert_eq!(b.read_file(file).unwrap(), bytes);
+    let identity = a.file_message_identity_bundle(binding).unwrap().unwrap();
+    let host = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
+    assert!(
+        b.has_file_message_identity(host, binding).unwrap(),
+        "source identity metadata must cross federation without a direct client route"
+    );
+    assert!(!b.log.lock().unwrap().has(&identity.id).unwrap());
+    assert!(!ps.lock().unwrap().has(&identity.id));
+    assert!(!qs.lock().unwrap().has(&identity.id));
+    assert!(super::file_consent::Decision::open(&identity).is_none());
+    assert!(
+        b.accept_file_consent_event(&identity, &ap.public())
+            .unwrap(),
+        "legacy reserved-control handling consumes the new identity subtype without creating chat history"
+    );
     let saved = bd.path().join("received.bin");
     b.save_file(file, &saved).unwrap();
     b.drain_from_post_office().await;
@@ -400,11 +816,12 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         "a later policy change must not replace completed delivery with an approval prompt"
     );
     let adopted_account = Account::generate();
-    b.delivery
-        .lock()
-        .unwrap()
-        .prepare_profile_adoption(&adopted_account.account_id())
-        .unwrap();
+    b.persist_account_adoption(
+        &adopted_account.public(),
+        || Ok(()),
+        || Ok(adopted_account.public()),
+    )
+    .unwrap();
     drop(b);
     let (adopted, _, _) = node_with_files(
         bd.path(),
@@ -506,6 +923,7 @@ async fn direct_file_approval_shares_signed_revision_with_relay_delivery() {
             .lock()
             .unwrap()
             .received_control(manifest)
+            .unwrap()
             .is_some(),
         "direct consent must establish the same signed watermark as mailbox consent"
     );

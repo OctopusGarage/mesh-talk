@@ -4,13 +4,32 @@ A peer-operated post office can temporarily hold encrypted events while a recipi
 
 ## Configure participation
 
-1. Open **More → Settings → Connection & delivery**.
+1. Open **More → Settings → Network & delivery**.
 2. Review **Use post offices**, the master switch for relay participation.
 3. Review **Send through post offices** and **Receive through post offices** independently.
 4. To opt into participant introductions, review **Discover peers through a post office**. Its availability depends on the parent settings and visibility policy.
 5. Choose a **Preferred post office** from known eligible direct candidates if you have a preference.
 
 The preferred choice is saved intent, not proof the relay is currently connected or handling a message. Disabling the master switch retains dependent saved choices; the app shows why they are inactive.
+
+## Choose whether to share your registration office
+
+**Share my originating post office**, under **Network & delivery**, is off by
+default. Enable it only if you want people discovering this device to see the
+name and identity of its registration office, including through forwarding
+offices. This choice belongs to the person sharing the information; viewing
+someone's profile cannot enable it for them.
+
+Office names may reveal a network or site. Participating post offices can read
+this optional metadata through the existing encrypted connections. Turning the
+setting off stops new sharing; already forwarded information expires within
+its original 15-second lease. It cannot erase information someone already read.
+Ordinary discovery and messaging continue. This control does not hide connection
+IP addresses or the office introducing a participant directly to you.
+
+A member profile separates **Registration office** from **Discovery source**.
+No shared registration information can mean sharing is off, evidence has expired
+or a node does not support it. Neither field establishes physical location.
 
 ## Understand the limits
 

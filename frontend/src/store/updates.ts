@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { updates } from "@/lib/api";
+import { prepareUpdateRestart } from "./updateRestart";
 import { errorMessage } from "@/lib/error";
 import type {
   DownloadedUpdate,
@@ -9,7 +10,13 @@ import type {
 } from "@/lib/types";
 
 export type UpdatePhase =
-  "idle" | "checking" | "ready" | "downloading" | "downloaded";
+  | "idle"
+  | "checking"
+  | "ready"
+  | "downloading"
+  | "downloaded"
+  | "installing"
+  | "restarting";
 
 interface UpdateState {
   phase: UpdatePhase;
@@ -23,9 +30,13 @@ interface UpdateState {
   canceling: boolean;
   check: () => Promise<void>;
   startDownload: () => Promise<void>;
+  install: () => Promise<void>;
   cancel: () => Promise<void>;
   setError: (error: string) => void;
 }
+
+const isBusy = (phase: UpdatePhase) =>
+  ["checking", "downloading", "installing", "restarting"].includes(phase);
 
 const channelStorageKey = "mesh-talk-update-channel";
 function storedChannel(): UpdateChannel {
@@ -45,12 +56,7 @@ export const useUpdates = create<UpdateState>((set, get) => ({
   channel: storedChannel(),
   currentVersion: null,
   setChannel: (channel) => {
-    if (
-      get().channel === channel ||
-      get().phase === "checking" ||
-      get().phase === "downloading"
-    )
-      return;
+    if (get().channel === channel || isBusy(get().phase)) return;
     try {
       localStorage.setItem(channelStorageKey, channel);
     } catch {
@@ -73,7 +79,7 @@ export const useUpdates = create<UpdateState>((set, get) => ({
   error: null,
   canceling: false,
   check: async () => {
-    if (get().phase === "checking" || get().phase === "downloading") return;
+    if (isBusy(get().phase)) return;
     set({ phase: "checking", error: null, release: null, download: null });
     try {
       const release = await updates.check(get().channel);
@@ -94,18 +100,38 @@ export const useUpdates = create<UpdateState>((set, get) => ({
       progress: { downloaded: 0, total: release.package_size ?? 0 },
     });
     try {
-      const download = await updates.download(
-        release.latest_version,
-        (progress) => set({ progress }),
-        get().channel,
-      );
+      const download = await (
+        release.automatic_install ? updates.prepare : updates.download
+      )(release.latest_version, (progress) => set({ progress }), get().channel);
+      if (cancelRequested) {
+        set({ phase: "ready", download: null, canceling: false, error: null });
+        return;
+      }
       set({ download, phase: "downloaded", canceling: false });
+      if (download.installable) await get().install();
     } catch (cause) {
       set({
         error: cancelRequested ? null : errorMessage(cause),
         phase: "ready",
         canceling: false,
       });
+    }
+  },
+  install: async () => {
+    const { release, download, phase, channel } = get();
+    if (phase !== "downloaded" || !release || !download?.installable) return;
+    set({ phase: "installing", error: null });
+    try {
+      const assertReady = await prepareUpdateRestart();
+      assertReady();
+      await updates.install(
+        release.latest_version,
+        (next) => set({ phase: next }),
+        channel,
+      );
+      set({ phase: "restarting" });
+    } catch (cause) {
+      set({ phase: "downloaded", error: errorMessage(cause) });
     }
   },
   cancel: async () => {
@@ -115,7 +141,8 @@ export const useUpdates = create<UpdateState>((set, get) => ({
     try {
       await updates.cancel();
     } catch (cause) {
-      cancelRequested = false;
+      // The user's cancellation also withdraws permission to install, even if
+      // the native cancellation request cannot be delivered.
       set({ error: errorMessage(cause), canceling: false });
     }
   },

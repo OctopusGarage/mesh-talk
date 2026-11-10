@@ -3,7 +3,7 @@
 use super::Node;
 use super::account_sync_wire::{AccountHistoryFrame, AccountSessionRequest, AccountSyncVersion};
 use super::node::NodeError;
-use super::session_pool::{SessionProtocol, retryable_transport_error};
+use super::session_pool::{InboundReuse, SessionProtocol, retryable_transport_error};
 use crate::discovery::PeerRecord;
 use crate::transport::{SecureChannel, TransportError};
 use rand_core::RngCore;
@@ -11,6 +11,74 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
+
+#[cfg(test)]
+pub(in crate::node) type AccountSessionTestHook = dyn Fn(
+        crate::identity::device::PublicIdentity,
+        AccountHistoryFrame,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
+#[cfg(test)]
+pub(in crate::node) type AccountControlDispatchTestHook = dyn Fn(
+        crate::identity::device::PublicIdentity,
+        bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
+#[cfg(test)]
+pub(in crate::node) type AccountClientTestHook =
+    dyn Fn(crate::identity::device::PublicIdentity, String) + Send + Sync;
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::node) enum ClientTransportOutcome {
+    Ok,
+    NoiseTimeout,
+    Authorization,
+    Other,
+}
+#[cfg(test)]
+pub(in crate::node) fn client_transport_outcome<T>(
+    result: &Result<T, TransportError>,
+) -> ClientTransportOutcome {
+    match result {
+        Ok(_) => ClientTransportOutcome::Ok,
+        Err(TransportError::Noise(message)) if message == "dial timed out" => {
+            ClientTransportOutcome::NoiseTimeout
+        }
+        Err(TransportError::AdmissionDenied) => ClientTransportOutcome::Authorization,
+        Err(_) => ClientTransportOutcome::Other,
+    }
+}
+
+#[cfg(test)]
+pub(in crate::node) fn client_trace_outcome<T>(result: &Result<T, NodeError>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(error) if super::account_sync::local_sync_capacity_busy(error) => "capacity_busy",
+        Err(NodeError::Channel(message)) if message == "account session negotiation timed out" => {
+            "negotiation_timeout"
+        }
+        Err(NodeError::Session(super::session::SessionError::Transport(
+            TransportError::Noise(message),
+        ))) if message == "dial timed out" => "noise_timeout",
+        Err(NodeError::Authorization(_)) => "authorization",
+        Err(NodeError::Session(super::session::SessionError::Transport(_))) => "transport",
+        Err(NodeError::Log(_)) => "storage",
+        Err(_) => "invalid_or_interrupted",
+    }
+}
+
+/// This transport deadline encloses TCP/Noise only after local permits were
+/// admitted. The outer negotiation deadline can include local waiting and must
+/// not qualify policy rejection, malformed responses or capacity backpressure.
+pub(in crate::node) fn account_dial_timed_out(error: &NodeError) -> bool {
+    matches!(error, NodeError::Session(super::session::SessionError::Transport(
+        TransportError::Noise(message))) if message == "dial timed out")
+}
 
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -43,7 +111,7 @@ impl AccountExchange {
     }
 }
 fn transport(error: TransportError) -> NodeError {
-    NodeError::Channel(error.to_string())
+    NodeError::Session(super::session::SessionError::Transport(error))
 }
 async fn send(
     channel: &mut SecureChannel<TcpStream>,
@@ -55,26 +123,100 @@ async fn send(
         .ok_or_else(|| TransportError::Serialization("invalid account session request".into()))?;
     channel.send(&bytes).await
 }
+#[cfg(test)]
+tokio::task_local! {
+    static CONTROL_TASK_TEST_LIFETIME: std::sync::Weak<()>;
+}
+
+#[cfg(test)]
+pub(in crate::node) fn observed_control_task_lifetime() -> Option<std::sync::Weak<()>> {
+    CONTROL_TASK_TEST_LIFETIME.try_with(Clone::clone).ok()
+}
+
 impl Node {
+    #[cfg(test)]
+    pub(in crate::node) fn trace_control_task(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        event: String,
+        lifetime: std::sync::Weak<()>,
+    ) {
+        CONTROL_TASK_TEST_LIFETIME.sync_scope(lifetime, || {
+            self.trace_account_client(peer, || event);
+        });
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn trace_account_client(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        event: impl FnOnce() -> String,
+    ) {
+        let hook = self.account_client_test_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(peer.clone(), event());
+        }
+    }
+
     pub(in crate::node) async fn begin_account_exchange(
         &self,
         peer: &PeerRecord,
         version: AccountSyncVersion,
         request: AccountHistoryFrame,
     ) -> Result<AccountExchange, NodeError> {
+        #[cfg(test)]
+        let trace = {
+            let enabled = self.account_client_test_hook.lock().unwrap().is_some();
+            enabled.then(|| {
+                let domain = match &request {
+                    AccountHistoryFrame::DocumentsRequest { body } => {
+                        super::account_documents::wire::DocumentRequest::decode(body)
+                            .map(|request| request.domain)
+                    }
+                    _ => None,
+                };
+                self.trace_account_client(&peer.public, || {
+                    format!("negotiation_begin domain={domain:?}")
+                });
+                (std::time::Instant::now(), domain)
+            })
+        };
         if peer.account_id.as_deref() != Some(self.account_id().as_str())
             || !self.certified_sibling(&peer.public)
         {
+            #[cfg(test)]
+            if let Some(trace) = trace {
+                self.trace_account_client(&peer.public, || {
+                    format!(
+                        "negotiation_end domain={:?} elapsed_ms={} outcome=authorization",
+                        trace.1,
+                        trace.0.elapsed().as_millis()
+                    )
+                });
+            }
             return Err(NodeError::Authorization(
                 "account session requires a certified sibling".into(),
             ));
         }
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             NEGOTIATION_TIMEOUT,
             self.begin_account_exchange_inner(peer, version, request),
         )
         .await
-        .map_err(|_| NodeError::Channel("account session negotiation timed out".into()))?
+        .map_err(|_| NodeError::Channel("account session negotiation timed out".into()))
+        .and_then(|result| result);
+        #[cfg(test)]
+        if let Some(trace) = trace {
+            self.trace_account_client(&peer.public, || {
+                format!(
+                    "negotiation_end domain={:?} elapsed_ms={} outcome={}",
+                    trace.1,
+                    trace.0.elapsed().as_millis(),
+                    client_trace_outcome(&result)
+                )
+            });
+        }
+        result
     }
     async fn begin_account_exchange_inner(
         &self,
@@ -97,7 +239,30 @@ impl Node {
         }
         let body = AccountSessionRequest::from_frame(&request)
             .ok_or_else(|| NodeError::Channel("invalid reusable account request".into()))?;
+        let optional_request = match &body {
+            AccountSessionRequest::AttachmentChecked { .. }
+            | AccountSessionRequest::FileMessageIdentities { .. } => true,
+            AccountSessionRequest::Documents { body } => {
+                super::account_documents::wire::DocumentRequest::decode(body)
+                    .is_some_and(|request| request.version > 1)
+            }
+            _ => false,
+        };
+        let authentication_priority = match &body {
+            AccountSessionRequest::Documents { body }
+                if super::account_documents::wire::DocumentRequest::decode(body).is_some_and(
+                    |request| request.domain == super::AccountDocumentDomain::GroupControl,
+                ) =>
+            {
+                super::session_pool::AuthenticationPriority::Control
+            }
+            _ => super::session_pool::AuthenticationPriority::Ordinary,
+        };
         for fresh in [false, true] {
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || {
+                format!("session_checkout_begin fresh={fresh}")
+            });
             let pooled = if fresh {
                 None
             } else {
@@ -106,13 +271,19 @@ impl Node {
                     .map_err(transport)?
             };
             let reused = pooled.is_some();
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || {
+                format!("session_checkout_end reused={reused}")
+            });
             let mut channel = match pooled {
                 Some(channel) => channel,
                 None => self
-                    .privacy_dial(peer.addr, &peer.public)
+                    .privacy_dial_priority(peer.addr, &peer.public, authentication_priority)
                     .await
                     .map_err(transport)?,
             };
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || "session_channel_ready".into());
             let key = self.peer_endpoint_key(
                 channel
                     .tcp_peer_addr()
@@ -133,6 +304,8 @@ impl Node {
                 rand_core::OsRng.fill_bytes(&mut request_id);
             }
             let opening = async {
+                #[cfg(test)]
+                self.trace_account_client(&peer.public, || "session_request_send_begin".into());
                 send(
                     &mut channel,
                     AccountSyncVersion::V2,
@@ -142,9 +315,17 @@ impl Node {
                     },
                 )
                 .await?;
+                #[cfg(test)]
+                self.trace_account_client(&peer.public, || {
+                    "session_request_send_end_ready_wait".into()
+                });
                 channel.recv().await
             }
             .await;
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || {
+                format!("session_ready_wait_end ok={}", opening.is_ok())
+            });
             match opening {
                 Ok(bytes) => {
                     if !matches!(AccountHistoryFrame::decode_versioned(&bytes), Some((AccountSyncVersion::V2, AccountHistoryFrame::SessionReady { request_id: echoed })) if echoed == request_id)
@@ -165,12 +346,17 @@ impl Node {
                     drop(channel);
                 }
                 Err(error) if retryable_transport_error(&error) => {
+                    if optional_request {
+                        // An unknown appended request says nothing about the
+                        // peer's support for the older reusable session owner.
+                        return Err(transport(error));
+                    }
                     // Old peers close on the appended optional tag. Only an
                     // authenticated pre-ack close permits legacy fallback.
                     drop(channel);
                     self.sessions.note_account_unsupported(key);
                     let mut channel = self
-                        .privacy_dial(peer.addr, &peer.public)
+                        .privacy_dial_priority(peer.addr, &peer.public, authentication_priority)
                         .await
                         .map_err(transport)?;
                     send(&mut channel, version, &request)
@@ -198,6 +384,18 @@ impl Node {
                 AccountHistoryFrame::Request { account_id, .. }
                 | AccountHistoryFrame::AttachmentRequest { account_id, .. }
                 | AccountHistoryFrame::Wake { account_id, .. } => account_id,
+                AccountHistoryFrame::AttachmentRequestChecked { account_id, .. }
+                | AccountHistoryFrame::FileMessageIdentitiesRequest { account_id, .. } => {
+                    account_id
+                }
+                AccountHistoryFrame::DocumentsRequest { body } => {
+                    // The document owner repeats exact account authorization.
+                    if super::account_documents::wire::DocumentRequest::decode(body).is_none() {
+                        return;
+                    }
+                    // Own account is borrowed only until this admission block ends.
+                    &self.account_id()
+                }
                 _ => return,
             };
             {
@@ -224,7 +422,34 @@ impl Node {
             ) {
                 return;
             }
+            // Observe only acknowledged, authenticated exchanges. The hook is
+            // instance-scoped and never holds a store mutex or disclosure guard.
+            #[cfg(test)]
+            {
+                let hook = self.account_session_test_hook.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook(channel.peer_identity().clone(), frame.clone()).await;
+                }
+            }
             let complete = match frame {
+                AccountHistoryFrame::FileMessageIdentitiesRequest {
+                    account_id,
+                    requests,
+                } => {
+                    self.serve_account_file_message_identities(&mut channel, &account_id, requests)
+                        .await
+                }
+                AccountHistoryFrame::AttachmentRequestChecked {
+                    account_id,
+                    file_conv,
+                } => {
+                    self.serve_account_attachment_checked(
+                        &mut channel,
+                        &account_id,
+                        crate::eventlog::event::ConversationId::new(file_conv),
+                    )
+                    .await
+                }
                 AccountHistoryFrame::Request {
                     account_id,
                     cursor,
@@ -255,6 +480,14 @@ impl Node {
                     )
                     .await
                 }
+                AccountHistoryFrame::DocumentsRequest { body } => {
+                    let Some(request) =
+                        super::account_documents::wire::DocumentRequest::decode(&body)
+                    else {
+                        return;
+                    };
+                    self.serve_account_documents(&mut channel, request).await
+                }
                 AccountHistoryFrame::Wake {
                     account_id,
                     epoch,
@@ -274,8 +507,20 @@ impl Node {
             if !complete {
                 return;
             }
-            let bytes = match tokio::time::timeout(SESSION_IDLE_TIMEOUT, channel.recv()).await {
-                Ok(Ok(bytes)) => bytes,
+            let bytes = match tokio::time::timeout(
+                SESSION_IDLE_TIMEOUT,
+                self.recv_inbound_reuse(&mut channel),
+            )
+            .await
+            {
+                Ok(Ok(InboundReuse::Frame(bytes))) => bytes,
+                Ok(Ok(InboundReuse::Retired(retirement))) => {
+                    // Keep pressure coalesced until the actual socket/permits
+                    // have been released by their owning channel.
+                    drop(channel);
+                    drop(retirement);
+                    return;
+                }
                 _ => return,
             };
             match AccountHistoryFrame::decode_versioned(&bytes) {
@@ -291,6 +536,63 @@ impl Node {
                 }
                 _ => return,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn control_task_lifetime_scope_restores_outer_witness_after_panic() {
+        assert!(observed_control_task_lifetime().is_none());
+        let outer = Arc::new(());
+        let inner = Arc::new(());
+        CONTROL_TASK_TEST_LIFETIME.sync_scope(Arc::downgrade(&outer), || {
+            assert!(
+                observed_control_task_lifetime()
+                    .unwrap()
+                    .ptr_eq(&Arc::downgrade(&outer))
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CONTROL_TASK_TEST_LIFETIME.sync_scope(Arc::downgrade(&inner), || {
+                    assert!(
+                        observed_control_task_lifetime()
+                            .unwrap()
+                            .ptr_eq(&Arc::downgrade(&inner))
+                    );
+                    panic!("deliberate synchronous observation panic");
+                });
+            }));
+            assert!(result.is_err());
+            assert!(
+                observed_control_task_lifetime()
+                    .unwrap()
+                    .ptr_eq(&Arc::downgrade(&outer))
+            );
+        });
+        assert!(observed_control_task_lifetime().is_none());
+    }
+
+    #[test]
+    fn only_remote_dial_timeout_allows_wake_recovery() {
+        assert!(account_dial_timed_out(&transport(TransportError::Noise(
+            "dial timed out".into()
+        ))));
+        for error in [
+            NodeError::Channel("account session negotiation timed out".into()),
+            NodeError::Authorization("account session requires a certified sibling".into()),
+            transport(TransportError::AdmissionDenied),
+            transport(TransportError::Noise("TCP connection capacity busy".into())),
+            transport(TransportError::Noise("dial deadline exceeded".into())),
+            transport(TransportError::Noise("invalid handshake".into())),
+            NodeError::Channel("invalid account document exchange".into()),
+        ] {
+            assert!(
+                !account_dial_timed_out(&error),
+                "only the remote dial's own deadline establishes recovery eligibility: {error}"
+            );
         }
     }
 }

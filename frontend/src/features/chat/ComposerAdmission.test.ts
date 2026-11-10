@@ -196,3 +196,133 @@ it.each([
     expect(input.value).toBe("");
   },
 );
+
+it("retains protection on rejection and resets it after acceptance", async () => {
+  await render();
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="composer-protection"]')!
+      .click(),
+  );
+  await act(async () =>
+    document
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="composer-protection-authenticate"]',
+      )!
+      .click(),
+  );
+  const selected = () =>
+    host.textContent?.includes("Text & images · hides after 30 seconds");
+  send.mockReturnValueOnce(false);
+  await click();
+  expect(send).toHaveBeenLastCalledWith(
+    "Please send the document tomorrow.",
+    "authenticate",
+  );
+  expect(selected()).toBe(true);
+  await click();
+  expect(selected()).toBe(false);
+});
+
+it.each([true, false])(
+  "synchronizes accepted clear after remount only while its owning revision is current (%s)",
+  async (current) => {
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          onSend: send,
+          initialDraft: "Accepted original",
+          initialProtection: "click",
+          placeholder: "Message",
+          mentionNames: [],
+        }),
+      ),
+    );
+    if (!current) await edit("Replacement draft");
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          onSend: send,
+          initialDraft: "",
+          initialProtection: undefined,
+          acceptedClear: { n: 1, applyIf: () => current },
+          placeholder: "Message",
+          mentionNames: [],
+        }),
+      ),
+    );
+    expect(host.querySelector("textarea")!.value).toBe(
+      current ? "" : "Replacement draft",
+    );
+    expect(
+      host.textContent?.includes("Text & images · hides after 30 seconds"),
+    ).toBe(!current);
+  },
+);
+
+it.each(["own admission", "parent admission", "same event loop"])(
+  "prevents an already-open protection picker from changing mode during %s",
+  async (kind) => {
+    const admission = deferred<boolean>();
+    const changed = vi.fn();
+    send.mockReturnValue(admission.promise);
+    const renderPicker = async (admissionPending = false) =>
+      act(async () =>
+        root.render(
+          createElement(Composer, {
+            onSend: send,
+            initialDraft: "Private draft",
+            initialProtection: "click",
+            admissionPending,
+            onProtectionChange: changed,
+            placeholder: "Message",
+            mentionNames: [],
+          }),
+        ),
+      );
+    await renderPicker();
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="composer-protection"]',
+        )!
+        .click(),
+    );
+    const choice = () =>
+      document.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-protection-authenticate"]',
+      )!;
+    const openedChoice = choice();
+    expect(openedChoice.disabled).toBe(false);
+    if (kind === "parent admission") await renderPicker(true);
+    else if (kind === "same event loop") {
+      await act(async () => {
+        host
+          .querySelector<HTMLButtonElement>('[data-testid="composer-send"]')!
+          .click();
+        choice().click();
+      });
+    } else await click();
+    if (kind !== "same event loop") {
+      const pendingChoice = choice();
+      // Radix may dismiss the popover when its focused trigger becomes disabled.
+      // Any radio still mounted must be disabled; a dismissed one cannot act.
+      if (pendingChoice) expect(pendingChoice.disabled).toBe(true);
+      else expect(openedChoice.isConnected).toBe(false);
+      await act(async () => (pendingChoice ?? openedChoice).click());
+    }
+    expect(changed).not.toHaveBeenCalled();
+    expect(host.querySelector("textarea")!.value).toBe("Private draft");
+    if (kind === "parent admission") {
+      await renderPicker(false);
+      expect(choice().disabled).toBe(false);
+      await act(async () => choice().click());
+      expect(changed).toHaveBeenCalledExactlyOnceWith("authenticate");
+    } else {
+      expect(send).toHaveBeenCalledExactlyOnceWith("Private draft", "click");
+      await act(async () => admission.resolve(true));
+      expect(changed).toHaveBeenCalledExactlyOnceWith(undefined);
+      expect(host.querySelector("textarea")!.value).toBe("");
+    }
+  },
+);

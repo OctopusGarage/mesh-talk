@@ -26,10 +26,23 @@ use crate::state::AppState;
 /// - `io`               — file / disk / log I/O failure
 /// - `not-started`      — the node runtime isn't running yet
 /// - `invalid-input`    — caller-supplied input was rejected
+/// - `link-*`           — the core's explicit device-pairing stage/recovery cause
 /// - `internal`         — anything not distinguishable as one of the above
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", content = "message")]
 pub enum CommandError {
+    #[serde(rename = "link-no-direct-route")]
+    LinkNoDirectRoute(String),
+    #[serde(rename = "link-connection")]
+    LinkConnection(String),
+    #[serde(rename = "link-timeout")]
+    LinkTimeout(String),
+    #[serde(rename = "link-rejected")]
+    LinkRejected(String),
+    #[serde(rename = "link-upgrade-required")]
+    LinkUpgradeRequired(String),
+    #[serde(rename = "link-protocol")]
+    LinkProtocol(String),
     #[serde(rename = "peer-unknown")]
     PeerUnknown(String),
     #[serde(rename = "relay-unreachable")]
@@ -38,6 +51,8 @@ pub enum CommandError {
     Crypto(String),
     #[serde(rename = "auth")]
     Auth(String),
+    #[serde(rename = "authentication-required")]
+    AuthenticationRequired(String),
     #[serde(rename = "authorization")]
     Authorization(String),
     #[serde(rename = "io")]
@@ -80,9 +95,16 @@ impl std::fmt::Display for CommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CommandError::PeerUnknown(msg)
+            | CommandError::LinkNoDirectRoute(msg)
+            | CommandError::LinkConnection(msg)
+            | CommandError::LinkTimeout(msg)
+            | CommandError::LinkRejected(msg)
+            | CommandError::LinkUpgradeRequired(msg)
+            | CommandError::LinkProtocol(msg)
             | CommandError::RelayUnreachable(msg)
             | CommandError::Crypto(msg)
             | CommandError::Auth(msg)
+            | CommandError::AuthenticationRequired(msg)
             | CommandError::Authorization(msg)
             | CommandError::Io(msg)
             | CommandError::NotStarted(msg)
@@ -101,6 +123,12 @@ impl From<String> for CommandError {
     }
 }
 
+impl From<mesh_talk_core::eventlog::LogError> for CommandError {
+    fn from(error: mesh_talk_core::eventlog::LogError) -> Self {
+        mesh_talk_core::node::NodeError::Log(error).into()
+    }
+}
+
 /// Map a node operation failure to the finest kind the core can actually distinguish.
 /// Sends, file ops, channel ops and pairing all surface as `NodeError`, so this is the
 /// single place that drives the user-visible failure reason for those paths.
@@ -112,6 +140,19 @@ impl From<mesh_talk_core::node::NodeError> for CommandError {
 
         let msg = e.to_string();
         match e {
+            NodeError::Linking(error) => {
+                use mesh_talk_core::node::LinkingError;
+                match error {
+                    LinkingError::NoDirectRoute => CommandError::LinkNoDirectRoute(msg),
+                    LinkingError::Connection(_) => CommandError::LinkConnection(msg),
+                    LinkingError::ResponseTimeout => CommandError::LinkTimeout(msg),
+                    LinkingError::Closed => CommandError::LinkRejected(msg),
+                    LinkingError::UpgradeRequired => CommandError::LinkUpgradeRequired(msg),
+                    LinkingError::InvalidResponse | LinkingError::Protocol(_) => {
+                        CommandError::LinkProtocol(msg)
+                    }
+                }
+            }
             NodeError::InvalidInput(_) | NodeError::RequestConflict => {
                 CommandError::InvalidInput(msg)
             }
@@ -149,10 +190,10 @@ impl From<mesh_talk_core::node::NodeError> for CommandError {
 
 pub type CommandResult<T> = Result<T, CommandError>;
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct UserInfo {
     pub id: String,
-    /// The immutable login handle.
+    /// The shared account login name, or the legacy local login name.
     pub username: String,
     /// The editable, peer-facing display name (nickname). Equals `username` until changed.
     pub display_name: String,
@@ -160,16 +201,27 @@ pub struct UserInfo {
 
 impl From<User> for UserInfo {
     fn from(user: User) -> Self {
+        let username = user.login_name().to_owned();
         Self {
             id: user.user_id,
-            username: user.name,
+            username,
             display_name: user.display_name,
         }
     }
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedSessionStatus {
+    Saved,
+    Failed,
+    Disabled,
+}
+
 #[derive(serde::Serialize)]
 pub struct LoginResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_session: Option<SavedSessionStatus>,
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -203,7 +255,7 @@ pub async fn login<R: tauri::Runtime>(
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<LoginResult, CommandError> {
     let outcome = login_impl(username, password.clone(), app_state.inner()).await?;
-    let result = outcome.result;
+    let mut result = outcome.result;
 
     if result.success {
         app_state
@@ -212,28 +264,30 @@ pub async fn login<R: tauri::Runtime>(
                 settings_state.activate(outcome.lease.owner())
             })
             .map_err(CommandError::Authorization)?;
-        // Start the node: per-account stores under ~/.mesh-talk/accounts/<user_id>/.
-        // NOTE: the node keystore intentionally uses the RAW `password` here, while the auth
-        // keystore uses the trimmed form (auth_service::login trims). They are independent
-        // stores; the node's was first created with the raw value, so it must keep using the
-        // raw value. Do NOT "unify" these to the trimmed form without a keystore migration —
-        // that would break decryption for any user whose password has leading/trailing space.
+        let (node_password, login_password) = app_state
+            .session()
+            .matching(&outcome.lease, |info| {
+                (
+                    info.node_storage_password.clone(),
+                    info.account_login_password.clone(),
+                )
+            })
+            .map_err(CommandError::Authorization)?;
         {
-            // "Stay signed in": persist the RAW password (the one the node keystore needs)
-            // to the OS keychain so the next launch can auto-unlock; otherwise forget any
-            // previously-saved secret. Keyed by the trimmed username the user typed.
-            remember_login(
-                &app_handle,
-                app_state.inner(),
-                settings_state.inner(),
-                &outcome.user,
-                &outcome.lease,
-                &password,
-            )?;
+            result.saved_session = Some(
+                remember_login_owned(
+                    app_handle.clone(),
+                    app_state.inner().clone(),
+                    settings_state.inner().clone(),
+                    outcome.lease.clone(),
+                    login_password,
+                )
+                .await?,
+            );
             spawn_node_runtime(
                 app_handle.clone(),
                 outcome.lease,
-                password,
+                node_password,
                 node_state.inner().clone(),
                 app_state.session().clone(),
             );
@@ -243,7 +297,8 @@ pub async fn login<R: tauri::Runtime>(
     Ok(result)
 }
 
-/// "Stay signed in" auto-login: if enabled and a username + keychain secret exist, run the
+/// Restore an unlocked live desktop session without reauthentication or runtime replacement.
+/// With no live session, "Stay signed in": if a username + keychain secret exist, run the
 /// SAME path as [`login`] (verify the auth keystore + spawn the node) using the stored
 /// credential, returning the `User` so the frontend can skip the login screen. Returns
 /// `Ok(None)` (NOT an error) whenever there's nothing to resume — no saved session, or the
@@ -257,6 +312,20 @@ pub async fn auto_login<R: tauri::Runtime>(
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<Option<UserInfo>, CommandError> {
     let entry_generation = app_state.session().generation();
+    if let Ok(lease) = app_state.session().capture() {
+        // A renderer refresh does not retire the native session. Return only its
+        // public identity while retaining exact-session and unlocked authority;
+        // saved-login consent applies to cold startup, not this live session.
+        return app_state
+            .session()
+            .matching(&lease, |info| {
+                let revision = app_state.app_lock().authorization_revision()?;
+                app_state.app_lock().with_unchanged_revision(revision, || {
+                    Ok(Some(UserInfo::from(info.user.clone())))
+                })
+            })
+            .map_err(CommandError::Authorization)?;
+    }
     let settings = settings_state.get();
     if !settings.stay_signed_in {
         return Ok(None);
@@ -264,23 +333,35 @@ pub async fn auto_login<R: tauri::Runtime>(
     let Some(username) = settings.last_user else {
         return Ok(None);
     };
-    // Keychain access can block while the OS unlocks its credential store.
-    // Keep it off Tokio's worker threads.
-    let credential_user = username.clone();
-    let saved = tokio::task::spawn_blocking(move || crate::session_store::load(&credential_user))
-        .await
-        .unwrap_or_else(|error| {
-            log::warn!("saved-session credential read failed: {error}");
-            None
-        });
-    let Some(password) = saved else {
-        return Ok(None);
-    };
     #[cfg(test)]
     if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
         let _ = entered.send("auto-login-entry");
     }
-
+    // A legacy Keychain read can migrate (write) its item. It therefore shares
+    // credential ordering with saves and clears, while retaining no session lock.
+    let auth = app_state.auth_operation.clone().lock_owned().await;
+    let session = app_state.session().clone();
+    let current_settings = settings_state.inner().clone();
+    let credential_user = username.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        let _auth = auth;
+        let settings = current_settings.get();
+        if session.unchanged(entry_generation, || ()).is_err()
+            || !settings.stay_signed_in
+            || settings.last_user.as_deref() != Some(credential_user.as_str())
+        {
+            return None;
+        }
+        crate::session_store::load(&credential_user)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        log::warn!("saved-session credential read failed: {error}");
+        None
+    });
+    let Some(password) = saved else {
+        return Ok(None);
+    };
     #[cfg(test)]
     {
         let gate = app_state.auto_admission_gate.lock().unwrap().take();
@@ -293,7 +374,7 @@ pub async fn auto_login<R: tauri::Runtime>(
         username.clone(),
         password.clone(),
         app_state.inner(),
-        Some(entry_generation),
+        Some((entry_generation, settings_state.inner())),
     )
     .await
     {
@@ -304,11 +385,15 @@ pub async fn auto_login<R: tauri::Runtime>(
                     settings_state.activate(outcome.lease.owner())
                 })
                 .map_err(CommandError::Authorization)?;
+            let node_password = app_state
+                .session()
+                .matching(&outcome.lease, |info| info.node_storage_password.clone())
+                .map_err(CommandError::Authorization)?;
             let user_info = UserInfo::from(outcome.user);
             spawn_node_runtime(
                 app_handle.clone(),
                 outcome.lease,
-                password,
+                node_password,
                 node_state.inner().clone(),
                 app_state.session().clone(),
             );
@@ -317,13 +402,14 @@ pub async fn auto_login<R: tauri::Runtime>(
         // Stored secret no longer authenticates (e.g. password changed elsewhere): forget it
         // and fall back to manual login rather than surfacing a hard error on every launch.
         _ => {
-            let _ = app_state.session().unchanged(entry_generation, || {
-                if settings_state.get().last_user.as_deref() != Some(username.as_str()) {
-                    return;
-                }
-                crate::session_store::clear(&username);
-                crate::settings::record_last_user(&app_handle, settings_state.inner(), None);
-            });
+            forget_saved_session_owned(
+                app_handle,
+                app_state.inner().clone(),
+                settings_state.inner().clone(),
+                entry_generation,
+                Some(username),
+            )
+            .await?;
             Ok(None)
         }
     }
@@ -332,15 +418,64 @@ pub async fn auto_login<R: tauri::Runtime>(
 /// Explicit sign-out hook: forget the saved keychain secret + `last_user` so a subsequent
 /// launch does NOT auto-login. Called by the frontend on "Sign out". Best-effort.
 #[tauri::command]
-pub fn clear_saved_session(
-    app_handle: tauri::AppHandle,
+pub async fn clear_saved_session<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    app_state: tauri::State<'_, AppState>,
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<(), CommandError> {
-    if let Some(user) = settings_state.get().last_user.as_deref() {
-        crate::session_store::clear(user);
+    let generation = app_state.session().generation();
+    let username = settings_state.get().last_user;
+    #[cfg(test)]
+    if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+        let _ = entered.send("saved-clear-entry");
     }
-    crate::settings::record_last_user(&app_handle, settings_state.inner(), None);
-    Ok(())
+    forget_saved_session_owned(
+        app_handle,
+        app_state.inner().clone(),
+        settings_state.inner().clone(),
+        generation,
+        username,
+    )
+    .await
+}
+
+async fn forget_saved_session_owned<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    app: AppState,
+    settings: crate::settings::SettingsState,
+    generation: u64,
+    username: Option<String>,
+) -> CommandResult<()> {
+    let auth = app.auth_operation.clone().lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _auth = auth;
+        let current = app
+            .session()
+            .unchanged(generation, || settings.get().last_user == username)
+            .unwrap_or(false);
+        if current {
+            if let Some(username) = username {
+                forget_logged_out(&handle, &settings, &username);
+            } else {
+                crate::settings::record_last_user(&handle, &settings, None);
+            }
+        }
+    })
+    .await
+    .map_err(|_| CommandError::Service("Saved-login cleanup worker stopped".into()))
+}
+
+/// After the caller commits a saved-login preference change, transfer its auth
+/// guard into cleanup before any await. Cancelling the IPC waiter cannot let a
+/// subsequent same-user credential write overtake this native clear.
+pub(crate) fn spawn_saved_credential_cleanup(
+    auth: tokio::sync::OwnedMutexGuard<()>,
+    username: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        let _auth = auth;
+        crate::session_store::clear(&username);
+    })
 }
 
 struct AuthOutcome {
@@ -356,18 +491,153 @@ fn remember_login<R: tauri::Runtime>(
     user: &User,
     lease: &crate::state::SessionLease,
     raw_password: &str,
-) -> CommandResult<()> {
-    app.session()
-        .matching(lease, |_| {
-            if settings.get().stay_signed_in {
-                crate::session_store::save(&user.name, raw_password);
-                crate::settings::record_last_user(handle, settings, Some(user.name.clone()));
-            } else {
-                crate::session_store::clear(&user.name);
-                crate::settings::record_last_user(handle, settings, None);
-            }
+) -> CommandResult<SavedSessionStatus> {
+    persist_saved_login_checked(handle, settings, user, raw_password, |commit| {
+        app.session()
+            .matching(lease, |_| commit())
+            .map_err(CommandError::Authentication)?
+    })
+}
+
+/// Keep authentication serialization in the worker after IPC cancellation, but
+/// never hold the session or app-lock mutex during an OS credential-store call.
+pub(crate) async fn remember_login_owned<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    app: AppState,
+    settings: crate::settings::SettingsState,
+    lease: crate::state::SessionLease,
+    raw_password: String,
+) -> CommandResult<SavedSessionStatus> {
+    let auth = app.auth_operation.clone().lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _auth = auth;
+        let user = app
+            .session()
+            .matching(&lease, |info| info.user.clone())
+            .map_err(CommandError::Authentication)?;
+        remember_login(&handle, &app, &settings, &user, &lease, &raw_password)
+    })
+    .await
+    .map_err(|_| CommandError::Service("Saved-login worker stopped".into()))?
+}
+
+/// Callers own authentication serialization through this whole operation. Native
+/// credential writes are not cancellable: revalidate before advertising them,
+/// and compensate an obsolete write before a replacement login may proceed.
+pub(crate) fn persist_saved_login_checked<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+    settings: &crate::settings::SettingsState,
+    user: &User,
+    raw_password: &str,
+    mut authorize: impl FnMut(&mut dyn FnMut() -> CommandResult<()>) -> CommandResult<()>,
+) -> CommandResult<SavedSessionStatus> {
+    authorize(&mut || Ok(()))?;
+    let requested = settings.get().stay_signed_in;
+    let stored = requested && crate::session_store::save(user.login_name(), raw_password);
+    let mut status = SavedSessionStatus::Failed;
+    let committed = authorize(&mut || {
+        status = if !settings.get().stay_signed_in {
+            crate::settings::record_last_user(handle, settings, None);
+            SavedSessionStatus::Disabled
+        } else if stored
+            && crate::settings::record_last_user(
+                handle,
+                settings,
+                Some(user.login_name().to_owned()),
+            )
+        {
+            SavedSessionStatus::Saved
+        } else {
+            crate::settings::record_last_user(handle, settings, None);
+            SavedSessionStatus::Failed
+        };
+        Ok(())
+    });
+    if committed.is_err() || !matches!(status, SavedSessionStatus::Saved) {
+        // Withdraw resume metadata before possibly blocked native cleanup.
+        if settings.get().last_user.as_deref() == Some(user.login_name()) {
+            crate::settings::record_last_user(handle, settings, None);
+        }
+        crate::session_store::clear(user.login_name());
+    }
+    committed?;
+    Ok(status)
+}
+
+/// Retry only from the unlocked, exact current session. The native runtime owns
+/// the account login password; no secret is returned to or retained by the UI.
+#[tauri::command]
+pub async fn retry_saved_session<R: tauri::Runtime>(
+    owner: String,
+    password: Option<String>,
+    app_handle: tauri::AppHandle<R>,
+    app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, crate::chat_commands::NodeState>,
+    settings_state: tauri::State<'_, crate::settings::SettingsState>,
+) -> CommandResult<SavedSessionStatus> {
+    let lease = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authorization)?;
+    if lease.owner() != owner || app_state.app_lock().is_locked() {
+        return Err(CommandError::Authorization("session unavailable".into()));
+    }
+    let proof = if settings_state.get().stay_signed_in {
+        Some(
+            crate::app_lock::SensitiveAction::verify(
+                &app_state,
+                &lease,
+                password,
+                "save your Mesh-Talk sign-in",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    #[cfg(test)]
+    if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+        let _ = entered.send("saved-retry-entry");
+    }
+    let auth = app_state.auth_operation.clone().lock_owned().await;
+    let app = app_state.inner().clone();
+    let node = node_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let _auth = auth;
+        let (user, password) = app
+            .session()
+            .matching(&lease, |info| {
+                (info.user.clone(), info.account_login_password.clone())
+            })
+            .map_err(CommandError::Authorization)?;
+        persist_saved_login_checked(&app_handle, &settings, &user, &password, |commit| {
+            let runtime = node.0.blocking_read();
+            app.session()
+                .matching(&lease, |_| {
+                    if app.app_lock().is_locked() {
+                        return Err(CommandError::Authorization("app is locked".into()));
+                    }
+                    node.check_installation(&lease)?;
+                    runtime.as_ref().ok_or_else(CommandError::not_started)?;
+                    if settings.get().stay_signed_in {
+                        proof
+                            .as_ref()
+                            .ok_or_else(|| {
+                                CommandError::Authorization(
+                                    "Saved-login preference changed during verification".into(),
+                                )
+                            })?
+                            .commit(commit)
+                    } else {
+                        commit()
+                    }
+                })
+                .map_err(CommandError::Authorization)?
         })
-        .map_err(CommandError::Authentication)
+    })
+    .await
+    .map_err(|_| CommandError::Service("Saved-login worker stopped".into()))?
 }
 
 /// Called inside successful logout's auth-operation guard.
@@ -376,10 +646,10 @@ fn forget_logged_out<R: tauri::Runtime>(
     settings: &crate::settings::SettingsState,
     username: &str,
 ) {
-    crate::session_store::clear(username);
     if settings.get().last_user.as_deref() == Some(username) {
         crate::settings::record_last_user(handle, settings, None);
     }
+    crate::session_store::clear(username);
 }
 
 async fn login_impl(
@@ -394,16 +664,21 @@ async fn login_impl_guarded(
     username: String,
     password: String,
     app_state: &AppState,
-    expected_generation: Option<u64>,
+    saved_login: Option<(u64, &crate::settings::SettingsState)>,
 ) -> CommandResult<AuthOutcome> {
     let auth_operation = app_state.auth_operation.clone().lock_owned().await;
     // Saved credentials describe the session observed at invocation, unlike an
     // explicit manual login. Reauthorize under auth serialization before mutation.
-    if expected_generation.is_some_and(|generation| generation != app_state.session().generation())
-    {
-        return Err(CommandError::Authentication(
-            "Saved login superseded".into(),
-        ));
+    if let Some((generation, settings)) = saved_login {
+        let settings = settings.get();
+        if generation != app_state.session().generation()
+            || !settings.stay_signed_in
+            || settings.last_user.as_deref() != Some(username.as_str())
+        {
+            return Err(CommandError::Authentication(
+                "Saved login superseded".into(),
+            ));
+        }
     }
     if username.trim().is_empty() || password.trim().is_empty() {
         return Err(CommandError::Validation(
@@ -412,7 +687,7 @@ async fn login_impl_guarded(
     }
 
     let normalized_username = username.trim().to_string();
-    let normalized_password = password.trim().to_string();
+    let raw_password = password;
 
     // The Argon2 password KDF inside auth_service.login is CPU-bound and would pin a tokio
     // worker for its full duration. Run credential verification and its atomic session
@@ -420,17 +695,18 @@ async fn login_impl_guarded(
     let auth_service = app_state.auth_service().clone();
     let auth_result = {
         let normalized_username = normalized_username.clone();
-        let normalized_password = normalized_password.clone();
+        let raw_password = raw_password.clone();
         tokio::task::spawn_blocking(move || {
             // The blocking operation owns auth serialization even if its IPC
             // future is cancelled. Publication belongs to this actual result.
             let _auth = auth_operation;
             let (user, token, lease) =
-                auth_service.login_session(normalized_username, normalized_password)?;
+                auth_service.login_session(normalized_username, raw_password)?;
             Ok::<_, AuthError>(AuthOutcome {
                 user: user.clone(),
                 lease,
                 result: LoginResult {
+                    saved_session: None,
                     success: true,
                     token: Some(token),
                     user: Some(UserInfo::from(user)),
@@ -472,7 +748,7 @@ pub async fn logout<R: tauri::Runtime>(
         .map_err(CommandError::Authentication)?;
     let username = app_state
         .session()
-        .matching(&lease, |info| info.user.name.clone())
+        .matching(&lease, |info| info.user.login_name().to_owned())
         .map_err(CommandError::Authentication)?;
     #[cfg(test)]
     if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
@@ -480,25 +756,33 @@ pub async fn logout<R: tauri::Runtime>(
     }
     // Clear the session FIRST; only stop the node once logout actually succeeded, so an
     // error path (e.g. no session) can't leave the node torn down with the session intact.
-    let (result, retirement_ticket) = {
-        let _auth = app_state.auth_operation.lock().await;
+    let (result, retirement_ticket, credential_cleanup) = {
+        let auth = app_state.auth_operation.clone().lock_owned().await;
         app_state
             .session()
             .matching(&lease, |_| ())
             .map_err(CommandError::Authentication)?;
         let result = logout_impl(app_state.inner())?;
+        *app_state.drafts.lock().unwrap() = None;
         settings_state.deactivate();
         app_state.app_lock().clear();
         crate::chat_commands::clear_badge_after_logout(&app_handle, app_state.session().clone());
         let ticket = node_state.next_lifecycle_ticket();
-        // Forget exactly the successfully signed-out credential before releasing
-        // auth serialization. A replacement login can now remember its own secret.
-        forget_logged_out(&app_handle, settings_state.inner(), &username);
+        // The worker retains auth serialization even if its caller is cancelled.
+        // Retirement below does not wait for an unresponsive native keychain.
+        let handle = app_handle.clone();
+        let settings = settings_state.inner().clone();
         #[cfg(test)]
-        if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
-            let _ = entered.send("logout-published");
-        }
-        (result, ticket)
+        let captured = app_state.owner_command_captured.clone();
+        let cleanup = tokio::task::spawn_blocking(move || {
+            let _auth = auth;
+            forget_logged_out(&handle, &settings, &username);
+            #[cfg(test)]
+            if let Some(entered) = captured.lock().unwrap().as_ref() {
+                let _ = entered.send("logout-published");
+            }
+        });
+        (result, ticket, cleanup)
     };
     // The child owns retirement, so cancellation of the host caller cannot drop
     // stop's producer joins or release profile serialization prematurely.
@@ -521,6 +805,9 @@ pub async fn logout<R: tauri::Runtime>(
     retirement
         .await
         .map_err(|_| CommandError::Service("Runtime retirement failed".into()))?;
+    credential_cleanup
+        .await
+        .map_err(|_| CommandError::Service("Saved-login cleanup worker stopped".into()))?;
     Ok(result)
 }
 
@@ -661,21 +948,23 @@ pub async fn rename_account(
                 let _ = release.await;
             }
         }
-        let mut guard = node_state.0.lock().await;
+        let guard = node_state.0.read().await;
         app_state
             .session()
             .matching(&lease, |info| {
                 if node_state.check_installation(&lease).is_err() {
-                    return;
+                    return Ok::<_, CommandError>(());
                 }
                 if let Some(rt) = guard
-                    .as_mut()
+                    .as_ref()
                     .filter(|rt| rt.host_account_id() == Some(lease.owner()))
                 {
-                    rt.set_display_name(&info.user.display_name);
+                    rt.try_set_display_name(&info.user.display_name)
+                        .map_err(CommandError::from)?;
                 }
+                Ok(())
             })
-            .map_err(CommandError::Authentication)?;
+            .map_err(CommandError::Authentication)??;
     }
 
     Ok(UserInfo::from(updated))
@@ -746,7 +1035,7 @@ mod tests {
                 |_| {},
             ))
             .unwrap();
-            *node.0.blocking_lock() = Some(runtime);
+            *node.0.blocking_write() = Some(runtime);
             let settings =
                 crate::settings::SettingsState::isolated(root.path().join("settings.json"));
             let mut value = settings.get();
@@ -754,11 +1043,17 @@ mod tests {
             settings.set(value);
             let app = tauri::test::mock_builder()
                 .manage(app_state.clone())
+                .manage(app_state.app_lock().clone())
                 .manage(node.clone())
+                .manage(crate::reception_host::ReceptionHostState::default())
                 .manage(settings.clone())
                 .invoke_handler(tauri::generate_handler![
                     login,
                     auto_login,
+                    retry_saved_session,
+                    clear_saved_session,
+                    crate::settings::set_app_settings,
+                    crate::app_lock::lock_app,
                     adopt_linked_account,
                     rename_account,
                     logout,
@@ -822,7 +1117,10 @@ mod tests {
     impl Drop for AuthFixture {
         fn drop(&mut self) {
             let _startup = self.node.test_startup_gate().blocking_lock();
-            let old = self.node.0.blocking_lock().take();
+            // A detached login startup may still be queued behind this gate.
+            // Retire its authority before releasing the fixture's profile root.
+            self.node.next_lifecycle_ticket();
+            let old = self.node.0.blocking_write().take();
             if let Some(old) = old {
                 tauri::async_runtime::block_on(old.stop());
             }
@@ -842,7 +1140,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             // Bind this manually opened fixture through the production install
             // interface before checking the installation's session generation.
-            let runtime = fixture.node.0.lock().await.take().unwrap();
+            let runtime = fixture.node.0.write().await.take().unwrap();
             let authority = crate::chat_commands::RuntimeAuthority::request(
                 session.clone(),
                 session.capture().unwrap(),
@@ -850,7 +1148,7 @@ mod tests {
             )
             .unwrap();
             assert!(authority.begin().await.unwrap().install(runtime).await);
-            let guard = fixture.node.0.lock().await;
+            let guard = fixture.node.0.write().await;
             let pending = fixture.node.node_for_owner(session, &owner);
             tokio::pin!(pending);
             // Poll the real interface into its runtime wait, without sleeps.
@@ -1070,7 +1368,7 @@ mod tests {
         let raw = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .restart_password()
@@ -1135,12 +1433,638 @@ mod tests {
     }
 
     #[test]
+    fn registered_auth_fixture_teardown_rejects_queued_startup() {
+        let fixture = AuthFixture::new("queued-startup-teardown");
+        let node = fixture.node.clone();
+        let root = fixture.root.path().to_owned();
+        // Production allocates this authority synchronously before spawning the
+        // startup task. Keep begin unpolled until teardown wins the startup gate.
+        let queued = crate::chat_commands::RuntimeAuthority::request(
+            fixture.app_state.session().clone(),
+            fixture.app_state.session().capture().unwrap(),
+            node.clone(),
+        )
+        .unwrap();
+        drop(fixture);
+        assert!(
+            !root.exists(),
+            "fixture teardown must remove its profile root"
+        );
+        tauri::async_runtime::block_on(async {
+            assert!(
+                queued.begin().await.is_err(),
+                "fixture teardown must reject queued startup authority"
+            );
+            assert!(node.0.read().await.is_none());
+        });
+        assert!(
+            !root.exists(),
+            "queued startup must not recreate fixture data"
+        );
+    }
+
+    #[test]
+    fn registered_login_reports_unsaved_when_resume_metadata_cannot_be_written() {
+        let fixture = AuthFixture::new("save-metadata-failure");
+        let path = fixture.root.path().join("settings.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let result = invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username": fixture.alice, "password": " password-a "}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["saved_session"], "failed");
+        assert!(fixture.settings.get().last_user.is_none());
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+    }
+
+    #[test]
+    fn denied_saved_session_retry_keeps_existing_credential_unchanged() {
+        let fixture = AuthFixture::new("denied-saved-retry");
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        assert!(crate::session_store::save(
+            &fixture.alice,
+            "existing credential"
+        ));
+        let last_user = fixture.settings.get().last_user;
+        fixture.app_state.app_lock().set_identity_verifier(|| {
+            Err(CommandError::Authentication("Verification canceled".into()))
+        });
+        let error = invoke_auth(
+            &fixture.webview,
+            "retry_saved_session",
+            serde_json::json!({"owner": owner}),
+        )
+        .unwrap_err();
+        assert_eq!(error["kind"], "auth");
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some("existing credential")
+        );
+        assert_eq!(fixture.settings.get().last_user, last_user);
+    }
+
+    #[test]
+    fn saved_session_provider_does_not_block_app_lock_or_publish_after_lock() {
+        let fixture = AuthFixture::new("saved-provider-liveness");
+        fixture
+            .app_state
+            .app_lock()
+            .set_identity_verifier(|| Ok(()));
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "save",
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        );
+        let webview = fixture.webview.clone();
+        let retry = std::thread::spawn(move || {
+            invoke_auth(
+                &webview,
+                "retry_saved_session",
+                serde_json::json!({"owner": owner}),
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let webview = fixture.webview.clone();
+        let lock = std::thread::spawn(move || {
+            let result = invoke_auth(&webview, "lock_app", serde_json::json!({}));
+            locked_tx.send(result.is_ok()).unwrap();
+            result
+        });
+        let responsive = locked_rx.recv_timeout(std::time::Duration::from_millis(250));
+        // Always release the fake OS provider before asserting, including on RED.
+        release_tx.send(()).unwrap();
+        let retried = retry.join().unwrap();
+        lock.join().unwrap().unwrap();
+        assert_eq!(
+            responsive,
+            Ok(true),
+            "keychain I/O retained global session or app-lock state"
+        );
+        assert!(
+            retried.is_err(),
+            "late keychain write survived a locked-session revision"
+        );
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+        assert!(fixture.settings.get().last_user.is_none());
+    }
+
+    #[test]
+    fn logout_retires_runtime_while_native_credential_cleanup_is_blocked() {
+        let fixture = AuthFixture::new("logout-provider-liveness");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "clear",
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        );
+        let webview = fixture.webview.clone();
+        let logout =
+            std::thread::spawn(move || invoke_auth(&webview, "logout", serde_json::json!({})));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let signed_out = fixture.app_state.session().get().is_none();
+        let serialized = fixture.app_state.auth_operation.try_lock().is_err();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let retired = loop {
+            if fixture
+                .node
+                .0
+                .try_read()
+                .is_ok_and(|runtime| runtime.is_none())
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let forgotten = fixture.settings.get().last_user.is_none();
+        release_tx.send(()).unwrap();
+        logout.join().unwrap().unwrap();
+        assert!(
+            signed_out && forgotten,
+            "blocked cleanup retained a published saved session"
+        );
+        assert!(
+            retired,
+            "blocked keychain cleanup delayed runtime retirement"
+        );
+        assert!(
+            serialized,
+            "replacement authentication overtook native cleanup"
+        );
+    }
+
+    #[test]
+    fn cancelled_saved_login_caller_retains_auth_until_native_write_finishes() {
+        let fixture = AuthFixture::new("cancelled-provider-owner");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "save",
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        );
+        let task = tauri::async_runtime::spawn(remember_login_owned(
+            fixture.webview.app_handle().clone(),
+            fixture.app_state.clone(),
+            fixture.settings.clone(),
+            fixture.app_state.session().capture().unwrap(),
+            " password-a ".into(),
+        ));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        task.abort();
+        let responsive = fixture.app_state.session().get().is_some();
+        let serialized = fixture.app_state.auth_operation.try_lock().is_err();
+        release_tx.send(()).unwrap();
+        let _finished = fixture.app_state.auth_operation.blocking_lock();
+        assert!(responsive, "cancelled native work retained session state");
+        assert!(
+            serialized,
+            "cancellation released authentication before the native write completed"
+        );
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some(" password-a ")
+        );
+    }
+
+    #[test]
+    fn queued_saved_session_clear_preserves_replacement_login_for_the_same_user() {
+        let fixture = AuthFixture::new("queued-saved-clear");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let auth = fixture.app_state.auth_operation.blocking_lock();
+        let webview = fixture.webview.clone();
+        let clear = std::thread::spawn(move || {
+            invoke_auth(&webview, "clear_saved_session", serde_json::json!({}))
+        });
+        AuthFixture::wait_phase(&entered_rx, "saved-clear-entry");
+        logout_impl(&fixture.app_state).unwrap();
+        fixture
+            .app_state
+            .auth_service()
+            .login_session(fixture.alice.clone(), "password-a".into())
+            .unwrap();
+        crate::session_store::save(&fixture.alice, "replacement credential");
+        drop(auth);
+        clear.join().unwrap().unwrap();
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some("replacement credential")
+        );
+        assert_eq!(
+            fixture.settings.get().last_user.as_deref(),
+            Some(fixture.alice.as_str())
+        );
+    }
+
+    #[test]
+    fn saved_session_settings_cleanup_does_not_block_app_lock() {
+        let fixture = AuthFixture::new("settings-provider-liveness");
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        fixture.settings.activate(&owner);
+        let settings = fixture.settings.get();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "clear",
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        );
+        let webview = fixture.webview.clone();
+        let change = std::thread::spawn(move || {
+            invoke_auth(
+                &webview,
+                "set_app_settings",
+                serde_json::json!({
+                    "owner": owner, "settings": settings, "patch": {"stay_signed_in": false}
+                }),
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let webview = fixture.webview.clone();
+        let lock = std::thread::spawn(move || {
+            locked_tx
+                .send(invoke_auth(&webview, "lock_app", serde_json::json!({})).is_ok())
+                .unwrap();
+        });
+        let responsive = locked_rx.recv_timeout(std::time::Duration::from_millis(250));
+        release_tx.send(()).unwrap();
+        change.join().unwrap().unwrap();
+        lock.join().unwrap();
+        assert_eq!(
+            responsive,
+            Ok(true),
+            "settings cleanup retained session or app-lock authority during native I/O"
+        );
+        assert!(!fixture.settings.get().stay_signed_in);
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+    }
+
+    #[test]
+    fn saved_session_settings_cleanup_preserves_live_policy_and_replacement_write() {
+        let fixture = AuthFixture::new("settings-provider-policy");
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        fixture.settings.activate(&owner);
+        let settings = fixture.settings.get();
+        let (account, node) = {
+            let runtime = fixture.node.0.blocking_read();
+            let runtime = runtime.as_ref().unwrap();
+            (runtime.account_id().to_owned(), runtime.handle())
+        };
+        assert!(!node.physical_lan_only());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "clear",
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        );
+        let webview = fixture.webview.clone();
+        let change = std::thread::spawn(move || {
+            invoke_auth(
+                &webview,
+                "set_app_settings",
+                serde_json::json!({
+                    "owner": owner, "expectedAccount": account, "settings": settings,
+                    "patch": {"stay_signed_in": false, "physical_lan_only": true}
+                }),
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !node.physical_lan_only() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let applied = node.physical_lan_only();
+        let app = fixture.app_state.clone();
+        let username = fixture.alice.clone();
+        let (replaced_tx, replaced_rx) = std::sync::mpsc::channel();
+        let replacement = std::thread::spawn(move || {
+            let _auth = app.auth_operation.blocking_lock();
+            crate::session_store::save(&username, "replacement credential");
+            replaced_tx.send(()).unwrap();
+        });
+        let overtook = replaced_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+        release_tx.send(()).unwrap();
+        change.join().unwrap().unwrap();
+        replacement.join().unwrap();
+        assert!(
+            applied,
+            "blocked credential cleanup postponed committed network privacy policy"
+        );
+        assert!(
+            !overtook,
+            "replacement credential write overtook settings cleanup"
+        );
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some("replacement credential")
+        );
+    }
+
+    #[test]
+    fn saved_session_migration_load_serializes_replacement_native_write() {
+        let fixture = AuthFixture::new("migration-provider-owner");
+        logout_impl(&fixture.app_state).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let username = fixture.alice.clone();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "load",
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                // macOS legacy load can migrate a biometric item into the standard store.
+                crate::session_store::save(&username, " password-a ");
+            }),
+        );
+        let webview = fixture.webview.clone();
+        let automatic =
+            std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let serialized = fixture.app_state.auth_operation.try_lock().is_err();
+        let app = fixture.app_state.clone();
+        let username = fixture.alice.clone();
+        let (replaced_tx, replaced_rx) = std::sync::mpsc::channel();
+        let replacement = std::thread::spawn(move || {
+            let _auth = app.auth_operation.blocking_lock();
+            crate::session_store::save(&username, "replacement credential");
+            replaced_tx.send(()).unwrap();
+        });
+        let overtook = replaced_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+        release_tx.send(()).unwrap();
+        automatic.join().unwrap().unwrap();
+        replacement.join().unwrap();
+        assert!(
+            serialized && !overtook,
+            "migration-containing load did not retain native credential ordering"
+        );
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some("replacement credential")
+        );
+    }
+
+    #[test]
+    fn registered_queued_saved_session_retry_cannot_save_after_same_account_relogin() {
+        let fixture = AuthFixture::new("queued-saved-retry");
+        fixture
+            .app_state
+            .app_lock()
+            .set_identity_verifier(|| Ok(()));
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let auth = fixture.app_state.auth_operation.blocking_lock();
+        let webview = fixture.webview.clone();
+        let retry = std::thread::spawn(move || {
+            invoke_auth(
+                &webview,
+                "retry_saved_session",
+                serde_json::json!({"owner": owner}),
+            )
+        });
+        AuthFixture::wait_phase(&entered_rx, "saved-retry-entry");
+        logout_impl(&fixture.app_state).unwrap();
+        fixture
+            .app_state
+            .auth_service()
+            .login_session(fixture.alice.clone(), "password-a".into())
+            .unwrap();
+        crate::session_store::clear(&fixture.alice);
+        drop(auth);
+        assert!(retry.join().unwrap().is_err());
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+    }
+
+    #[test]
+    fn registered_saved_session_retry_preserves_raw_secret_and_checks_owner_and_preference() {
+        let fixture = AuthFixture::new("saved-retry");
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        crate::session_store::clear(&fixture.alice);
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "retry_saved_session",
+                serde_json::json!({"owner": "wrong"})
+            )
+            .is_err()
+        );
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+        fixture
+            .app_state
+            .app_lock()
+            .set_identity_verifier(|| Ok(()));
+        let result = invoke_auth(
+            &fixture.webview,
+            "retry_saved_session",
+            serde_json::json!({"owner": owner}),
+        )
+        .unwrap();
+        assert_eq!(result, "saved");
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some(" password-a ")
+        );
+        let mut settings = fixture.settings.get();
+        settings.stay_signed_in = false;
+        fixture.settings.set(settings);
+        let result = invoke_auth(
+            &fixture.webview,
+            "retry_saved_session",
+            serde_json::json!({"owner": owner}),
+        )
+        .unwrap();
+        assert_eq!(result, "disabled");
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+        invoke_auth(&fixture.webview, "lock_app", serde_json::json!({})).unwrap();
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "retry_saved_session",
+                serde_json::json!({"owner": owner})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn registered_auto_login_preserves_unlocked_live_session_and_runtime() {
+        let fixture = AuthFixture::new("warm-renderer-resume");
+        let login = invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username":fixture.alice,"password":" password-a "}),
+        )
+        .unwrap();
+        let lease = fixture.app_state.session().capture().unwrap();
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !fixture.node.test_installed_for(&lease) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        let owner = login["user"]["id"].as_str().unwrap();
+        let before = invoke_auth(
+            &fixture.webview,
+            "owner_node_identity",
+            serde_json::json!({"owner":owner}),
+        )
+        .unwrap();
+        let token = fixture.app_state.session().get().unwrap().token;
+        let ticket = fixture.node.test_lifecycle_ticket();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "load",
+            Box::new(|| panic!("warm renderer resume must not read saved credentials")),
+        );
+        for consent in [false, true] {
+            let mut settings = fixture.settings.get();
+            settings.stay_signed_in = consent;
+            fixture.settings.set(settings);
+            let automatic =
+                invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap();
+            assert_eq!(automatic, login["user"]);
+            assert_eq!(fixture.app_state.session().generation(), lease.generation());
+            assert_eq!(fixture.app_state.session().get().unwrap().token, token);
+            assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
+            let after = invoke_auth(
+                &fixture.webview,
+                "owner_node_identity",
+                serde_json::json!({"owner":owner}),
+            )
+            .unwrap();
+            assert_eq!(after["runtime_id"], before["runtime_id"]);
+        }
+        invoke_auth(&fixture.webview, "lock_app", serde_json::json!({})).unwrap();
+        assert!(invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).is_err());
+        assert_eq!(fixture.app_state.session().generation(), lease.generation());
+        assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
+    }
+
+    #[test]
+    fn registered_auto_login_after_logout_resumes_only_a_newly_authenticated_owner() {
+        let fixture = AuthFixture::new("warm-renderer-logout-switch");
+        let mut settings = fixture.settings.get();
+        settings.stay_signed_in = false;
+        fixture.settings.set(settings);
+        invoke_auth(&fixture.webview, "logout", serde_json::json!({})).unwrap();
+        let signed_out_generation = fixture.app_state.session().generation();
+        let ticket = fixture.node.test_lifecycle_ticket();
+        assert_eq!(
+            invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(fixture.app_state.session().get().is_none());
+        assert_eq!(
+            fixture.app_state.session().generation(),
+            signed_out_generation
+        );
+        assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
+        let switched = invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username":fixture.bob,"password":"password-b"}),
+        )
+        .unwrap();
+        let generation = fixture.app_state.session().generation();
+        assert_eq!(
+            invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap(),
+            switched["user"]
+        );
+        assert_eq!(fixture.app_state.session().generation(), generation);
+    }
+
+    #[test]
     fn registered_login_and_auto_login_publish_actual_owner_and_preserve_raw_runtime_password() {
         let fixture = AuthFixture::new("login");
         let old_device = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .user_id()
@@ -1152,6 +2076,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["success"], true);
+        assert_eq!(result["saved_session"], "saved");
         assert_eq!(result["user"]["username"], fixture.alice);
         let wait_installed = || {
             tauri::async_runtime::block_on(async {
@@ -1181,7 +2106,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .restart_password(),
@@ -1207,6 +2132,8 @@ mod tests {
             crate::session_store::load(&fixture.alice).as_deref(),
             Some(" password-a ")
         );
+        // Exercise cold saved-login restoration, including the raw node secret.
+        logout_impl(&fixture.app_state).unwrap();
         let automatic = invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap();
         assert_eq!(automatic["username"], fixture.alice);
         wait_installed();
@@ -1214,7 +2141,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .restart_password(),
@@ -1229,7 +2156,7 @@ mod tests {
         let original_device = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .user_id()
@@ -1241,26 +2168,63 @@ mod tests {
             serde_json::json!({}),
         )
         .unwrap();
+        let requested_ticket = fixture.node.test_lifecycle_ticket();
         tauri::async_runtime::block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let started = std::time::Instant::now();
+            let installed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
                     if fixture.node.test_installed_for(&lease) {
                         break;
                     }
-                    tokio::task::yield_now().await;
+                    // Startup retires and reopens real storage on other tasks.
+                    // Yielding an always-ready observer repeatedly contends with
+                    // its lifecycle mutex instead of giving that owner CPU time.
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             })
-            .await
-            .unwrap();
+            .await;
+            if installed.is_err() {
+                let startup = fixture
+                    .node
+                    .startup_identity(
+                        fixture.app_state.session(),
+                        &lease,
+                        fixture.app_state.app_lock(),
+                    )
+                    .ok()
+                    .flatten()
+                    .and_then(|state| serde_json::to_value(state).ok());
+                // Select only static phase labels; never log the IDs projection.
+                let phase = match startup.as_ref().and_then(|value| value["phase"].as_str()) {
+                    Some("pending") => "pending",
+                    Some("identity") => "identity",
+                    Some("ready") => "ready",
+                    Some("failed") => "failed",
+                    _ => "unavailable",
+                };
+                let runtime_present = fixture.node.0.try_read().ok().map(|slot| slot.is_some());
+                eprintln!(
+                    "adoption install timeout elapsed_ms={} phase={phase} requested_ticket={requested_ticket} current_ticket={} installed_for_lease={} runtime_present={runtime_present:?} startup_gate_busy={}",
+                    started.elapsed().as_millis(),
+                    fixture.node.test_lifecycle_ticket(),
+                    fixture.node.test_installed_for(&lease),
+                    fixture.node.test_startup_gate().try_lock().is_err(),
+                );
+            }
+            installed
+                .expect("the current session must install its adopted runtime within five seconds");
         });
-        let runtime = fixture.node.0.blocking_lock();
+        let runtime = fixture.node.0.blocking_write();
         assert_eq!(runtime.as_ref().unwrap().user_id(), original_device);
         assert_eq!(runtime.as_ref().unwrap().restart_password(), " password-a ");
     }
 
     #[test]
-    fn registered_stale_auto_login_success_cannot_resurrect_logout() {
-        let fixture = AuthFixture::new("autoresurrection");
+    fn saved_session_disabled_after_native_read_cannot_auto_login() {
+        let fixture = AuthFixture::new("autologin-disabled-after-read");
+        logout_impl(&fixture.app_state).unwrap();
+        fixture.settings.deactivate();
+        let generation = fixture.app_state.session().generation();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         *fixture.app_state.auto_admission_gate.lock().unwrap() = Some((entered_tx, release_rx));
@@ -1268,6 +2232,42 @@ mod tests {
         let automatic =
             std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
         tauri::async_runtime::block_on(entered_rx).unwrap();
+        invoke_auth(
+            &fixture.webview,
+            "set_app_settings",
+            serde_json::json!({
+                "settings": fixture.settings.get(), "patch": {"stay_signed_in": false}
+            }),
+        )
+        .unwrap();
+        assert_eq!(fixture.app_state.session().generation(), generation);
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            automatic.join().unwrap().unwrap(),
+            serde_json::Value::Null,
+            "withdrawn saved-login consent admitted an already-read credential"
+        );
+        assert!(fixture.app_state.session().get().is_none());
+    }
+
+    #[test]
+    fn registered_stale_auto_login_success_cannot_resurrect_logout() {
+        let fixture = AuthFixture::new("autoresurrection");
+        logout_impl(&fixture.app_state).unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *fixture.app_state.auto_admission_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        let webview = fixture.webview.clone();
+        let automatic =
+            std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
+        tauri::async_runtime::block_on(entered_rx).unwrap();
+        // A cold resume may be superseded by a real login followed by logout.
+        invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username":fixture.alice,"password":" password-a "}),
+        )
+        .unwrap();
         invoke_auth(&fixture.webview, "logout", serde_json::json!({})).unwrap();
         let ticket = fixture.node.test_lifecycle_ticket();
         release_tx.send(()).unwrap();
@@ -1276,13 +2276,14 @@ mod tests {
         assert!(fixture.app_state.session().get().is_none());
         assert!(crate::session_store::load(&fixture.alice).is_none());
         assert!(fixture.settings.get().last_user.is_none());
-        assert!(fixture.node.0.blocking_lock().is_none());
+        assert!(fixture.node.0.blocking_write().is_none());
         assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
     }
 
     #[test]
     fn registered_stale_auto_login_failure_cannot_forget_replacement_owner() {
         let fixture = AuthFixture::new("autofailure");
+        logout_impl(&fixture.app_state).unwrap();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
         let auth = fixture.app_state.auth_operation.blocking_lock();
@@ -1290,7 +2291,6 @@ mod tests {
         let automatic =
             std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
         AuthFixture::wait_phase(&entered_rx, "auto-login-entry");
-        logout_impl(&fixture.app_state).unwrap();
         let (user, _, lease) = fixture
             .app_state
             .auth_service()
@@ -1352,7 +2352,7 @@ mod tests {
             .await
         });
         tauri::async_runtime::block_on(entered_rx).unwrap();
-        assert!(fixture.node.0.blocking_lock().is_none());
+        assert!(fixture.node.0.blocking_write().is_none());
         caller.abort();
         assert!(tauri::async_runtime::block_on(caller).is_err());
         let signed_in = tauri::async_runtime::block_on(login_impl(
@@ -1391,6 +2391,69 @@ mod tests {
         assert!(
             serialization_retained,
             "aborted caller released startup serialization before retirement completed"
+        );
+    }
+
+    #[test]
+    fn nickname_change_during_a_stalled_send_preserves_node_observations() {
+        let fixture = AuthFixture::new("renamestalled");
+        let admission = crate::runtime_admission::RuntimeAdmission::capture_current(
+            &fixture.app_state,
+            &fixture.node,
+        )
+        .unwrap();
+        let observer = admission.clone();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let producer = tauri::async_runtime::spawn(admission.detached(move |_, _| {
+            Box::pin(async move {
+                entered.send(()).unwrap();
+                blocked.await.unwrap();
+                Ok(())
+            })
+        }));
+        tauri::async_runtime::block_on(started).unwrap();
+        let (phase, phases) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(phase);
+        let webview = fixture.webview.clone();
+        let (finished, result) = std::sync::mpsc::channel();
+        let renaming = std::thread::spawn(move || {
+            let value = invoke_auth(
+                &webview,
+                "rename_account",
+                serde_json::json!({"newDisplayName":"New nickname"}),
+            );
+            finished.send(value).unwrap();
+        });
+        AuthFixture::wait_phase(&phases, "rename-published");
+        let renamed_without_send = result.recv_timeout(std::time::Duration::from_secs(1));
+        let observed = tauri::async_runtime::block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                observer.with_runtime(|runtime| Ok(runtime.user_id().to_owned())),
+            )
+            .await
+        });
+        release.send(()).unwrap();
+        tauri::async_runtime::block_on(producer).unwrap().unwrap();
+        renaming.join().unwrap();
+        assert!(
+            renamed_without_send.is_ok_and(|result| result.is_ok()),
+            "nickname changes must not wait behind an unrelated network producer"
+        );
+        assert!(
+            observed.is_ok_and(|result| result.is_ok()),
+            "a nickname update must not queue an exclusive lifecycle writer ahead of node reads"
+        );
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .display_name(),
+            "New nickname"
         );
     }
 
@@ -1435,7 +2498,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .display_name(),
@@ -1448,7 +2511,7 @@ mod tests {
         let fixture = AuthFixture::new("rename");
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-        let mut lifecycle = fixture.node.0.blocking_lock();
+        let mut lifecycle = fixture.node.0.blocking_write();
         let webview = fixture.webview.clone();
         let rename = std::thread::spawn(move || {
             invoke_auth(
@@ -1493,7 +2556,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .display_name(),
@@ -1549,7 +2612,7 @@ mod tests {
             Some(fixture.bob.as_str())
         );
         assert!(
-            fixture.node.0.blocking_lock().is_some(),
+            fixture.node.0.blocking_write().is_some(),
             "stale logout must not retire any runtime"
         );
     }
@@ -1601,6 +2664,7 @@ mod tests {
         User {
             user_id: owner.into(),
             name: owner.into(),
+            account_login_name: None,
             display_name: owner.into(),
             address: "fixture".into(),
             created_at: 0,
@@ -1663,6 +2727,7 @@ mod tests {
                                     std::io::ErrorKind::PermissionDenied,
                                 ))
                             })
+                            .and_then(std::convert::identity)
                     },
                 )
                 .await
@@ -1691,10 +2756,61 @@ mod tests {
             }
             release_tx.send(()).unwrap();
             assert!(prepare.await.unwrap().is_err());
-            assert!(node.0.lock().await.is_none());
+            assert!(node.0.write().await.is_none());
             drop(permit);
             assert!(node.test_startup_gate().try_lock().is_ok());
         }
+    }
+
+    async fn startup_endpoint_identity_reachable(
+        port: u16,
+        expected: &mesh_talk_core::identity::device::PublicIdentity,
+    ) -> bool {
+        use mesh_talk_core::transport::{SecureChannel, TransportError};
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let stream = match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    return false;
+                }
+                Err(error) => panic!("endpoint probe failed before identity verification: {error}"),
+            };
+            let caller = mesh_talk_core::identity::device::DeviceIdentity::generate();
+            match SecureChannel::connect(stream, &caller, Some(expected)).await {
+                Ok(_) => true,
+                Err(TransportError::UnexpectedPeer) => false,
+                Err(error) => panic!("endpoint probe failed without proving retirement: {error}"),
+            }
+        })
+        .await
+        .expect("endpoint identity probe timed out; runtime retirement is unproven")
+    }
+
+    #[tokio::test]
+    async fn startup_endpoint_probe_distinguishes_a_reused_port_from_the_retired_identity() {
+        use mesh_talk_core::identity::device::DeviceIdentity;
+        use mesh_talk_core::transport::{SecureChannel, net::bind_dual_stack_listener};
+        let retired = DeviceIdentity::generate().public();
+        let original = bind_dual_stack_listener(0).await.unwrap();
+        let port = original.local_addr().unwrap().port();
+        drop(original);
+        let replacement = bind_dual_stack_listener(port).await.unwrap();
+        let replacement_identity = DeviceIdentity::generate();
+        let responder = tokio::spawn(async move {
+            // A raw TCP probe succeeds even though this is a different endpoint owner.
+            let (raw, _) = replacement.accept().await.unwrap();
+            drop(raw);
+            let (stream, _) = replacement.accept().await.unwrap();
+            let _ = SecureChannel::accept(stream, &replacement_identity).await;
+        });
+        let raw = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        drop(raw);
+        assert!(!startup_endpoint_identity_reachable(port, &retired).await);
+        responder.await.unwrap();
     }
 
     #[tokio::test]
@@ -1724,12 +2840,15 @@ mod tests {
                             std::io::ErrorKind::PermissionDenied,
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await
         .unwrap();
         let port = runtime.listen_tcp_port();
-        let guard = node.0.lock().await;
+        let expected = runtime.handle().signed_announce("fixture", port).public();
+        assert!(startup_endpoint_identity_reachable(port, &expected).await);
+        let guard = node.0.write().await;
         let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
         let install = tokio::spawn(async move {
             queued_tx.send(()).unwrap();
@@ -1742,12 +2861,8 @@ mod tests {
         drop(guard);
         assert!(!install.await.unwrap());
         assert!(node.test_startup_gate().try_lock().is_ok());
-        assert!(node.0.lock().await.is_none());
-        assert!(
-            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
-                .await
-                .is_err()
-        );
+        assert!(node.0.write().await.is_none());
+        assert!(!startup_endpoint_identity_reachable(port, &expected).await);
     }
 
     #[tokio::test]
@@ -1771,21 +2886,24 @@ mod tests {
         .await
         .unwrap();
         let port = old.listen_tcp_port();
-        *node.0.lock().await = Some(old);
+        *node.0.write().await = Some(old);
         let stale =
             RuntimeAuthority::request(session.clone(), lease.clone(), node.clone()).unwrap();
         let latest = RuntimeAuthority::request(session.clone(), lease, node.clone()).unwrap();
         assert!(stale.begin().await.is_err());
-        assert!(node.0.lock().await.is_some());
-        let permit = latest.begin().await.unwrap();
+        assert!(node.0.write().await.is_some());
+        let mut permit = latest.begin().await.unwrap();
         // Actual production coordinator + actual NodeRuntime::stop. Core retirement
         // tests independently prove blocked writers drain inside that awaited stop.
-        assert!(node.0.lock().await.is_none());
+        assert!(node.0.write().await.is_none());
         assert!(
             tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
                 .await
                 .is_err()
         );
+        // Match the production replacement path: the joined runtime's storage
+        // handoff remains exclusive until the startup permit releases it.
+        drop(permit.take_retired());
         session.set_display_name("renamed during preparation".into());
         let runtime = mesh_talk_core::node::NodeRuntime::start_guarded(
             root.path(),
@@ -1806,6 +2924,7 @@ mod tests {
                             std::io::ErrorKind::PermissionDenied,
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await
@@ -1814,10 +2933,10 @@ mod tests {
         session.set_display_name("renamed before install".into());
         assert!(permit.install(runtime).await);
         assert_eq!(
-            node.0.lock().await.as_ref().unwrap().display_name(),
+            node.0.write().await.as_ref().unwrap().display_name(),
             "renamed before install"
         );
-        let runtime = node.0.lock().await.take().unwrap();
+        let runtime = node.0.write().await.take().unwrap();
         runtime.stop().await;
     }
     #[test]
@@ -1894,6 +3013,36 @@ mod tests {
             let v = serde_json::to_value(&err).unwrap();
             assert_eq!(v["kind"], kind, "kind tag for {err:?}");
             assert!(v["message"].is_string(), "message is a string for {err:?}");
+        }
+    }
+
+    #[test]
+    fn device_link_errors_preserve_the_stage_and_diagnostic_in_ipc() {
+        use mesh_talk_core::node::{LinkingError, NodeError};
+        use mesh_talk_core::transport::TransportError;
+        let cases = [
+            (LinkingError::NoDirectRoute, "link-no-direct-route"),
+            (
+                LinkingError::Connection(TransportError::Io(
+                    std::io::ErrorKind::ConnectionRefused.into(),
+                )),
+                "link-connection",
+            ),
+            (LinkingError::ResponseTimeout, "link-timeout"),
+            (LinkingError::Closed, "link-rejected"),
+            (LinkingError::UpgradeRequired, "link-upgrade-required"),
+            (LinkingError::InvalidResponse, "link-protocol"),
+            (
+                LinkingError::Protocol(TransportError::FrameTooLarge(100_000)),
+                "link-protocol",
+            ),
+        ];
+        for (error, kind) in cases {
+            let expected = NodeError::Linking(error);
+            let message = expected.to_string();
+            let value = serde_json::to_value(CommandError::from(expected)).unwrap();
+            assert_eq!(value["kind"], kind);
+            assert_eq!(value["message"], message);
         }
     }
 

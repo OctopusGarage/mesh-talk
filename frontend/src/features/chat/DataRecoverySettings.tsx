@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { BackupRecoveryKey } from "@/features/recovery/BackupRecoveryKey";
 import {
   Dialog,
   DialogContent,
@@ -13,9 +13,18 @@ import {
 } from "@/components/ui/dialog";
 import { useAuth } from "@/store/auth";
 import { useChat, captureChatOwnership } from "@/store/chat";
+import { captureRuntimeOwner } from "@/store/ownership";
 import { recovery } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
-import type { BackupCreated, BackupStatus } from "@/lib/api/recovery";
+import { googleDrive } from "@/lib/api/googleDrive";
+import { GoogleDriveConnection } from "@/features/recovery/GoogleDriveConnection";
+import { GoogleDriveProgress } from "@/features/recovery/GoogleDriveProgress";
+import { errorMessage, isVerificationCanceled } from "@/lib/error";
+import type {
+  BackupCreated,
+  BackupStatus,
+  BackupSetup,
+  BackupDestination,
+} from "@/lib/api/recovery";
 
 export function DataRecoverySettings({
   enabled = true,
@@ -44,9 +53,11 @@ export function DataRecoverySettings({
 export function BackupStatusSummary({
   enabled = true,
   refreshToken = 0,
+  showRestoreHint = true,
 }: {
   enabled?: boolean;
   refreshToken?: number;
+  showRestoreHint?: boolean;
 }) {
   const { t } = useTranslation();
   const owner = useAuth((state) => state.generation);
@@ -58,7 +69,7 @@ export function BackupStatusSummary({
   const [retry, setRetry] = useState(0);
   useEffect(() => {
     let current = true;
-    const lease = captureChatOwnership();
+    const lease = captureRuntimeOwner();
     setStatus(null);
     setLoading(true);
     setFailed(null);
@@ -107,7 +118,7 @@ export function BackupStatusSummary({
           {t("contactVisibility.retry")}
         </Button>
       )}
-      <p>{t("recovery.restoreHint")}</p>
+      {showRestoreHint && <p>{t("recovery.restoreHint")}</p>}
     </div>
   );
 }
@@ -124,39 +135,45 @@ function BackupDialog({
   const { t } = useTranslation();
   const [localOpen, setOpen] = useState(false);
   const open = controlledOpen ?? localOpen;
-  const [key, setKey] = useState("");
-  const [challenge, setChallenge] = useState("");
+  const [setup, setSetup] = useState<BackupSetup | null>(null);
+  const [savedKey, setSavedKey] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [savingDestination, setSavingDestination] = useState(false);
   const [error, setError] = useState("");
+  const [destinationKind, setDestinationKind] =
+    useState<BackupDestination>("local");
+  const [connectionId, setConnectionId] = useState(() => crypto.randomUUID());
+  const [driveConnected, setDriveConnected] = useState(false);
   const [created, setCreated] = useState<BackupCreated | null>(null);
   const pending = useRef(false);
+  const cancelling = useRef(false);
+  const preparation = useRef(0);
   useEffect(
     () => () => {
       preparation.current++;
     },
     [],
   );
-  const preparation = useRef(0);
-  const groups = key.split("-");
-  const challengeAnswer =
-    groups.length === 8 ? `${groups[1]}-${groups[6]}` : "";
 
   const prepare = useCallback(async () => {
     if (pending.current) return;
     const lease = captureChatOwnership();
     if (!lease.current()) return;
-    const current = ++preparation.current;
+    const generation = ++preparation.current;
     setError("");
-    setCreated(null);
-    setChallenge("");
-    setKey("");
+    setLoading(true);
     try {
-      const nextKey = await recovery.prepareKey();
-      if (current !== preparation.current || !lease.current()) return;
-      setKey(nextKey);
+      const next = await recovery.setup();
+      if (generation !== preparation.current || !lease.current()) return;
+      setSetup(next);
+      setDestinationKind(next.destination);
     } catch (cause) {
-      if (current === preparation.current && lease.current())
+      if (generation === preparation.current && lease.current())
         setError(errorMessage(cause));
+    } finally {
+      if (generation === preparation.current && lease.current())
+        setLoading(false);
     }
   }, []);
 
@@ -164,115 +181,212 @@ function BackupDialog({
     preparation.current++;
     pending.current = false;
     setBusy(false);
-    setKey("");
-    setChallenge("");
+    setSavingDestination(false);
+    setSetup(null);
+    setSavedKey(false);
     setCreated(null);
     setError("");
+    setDriveConnected(false);
+    setConnectionId(crypto.randomUUID());
     if (open) void prepare();
   }, [open, prepare]);
 
-  const create = async () => {
-    if (
-      pending.current ||
-      created ||
-      !key ||
-      challenge.trim().toLowerCase() !== challengeAnswer
-    )
-      return;
-    const lease = captureChatOwnership();
-    if (!lease.current()) return;
+  const changeOpen = (next: boolean) => {
+    if (pending.current) return;
+    setOpen(next);
+    onOpenChange?.(next);
+  };
+
+  const changeDestination = async (next: BackupDestination) => {
+    if (pending.current) return;
+    const lease = captureRuntimeOwner();
     const generation = preparation.current;
     const current = () => generation === preparation.current && lease.current();
     pending.current = true;
-    setBusy(true);
+    setSavingDestination(true);
     setError("");
     try {
-      const destination = await save({
-        defaultPath: `mesh-talk-${new Date().toISOString().slice(0, 10)}.mtbackup`,
-        filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
-      });
-      if (!destination || !current()) return;
-      const backup = await recovery.create(destination, key);
-      if (current()) {
-        setCreated(backup);
-        onBackupCreated?.();
-      }
+      await recovery.setDestination(next);
+      if (!current()) return;
+      setDestinationKind(next);
+      setDriveConnected(false);
+      setConnectionId(crypto.randomUUID());
     } catch (cause) {
       if (current()) setError(errorMessage(cause));
     } finally {
       if (current()) {
         pending.current = false;
+        setSavingDestination(false);
+      }
+    }
+  };
+
+  const create = async () => {
+    if (pending.current || created || !setup || (!setup.confirmed && !savedKey))
+      return;
+    if (destinationKind === "drive" && !driveConnected) return;
+    if (!captureChatOwnership().current()) return;
+    // Snapshot creation pauses messaging; completion belongs to the runtime owner,
+    // independent of temporary node readiness during the restart.
+    const lease = captureRuntimeOwner();
+    const generation = preparation.current;
+    const current = () => generation === preparation.current && lease.current();
+    pending.current = true;
+    cancelling.current = false;
+    setBusy(true);
+    setError("");
+    try {
+      await recovery.setDestination(destinationKind);
+      if (!current()) return;
+      if (!setup.confirmed) {
+        await recovery.confirmKey(setup.recovery_key);
+        if (!current()) return;
+        setSetup({ ...setup, confirmed: true });
+      }
+      let backup: BackupCreated;
+      if (destinationKind === "drive") {
+        backup = await googleDrive.create(connectionId);
+      } else {
+        const destination = await save({
+          defaultPath: `mesh-talk-${new Date().toISOString().replace(/[:.]/g, "-")}.mtbackup`,
+          filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
+        });
+        if (!destination || !current()) return;
+        backup = await recovery.create(destination);
+      }
+      if (current()) {
+        setCreated(backup);
+        onBackupCreated?.();
+      }
+    } catch (cause) {
+      if (current() && !isVerificationCanceled(cause))
+        setError(errorMessage(cause));
+    } finally {
+      if (current()) {
+        pending.current = false;
         setBusy(false);
+        if (cancelling.current) {
+          setDriveConnected(false);
+          setConnectionId(crypto.randomUUID());
+        }
       }
     }
   };
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!pending.current) {
-          setOpen(next);
-          onOpenChange?.(next);
-        }
-      }}
-    >
+    <Dialog open={open} onOpenChange={changeOpen}>
       <DialogTrigger asChild>
         <Button variant="secondary" size="sm">
           {t("recovery.createBackup")}
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-h-[min(42rem,calc(100vh-2rem))] max-w-lg overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[min(42rem,calc(100vh-2rem))] max-w-lg flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="shrink-0 p-6 pb-4">
           <DialogTitle>{t("recovery.createBackup")}</DialogTitle>
-          <DialogDescription>{t("recovery.exportIntro")}</DialogDescription>
+          <DialogDescription>{t("recovery.simpleIntro")}</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 text-sm">
-          <div className="rounded-md border bg-muted/35 p-3 text-muted-foreground">
-            <p>{t("recovery.included")}</p>
-            <p className="mt-2">{t("recovery.excluded")}</p>
-          </div>
-          <p className="text-muted-foreground">{t("recovery.pauseNotice")}</p>
-          {key && (
+        <div className="min-h-0 space-y-5 overflow-y-auto px-6 pb-4 text-sm">
+          {!created && (
+            <>
+              <div className="space-y-2">
+                <label
+                  className="block text-xs font-medium"
+                  htmlFor="backup-destination"
+                >
+                  {t("drive.destination")}
+                </label>
+                <select
+                  id="backup-destination"
+                  className="w-full rounded-md border bg-background p-2"
+                  value={destinationKind}
+                  disabled={busy || savingDestination || loading || !setup}
+                  onChange={(event) =>
+                    void changeDestination(
+                      event.target.value as BackupDestination,
+                    )
+                  }
+                >
+                  <option value="local">{t("drive.local")}</option>
+                  <option value="drive">{t("drive.cloud")}</option>
+                </select>
+                {open && setup && destinationKind === "drive" && (
+                  <GoogleDriveConnection
+                    key={connectionId}
+                    connectionId={connectionId}
+                    disabled={busy || savingDestination}
+                    onConnected={() => setDriveConnected(true)}
+                    onDisconnected={() => setDriveConnected(false)}
+                  />
+                )}
+              </div>
+              {loading && (
+                <p role="status" className="text-muted-foreground">
+                  {t("common.loading")}
+                </p>
+              )}
+              {setup && (destinationKind === "local" || driveConnected) && (
+                <BackupRecoveryKey
+                  recoveryKey={setup.recovery_key}
+                  confirmed={setup.confirmed}
+                  disabled={busy || savingDestination}
+                />
+              )}
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer py-1 font-medium text-foreground">
+                  {t("recovery.backupDetails")}
+                </summary>
+                <div className="mt-2 space-y-2 leading-relaxed">
+                  <p>{t("recovery.included")}</p>
+                  <p>{t("recovery.excluded")}</p>
+                  <p>{t("recovery.pauseNotice")}</p>
+                </div>
+              </details>
+            </>
+          )}
+          {busy && destinationKind === "drive" && (
             <div className="space-y-2">
-              <p className="font-medium">{t("recovery.saveKey")}</p>
-              <code
-                data-testid="recovery-export-key"
-                className="block select-all break-all rounded-md border bg-background p-3 font-mono text-xs leading-6"
+              <GoogleDriveProgress connectionId={connectionId} />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const lease = captureRuntimeOwner();
+                  const generation = preparation.current;
+                  cancelling.current = true;
+                  void googleDrive.disconnect(connectionId).catch((cause) => {
+                    if (generation === preparation.current && lease.current())
+                      setError(errorMessage(cause));
+                  });
+                  setDriveConnected(false);
+                  // Keep the operation owned until the snapshot safely restarts messaging.
+                }}
               >
-                {key}
-              </code>
-              <p className="text-xs text-muted-foreground">
-                {t("recovery.perExportKey")}
-              </p>
-              <label
-                className="block text-xs font-medium"
-                htmlFor="recovery-key-check"
-              >
-                {t("recovery.confirmGroups")}
-              </label>
-              <Input
-                id="recovery-key-check"
-                data-testid="recovery-key-check"
-                value={challenge}
-                onChange={(event) => setChallenge(event.target.value)}
-                autoComplete="off"
-                placeholder="XXXXXXXX-XXXXXXXX"
-              />
+                {t("drive.cancel")}
+              </Button>
             </div>
           )}
           {error && (
-            <p role="alert" className="text-destructive">
+            <p role="alert" className="break-words text-destructive">
               {error}
             </p>
           )}
-          {created && (
-            <div
-              role="status"
-              className="rounded-md border border-signal/40 bg-signal/5 p-3"
+          {!loading && !setup && error && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void prepare()}
             >
-              <p className="font-medium">{t("recovery.backupComplete")}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
+              {t("contactVisibility.retry")}
+            </Button>
+          )}
+          {created && (
+            <div role="status" className="space-y-2 py-2">
+              <p className="font-medium">
+                {destinationKind === "drive"
+                  ? t("drive.complete")
+                  : t("recovery.backupComplete")}
+              </p>
+              <p className="text-xs text-muted-foreground">
                 {t("recovery.backupSummary", {
                   count: created.preview.messages,
                   size: (created.archive_bytes / 1024 / 1024).toFixed(1),
@@ -283,27 +397,47 @@ function BackupDialog({
           <BackupStatusSummary
             key={created ? "created" : "initial"}
             enabled={open}
+            showRestoreHint={false}
           />
+        </div>
+        <div className="shrink-0 space-y-3 border-t bg-background px-6 py-4">
+          {setup &&
+            !setup.confirmed &&
+            !created &&
+            (destinationKind === "local" || driveConnected) && (
+              <label className="flex items-start gap-2 text-sm leading-relaxed">
+                <input
+                  data-testid="recovery-key-saved"
+                  type="checkbox"
+                  checked={savedKey}
+                  disabled={busy || savingDestination}
+                  onChange={(event) => setSavedKey(event.target.checked)}
+                  className="mt-1 accent-signal"
+                />
+                {t("recovery.keySaved")}
+              </label>
+            )}
           <div className="flex justify-end gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => void prepare()}
-              disabled={busy}
-            >
-              {t("recovery.newKey")}
-            </Button>
-            <Button
-              data-testid="recovery-export"
-              disabled={
-                busy ||
-                !key ||
-                !!created ||
-                challenge.trim().toLowerCase() !== challengeAnswer
-              }
-              onClick={() => void create()}
-            >
-              {busy ? t("recovery.exporting") : t("recovery.chooseDestination")}
-            </Button>
+            {created ? (
+              <Button onClick={() => changeOpen(false)}>
+                {t("common.done")}
+              </Button>
+            ) : (
+              <Button
+                data-testid="recovery-export"
+                disabled={
+                  busy ||
+                  savingDestination ||
+                  loading ||
+                  !setup ||
+                  (destinationKind === "drive" && !driveConnected) ||
+                  (!setup.confirmed && !savedKey)
+                }
+                onClick={() => void create()}
+              >
+                {busy ? t("recovery.exporting") : t("drive.backUpNow")}
+              </Button>
+            )}
           </div>
         </div>
       </DialogContent>

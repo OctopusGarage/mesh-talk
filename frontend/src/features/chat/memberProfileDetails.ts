@@ -30,6 +30,32 @@ export function memberDiscoverySources(
   return [...sources.values()];
 }
 
+/** Registration origin is consented evidence, never inferred from a route. */
+export function memberRegistrationOrigins(
+  presence: PresenceInfo,
+): NonNullable<PresenceEvidence["registration_origin"]>[] {
+  const origins = new Map<
+    string,
+    NonNullable<PresenceEvidence["registration_origin"]>
+  >();
+  for (const device of presence.devices ?? []) {
+    for (const evidence of device.evidence) {
+      const origin = evidence.registration_origin;
+      if (
+        evidence.source !== "directory" ||
+        evidence.expires_in_secs <= 0 ||
+        !origin ||
+        origin.expires_in_secs <= 0
+      )
+        continue;
+      const existing = origins.get(origin.user_id);
+      if (!existing || existing.expires_in_secs < origin.expires_in_secs)
+        origins.set(origin.user_id, origin);
+    }
+  }
+  return [...origins.values()];
+}
+
 export interface MemberProfileTarget {
   name: string;
   canonicalName?: string;

@@ -1,5 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  SavedSessionStatus,
+  UserInfo,
   CallSignalEvent,
   NodeStateChangedEvent,
   ChannelMessageEvent,
@@ -8,11 +10,13 @@ import type {
   FileProgressEvent,
   FileReceivedEvent,
   ProfileReceivedEvent,
+  ReceptionScope,
   IntegrationMessageAcceptedEvent,
 } from "./types";
 
 /** Subscribe to the node's inbound events. Returns a single unlisten function. */
 export function subscribeNodeEvents(handlers: {
+  onReceptionWake?: (scope: ReceptionScope) => void;
   onIntegrationMessageAccepted?: (e: IntegrationMessageAcceptedEvent) => void;
   onStateChanged?: (e: NodeStateChangedEvent) => void;
   onDm?: (e: DmReceivedEvent) => void;
@@ -20,10 +24,22 @@ export function subscribeNodeEvents(handlers: {
   onChannelMessage?: (e: ChannelMessageEvent) => void;
   onFile?: (e: FileReceivedEvent) => void;
   onFileProgress?: (e: FileProgressEvent) => void;
+  onAccountProfile?: (event: {
+    user: UserInfo;
+    account_id: string;
+    device_id: string;
+    saved_session?: SavedSessionStatus | null;
+  }) => void;
   onProfile?: (e: ProfileReceivedEvent) => void;
   onCallSignal?: (e: CallSignalEvent) => void;
 }): () => void {
   const unlisteners: Promise<UnlistenFn>[] = [];
+  if (handlers.onReceptionWake)
+    unlisteners.push(
+      listen<ReceptionScope>("node-reception-wake", (e) =>
+        handlers.onReceptionWake!(e.payload),
+      ),
+    );
   if (handlers.onIntegrationMessageAccepted) {
     unlisteners.push(
       listen<IntegrationMessageAcceptedEvent>(
@@ -69,6 +85,18 @@ export function subscribeNodeEvents(handlers: {
     unlisteners.push(
       listen<FileProgressEvent>("file-progress", (e) =>
         handlers.onFileProgress!(e.payload),
+      ),
+    );
+  }
+  if (handlers.onAccountProfile) {
+    unlisteners.push(
+      listen<{
+        user: UserInfo;
+        account_id: string;
+        device_id: string;
+        saved_session?: SavedSessionStatus | null;
+      }>("account-profile-changed", (e) =>
+        handlers.onAccountProfile!(e.payload),
       ),
     );
   }

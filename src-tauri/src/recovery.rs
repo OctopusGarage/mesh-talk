@@ -1,5 +1,7 @@
 //! Manual encrypted backup and transactional offline restore.
 
+pub(crate) mod setup;
+
 use crate::chat_commands::{NodeState, RuntimeAuthority};
 use crate::commands::CommandError;
 use crate::runtime_bootstrap::spawn_node_runtime;
@@ -15,6 +17,17 @@ use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// Reuse the runtime's existing per-fixture root; production has one desktop root.
+pub(crate) fn data_root(node: &NodeState) -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some((root, _)) = node.4.lock().unwrap().as_ref() {
+        return root.clone();
+    }
+    #[cfg(not(test))]
+    let _ = node;
+    crate::data_dir()
+}
 
 const MARKER: &str = "recovery-publish.json";
 const COMPLETE_MARKER: &str = "recovery-publish.complete.json";
@@ -112,7 +125,25 @@ fn create_backup_offline(
     key: &RecoveryKey,
     username: &str,
     auth_password: &str,
+    record_status: bool,
+    proof: &crate::app_lock::SensitiveAction,
+    retired: Option<mesh_talk_core::node::RetiredNode>,
 ) -> Result<BackupCreated, CommandError> {
+    authority
+        .current(|_| ())
+        .map_err(CommandError::Authorization)?;
+    proof.checked(|| Ok(()))?;
+    if let Some(retired) = &retired {
+        let expected_root = fs::canonicalize(profile)
+            .map_err(|_| CommandError::Authorization("Backup profile is unavailable".into()))?;
+        if retired.host_account_id() != authority.lease.owner()
+            || retired.profile_root() != expected_root
+        {
+            return Err(CommandError::Authorization(
+                "Retired backup storage belongs to another local profile".into(),
+            ));
+        }
+    }
     let parent = destination
         .parent()
         .filter(|path| path.is_dir())
@@ -126,7 +157,16 @@ fn create_backup_offline(
     }
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|_| CommandError::Io("Could not create backup file".into()))?;
-    let node = Node::open_recovery_profile(profile, password).map_err(backup_error)?;
+    let reopened = if retired.is_none() {
+        Some(Node::open_recovery_profile(profile, password).map_err(backup_error)?)
+    } else {
+        None
+    };
+    let node = retired
+        .as_ref()
+        .map(|retired| retired.node())
+        .or(reopened.as_deref())
+        .ok_or_else(|| CommandError::Internal("Backup storage owner missing".into()))?;
     node.write_encrypted_recovery_archive(temp.as_file_mut(), key, now_ms())
         .map_err(backup_error)?;
     temp.as_file_mut()
@@ -147,25 +187,25 @@ fn create_backup_offline(
         .len();
     // `persist_noclobber` uses create-new semantics; a destination that appeared
     // during export is never overwritten.
-    temp.persist_noclobber(destination).map_err(|error| {
-        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            CommandError::InvalidInput("A backup already exists at this path".into())
-        } else {
-            CommandError::Io("Could not publish backup file".into())
-        }
-    })?;
-    if sync_directory(parent).is_err() {
-        let _ = fs::remove_file(destination);
-        let _ = sync_directory(parent);
-        return Err(CommandError::Io("Could not sync backup folder".into()));
-    }
-    if authority.current(|_| ()).is_err() {
-        let _ = fs::remove_file(destination);
-        let _ = sync_directory(parent);
-        return Err(CommandError::Authorization(
-            "Backup session was replaced".into(),
-        ));
-    }
+    authority
+        .current(|_| {
+            proof.commit(|| {
+                temp.persist_noclobber(destination).map_err(|error| {
+                    if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                        CommandError::InvalidInput("A backup already exists at this path".into())
+                    } else {
+                        CommandError::Io("Could not publish backup file".into())
+                    }
+                })?;
+                if sync_directory(parent).is_err() {
+                    let _ = fs::remove_file(destination);
+                    let _ = sync_directory(parent);
+                    return Err(CommandError::Io("Could not sync backup folder".into()));
+                }
+                Ok(())
+            })
+        })
+        .map_err(CommandError::Authorization)??;
     let status = BackupStatus {
         destination: destination.display().to_string(),
         preview: preview.clone(),
@@ -173,9 +213,25 @@ fn create_backup_offline(
     };
     // Local status contains no key. The archive itself is already durable, so a
     // failed status update does not invalidate the successful backup.
-    let manager = FileManager::new(scratch.to_path_buf());
-    let _ =
-        manager.write_encrypted_file(username, "meta/backup_status.enc", &status, auth_password);
+    if record_status {
+        let prepared = FileManager::new(scratch.to_path_buf()).prepare_encrypted_write(
+            username,
+            "meta/backup_status.enc",
+            &status,
+            auth_password,
+        );
+        if let Ok(prepared) = prepared
+            && let Ok(Ok(published)) = authority.current(|_| {
+                proof.commit(|| {
+                    prepared
+                        .publish()
+                        .map_err(|_| CommandError::Io("Could not record backup status".into()))
+                })
+            })
+        {
+            published.finish();
+        }
+    }
     Ok(BackupCreated {
         recovery_key: key.display(),
         preview,
@@ -191,7 +247,40 @@ pub async fn create_backup<R: tauri::Runtime>(
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, NodeState>,
     destination: String,
+    recovery_key: Option<String>,
+    password: Option<String>,
+) -> Result<BackupCreated, CommandError> {
+    let generation = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authentication)?
+        .generation();
+    let recovery_key = match recovery_key {
+        Some(key) => key,
+        None => setup::saved_key(&app_state, &node_state, generation).await?,
+    };
+    create_backup_with_status(
+        app_handle,
+        &app_state,
+        &node_state,
+        destination,
+        recovery_key,
+        true,
+        Some(generation),
+        password,
+    )
+    .await
+}
+
+pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    app_state: &AppState,
+    node_state: &NodeState,
+    destination: String,
     recovery_key: String,
+    record_status: bool,
+    expected_generation: Option<u64>,
+    verification_password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
     let key = RecoveryKey::parse(&recovery_key)
         .map_err(|_| CommandError::InvalidInput("Recovery key format is invalid".into()))?;
@@ -199,29 +288,45 @@ pub async fn create_backup<R: tauri::Runtime>(
         .session()
         .capture()
         .map_err(CommandError::Authentication)?;
+    if expected_generation.is_some_and(|generation| lease.generation() != generation) {
+        return Err(CommandError::Authorization(
+            "Backup session was replaced".into(),
+        ));
+    }
+    let proof = crate::app_lock::SensitiveAction::verify(
+        app_state,
+        &lease,
+        verification_password,
+        "export a Mesh-Talk backup",
+    )
+    .await?;
     let password = app_state
         .session()
-        .matching(&lease, |info| info.password.clone())
+        .matching(&lease, |info| info.node_storage_password.clone())
         .map_err(CommandError::Authentication)?;
     let username = app_state
         .session()
         .matching(&lease, |info| info.user.name.clone())
         .map_err(CommandError::Authentication)?;
-    let auth_password = password.trim().to_string();
-    let node = node_state.inner().clone();
+    let auth_password = app_state
+        .session()
+        .matching(&lease, |info| info.password.clone())
+        .map_err(CommandError::Authentication)?;
+    let node = node_state.clone();
     let session = app_state.session().clone();
     let authority = RuntimeAuthority::request(session.clone(), lease.clone(), node.clone())
         .map_err(CommandError::Authorization)?;
     let child = tokio::spawn(async move {
-        let permit = authority
+        let mut permit = authority
             .begin()
             .await
             .map_err(CommandError::Authorization)?;
-        let root = crate::data_dir();
+        let root = data_root(&node);
         let profile = root.join("accounts").join(lease.owner());
         let authority_for_work = authority.clone();
+        let retired = permit.take_retired();
         let output = tokio::task::spawn_blocking(move || {
-            create_backup_offline(
+            let result = create_backup_offline(
                 &profile,
                 &password,
                 Path::new(&destination),
@@ -230,18 +335,23 @@ pub async fn create_backup<R: tauri::Runtime>(
                 &key,
                 &username,
                 &auth_password,
-            )
+                record_status,
+                &proof,
+                retired,
+            );
+            (permit, result)
         })
         .await
         .map_err(|_| CommandError::Internal("Backup worker stopped".into()));
+        let (permit, output) = output?;
         drop(permit);
         if authority.current(|_| ()).is_ok() {
             let restart_password = session
-                .matching(&lease, |info| info.password.clone())
+                .matching(&lease, |info| info.node_storage_password.clone())
                 .map_err(CommandError::Authorization)?;
             spawn_node_runtime(app_handle, lease, restart_password, node, session);
         }
-        output?
+        output
     });
     child
         .await
@@ -251,38 +361,27 @@ pub async fn create_backup<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn backup_status(
     app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, NodeState>,
 ) -> Result<Option<BackupStatus>, CommandError> {
-    let lease = app_state
-        .session()
-        .capture()
-        .map_err(CommandError::Authentication)?;
-    let (username, password) = app_state
-        .session()
-        .matching(&lease, |info| {
-            (info.user.name.clone(), info.password.trim().to_string())
-        })
-        .map_err(CommandError::Authentication)?;
-    tokio::task::spawn_blocking(move || {
-        let manager = FileManager::new(crate::data_dir());
-        if !manager.file_exists(&username, "meta/backup_status.enc") {
+    setup::with_storage(&app_state, &node_state, None, |storage| {
+        if !storage.exists("meta/backup_status.enc") {
             return Ok(None);
         }
-        manager
-            .read_encrypted_file(&username, "meta/backup_status.enc", &password)
+        storage
+            .read("meta/backup_status.enc", "Could not read backup status")
             .map(Some)
-            .map_err(|_| CommandError::Io("Could not read backup status".into()))
     })
     .await
-    .map_err(|_| CommandError::Internal("Backup status worker stopped".into()))?
 }
 
 #[tauri::command]
-pub fn prepare_backup_key(app_state: tauri::State<'_, AppState>) -> Result<String, CommandError> {
-    app_state
-        .session()
-        .capture()
-        .map_err(CommandError::Authentication)?;
-    Ok(RecoveryKey::generate().display())
+pub async fn prepare_backup_key(
+    app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    Ok(setup::backup_setup(app_state, node_state)
+        .await?
+        .recovery_key)
 }
 
 #[tauri::command]
@@ -369,6 +468,74 @@ pub(crate) fn recover_interrupted_publication(root: &Path) -> Result<(), String>
     Ok(())
 }
 
+/// Commit a verified staged credential/profile pair through the recovery journal.
+/// Caller holds profile lifecycle and login namespace authority.
+pub(crate) fn publish_staged_profile(
+    root: &Path,
+    stage: &Path,
+    username: &str,
+    host_id: &str,
+) -> Result<(), CommandError> {
+    let stage_name = stage
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("recovery-stage-"))
+        .ok_or_else(|| CommandError::Validation("Invalid account staging path".into()))?;
+    if stage.parent() != Some(root)
+        || !User::validate_username(username)
+        || !User::validate_user_id(host_id)
+    {
+        return Err(CommandError::Validation(
+            "Invalid account publication".into(),
+        ));
+    }
+    let staged_profile = stage.join("accounts").join(host_id);
+    sync_tree(&stage.join("users").join(username))
+        .map_err(|_| CommandError::Io("Could not sync staged credentials".into()))?;
+    sync_tree(&staged_profile)
+        .map_err(|_| CommandError::Io("Could not sync staged account".into()))?;
+    let auth_target = root.join("users").join(username);
+    let account_target = root.join("accounts").join(host_id);
+    if auth_target.exists() || account_target.exists() {
+        return Err(CommandError::InvalidInput(
+            "Recovery destination already exists".into(),
+        ));
+    }
+    fs::create_dir_all(root.join("users"))
+        .map_err(|_| CommandError::Io("Could not create users folder".into()))?;
+    fs::create_dir_all(root.join("accounts"))
+        .map_err(|_| CommandError::Io("Could not create accounts folder".into()))?;
+    let marker = Publication {
+        username: username.into(),
+        host_id: host_id.into(),
+        stage: stage_name.into(),
+        complete: false,
+    };
+    write_marker(root, &marker)?;
+    let publication: Result<(), CommandError> = (|| {
+        fs::rename(stage.join("users").join(username), &auth_target)
+            .map_err(|_| CommandError::Io("Could not publish local credentials".into()))?;
+        sync_directory(&root.join("users"))
+            .map_err(|_| CommandError::Io("Could not sync users folder".into()))?;
+        fs::rename(&staged_profile, &account_target)
+            .map_err(|_| CommandError::Io("Could not publish recovered account".into()))?;
+        sync_directory(&root.join("accounts"))
+            .map_err(|_| CommandError::Io("Could not sync accounts folder".into()))?;
+        // Renaming the marker is the publication commit point. A crash before
+        // this rename rolls back both targets; a crash after it retains both.
+        fs::rename(root.join(MARKER), root.join(COMPLETE_MARKER))
+            .map_err(|_| CommandError::Io("Could not complete recovery transaction".into()))?;
+        let _ = sync_directory(root);
+        let _ = fs::remove_file(root.join(COMPLETE_MARKER));
+        let _ = sync_directory(root);
+        Ok(())
+    })();
+    if publication.is_err() {
+        recover_interrupted_publication(root).map_err(CommandError::Io)?;
+    }
+    publication
+}
+
 fn restore_offline(
     root: &Path,
     source: &Path,
@@ -393,12 +560,6 @@ fn restore_offline(
         .prefix("recovery-stage-")
         .tempdir_in(root)
         .map_err(|_| CommandError::Io("Could not create recovery staging".into()))?;
-    let stage_name = stage
-        .path()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
     let auth = IdentityManager::new(FileManager::new(stage.path().to_path_buf()));
     let user = auth
         .register_user(username, password)
@@ -420,7 +581,9 @@ fn restore_offline(
             "Recovered account identity did not match".into(),
         ));
     }
-    drop(installed);
+    installed
+        .close_profile()
+        .map_err(|_| CommandError::Io("Could not close restored profile".into()))?;
     let reopened = Node::open_recovery_profile(&staged_profile, password).map_err(backup_error)?;
     if reopened.account_id() != preview.account_id {
         return Err(CommandError::Crypto(
@@ -428,54 +591,26 @@ fn restore_offline(
         ));
     }
     let device_id = reopened.user_id();
-    drop(reopened);
+    reopened
+        .close_profile()
+        .map_err(|_| CommandError::Io("Could not close restored profile".into()))?;
     auth.authenticate_user(username, password).map_err(|_| {
         CommandError::Auth("Restored local credentials could not be verified".into())
     })?;
+    // The user has supplied this key successfully. Retain it with the staged
+    // credentials so the next backup does not demand another recovery setup.
+    setup::retain_restored_key(stage.path(), username, password, key)?;
     sync_tree(&stage.path().join("users").join(username))
         .map_err(|_| CommandError::Io("Could not sync restored credentials".into()))?;
     sync_tree(&staged_profile)
         .map_err(|_| CommandError::Io("Could not sync restored account".into()))?;
-    let auth_target = root.join("users").join(username);
-    let account_target = root.join("accounts").join(&user.user_id);
-    if auth_target.exists() || account_target.exists() {
-        return Err(CommandError::InvalidInput(
-            "Recovery destination already exists".into(),
-        ));
-    }
-    fs::create_dir_all(root.join("users"))
-        .map_err(|_| CommandError::Io("Could not create users folder".into()))?;
-    fs::create_dir_all(root.join("accounts"))
-        .map_err(|_| CommandError::Io("Could not create accounts folder".into()))?;
-    let marker = Publication {
-        username: username.into(),
-        host_id: user.user_id,
-        stage: stage_name,
-        complete: false,
-    };
-    write_marker(root, &marker)?;
-    let publication: Result<(), CommandError> = (|| {
-        fs::rename(stage.path().join("users").join(username), &auth_target)
-            .map_err(|_| CommandError::Io("Could not publish local credentials".into()))?;
-        sync_directory(&root.join("users"))
-            .map_err(|_| CommandError::Io("Could not sync users folder".into()))?;
-        fs::rename(&staged_profile, &account_target)
-            .map_err(|_| CommandError::Io("Could not publish recovered account".into()))?;
-        sync_directory(&root.join("accounts"))
-            .map_err(|_| CommandError::Io("Could not sync accounts folder".into()))?;
-        // Renaming the marker is the publication commit point. A crash before
-        // this rename rolls back both targets; a crash after it retains both.
-        fs::rename(root.join(MARKER), root.join(COMPLETE_MARKER))
-            .map_err(|_| CommandError::Io("Could not complete recovery transaction".into()))?;
-        let _ = sync_directory(root);
-        let _ = fs::remove_file(root.join(COMPLETE_MARKER));
-        let _ = sync_directory(root);
-        Ok(())
-    })();
-    if publication.is_err() {
-        recover_interrupted_publication(root).map_err(CommandError::Io)?;
-    }
-    publication?;
+    IdentityManager::new(FileManager::new(root.to_path_buf()))
+        .publish_new_account_login(username, || {
+            publish_staged_profile(root, stage.path(), username, &user.user_id)
+        })
+        .map_err(|_| {
+            CommandError::InvalidInput("Login name already exists on this device".into())
+        })??;
     Ok(RestoreComplete {
         username: username.into(),
         device_id,
@@ -492,25 +627,47 @@ pub async fn restore_backup(
     username: String,
     new_password: String,
 ) -> Result<RestoreComplete, CommandError> {
+    restore_backup_with_generation(
+        &app_state,
+        &node_state,
+        path,
+        recovery_key,
+        username,
+        new_password,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn restore_backup_with_generation(
+    app_state: &AppState,
+    node_state: &NodeState,
+    path: String,
+    recovery_key: String,
+    username: String,
+    new_password: String,
+    expected_generation: Option<u64>,
+) -> Result<RestoreComplete, CommandError> {
     let key = RecoveryKey::parse(&recovery_key)
         .map_err(|_| CommandError::InvalidInput("Recovery key format is invalid".into()))?;
     let auth_guard = app_state.auth_operation.clone().lock_owned().await;
+    if let Some(generation) = expected_generation {
+        app_state
+            .session()
+            .unchanged(generation, || ())
+            .map_err(CommandError::Authorization)?;
+    }
     if app_state.session().get().is_some() {
         return Err(CommandError::Authorization(
             "Sign out before restoring a backup".into(),
         ));
     }
     let lifecycle_guard = node_state.lock_profile_lifecycle().await;
+    let root = data_root(node_state);
     tokio::task::spawn_blocking(move || {
         let _auth_guard = auth_guard;
         let _lifecycle_guard = lifecycle_guard;
-        restore_offline(
-            &crate::data_dir(),
-            Path::new(&path),
-            &key,
-            &username,
-            &new_password,
-        )
+        restore_offline(&root, Path::new(&path), &key, &username, &new_password)
     })
     .await
     .map_err(|_| CommandError::Internal("Recovery worker stopped".into()))?
@@ -604,6 +761,164 @@ mod tests {
         .unwrap();
         assert_eq!(recovered.account_id(), original_account);
         assert_eq!(recovered.user_id(), complete.device_id);
+        let setup: setup::BackupSetup = FileManager::new(target.clone())
+            .read_encrypted_file("alice", "meta/backup_setup.enc", "new password")
+            .expect("restoration retains the supplied key for later manual backups");
+        assert!(setup.confirmed);
+        assert_eq!(setup.recovery_key, key.display());
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_retired_other_local_profile_before_any_archive_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Arc::new(IdentityManager::new(FileManager::new(
+            directory.path().to_owned(),
+        )));
+        let app = AppState::new(crate::services::auth_service::AuthService::new(manager));
+        let user = |id: &str| crate::services::user::User {
+            user_id: id.into(),
+            account_login_name: None,
+            name: id.into(),
+            display_name: id.into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        let node = NodeState::empty();
+        let lease_a = app
+            .session()
+            .publish("token-a".into(), user("local-a"), "pw".into());
+        let authority_a =
+            RuntimeAuthority::request(app.session().clone(), lease_a, node.clone()).unwrap();
+        let permit_a = authority_a.begin().await.unwrap();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            directory.path(),
+            "local-a",
+            "A",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        runtime
+            .handle()
+            .enqueue_to_account(
+                runtime.account_id(),
+                b"previous local user's private history",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(permit_a.install(runtime).await);
+        let profile_b = directory.path().join("accounts/local-b");
+        {
+            let _owner =
+                mesh_talk_core::storage::profile::ProfileStorageLease::acquire(&profile_b).unwrap();
+            // Equal mesh account does not transfer another local installation's
+            // private history or suppression to a different signed-in owner.
+            let account = mesh_talk_core::identity::account_keystore::load(
+                &directory.path().join("accounts/local-a/account.keystore"),
+                "pw",
+            )
+            .unwrap();
+            mesh_talk_core::identity::account_keystore::save(
+                &profile_b.join("account.keystore"),
+                "pw",
+                &account,
+            )
+            .unwrap();
+        }
+        let lease_b = app
+            .session()
+            .publish("token-b".into(), user("local-b"), "pw".into());
+        let authority_b =
+            RuntimeAuthority::request(app.session().clone(), lease_b.clone(), node.clone())
+                .unwrap();
+        let mut permit_b = authority_b.begin().await.unwrap();
+        let retired_a = permit_b.take_retired().unwrap();
+        app.app_lock().set_identity_verifier(|| Ok(()));
+        let proof =
+            crate::app_lock::SensitiveAction::verify(&app, &lease_b, None, "backup fixture")
+                .await
+                .unwrap();
+        let output = directory.path().join("output");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("sentinel"), b"untouched destination").unwrap();
+        let destination = output.join("must-not-exist.mtbackup");
+        let result = create_backup_offline(
+            &profile_b,
+            "pw",
+            &destination,
+            directory.path(),
+            &authority_b,
+            &RecoveryKey::generate(),
+            "local-b",
+            "pw",
+            false,
+            &proof,
+            Some(retired_a),
+        );
+        assert!(
+            matches!(result, Err(CommandError::Authorization(_))),
+            "backup accepted another local profile"
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_dir(&output).unwrap().count(),
+            1,
+            "backup created temporary output before owner validation"
+        );
+        assert_eq!(
+            fs::read(output.join("sentinel")).unwrap(),
+            b"untouched destination"
+        );
+        let runtime_b = mesh_talk_core::node::NodeRuntime::start(
+            directory.path(),
+            "local-b",
+            "B",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(permit_b.install(runtime_b).await);
+        let exact =
+            RuntimeAuthority::request(app.session().clone(), lease_b, node.clone()).unwrap();
+        let mut exact_permit = exact.begin().await.unwrap();
+        let exact_retired = exact_permit.take_retired().unwrap();
+        let valid_destination = output.join("valid-local-b.mtbackup");
+        let created = create_backup_offline(
+            &profile_b,
+            "pw",
+            &valid_destination,
+            directory.path(),
+            &exact,
+            &RecoveryKey::generate(),
+            "local-b",
+            "pw",
+            false,
+            &proof,
+            Some(exact_retired),
+        )
+        .unwrap();
+        assert_eq!(
+            created.preview.messages, 0,
+            "equal-account installation inherited another local user's private history"
+        );
+        assert!(valid_destination.is_file());
+        assert!(!destination.exists());
+        drop(exact_permit);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { crc32 } from "../evals/png-evidence.mjs";
 import { runInNewContext } from "node:vm";
@@ -197,4 +199,126 @@ test("receipt capture rejects stale compositor frame then requires two identical
     assert.equal(error.captureDiagnostics.paint.painted,false);
     return /never settled/.test(error.message);
   });
+});
+
+async function logFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), "native-log-capture-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = join(root, "fixture"), output = join(root, "output");
+  const logs = join(fixture, "app", "logs");
+  await mkdir(logs, { recursive: true });
+  await mkdir(output);
+  return { fixture, output, logs, password: "private-fixture-password", retired: true };
+}
+
+test("private native log capture waits for retirement before touching paths", async t => {
+  const { collectNativeApplicationLogs } = await load();
+  const expected = { status: "not-retired", files: [], issues: [] };
+  assert.deepEqual(await collectNativeApplicationLogs({ retired: false }), expected);
+  const f = await logFixture(t);
+  await writeFile(join(f.logs, "mesh-talk.log"), f.password);
+  assert.deepEqual(await collectNativeApplicationLogs({ ...f, retired: false }), expected);
+  assert.deepEqual(await readdir(f.output), []);
+});
+
+test("private native logs retain bounded redacted tails after retirement", async t => {
+  const { collectNativeApplicationLogs, nativeApplicationLogLimits: limits } = await load();
+  const f = await logFixture(t);
+  await writeFile(join(f.logs, "mesh-talk.log"), "old".repeat(limits.fileBytes) + `\nstartup failed ${f.password}\n`);
+  await writeFile(join(f.logs, "unrelated.log"), "do not collect");
+  const result = await collectNativeApplicationLogs(f);
+  assert.equal(result.status, "collected");
+  assert.equal(result.files.length, 1);
+  const bytes = await readFile(join(f.output, result.files[0].artifact));
+  assert.ok(bytes.length <= limits.fileBytes);
+  assert.match(bytes.toString(), /startup failed \[REDACTED\]/);
+  assert.ok(!bytes.includes(Buffer.from(f.password)));
+  assert.equal(result.files[0].truncated, true);
+  assert.equal((await lstat(join(f.output, result.files[0].artifact))).isFile(), true);
+});
+
+test("private native log capture reports missing and nonregular paths", async t => {
+  const { collectNativeApplicationLogs } = await load();
+  const f = await logFixture(t);
+  await rm(f.logs, { recursive: true });
+  assert.equal((await collectNativeApplicationLogs(f)).status, "missing");
+  await writeFile(f.logs, "not a log directory");
+  assert.equal((await collectNativeApplicationLogs(f)).status, "unavailable");
+  await rm(f.logs);
+  await mkdir(join(f.logs, "mesh-talk.log"), { recursive: true });
+  const result = await collectNativeApplicationLogs(f);
+  assert.equal(result.status, "partial");
+  assert.equal(result.files.length, 0);
+  assert.equal(result.issues[0].reason, "unsafe-file");
+});
+
+test("private native log capture rejects linked directories and files", async t => {
+  const { collectNativeApplicationLogs } = await load();
+  const f = await logFixture(t);
+  const outside = join(f.output, "outside");
+  await mkdir(outside);
+  await writeFile(join(outside, "mesh-talk.log"), "outside secret");
+  try { await symlink(join(outside, "mesh-talk.log"), join(f.logs, "mesh-talk.log")); }
+  catch (error) { if (["EPERM", "EACCES"].includes(error.code)) { t.skip("host cannot create native symlinks"); return; } throw error; }
+  assert.equal((await collectNativeApplicationLogs(f)).issues[0].reason, "unsafe-file");
+  await rm(f.logs, { recursive: true });
+  await symlink(outside, f.logs, "junction");
+  assert.equal((await collectNativeApplicationLogs(f)).status, "unavailable");
+  assert.deepEqual((await readdir(f.output)).sort(), ["outside"]);
+});
+
+test("private native log capture reports unreadable files without throwing", async t => {
+  if (process.platform === "win32" || process.getuid?.() === 0) { t.skip("POSIX permission fixture requires an unprivileged POSIX host"); return; }
+  const { collectNativeApplicationLogs } = await load();
+  const f = await logFixture(t);
+  const path = join(f.logs, "mesh-talk.log");
+  await writeFile(path, "inaccessible");
+  await chmod(path, 0);
+  t.after(() => chmod(path, 0o600).catch(() => {}));
+  const result = await collectNativeApplicationLogs(f);
+  assert.equal(result.status, "partial");
+  assert.equal(result.files.length, 0);
+  assert.equal(result.issues[0].reason, "EACCES");
+});
+
+test("private native log capture bounds directory scans, file count and total bytes", async t => {
+  const { collectNativeApplicationLogs, nativeApplicationLogLimits: limits } = await load();
+  const f = await logFixture(t);
+  for (let i = 0; i < limits.files + 2; i++) await writeFile(join(f.logs, `mesh-talk-${i}.log`), "x".repeat(limits.fileBytes - 1) + "\n");
+  const result = await collectNativeApplicationLogs(f);
+  assert.equal(result.status, "partial");
+  assert.equal(result.files.length, limits.totalBytes / limits.fileBytes);
+  assert.ok(result.files.length <= limits.files);
+  assert.ok(result.files.reduce((n, file) => n + file.bytes, 0) <= limits.totalBytes);
+  assert.ok(result.issues.some(issue => issue.reason === "byte-limit" || issue.reason === "file-limit"));
+  const counted = await logFixture(t);
+  for (let i = 0; i < limits.files + 2; i++) await writeFile(join(counted.logs, `mesh-talk-${i}.log`), "small\n");
+  const count = await collectNativeApplicationLogs(counted);
+  assert.equal(count.files.length, limits.files);
+  assert.ok(count.issues.some(issue => issue.reason === "file-limit"));
+  const scanned = await logFixture(t);
+  for (let i = 0; i < limits.entries + 2; i++) await writeFile(join(scanned.logs, `other-${i}`), "");
+  assert.ok((await collectNativeApplicationLogs(scanned)).issues.some(issue => issue.reason === "entry-limit"));
+});
+
+test("private native log tail never publishes a password cut by its byte boundary", async t => {
+  const { collectNativeApplicationLogs, nativeApplicationLogLimits: limits } = await load();
+  const f = await logFixture(t);
+  const suffix = "suffix\n";
+  await writeFile(join(f.logs, "mesh-talk.log"), f.password + "x".repeat(limits.fileBytes - suffix.length - 5) + suffix);
+  const result = await collectNativeApplicationLogs(f);
+  assert.equal(result.status, "collected");
+  assert.equal((await readFile(join(f.output, result.files[0].artifact))).toString(), "");
+});
+
+test("private native log capture prioritizes the current startup log before rotations", async t => {
+  const { collectNativeApplicationLogs, nativeApplicationLogLimits: limits } = await load();
+  const f = await logFixture(t);
+  for (let i = 0; i < limits.files + 2; i++) await writeFile(join(f.logs, `mesh-talk-${i}.log`), "rotated\n".repeat(limits.fileBytes));
+  await writeFile(join(f.logs, "mesh-talk.log"), "current startup failure\n");
+  const result = await collectNativeApplicationLogs(f);
+  assert.match((await readFile(join(f.output, result.files[0].artifact))).toString(), /current startup failure/);
+  assert.ok(result.files.length <= limits.files);
+  assert.ok(result.files.every(file => file.bytes <= limits.fileBytes));
+  assert.ok(result.files.reduce((sum, file) => sum + file.bytes, 0) <= limits.totalBytes);
 });

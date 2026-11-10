@@ -47,9 +47,10 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   await expect(page.getByTestId("sidebar-action-search")).toHaveText(
     "Search messages",
   );
-  await expect(page.getByTestId("sidebar-action-files")).toHaveText(
-    "Received files",
-  );
+  const files = page.getByTestId("sidebar-action-files");
+  await expect(files).toHaveText("Files");
+  await expect(files).toHaveAccessibleName("Received files");
+  await expect(files).toHaveAttribute("title", "Received files");
   await expect(page.getByTestId("lan-online-count")).toContainText("online");
   await expect(page.getByTestId("lan-online-count")).toHaveAttribute(
     "aria-label",
@@ -202,7 +203,16 @@ test("stranded prompt dismiss target meets interaction invariants", async ({
   await expectVisibleFocus(page, page.getByTestId("stranded-dismiss"));
 });
 
-for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
+for (const language of [
+  "en",
+  "es",
+  "ja",
+  "zh-Hans",
+  "zh-Hant",
+  "yue",
+  "pt-BR",
+  "ko",
+]) {
   test(`sidebar actions fit in ${language}`, async ({ page }) => {
     await page.addInitScript(
       (nextLanguage) => localStorage.setItem("mesh-talk-lang", nextLanguage),

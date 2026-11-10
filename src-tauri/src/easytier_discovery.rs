@@ -28,7 +28,15 @@ impl CandidateSource for EasyTierCandidates {
             {
                 return Vec::new();
             }
-            local_inventory_from(cli_locations(), &rpc, self.discovery_port).await
+            local_inventory_from(
+                cli_locations()
+                    .into_iter()
+                    .map(crate::background_command::command)
+                    .collect(),
+                &rpc,
+                self.discovery_port,
+            )
+            .await
         })
     }
 }
@@ -67,12 +75,16 @@ fn cli_locations() -> Vec<PathBuf> {
     paths
 }
 
-async fn local_inventory_from(executables: Vec<PathBuf>, rpc: &str, port: u16) -> Vec<SocketAddr> {
+async fn local_inventory_from(
+    commands: Vec<tokio::process::Command>,
+    rpc: &str,
+    port: u16,
+) -> Vec<SocketAddr> {
     // Bound the whole search, including executable fallbacks, below the host's
     // deadline. Dropping this future also drops/kills any in-flight CLI child.
     tokio::time::timeout(Duration::from_secs(2), async {
-        for executable in executables {
-            if let Some(bytes) = read_inventory(executable, rpc).await
+        for command in commands {
+            if let Some(bytes) = read_inventory(command, rpc).await
                 && let Some(candidates) = parse_routes(&bytes, port)
             {
                 return candidates;
@@ -84,8 +96,7 @@ async fn local_inventory_from(executables: Vec<PathBuf>, rpc: &str, port: u16) -
     .unwrap_or_default()
 }
 
-async fn read_inventory(executable: PathBuf, rpc: &str) -> Option<Vec<u8>> {
-    let mut command = crate::background_command::command(executable);
+async fn read_inventory(mut command: tokio::process::Command, rpc: &str) -> Option<Vec<u8>> {
     let mut child = command
         .args([
             "--rpc-portal",

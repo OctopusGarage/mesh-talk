@@ -52,4 +52,10 @@ pub struct BackupPreview {
     pub file_cards: u64,
     pub media_files: u64,
     pub missing_media: u64,
+    #[serde(default)]
+    pub favorites: u64,
+    #[serde(default)]
+    pub favorite_files: u64,
+    #[serde(default)]
+    pub missing_favorite_files: u64,
 }
