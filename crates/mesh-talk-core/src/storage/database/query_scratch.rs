@@ -167,17 +167,17 @@ mod tests {
                 },
                 ffi::SQLITE_OK
             );
-            assert!(!file.is_null());
+            let file =
+                std::ptr::NonNull::new(file).expect("SQLite must return its live spill file");
             // SAFETY: the pager/file remain live until the connection closure
-            // returns. The nonnull methods table belongs to this SQLite file.
-            let methods = unsafe {
-                assert!(!(*file).pMethods.is_null());
-                &*(*file).pMethods
-            };
+            // returns. Check both FFI output pointers before borrowing the
+            // methods table; neither pointer is owned or closed by this test.
+            let methods = unsafe { file.as_ref().pMethods.as_ref() }
+                .expect("a live SQLite spill file must have a methods table");
             let mut length = 0;
             // SAFETY: output points to a valid integer and file is still live.
             assert_eq!(
-                unsafe { methods.xFileSize.unwrap()(file, &mut length) },
+                unsafe { methods.xFileSize.unwrap()(file.as_ptr(), &mut length) },
                 ffi::SQLITE_OK
             );
             assert!(
@@ -194,7 +194,7 @@ mod tests {
             );
             // SAFETY: same live file and initialized size output as above.
             assert_eq!(
-                unsafe { methods.xFileSize.unwrap()(file, &mut length) },
+                unsafe { methods.xFileSize.unwrap()(file.as_ptr(), &mut length) },
                 ffi::SQLITE_OK
             );
             assert!(length > 8 * 1024 * 1024 && length <= 32 * 1024 * 1024);
@@ -206,7 +206,12 @@ mod tests {
                 // are bounded by xFileSize, while the owned file remains live.
                 assert_eq!(
                     unsafe {
-                        methods.xRead.unwrap()(file, bytes.as_mut_ptr().cast(), size as i32, offset)
+                        methods.xRead.unwrap()(
+                            file.as_ptr(),
+                            bytes.as_mut_ptr().cast(),
+                            size as i32,
+                            offset,
+                        )
                     },
                     ffi::SQLITE_OK
                 );
