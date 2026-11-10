@@ -3,10 +3,9 @@
   "checkpoint_id": "01M71T23A58YW7CFRAMQ57ZN4D",
   "session_id": "01a1c39c-4d4d-7e32-9d91-aabbb7ee41eb",
   "strategy": "manual-commit",
-  "created_at": "2026-11-10T04:04:35.463702Z",
+  "created_at": "2026-11-10T04:04:43.886925Z",
   "branch": "fix/pr-explicit-validation-owners",
   "checkpoints_count": 1,
-  "save_step_count": 1,
   "files_touched": [
     "frontend/e2e/chat.spec.ts",
     "frontend/e2e/reaction-summaries.spec.ts",
@@ -17,14 +16,15 @@
   "agent": "Codex",
   "model": "gpt-6.1-sol",
   "turn_id": "0612530a8fef",
-  "compact_transcript_start": 0,
+  "checkpoint_transcript_start": 142,
+  "transcript_lines_at_start": 142,
+  "compact_transcript_start": 20,
   "token_usage": {
-    "input_tokens": 53225,
+    "input_tokens": 238,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 945920,
-    "output_tokens": 3200,
-    "api_call_count": 18,
-    "subagent_tokens_complete": true
+    "cache_read_tokens": 66176,
+    "output_tokens": 49,
+    "api_call_count": 1
   },
   "redaction": {
     "replacements": 3541,
