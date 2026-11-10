@@ -167,6 +167,7 @@ thread_local! {
 struct OperationPublication {
     meta: AccountDocumentMeta,
     projection: [u8; 32],
+    input: Option<[u8; 32]>,
     repair_at: std::time::Instant,
 }
 const MAX_OPERATION_PUBLICATIONS: usize = 128;
@@ -492,6 +493,33 @@ impl AccountDocumentStore {
                     && std::time::Instant::now() < entry.repair_at
             })
     }
+    pub(super) fn operation_publication_input_unchanged(
+        &mut self,
+        meta: Option<&AccountDocumentMeta>,
+        input: [u8; 32],
+        verified: Option<[u8; 32]>,
+    ) -> bool {
+        let projection = meta
+            .and_then(|meta| self.operation_publications.get(&meta.key))
+            .filter(|entry| entry.input == Some(input))
+            .map(|entry| entry.projection);
+        projection.is_some_and(|projection| {
+            self.operation_publication_unchanged(meta, projection, verified)
+        })
+    }
+    /// Attach only the before/after stable input to an already validated head.
+    /// Updating qualification never renews the owner's sparse repair deadline.
+    pub(super) fn qualify_operation_publication(
+        &mut self,
+        meta: &AccountDocumentMeta,
+        input: Option<[u8; 32]>,
+    ) {
+        if let Some(entry) = self.operation_publications.get_mut(&meta.key)
+            && entry.meta == *meta
+        {
+            entry.input = input;
+        }
+    }
     pub(super) fn remember_operation_publication(
         &mut self,
         meta: AccountDocumentMeta,
@@ -519,6 +547,7 @@ impl AccountDocumentStore {
             OperationPublication {
                 meta,
                 projection,
+                input: None,
                 repair_at: std::time::Instant::now() + OPERATION_PUBLICATION_REPAIR,
             },
         );
@@ -1847,7 +1876,18 @@ mod tests {
         };
         let first = make(0);
         store.remember_operation_publication(first.clone(), [1; 32]);
+        store.qualify_operation_publication(&first, Some([3; 32]));
         let deadline = store.operation_publications[&first.key].repair_at;
+        assert!(store.operation_publication_input_unchanged(
+            Some(&first),
+            [3; 32],
+            Some(first.content_hash)
+        ));
+        assert!(!store.operation_publication_input_unchanged(
+            Some(&first),
+            [4; 32],
+            Some(first.content_hash)
+        ));
         assert!(store.operation_publication_unchanged(
             Some(&first),
             [1; 32],
@@ -1869,8 +1909,15 @@ mod tests {
             [1; 32],
             Some(first.content_hash)
         ));
+        assert!(!store.operation_publication_input_unchanged(
+            Some(&changed),
+            [3; 32],
+            Some(first.content_hash)
+        ));
+        assert!(!store.operation_publication_input_unchanged(Some(&first), [3; 32], None));
         assert!(!store.operation_publication_unchanged(Some(&first), [1; 32], None));
         store.remember_operation_publication(first.clone(), [1; 32]);
+        store.qualify_operation_publication(&first, Some([3; 32]));
         for n in 1..=MAX_OPERATION_PUBLICATIONS {
             store.remember_operation_publication(make(n), [1; 32]);
         }
@@ -1878,12 +1925,23 @@ mod tests {
             !store.operation_publication_unchanged(Some(&first), [1; 32], Some(first.content_hash)),
             "eviction must require normal publication work"
         );
+        assert!(!store.operation_publication_input_unchanged(
+            Some(&first),
+            [3; 32],
+            Some(first.content_hash)
+        ));
         assert_eq!(
             store.operation_publications.len(),
             MAX_OPERATION_PUBLICATIONS
         );
         let last = make(MAX_OPERATION_PUBLICATIONS);
+        store.qualify_operation_publication(&last, Some([3; 32]));
         store.expire_operation_publications_for_test();
+        assert!(!store.operation_publication_input_unchanged(
+            Some(&last),
+            [3; 32],
+            Some(last.content_hash)
+        ));
         assert!(!store.operation_publication_unchanged(
             Some(&last),
             [1; 32],
@@ -1892,6 +1950,11 @@ mod tests {
         drop(store);
         let mut reopened =
             AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        assert!(!reopened.operation_publication_input_unchanged(
+            Some(&last),
+            [3; 32],
+            Some(last.content_hash)
+        ));
         assert!(!reopened.operation_publication_unchanged(
             Some(&last),
             [1; 32],

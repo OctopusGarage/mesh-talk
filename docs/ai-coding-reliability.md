@@ -1163,10 +1163,17 @@ invalidation, failed writes and timer-driven recovery without periodic peer poll
 Comparing unchanged publication after loading its encrypted old payload is still
 repeated work. Ordinary/legacy operation publishers qualify at most 128 runtime
 metadata/projection pairs under the exact verified own-head hash, with a
-nonrenewable five-minute repair deadline. Current projection authority is still
-evaluated before reuse; changed heads, missing verification and expiry re-read.
-The [operation publication regression](../crates/mesh-talk-core/src/node/account_documents/group_operations.rs)
-counts body reads as well as signatures and exercises repair and replacement.
+nonrenewable five-minute repair deadline. Settled ordinary Text/Sticker/File
+results can qualify before body materialization only with complete current journal,
+source/destructive and File row/suppression/recall metadata, observed unchanged
+before and after materialization. Pending/query/forwarding decisions and unsupported
+Recall or expiring File inputs retain live projection. Both absolute and first-seen
+expiry require live evaluation. Changed heads, missing verification and sparse
+repair still re-read. The [operation publication regressions](../crates/mesh-talk-core/src/node/account_documents/group_operations.rs)
+count actual EventRepository body fetches/decodes for real committed Text and File
+results as well as document reads and signatures; a Rename-only fixture or a
+document-store counter cannot detect repeated event preparation. They also cover
+changed inputs, File retirement, expiry, repair and replacement.
 Explicit document reads continue to authenticate durable bytes; this scheduling
 qualification never serves a payload or grants permission.
 

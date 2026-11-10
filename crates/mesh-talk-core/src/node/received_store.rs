@@ -483,6 +483,13 @@ impl ReceivedStore {
             .map(decode)
             .transpose()
     }
+    pub(crate) fn header_in(
+        &self,
+        conversation: &ConversationId,
+        id: EventId,
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.repository.lookup_header(conversation, id.as_bytes())
+    }
     pub(crate) fn file_headers(
         &self,
         file: &ConversationId,

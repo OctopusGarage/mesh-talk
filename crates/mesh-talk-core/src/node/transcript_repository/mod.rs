@@ -376,6 +376,18 @@ impl TranscriptRepository {
             h.map(|h| self.load_on(c, h)).transpose()
         })
     }
+    /// A point observation never fetches plaintext; the existing revision and
+    /// digest still qualify later body materialization, not its authorization.
+    pub(super) fn lookup_header(
+        &self,
+        conversation: &ConversationId,
+        key: &[u8],
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.check_read_publication()?;
+        self.profile
+            .database()
+            .read(|c| Self::find_header_on(c, self.kind, Some(conversation), key))
+    }
     fn find_header_on(
         c: &Connection,
         kind: i64,
