@@ -18,7 +18,8 @@ use tokio::sync::watch;
 thread_local! {
 static PHYSICAL_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 static SLICE_TIMES: std::cell::RefCell<Vec<(Instant,Instant)>> = const { std::cell::RefCell::new(Vec::new()) };
-static LAST_DUTY_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>> = const { std::cell::Cell::new(None) };}
+static LAST_DUTY_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>> = const { std::cell::Cell::new(None) };
+static LAST_PHYSICAL_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>> = const { std::cell::Cell::new(None) };}
 
 const MIN_SPACING: Duration = Duration::from_millis(10);
 fn pause_for(elapsed: Duration, failures: u32) -> Duration {
@@ -285,7 +286,10 @@ impl IndexedPostOffice {
             // interrupt the spacing/duty/error-backoff gate.
             let duty = tokio::time::sleep(pause_for(started.elapsed(), failures));
             #[cfg(test)]
-            LAST_DUTY_DEADLINE.with(|deadline| deadline.set(Some(duty.deadline())));
+            {
+                LAST_DUTY_DEADLINE.with(|deadline| deadline.set(Some(duty.deadline())));
+                LAST_PHYSICAL_DEADLINE.with(|deadline| deadline.set(physical.next_eligible));
+            }
             tokio::pin!(duty);
             tokio::select! {
                 biased;
@@ -590,12 +594,46 @@ mod tests {
             1,
             "healthy watch wakes must not inspect physical scalars before success eligibility"
         );
-        let limit = first + PHYSICAL_COOLDOWN.saturating_mul(2);
-        while VACUUM_ATTEMPTS.with(|v| v.borrow().len()) < 2 {
-            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
-            assert!(tokio::time::Instant::now() < limit);
+        let eligible = LAST_PHYSICAL_DEADLINE
+            .with(|deadline| deadline.get())
+            .expect("the first physical slice must retain its measured eligibility deadline");
+        assert!(eligible >= first + PHYSICAL_COOLDOWN);
+        tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(eligible - MIN_SPACING)=>{}}
+        assert_eq!(VACUUM_ATTEMPTS.with(|v| v.borrow().len()), 1);
+        assert_eq!(
+            PHYSICAL_INSPECTIONS.with(|v| v.get()),
+            1,
+            "watch work must not inspect physical state before the actual measured deadline"
+        );
+        // Follow the real owner's independent physical and whole-slice duty
+        // gates. Real SQL elapsed time can legitimately place either beyond a
+        // fixed multiple of the minimum cooldown, even with Tokio time paused.
+        for _ in 0..64 {
+            if VACUUM_ATTEMPTS.with(|v| v.borrow().len()) >= 2 {
+                break;
+            }
+            let physical = LAST_PHYSICAL_DEADLINE
+                .with(|deadline| deadline.get())
+                .expect("pending physical cleanup must retain eligibility");
+            let duty = LAST_DUTY_DEADLINE
+                .with(|deadline| deadline.get())
+                .expect("a completed slice must arm its measured duty gate");
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(physical.max(duty))=>{}}
+            std::future::poll_fn(|cx| match std::future::Future::poll(worker.as_mut(), cx) {
+                std::task::Poll::Ready(result) => panic!("worker stopped: {result:?}"),
+                std::task::Poll::Pending => std::task::Poll::Ready(()),
+            })
+            .await;
         }
         let attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().clone());
+        assert!(
+            attempts.len() >= 2,
+            "physical work must resume within bounded owned slices"
+        );
+        assert!(
+            attempts[1] >= eligible,
+            "the second attempt must honor actual success eligibility"
+        );
         assert!(attempts[1] - attempts[0] >= PHYSICAL_COOLDOWN);
         assert!(PHYSICAL_INSPECTIONS.with(|v| v.get()) >= 2);
         // Real SQL duration controls the duty pause even while Tokio time is

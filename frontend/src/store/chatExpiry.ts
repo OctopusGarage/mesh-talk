@@ -20,6 +20,7 @@ export function startChatExpiry(ports: {
   const wallStart = Date.now();
   const monotonicStart = performance.now();
   let stopped = false;
+  let refreshQueued = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const now = () =>
     Math.max(
@@ -56,6 +57,19 @@ export function startChatExpiry(ports: {
     if (stopped || !ports.current()) return;
     const deadline = nextDeadline();
     if (deadline === Infinity) return;
+    // A state publication can run before an already-due timer. Do not defer
+    // retirement to another timer tick after cancelling that deadline. A
+    // microtask keeps store updates out of the current subscriber dispatch.
+    if (deadline <= now()) {
+      if (!refreshQueued) {
+        refreshQueued = true;
+        queueMicrotask(() => {
+          refreshQueued = false;
+          refresh();
+        });
+      }
+      return;
+    }
     // A sparse clock check only while expiring content exists also bounds wall-clock jumps.
     timer = setTimeout(
       refresh,

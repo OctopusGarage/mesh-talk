@@ -317,6 +317,13 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 ## R05: Bounded work must also make progress
 
+When a state publication reschedules an actual-deadline timer, already-due work
+must not depend on another timer tick after the original callback is cancelled.
+Dispatch the due work after the current state notification, coalesce repeated
+publications, and recheck the owning lifetime before mutation. The
+[chat expiry regressions](../frontend/src/store/chat.test.ts) cover a due deadline
+interrupted by state publication and cancellation before its queued dispatch.
+
 Distinguish a fully checked no-work outcome from missing evidence, deferred
 preparation and failure before parking repeated work. Learn scheduling-only
 absence after source guards release and exact before/after inputs match; keep
@@ -845,6 +852,20 @@ and existing compatibility rules. Multi-store changes are not automatically one
 transaction; define recovery or compensation for every partial commit boundary.
 Use established error types and distinguish absent, unavailable and corrupt data.
 
+Distinguish filesystem publication durability from later database mutations.
+The [history source publisher](../crates/mesh-talk-core/src/node/transcript_repository/publication.rs)
+synchronizes the barrier file and, where supported, its renamed parent directory
+before SQL marks a source published. Retrying a failed initial sync must finish that ordering without
+replaying a committed import. Once published, every write still validates the exact
+barrier, while SQL FULL transactions own row durability; unchanged directory entries
+must not be synchronized for each row mutation. The publisher's
+`initial_history_barrier_sync_failure_requires_retry_before_publication` regression
+and the opaque checkpoint owner's
+`changed_cache_sql_writes_do_not_republish_barrier` and
+`failed_checkpoint_sql_write_preserves_previous_value_and_retries_after_reopen`
+regressions retain initial-sync retry, barrier rejection and SQL rollback/reopen
+evidence independently of the directory-sync budget.
+
 Keep UI observations distinct from durable progress: phase/check timestamps
 must not rewrite a reception ledger. An unchanged committed cursor can reuse its
 successful commit only while the exact owner has no dirty durable state; failed
@@ -861,6 +882,17 @@ to pending/active work and exclude active deadlines from timer selection. The
 checks capped spacing, revision replacement, wake races, overflow cleanup and
 success deduplication; the real source-invalidation fanout regressions retain
 original event/sequence authority through repeated failure and recovery.
+
+A validated durable fallback must warm the existing bounded runtime owner even
+when no subsequent mutation occurs; otherwise fresh adapters can repeatedly
+verify unchanged evidence. Normalize runtime binding only after rejecting retired
+session-only evidence, and preserve cold repair reset and actual lease ownership.
+A busy adapter does not exclude maintenance: compare its captured receipt under
+the same owner guard used to publish warming, so a concurrent repair rewind
+cannot be restored by stale initialization.
+The [mailbox checkpoint regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental/checkpoints.rs)
+cover fresh adapters without signature reopens, SQL commits or directory syncs,
+retired-runtime rejection and repair progress under its live owner.
 
 Keep retry scheduling distinct from durable progress. A bounded volatile order
 may replace repeated ticket writes, but must reconcile current pending rows,

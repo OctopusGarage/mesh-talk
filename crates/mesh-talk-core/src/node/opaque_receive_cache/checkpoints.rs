@@ -111,8 +111,9 @@ impl Bucket {
         if unchanged {
             return Ok(true);
         }
-        // Sync before entering the SQL guard. The transaction still checks the
-        // exact value again; this preflight does not own concurrent mutation.
+        // Validate the published barrier before entering the SQL guard. The
+        // transaction still checks the exact value again; this preflight does
+        // not own concurrent mutation.
         cache.checkpoint_source()?.check_write()?;
         profile.database().transport_hint_transaction(|c| {
             let existing: Option<(i64,bool)> = c.query_row(&format!("SELECT length(key)+length(value),value=?2 FROM {} WHERE key=?1",self.table), params![key,value], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
@@ -454,32 +455,91 @@ mod tests {
     }
 
     #[test]
-    fn changed_cache_write_syncs_and_failed_sync_remains_retryable() {
+    fn changed_cache_sql_writes_do_not_republish_barrier() {
         let (_root, profile, _device, _account, cache) = fixture();
-        cache.put_checkpoint(b"checkpoint", b"old").unwrap();
         let changes = profile.database().read(|c| Ok(c.total_changes())).unwrap();
+        let commits = profile.database().successful_write_commits();
         crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
-        crate::storage::profile::publication::tests::CUT
-            .with(|value| *value.borrow_mut() = Some("parent-sync"));
-        let rejected = cache.put_checkpoint(b"checkpoint", b"new");
-        crate::storage::profile::publication::tests::CUT.with(|value| *value.borrow_mut() = None);
-        assert!(rejected.is_err());
+        assert!(cache.put_checkpoint(b"checkpoint", b"old").unwrap());
+        assert!(cache.put_checkpoint(b"checkpoint", b"new").unwrap());
+        assert!(cache.put_wrapper_hint(b"wrapper", b"outer").unwrap());
+        cache.remove_checkpoint(b"checkpoint").unwrap();
+        assert_eq!(cache.get_checkpoint(b"checkpoint").unwrap(), None);
         assert_eq!(
-            profile.database().read(|c| Ok(c.total_changes())).unwrap(),
-            changes,
-            "a failed barrier sync must precede every cache mutation"
+            cache.get_wrapper_hint(b"wrapper").unwrap(),
+            Some(b"outer".to_vec())
+        );
+        assert!(profile.database().read(|c| Ok(c.total_changes())).unwrap() > changes);
+        assert!(profile.database().successful_write_commits() > commits);
+        assert_eq!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+            0,
+            "changed SQL rows must not republish an already durable unchanged directory entry"
+        );
+    }
+
+    #[test]
+    fn failed_checkpoint_sql_write_preserves_previous_value_and_retries_after_reopen() {
+        let (root, profile, device, account, cache) = fixture();
+        cache.put_checkpoint(b"checkpoint", b"old").unwrap();
+        profile.database().transaction(|c| {
+            // Abort after the payload update, so the usage and payload must both roll back.
+            c.execute_batch("CREATE TEMP TRIGGER fail_checkpoint_usage BEFORE UPDATE ON opaque_checkpoint_usage BEGIN SELECT RAISE(ABORT,'injected checkpoint SQL failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        let commits = profile.database().successful_write_commits();
+        let usage = profile.database().read(|c| CHECKPOINTS.usage(c)).unwrap();
+        assert!(cache.put_checkpoint(b"checkpoint", b"new").is_err());
+        assert_eq!(profile.database().successful_write_commits(), commits);
+        assert_eq!(
+            cache.get_checkpoint(b"checkpoint").unwrap(),
+            Some(b"old".to_vec())
+        );
+        assert_eq!(
+            profile.database().read(|c| CHECKPOINTS.usage(c)).unwrap(),
+            usage
+        );
+        drop(cache);
+        drop(profile);
+        let profile = ProfileStorage::open_participant(
+            ProfileStorageLease::acquire(root.path()).unwrap(),
+            &device.public(),
+            &account.public(),
+            &root.path().join("events"),
+            &root.path().join("sent"),
+            "pw",
+        )
+        .unwrap();
+        profile.complete_participant("pw", None).unwrap();
+        assert_eq!(
+            profile
+                .database()
+                .read(|c| Ok(c.pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))?))
+                .unwrap(),
+            2
+        );
+        let cache = OpaqueReceiveCache::open(
+            profile.clone(),
+            &root.path().join("events"),
+            "pw",
+            &device.public(),
+            &account.account_id(),
         );
         assert_eq!(
             cache.get_checkpoint(b"checkpoint").unwrap(),
             Some(b"old".to_vec())
         );
-        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
-        assert!(cache.put_checkpoint(b"checkpoint", b"new").unwrap());
-        assert!(
-            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0,
-            "a changed write must retry barrier synchronization after failure"
+        assert_eq!(
+            profile.database().read(|c| CHECKPOINTS.usage(c)).unwrap(),
+            usage
         );
-        assert!(profile.database().read(|c| Ok(c.total_changes())).unwrap() > changes);
+        let commits = profile.database().successful_write_commits();
+        assert!(cache.put_checkpoint(b"checkpoint", b"new").unwrap());
+        assert!(profile.database().successful_write_commits() > commits);
+        assert_eq!(
+            cache.get_checkpoint(b"checkpoint").unwrap(),
+            Some(b"new".to_vec())
+        );
     }
 
     #[test]
@@ -503,6 +563,9 @@ mod tests {
             assert!(cache.get_wrapper_hint(b"wrapper").is_err());
             assert!(cache.put_checkpoint(b"checkpoint", b"sealed").is_err());
             assert!(cache.put_wrapper_hint(b"wrapper", b"outer").is_err());
+            assert!(cache.put_checkpoint(b"checkpoint", b"changed").is_err());
+            assert!(cache.put_wrapper_hint(b"wrapper", b"changed").is_err());
+            assert!(cache.remove_checkpoint(b"checkpoint").is_err());
             assert!(cache.remove_checkpoint(b"absent").is_err());
             assert_eq!(
                 profile.database().read(|c| Ok(c.total_changes())).unwrap(),

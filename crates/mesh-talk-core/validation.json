@@ -3101,7 +3101,7 @@
             "reference": "docs/ARCHITECTURE.md#3-event-log--sync-eventlog"
           },
           {
-            "name": "Four scoped upload slots preserve unfinished preparation across cancelled rounds. Two independent bounded receive-only owners never acquire history views and permit incoming processing under bulk saturation. New bulk scopes defer under productive saturation; completed or empty owners are preferred for eviction, and privacy-generation changes or 30 seconds without actual progress permit reclamation. Acquiring and validating do not renew progress; contended entries do not block unrelated admission. Evicted selection destruction occurs outside global cache admission.",
+            "name": "Four scoped upload slots preserve unfinished preparation across cancelled rounds. Two independent bounded receive-only owners never acquire history views and permit incoming processing under bulk saturation. New bulk scopes defer under productive saturation; completed or empty owners are preferred for eviction, and privacy-generation changes or 30 seconds without actual progress permit reclamation. Acquiring and validating do not renew progress; contended entries do not block unrelated admission. Evicted selection destruction occurs outside global cache admission. Validated cold receipts warm these same bounded owners without writes or deadline renewal; current-runtime rebinding follows session-only validation, while cold repair spent reset, lease ownership and recovery remain unchanged.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {

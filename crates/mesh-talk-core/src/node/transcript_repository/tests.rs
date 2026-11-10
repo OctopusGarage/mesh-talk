@@ -91,6 +91,80 @@ fn auxiliary_sources_recover_each_barrier_without_changing_transcript_schema() {
 }
 
 #[test]
+fn initial_history_barrier_sync_failure_requires_retry_before_publication() {
+    use publication::PublishedHistorySource;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let path = dir.path().join("custody.log");
+    let (mut legacy, _) = EncryptedRecordLog::<u64>::open(&path, "pw", b"MTAUX1").unwrap();
+    legacy.append(&7).unwrap();
+    drop(legacy);
+    crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+    crate::storage::profile::publication::tests::CUT
+        .with(|value| *value.borrow_mut() = Some("parent-sync"));
+    let result = PublishedHistorySource::open(
+        owner.clone(),
+        &path,
+        "pw",
+        CHANNEL_CUSTODY,
+        |_, path, password| {
+            let (_, records) = EncryptedRecordLog::<u64>::open(path, password, b"MTAUX1")?;
+            assert_eq!(records, [7]);
+            Ok(())
+        },
+    );
+    crate::storage::profile::publication::tests::CUT.with(|value| *value.borrow_mut() = None);
+    assert!(
+        result.is_err(),
+        "an unsynchronized first barrier must not produce a published owner"
+    );
+    assert!(
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0
+    );
+    assert_eq!(
+        owner
+            .database()
+            .read(|c| Ok(c.query_row(
+                "SELECT published FROM auxiliary_history_sources WHERE kind=?1",
+                [CHANNEL_CUSTODY],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        0
+    );
+    assert!(
+        EncryptedRecordLog::<u64>::open(&path, "pw", b"MTAUX1").is_err(),
+        "the renamed downgrade barrier must already reject a legacy writer"
+    );
+    drop(owner);
+    let owner = profile(dir.path(), &identity, &account);
+    crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.set(0));
+    let source =
+        PublishedHistorySource::open(owner.clone(), &path, "pw", CHANNEL_CUSTODY, |_, _, _| {
+            panic!("a committed import must not replay after failed directory synchronization")
+        })
+        .unwrap();
+    assert!(
+        crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0,
+        "publication retry must synchronize the existing exact barrier before SQL marks it published"
+    );
+    assert_eq!(
+        owner
+            .database()
+            .read(|c| Ok(c.query_row(
+                "SELECT published FROM auxiliary_history_sources WHERE kind=?1",
+                [CHANNEL_CUSTODY],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        1
+    );
+    source.check_barrier().unwrap();
+}
+
+#[test]
 fn runtime_leaf_gap_revisions_survive_warm_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();

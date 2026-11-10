@@ -178,10 +178,10 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
         }
     }));
     owner.publish_group_inventory_for(group);
-    // Bootstrap may already have published this exact Inventory head. Its
-    // unchanged publication correctly emits no wake; schedule the reference's
-    // next ordinary refresh only after the response hook is installed.
-    reference.account_sync_notify.notify_one();
+    // Bootstrap may already have published this exact Inventory head. Request
+    // the exact receiver-owned pull after installing the response hook; a bare
+    // notification grants no refresh of an unchanged sibling.
+    reference.request_sibling_pull_for_test(&other.identity.public());
     super::cold_account_setup(held)
         .await
         .expect("the reference must reach the unrelated authenticated Control response")

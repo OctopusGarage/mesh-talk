@@ -1623,7 +1623,10 @@ async fn hold_original_pair_resume(
             })
         }
     }));
-    executor.account_sync_notify.notify_one();
+    // Seed the natural unpaired page through actual scoped receiver demand.
+    // No publisher Wake is created: the later authenticated Wake must still
+    // replace this exact original page and pay its protected prefix/resume.
+    executor.request_sibling_pull_for_test(&source.identity.public());
     super::cold_account_setup(arrived.acquire())
         .await
         .unwrap_or_else(|error| {

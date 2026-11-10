@@ -2764,13 +2764,24 @@ source floor. Semantic Profile compaction is classified transactionally and does
 not advance this repair revision; the full destructive revision still guards
 outgoing authority and retained-event views. Actual deletion and retirement keep
 their incoming invalidation behavior. At most 512 checkpoints use 8 MiB; each
-blob is limited to 16 KiB.
+blob is limited to 16 KiB. A successfully validated cold receipt warms its existing
+bounded upload or receive-only owner even when a new adapter changes no progress.
+Only after validation rejects retired session-only evidence is durable progress
+attached to the current runtime. Cold repair normalization still clears spent
+work and drops inactive repair hints; hot repair progress retains its existing
+lease, generation and expiry checks. Warming does not persist a checkpoint,
+acquire a repair lease or renew progress deadlines.
 Wrapper mappings contain IDs only and have independent 250,000-entry/64-MiB
 limits. Point lookups and unchanged writes do not update cache timestamps or
-rewrite old entries. Reads and proven no-ops still check the exact publication
-barrier but do not synchronize its parent directory. Changed writes retain the
-existing durability and retry rules. Missing, corrupt, foreign or evicted hints cause ordinary
-validated synchronization; they never grant admission or recipient delivery.
+rewrite old entries. Every operation still checks the exact publication barrier.
+Initial publication synchronizes the barrier file and, where supported, its
+renamed directory entry before SQL marks the source published; an interrupted
+publication must finish that ordering on retry. Later SQL changes use the encrypted
+connection's FULL transaction durability without synchronizing the unchanged barrier
+directory.
+Missing or changed barriers still reject writes. Failed SQL mutations roll back
+and remain retryable after reopen. Missing, corrupt, foreign or evicted hints cause
+ordinary validated synchronization; they never grant admission or recipient delivery.
 
 A separate versioned namespace in that same bounded wrapper-map bucket records
 outer-to-inner semantic Profile classifications after successful authentication.

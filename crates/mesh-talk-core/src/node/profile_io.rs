@@ -544,6 +544,285 @@ mod compaction_lease_tests {
         );
     }
 
+    #[tokio::test]
+    async fn ordinary_sync_rehydrates_compacted_profiles_once_then_reaches_a_fixed_point() {
+        use crate::eventlog::{AppendOutcome, sync::network::NetworkSyncStore};
+
+        async fn reconcile(source: &Arc<Node>, receiver: &Arc<Node>, conversation: ConversationId) {
+            let (client, server) = tokio::io::duplex(256 * 1024);
+            let source_node = source.clone();
+            let task = tokio::spawn(async move {
+                let mut channel =
+                    crate::transport::SecureChannel::accept(server, &source_node.identity)
+                        .await
+                        .unwrap();
+                let store = source_node.serve_sync_store(channel.peer_identity());
+                loop {
+                    if matches!(
+                        super::super::session::serve_one_paged(&mut channel, &store)
+                            .await
+                            .unwrap(),
+                        super::super::session::Served::Closed
+                    ) {
+                        break;
+                    }
+                }
+            });
+            let mut channel = crate::transport::SecureChannel::connect(
+                client,
+                &receiver.identity,
+                Some(&source.identity.public()),
+            )
+            .await
+            .unwrap();
+            let store = receiver.sync_store(channel.peer_identity());
+            super::super::session::request_round_paged(&mut channel, &store, conversation)
+                .await
+                .unwrap();
+            drop(store);
+            drop(channel);
+            task.await.unwrap();
+        }
+        fn ordinals(node: &Node, ids: &[EventId]) -> Vec<Option<i64>> {
+            let rows = node
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .committed_headers_page(None, 128)
+                .unwrap();
+            ids.iter()
+                .map(|id| {
+                    rows.iter()
+                        .find(|row| row.header.id == *id)
+                        .map(|row| row.ordinal)
+                })
+                .collect()
+        }
+        fn writes(node: &Node) -> (usize, u64) {
+            let database = node.storage.database();
+            (
+                database.successful_write_commits(),
+                database
+                    .read(|connection| Ok(connection.total_changes()))
+                    .unwrap(),
+            )
+        }
+        fn drain(node: &Node, conversation: ConversationId) -> usize {
+            // The normal receive owner alone discovers/requests compaction.
+            // Bound local turns without issuing any artificial maintenance demand.
+            let mut dropped = 0;
+            for _ in 0..64 {
+                node.process_profile_events(conversation);
+                dropped += node.drain_profile_compaction().unwrap().unwrap_or(0);
+            }
+            dropped
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let author = DeviceIdentity::generate();
+        let author_account = Account::generate();
+        let recipient = DeviceIdentity::generate();
+        let recipient_account = Account::generate();
+        let source_proof =
+            crate::discovery::Announce::new_with_account(&author, &author_account, "Source", 9);
+        let receiver_proof = crate::discovery::Announce::new_with_account(
+            &recipient,
+            &recipient_account,
+            "Receiver",
+            10,
+        );
+        let source_path = directory.path().join("source");
+        let receiver_path = directory.path().join("receiver");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::create_dir_all(&receiver_path).unwrap();
+        let (source, _, _) = super::super::test_support::node_with_files(
+            &source_path,
+            author,
+            author_account,
+            &receiver_proof,
+        );
+        let (receiver, _, _) = super::super::test_support::node_with_files(
+            &receiver_path,
+            recipient,
+            recipient_account,
+            &source_proof,
+        );
+        let conversation =
+            dm_conversation_id(&source.identity.public(), &receiver.identity.public());
+        let mut profiles = Vec::new();
+        // Production compaction requires eight droppable leaves and retains the
+        // latest pair. Ten tiny real Profiles meet that gate without a large DB.
+        for revision in 1..=10 {
+            let payload =
+                ProfilePayload::new(&source.account, Some(vec![revision as u8]), revision);
+            let event = Event::new(
+                &source.identity,
+                conversation,
+                revision,
+                vec![],
+                revision,
+                1,
+                EventKind::Profile,
+                crate::dm::seal(
+                    &source.identity,
+                    &receiver.identity.public().x25519_pub,
+                    &payload.encode(),
+                )
+                .unwrap(),
+            );
+            source.log.lock().unwrap().append(event.clone()).unwrap();
+            profiles.push(event);
+        }
+        let ids: Vec<_> = profiles.iter().map(|event| event.id).collect();
+        reconcile(&source, &receiver, conversation).await;
+        let original_ordinals = ordinals(&receiver, &ids);
+        assert!(original_ordinals.iter().all(Option::is_some));
+        receiver.process_profile_events(conversation);
+        assert_eq!(
+            drain(&receiver, conversation),
+            8,
+            "natural receive discovery must drive actual production compaction"
+        );
+        assert_eq!(
+            receiver
+                .log
+                .lock()
+                .unwrap()
+                .count_kind(&conversation, EventKind::Profile)
+                .unwrap(),
+            2
+        );
+        let compacted = ordinals(&receiver, &ids);
+        assert!(compacted[..8].iter().all(Option::is_none));
+        assert!(compacted[8..].iter().all(Option::is_some));
+        for event in &profiles[..3] {
+            assert!(
+                receiver
+                    .log
+                    .lock()
+                    .unwrap()
+                    .get(&event.id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                receiver
+                    .profile_receive_work
+                    .lock()
+                    .unwrap()
+                    .processed(event.id)
+                    .unwrap(),
+                "exact processed evidence must predate ordinary reimport"
+            );
+        }
+        let before = receiver
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .source_revision()
+            .unwrap();
+        {
+            let owner = receiver.sync_store(&source.identity.public());
+            let mut store = owner.lock().unwrap();
+            for event in &profiles[..3] {
+                assert_eq!(
+                    NetworkSyncStore::ingest(&mut *store, event.clone()).unwrap(),
+                    AppendOutcome::Appended
+                );
+            }
+        }
+        let rehydrated = ordinals(&receiver, &ids);
+        for index in 0..3 {
+            assert!(
+                rehydrated[index] > original_ordinals[index],
+                "same immutable ID must have a newly committed ordinal"
+            );
+        }
+        assert!(
+            receiver
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .source_revision()
+                .unwrap()
+                > before
+        );
+        receiver.process_profile_events(conversation);
+        assert_eq!(
+            drain(&receiver, conversation),
+            0,
+            "processed reimports alone must not manufacture new compaction demand"
+        );
+        assert_eq!(
+            receiver
+                .log
+                .lock()
+                .unwrap()
+                .count_kind(&conversation, EventKind::Profile)
+                .unwrap(),
+            5
+        );
+        assert_eq!(ordinals(&receiver, &ids), rehydrated);
+
+        let mut settled = None;
+        for round in 0..3 {
+            let before_writes = (writes(&source), writes(&receiver));
+            reconcile(&source, &receiver, conversation).await;
+            let after_sync_writes = (writes(&source), writes(&receiver));
+            receiver.process_profile_events(conversation);
+            let dropped = drain(&receiver, conversation);
+            let after_writes = (writes(&source), writes(&receiver));
+            let current = ordinals(&receiver, &ids);
+            let revision = receiver
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .source_revision()
+                .unwrap();
+            eprintln!(
+                "profile rehydration round={round} retained={} dropped={dropped} source_revision={revision} ordinals={current:?} writes_before={before_writes:?} writes_after_sync={after_sync_writes:?} writes_after_maintenance={after_writes:?}",
+                receiver
+                    .log
+                    .lock()
+                    .unwrap()
+                    .count_kind(&conversation, EventKind::Profile)
+                    .unwrap()
+            );
+            assert_eq!(
+                dropped, 0,
+                "unchanged ordinary reconciliation must not prune and rehydrate the same IDs repeatedly"
+            );
+            assert!(current.iter().all(Option::is_some));
+            if let Some((previous, previous_revision)) = &settled {
+                assert_eq!(
+                    &current, previous,
+                    "unchanged round must retain exact raw commit identities"
+                );
+                assert_eq!(
+                    revision, *previous_revision,
+                    "unchanged round must reach a source fixed point"
+                );
+                assert_eq!(
+                    after_writes, before_writes,
+                    "unchanged sync plus normal maintenance must also reach a SQL write fixed point"
+                );
+            }
+            settled = Some((current, revision));
+        }
+        assert_eq!(
+            receiver.peer_avatar(&source.account_id()).unwrap(),
+            Some(vec![10])
+        );
+    }
+
     #[test]
     fn nested_repair_leases_defer_profile_compaction_until_final_release() {
         let directory = tempfile::tempdir().unwrap();

@@ -313,10 +313,12 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
         servers.spawn(owner.clone().run_account_history_loop());
     }
     owner.publish_group_inventory_for(group);
-    // Bootstrap may already have published this exact Inventory head. Its
-    // unchanged publication correctly emits no wake; schedule the reference's
-    // next ordinary refresh only after the response hook is installed.
-    owner.account_sync_notify.notify_one();
+    // Passive setup needs exact receiver-owned demand after the response hook.
+    // The hinted scenario already owns its authenticated source Wake above;
+    // preserve that origin without introducing another pull trigger.
+    if !naturally_hinted {
+        owner.request_sibling_pull_for_test(&other.identity.public());
+    }
     super::cold_account_setup(held)
         .await
         .expect("the selected executor must reach the unrelated authenticated Control response")

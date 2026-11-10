@@ -1351,20 +1351,32 @@ impl Node {
             let hot = lease.0.lock().expect("upload entry").receipt.clone();
             let receipt =
                 self.load_mailbox_receipt_with_runtime(&key, p.mailbox.id(), hot.clone())?;
-            if hot.as_ref().is_some_and(|old| {
-                old.epoch != receipt.epoch
-                    || old.source_floor > receipt.source_floor
-                    || old.runtime != receipt.runtime
-            }) {
-                let old_lease = {
-                    let mut entry = lease.0.lock().expect("upload entry");
-                    entry.receipt = None;
+            #[cfg(test)]
+            self.trace_account_client(&p.recipient, || "mailbox_receipt_before_warm".into());
+            let old_lease = {
+                let mut entry = lease.0.lock().expect("upload entry");
+                // Maintenance may rewind a busy owner while durable validation
+                // runs. Never restore the receipt captured before that change.
+                if entry.receipt != hot {
+                    return Err(LogError::StaleCursor.into());
+                }
+                let old_lease = if hot.as_ref().is_some_and(|old| {
+                    old.epoch != receipt.epoch
+                        || old.source_floor > receipt.source_floor
+                        || old.runtime != receipt.runtime
+                }) {
                     entry.repair_hints.clear();
                     entry.repair_declarations.clear();
                     entry.repair_lease.take()
+                } else {
+                    None
                 };
-                drop(old_lease);
-            }
+                // Warm only this still-current bounded owner, preserving the
+                // cold repair normalization without changing durable progress.
+                entry.receipt = Some(receipt.clone());
+                old_lease
+            };
+            drop(old_lease);
             let saved = Some(receipt.clone());
             p.incremental = Mode::Active(Box::new(State {
                 key,

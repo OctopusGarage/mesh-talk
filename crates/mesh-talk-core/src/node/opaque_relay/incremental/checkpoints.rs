@@ -2,6 +2,11 @@
 use super::*;
 use bincode::Options;
 
+#[cfg(test)]
+thread_local! {
+    static HINT_OPEN_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn hint_key(mailbox: ConversationId, inner: EventId) -> Vec<u8> {
     let mut key = b"wrapper-v1".to_vec();
     key.extend_from_slice(mailbox.as_bytes());
@@ -367,6 +372,8 @@ impl Node {
         bincode::serialize(&Sealed { body, signature }).ok()
     }
     pub(super) fn open_mailbox_hint(&self, key: &[u8], bytes: &[u8]) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        HINT_OPEN_ATTEMPTS.with(|count| count.set(count.get() + 1));
         let sealed: Sealed = bounded(bytes)?;
         let signature: [u8; 64] = sealed.signature.try_into().ok()?;
         let mut message = b"MeshTalkMailboxHintV1\0".to_vec();
@@ -447,6 +454,9 @@ impl Node {
                     } else if let Some(repair) = receipt.repair.as_mut() {
                         repair.spent.fill(0);
                     }
+                    // Validation above rejects old session-only authority before
+                    // attaching reusable durable progress to this runtime.
+                    receipt.runtime = runtime;
                     self.observe_mailbox_work(reason::RECEIPT_DURABLE, None);
                     return Ok(receipt);
                 }
@@ -977,6 +987,419 @@ mod tests {
         drop(progress);
         drop(channel);
         (receipt, key, task.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn validated_cold_receipt_warms_existing_owner_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let relay_root = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = crate::discovery::Announce::new_with_account(
+            &remote,
+            &Account::generate(),
+            "Remote",
+            47475,
+        );
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            root.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = crate::node::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &remote.public(),
+        );
+        let relay = DeviceIdentity::generate();
+        let office = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+            &relay_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let (receipt, key, _) =
+            completed_round(&node, office.clone(), &relay, &remote, conversation).await;
+        assert!(receipt.completed.is_some());
+        node.opaque_upload_cache.lock().unwrap().clear();
+        let checkpoint = node
+            .opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_checkpoint(&key)
+            .unwrap()
+            .unwrap();
+        let writes = node.storage.database().successful_write_commits();
+        let parent_syncs =
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|count| count.get());
+        HINT_OPEN_ATTEMPTS.with(|count| count.set(0));
+        for round in 0..3 {
+            // A fresh adapter and Noise channel, but the same bounded runtime owner.
+            let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+            let mut progress = OpaqueMailboxProgress::new(
+                &relay.public(),
+                &remote.public(),
+                Some(conversation),
+                mailbox,
+            );
+            let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+            assert_eq!(
+                node.advance_incremental_mailbox(&mut channel, &mut progress, &|| true,)
+                    .await
+                    .unwrap(),
+                Some(false)
+            );
+            assert!(state(&progress).receipt == receipt);
+            // Equal durable state must stay a no-op even with a new adapter.
+            node.save_mailbox_receipt(&mut progress).unwrap();
+            drop(progress);
+            drop(channel);
+            assert_eq!(task.await.unwrap(), 0);
+            assert_eq!(
+                HINT_OPEN_ATTEMPTS.with(|count| count.get()),
+                1,
+                "round {round}: unchanged validated receipt must not reopen its signature"
+            );
+            assert_eq!(node.storage.database().successful_write_commits(), writes);
+            assert_eq!(
+                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|count| count.get()),
+                parent_syncs,
+                "unchanged initialization and save must not sync a directory"
+            );
+            assert!(
+                node.opaque_receive_cache
+                    .lock()
+                    .unwrap()
+                    .get_checkpoint(&key)
+                    .unwrap()
+                    .as_ref()
+                    == Some(&checkpoint)
+            );
+            assert_eq!(node.opaque_upload_cache.lock().unwrap().observed_len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_repair_receipt_warming_preserves_live_owner_spent_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let relay_root = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = crate::discovery::Announce::new_with_account(
+            &remote,
+            &Account::generate(),
+            "Remote",
+            47475,
+        );
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            root.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let relay = DeviceIdentity::generate();
+        let office = IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(relay_root.path()).unwrap(),
+            &relay_root.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let conversation = crate::node::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &remote.public(),
+        );
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let probe = OpaqueMailboxProgress::new(
+            &relay.public(),
+            &remote.public(),
+            Some(conversation),
+            mailbox,
+        );
+        let key = cache_key(&probe).unwrap();
+        let (epoch, source) = node.mailbox_local_binding().unwrap();
+        let runtime = node.opaque_receive_cache.lock().unwrap().session_epoch();
+        let global_epoch = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .destructive_policy_revision()
+            .unwrap();
+        let owner = EventId::new([8; 32]);
+        let cursor = MailboxCursor {
+            store_uuid: [3; 16],
+            conversation: probe.mailbox.id(),
+            epoch: 4,
+            first_seen: Some(10),
+            revision: 8,
+            after: 0,
+            window: Some((20, 9)),
+        };
+        let receipt = Receipt {
+            cursor: Some(cursor.clone()),
+            pending: vec![owner],
+            epoch,
+            source_floor: source,
+            runtime,
+            session_only: false,
+            completed: None,
+            repair: Some(Repair {
+                captured: cursor.clone(),
+                witness: pending_repair_witness(&[owner]).0,
+                active: true,
+                scan: cursor,
+                page: None,
+                rewind: false,
+                focus: None,
+                conversation,
+                local_epoch: 0,
+                global_epoch: Some(global_epoch),
+                owner,
+                spent: [255; 32],
+                scan_complete: false,
+            }),
+        };
+        let sealed = node
+            .seal_mailbox_hint(&key, bincode::serialize(&receipt).unwrap())
+            .unwrap();
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .put_checkpoint(&key, &sealed)
+            .unwrap();
+        HINT_OPEN_ATTEMPTS.with(|count| count.set(0));
+        let mut writes = None;
+        let mut expected_spent = None;
+        for round in 0..3 {
+            let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+            let mut progress = OpaqueMailboxProgress::new(
+                &relay.public(),
+                &remote.public(),
+                Some(conversation),
+                mailbox,
+            );
+            let (mut channel, task) = connection(&node, office.clone(), &relay).await;
+            assert_eq!(
+                node.advance_incremental_mailbox(&mut channel, &mut progress, &|| true,)
+                    .await
+                    .unwrap(),
+                Some(false)
+            );
+            let repair = state(&progress).receipt.repair.as_ref().unwrap();
+            assert_eq!(repair.spent, expected_spent.unwrap_or([0; 32]));
+            // This actual lease, not hint bytes, owns compaction protection.
+            node.hold_mailbox_repair_lease(&mut progress).unwrap();
+            if round == 0 {
+                let pending = state(&progress).receipt.pending.clone();
+                let repair = state_mut(&mut progress).receipt.repair.as_mut().unwrap();
+                repair.mark_spent(&pending, owner);
+                expected_spent = Some(repair.spent);
+                assert_ne!(repair.spent, [0; 32]);
+            }
+            node.save_mailbox_receipt(&mut progress).unwrap();
+            let actual_writes = node.storage.database().successful_write_commits();
+            if let Some(writes) = writes {
+                assert_eq!(
+                    actual_writes, writes,
+                    "hot repair progress must not be repaid and persisted"
+                );
+            } else {
+                writes = Some(actual_writes);
+            }
+            drop(progress);
+            drop(channel);
+            assert_eq!(task.await.unwrap(), 0);
+            assert_eq!(HINT_OPEN_ATTEMPTS.with(|count| count.get()), 1);
+        }
+        // Maintenance is allowed to rewind even a busy owner. Fence a receipt
+        // captured before that same-generation rewind from restoring old work.
+        let generation = node.privacy.generation.load(Ordering::Acquire);
+        {
+            let owner = node
+                .opaque_upload_cache
+                .lock()
+                .unwrap()
+                .entries
+                .get(&key)
+                .unwrap()
+                .clone();
+            let mut entry = owner.lock().unwrap();
+            assert!(entry.repair_lease.is_some());
+            entry.repair_progress = std::time::Instant::now() - std::time::Duration::from_secs(31);
+            entry
+                .receipt
+                .as_mut()
+                .unwrap()
+                .repair
+                .as_mut()
+                .unwrap()
+                .scan
+                .after = 7;
+        }
+        let rewound = Arc::new(Mutex::new(None));
+        let observed = rewound.clone();
+        let weak = Arc::downgrade(&node);
+        let hook_key = key.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, stage| {
+            if stage != "mailbox_receipt_before_warm" {
+                return;
+            }
+            let node = weak.upgrade().unwrap();
+            let mut cache = node.opaque_upload_cache.lock().unwrap();
+            cache.clear_stale_receive_repair_leases(generation);
+            let entry = cache.entries.get(&hook_key).unwrap().lock().unwrap();
+            assert!(entry.busy);
+            assert!(entry.repair_lease.is_none());
+            let receipt = entry.receipt.clone().unwrap();
+            let repair = receipt.repair.as_ref().unwrap();
+            assert_eq!(repair.scan.after, 0);
+            assert_eq!(repair.spent, [0; 32]);
+            *observed.lock().unwrap() = Some(receipt);
+        }));
+        let mailbox = RelayMailbox::federated(&node.identity, &remote.public()).unwrap();
+        let mut progress = OpaqueMailboxProgress::new(
+            &relay.public(),
+            &remote.public(),
+            Some(conversation),
+            mailbox,
+        );
+        let (mut channel, task) = connection(&node, office, &relay).await;
+        let result = node
+            .advance_incremental_mailbox(&mut channel, &mut progress, &|| true)
+            .await;
+        *node.account_client_test_hook.lock().unwrap() = None;
+        let owner = node
+            .opaque_upload_cache
+            .lock()
+            .unwrap()
+            .entries
+            .get(&key)
+            .unwrap()
+            .clone();
+        let (receipt, has_repair_lease, busy) = {
+            let entry = owner.lock().unwrap();
+            (
+                entry.receipt.clone(),
+                entry.repair_lease.is_some(),
+                entry.busy,
+            )
+        };
+        let expected = rewound.lock().unwrap().clone();
+        // Failure must not poison a guard that Lease::drop needs for cleanup.
+        assert!(
+            receipt == expected,
+            "warming must preserve the maintenance rewind"
+        );
+        assert!(!has_repair_lease);
+        assert!(
+            !busy,
+            "stale initialization must release its acquired owner"
+        );
+        assert!(matches!(
+            result,
+            Err(session::SessionError::Store(LogError::StaleCursor))
+        ));
+        drop(progress);
+        drop(channel);
+        assert_eq!(task.await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn cold_receipt_runtime_normalization_preserves_validation_and_repair_reset() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = crate::discovery::Announce::new_with_account(
+            &remote,
+            &Account::generate(),
+            "Remote",
+            47475,
+        );
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            root.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = ConversationId::new([5; 32]);
+        let (epoch, source) = node.mailbox_local_binding().unwrap();
+        let runtime = node.opaque_receive_cache.lock().unwrap().session_epoch();
+        let old_runtime = runtime.map(|byte| byte ^ 255);
+        let owner = EventId::new([8; 32]);
+        let cursor = MailboxCursor {
+            store_uuid: [3; 16],
+            conversation,
+            epoch: 4,
+            first_seen: Some(10),
+            revision: 8,
+            after: 0,
+            window: Some((20, 9)),
+        };
+        let base = Receipt {
+            cursor: Some(cursor.clone()),
+            pending: vec![owner],
+            epoch,
+            source_floor: source,
+            runtime: old_runtime,
+            session_only: false,
+            completed: None,
+            repair: Some(Repair {
+                captured: cursor.clone(),
+                witness: [7; 32],
+                active: true,
+                scan: cursor,
+                page: None,
+                rewind: false,
+                focus: None,
+                conversation,
+                local_epoch: epoch,
+                global_epoch: None,
+                owner,
+                spent: [255; 32],
+                scan_complete: false,
+            }),
+        };
+        for variant in 0..5 {
+            let key = [variant];
+            let mut receipt = base.clone();
+            match variant {
+                1 => receipt.session_only = true,
+                2 => receipt.epoch += 1,
+                3 => receipt.source_floor += 1,
+                4 => receipt.repair.as_mut().unwrap().active = false,
+                _ => {}
+            }
+            let sealed = node
+                .seal_mailbox_hint(&key, bincode::serialize(&receipt).unwrap())
+                .unwrap();
+            node.opaque_receive_cache
+                .lock()
+                .unwrap()
+                .put_checkpoint(&key, &sealed)
+                .unwrap();
+            let loaded = node
+                .load_mailbox_receipt_with_runtime(&key, conversation, None)
+                .unwrap();
+            assert_eq!(loaded.runtime, runtime);
+            if matches!(variant, 1..=3) {
+                assert!(
+                    loaded.cursor.is_none(),
+                    "invalid durable receipt must not be normalized into validity"
+                );
+                assert!(loaded.pending.is_empty());
+                assert!(loaded.repair.is_none());
+            } else {
+                assert!(loaded.cursor == base.cursor);
+                if variant == 4 {
+                    assert!(loaded.repair.is_none());
+                } else {
+                    let repair = loaded.repair.unwrap();
+                    assert!(repair.active);
+                    assert_eq!(repair.spent, [0; 32]);
+                    assert!(repair.scan == base.repair.as_ref().unwrap().scan);
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -659,9 +659,10 @@ mod tests {
                 > before,
             "a genuine received file must still commit durable processing evidence"
         );
-        assert!(
-            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()) > 0,
-            "a genuine received file must synchronize its publication barrier"
+        assert_eq!(
+            crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+            0,
+            "a genuine SQL received-file commit does not republish an unchanged durable barrier"
         );
         let database = fixture.receiver.storage.database();
         let changes = database

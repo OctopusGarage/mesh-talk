@@ -1024,9 +1024,10 @@ mod tests {
                 node.storage.database().successful_write_commits() > before,
                 "new consent controls and discovery progress must remain durable writes"
             );
-            assert!(
-                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get())
-                    > 0
+            assert_eq!(
+                crate::storage::profile::publication::tests::PARENT_SYNCS.with(|value| value.get()),
+                0,
+                "new SQL controls do not republish an unchanged durable barrier"
             );
             assert!(
                 node.file_consent_events(&sender.public()).unwrap() == expected,

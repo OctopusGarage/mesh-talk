@@ -142,6 +142,11 @@ impl Node {
         drop(demand);
         self.account_sync_notify.notify_one();
     }
+    /// Exercise the real receiver-owned demand without manufacturing a publisher Wake.
+    #[cfg(test)]
+    pub(in crate::node) fn request_sibling_pull_for_test(&self, public: &PublicIdentity) {
+        self.request_sibling_pull(public);
+    }
     pub(super) fn take_sibling_pull_requests(&self) -> HashSet<Identity> {
         std::mem::take(
             &mut *self

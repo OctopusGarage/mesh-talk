@@ -247,6 +247,36 @@ test("each native receipt card is captured while its own expected state is visib
   assert.deepEqual(recorded.observations.captures, recorded.captures);
 });
 
+test("native receipt timeout retains cached ordered statuses and observation failure", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], timeout = new Error("Timed out: original IDs become delivered");
+  let observations = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => {
+      if (command === "owner_account_history") return ids.map(id => ({ id, from_me: true }));
+      observations++;
+      if (observations === 1) return [{ id: "c", status: "delivered" }, { id: "a", status: "awaiting" }, { id: "b", status: "awaiting" }];
+      throw new Error("owner observation unavailable");
+    },
+    until: async (...args) => {
+      assert.equal(args.length, 2, "retain the existing default deadline");
+      assert.equal(args[0], "original IDs become delivered");
+      assert.equal(await args[1](), false);
+      await assert.rejects(args[1](), /owner observation unavailable/);
+      throw timeout;
+    },
+  };
+  await assert.rejects(receiptPhase(c, { owner: "owner", ids, labels: [] }, "receipt-peer-restart-delivered", "delivered"), error => {
+    assert.equal(error.cause, timeout);
+    assert.match(error.message, /^Timed out: original IDs become delivered;/);
+    assert.match(error.message, /"statuses":\["awaiting","awaiting","delivered"\]/);
+    assert.match(error.message, /"observationError":"owner observation unavailable"/);
+    return true;
+  });
+  assert.equal(observations, 2, "failure reporting performs no further IPC");
+});
+
 test("localized wrong-password error is captured before successful sign-in recovery", async () => {
   const { wrongPasswordCheckpoint } = await import("./native-core-scenarios.mjs");
   const steps = [], errorCapture = { filename: "auth-logout-wrong-password-error.png", text: "用户名或密码错误", visible: true };

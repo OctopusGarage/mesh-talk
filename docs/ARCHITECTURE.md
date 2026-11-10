@@ -2014,9 +2014,14 @@ match before committing imported rows and before replacing the legacy path with
 its exact downgrade barrier. Tail repair affects only the snapshot. Import
 failure preserves the original source; an interrupted committed import resumes
 publication without replaying it. The imported rows become available only after
-the barrier is durable and SQL publication completes. A published source with a
-missing or changed barrier fails closed. Warm constructors inspect fixed metadata
-and barriers without decoding historical bodies or opening another connection.
+the barrier file is synchronized, its rename is synchronized through the parent
+directory where supported, and SQL publication completes. A failed initial directory sync leaves
+the source unpublished; retry must finish that sync before exposing imported rows.
+A published source with a missing or changed barrier fails closed, including on
+every subsequent write. Later SQL mutations use the encrypted connection's FULL
+transaction durability; they do not republish or synchronize the unchanged barrier
+directory. Warm constructors inspect fixed metadata and barriers without decoding
+historical bodies or opening another connection.
 The existing profile lease excludes cooperating writers; identity comparisons
 also reject detected source changes during import.
 

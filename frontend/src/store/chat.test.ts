@@ -6779,6 +6779,61 @@ it("expires content at its exact deadline between former polling ticks", async (
   }
 });
 
+it("retires an already-due expiry after state publication without another timer tick", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    const now = Date.now();
+    const message = {
+      id: "due-before-publication",
+      fromMe: false,
+      who: "Friend",
+      text: "temporary",
+      wallClock: now,
+      replyTo: null,
+      expiresAtMs: now + 1000,
+    };
+    useChat.setState({ messages: { "account:friend": [message] } });
+    // Move the wall clock without dispatching the original deadline timer.
+    // Another state publication must not replace that due work with a timer
+    // that requires an additional clock tick to retire the same message.
+    vi.setSystemTime(now + 1001);
+    useChat.setState({ messages: { "account:friend": [message] } });
+    await Promise.resolve();
+    expect(useChat.getState().messages["account:friend"]).toEqual([]);
+    expect(useChat.getState().expiryNow).toBeGreaterThanOrEqual(now + 1001);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("does not apply a queued due expiry after its chat owner stops", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    const now = Date.now();
+    const message = {
+      id: "replacement-content",
+      fromMe: false,
+      who: "Friend",
+      text: "retained by replacement",
+      wallClock: now,
+      replyTo: null,
+      expiresAtMs: now - 1,
+    };
+    useChat.setState({ messages: { "account:friend": [message] } });
+    stop();
+    const expiryNow = useChat.getState().expiryNow;
+    await Promise.resolve();
+    expect(useChat.getState().messages["account:friend"]).toEqual([message]);
+    expect(useChat.getState().expiryNow).toBe(expiryNow);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
 it("keeps roster reconciliation quiet with native push after startup", async () => {
   vi.useFakeTimers();
   const { setPushStateSupport } = await import("@/lib/syncInvalidation");

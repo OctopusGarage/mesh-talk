@@ -188,9 +188,11 @@ impl PublishedHistorySource {
         }
         Ok(())
     }
+    /// Publication already synchronized the barrier's directory before marking
+    /// this source published. SQL mutations retain their own FULL durability;
+    /// an unchanged directory entry has no new publication to synchronize.
     pub(crate) fn check_write(&self) -> Result<(), LogError> {
-        self.check_barrier()?;
-        sync_parent(&self.path)
+        self.check_barrier()
     }
 }
 

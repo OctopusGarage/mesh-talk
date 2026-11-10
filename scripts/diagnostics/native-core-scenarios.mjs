@@ -188,10 +188,22 @@ export async function receiptPhase(c, state, name, expected, historical = false,
   }
   const history = await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 });
   for (const id of state.ids) assert.equal(history.filter(item => item.id === id && item.from_me).length, 1, "original accepted history entry retained once");
-  const statuses = await c.until(`original IDs become ${expected}`, async () => {
-    const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
-    return values.every(value => value === expected) && values;
-  });
+  let statuses, latestStatuses = null, observationError = null;
+  try {
+    statuses = await c.until(`original IDs become ${expected}`, async () => {
+      try {
+        const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
+        latestStatuses = values;
+        return values.every(value => value === expected) && values;
+      } catch (error) {
+        observationError = String(error.message ?? error).slice(0, 512);
+        throw error;
+      }
+    });
+  } catch (error) {
+    const diagnostic = JSON.stringify({ statuses: latestStatuses, observationError });
+    throw new Error(`${error.message}; receipt observation=${diagnostic}`, { cause: error });
+  }
   const captures = [];
   for (const [index, label] of [...state.labels].reverse().entries()) {
     if (historical && index > 0) await revealHistoricalNativeMessage(c, label);
