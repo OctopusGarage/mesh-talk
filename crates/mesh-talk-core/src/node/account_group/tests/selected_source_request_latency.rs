@@ -124,7 +124,11 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
         let reference_public = reference.identity.public();
         let diagnostic_tail = diagnostic_tail.clone();
         move |peer, event| {
-            if event.starts_with("page_end") || event.starts_with("control_owned_abort") {
+            if event.starts_with("page_end")
+                || event.starts_with("control_owned_abort")
+                || event.starts_with("control_task ")
+                || event.starts_with("control_request_body=")
+            {
                 let peer_label = if peer == other_public {
                     "other"
                 } else if peer == reference_public {
@@ -139,7 +143,20 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
                 tail.push_back((
                     diagnostic_started.elapsed().as_millis(),
                     peer_label,
-                    event.clone(),
+                    if event.starts_with("control_request_body=") {
+                        "control_request_body observed".into()
+                    } else if event.starts_with("control_task ") {
+                        std::iter::once("control_task")
+                            .chain(event.split_ascii_whitespace().filter(|field| {
+                                ["paired=", "protected=", "resumed=", "replacement=", "hint="]
+                                    .iter()
+                                    .any(|prefix| field.starts_with(prefix))
+                            }))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    } else {
+                        event.clone()
+                    },
                 ));
             }
             if peer != other_public {
@@ -226,6 +243,9 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     let (arrived, held) = oneshot::channel();
     let arrived = Arc::new(Mutex::new(Some(arrived)));
     let checkpoints = Arc::new(Mutex::new(Vec::new()));
+    // Metadata only: distinguish missing live ownership, missing dispatch
+    // evidence and an observed but ineligible origin without retaining requests.
+    let rejected_control_requests = Arc::new(Mutex::new([0_u64; 3]));
     let exact_reference = owner.identity.public();
     *other.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let release = release.clone();
@@ -233,6 +253,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
         let pages = pages.clone();
         let held_task = held_task.clone();
         let held_passive = held_passive.clone();
+        let rejected_control_requests = rejected_control_requests.clone();
         move |peer, frame| {
             let release = release.clone();
             let arrived = arrived.clone();
@@ -240,6 +261,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             let pages = pages.clone();
             let held_task = held_task.clone();
             let held_passive = held_passive.clone();
+            let rejected_control_requests = rejected_control_requests.clone();
             let exact_reference = exact_reference.clone();
             Box::pin(async move {
                 if peer != exact_reference {
@@ -252,9 +274,13 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
                     .expect("authenticated request must decode");
                 if request.domain == AccountDocumentDomain::GroupControl {
                     let Some(page) = pages.lock().unwrap().live_request(&request) else {
+                        let mut rejected = rejected_control_requests.lock().unwrap();
+                        rejected[0] = rejected[0].saturating_add(1);
                         return;
                     };
                     let Some(dispatch) = page.dispatch() else {
+                        let mut rejected = rejected_control_requests.lock().unwrap();
+                        rejected[1] = rejected[1].saturating_add(1);
                         return;
                     };
                     let eligible = if naturally_hinted {
@@ -263,6 +289,8 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
                         !dispatch.protected && !dispatch.hint
                     };
                     if arrived.lock().unwrap().is_some() && !eligible {
+                        let mut rejected = rejected_control_requests.lock().unwrap();
+                        rejected[2] = rejected[2].saturating_add(1);
                         return;
                     }
                     checkpoints.lock().unwrap().push((
@@ -323,7 +351,16 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     }
     super::cold_account_setup(held)
         .await
-        .expect("the selected executor must reach the unrelated authenticated Control response")
+        .unwrap_or_else(|error| {
+            panic!(
+                "the selected executor must reach the unrelated authenticated Control response: {error}; naturally_hinted={naturally_hinted}; held_passive={}; held_task_observed={}; matched_checkpoints={}; rejected_no_live_request_no_dispatch_ineligible_origin={:?}; bounded_peer_domain_outcomes={:?}",
+                held_passive.load(std::sync::atomic::Ordering::SeqCst),
+                held_task.lock().unwrap().is_some(),
+                checkpoints.lock().unwrap().len(),
+                *rejected_control_requests.lock().unwrap(),
+                diagnostic_tail.lock().unwrap(),
+            )
+        })
         .unwrap();
 
     assert!(

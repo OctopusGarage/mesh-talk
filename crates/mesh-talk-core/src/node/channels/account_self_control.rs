@@ -1952,6 +1952,12 @@ pub(in crate::node) mod tests {
         let selected_trace_peer = std::sync::Arc::new(std::sync::Mutex::new(
             None::<crate::identity::device::PublicIdentity>,
         ));
+        // Preserve each direction's early readiness evidence even if unrelated
+        // producers fill the shared rolling tail. No request bodies are retained.
+        let readiness_prefix = std::sync::Arc::new(std::sync::Mutex::new([
+            Vec::<(u128, String)>::new(),
+            Vec::<(u128, String)>::new(),
+        ]));
         let settled_scopes = std::sync::Arc::new(std::sync::Mutex::new([[false; 2]; 2]));
         let peer_labels: std::collections::HashMap<_, _> = nodes
             .iter()
@@ -1970,6 +1976,7 @@ pub(in crate::node) mod tests {
             let own_public = node.identity.public();
             let reference_public = reference.identity.public();
             let completed_scopes = settled_scopes.clone();
+            let client_readiness_prefix = readiness_prefix.clone();
             let queue_samples = std::sync::Mutex::new(std::collections::HashMap::new());
             *node.account_client_test_hook.lock().unwrap() =
                 Some(std::sync::Arc::new(move |peer, event| {
@@ -2032,6 +2039,21 @@ pub(in crate::node) mod tests {
                                 || (&own_public == online && peer == reference_public)
                         });
                     if selected_pair {
+                        if event.starts_with("control_")
+                            || event.starts_with("session_")
+                            || event.starts_with("negotiation_")
+                            || event.starts_with("document_scope_settled")
+                            || event.starts_with("page_end")
+                        {
+                            let direction = usize::from(own_public != reference_public);
+                            let mut prefix = client_readiness_prefix.lock().unwrap();
+                            if prefix[direction].len() < 64 {
+                                prefix[direction].push((
+                                    trace_started.elapsed().as_millis(),
+                                    event.chars().take(512).collect(),
+                                ));
+                            }
+                        }
                         let scope = match event.as_str() {
                             "document_scope_settled scope=Control" => Some(0),
                             "document_scope_settled scope=Directory" => Some(1),
@@ -2520,14 +2542,15 @@ pub(in crate::node) mod tests {
                 node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
                     && head.access.observation.role == AccountGroupRole::Member)
             }));
-            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; settled_control_directory_forward_reverse={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}",
+            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; settled_control_directory_forward_reverse={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}; readiness_prefix_forward_reverse={:?}",
                 readiness_started.elapsed().as_millis(), readiness(), forward, reverse, old_heads,
                 *settled_scopes.lock().unwrap(),
                 [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
                 [reference.routing_peer(&online.user_id()).is_some_and(|peer| peer.public == online.identity.public()),
                  online.routing_peer(&reference.user_id()).is_some_and(|peer| peer.public == reference.identity.public())],
                 trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
-                trace.lock().unwrap().iter().cloned().collect::<Vec<_>>())
+                trace.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
+                *readiness_prefix.lock().unwrap())
         }).await;
         eprintln!(
             "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?} trace_omitted={} bounded_trace={:?}",

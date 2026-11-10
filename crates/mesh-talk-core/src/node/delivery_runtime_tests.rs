@@ -9929,11 +9929,27 @@ async fn failed_media_persistence_remains_pending_until_storage_recovers() {
 
 #[tokio::test]
 async fn failed_media_completion_metadata_keeps_durable_bytes_pending() {
+    use futures_util::FutureExt;
+    use std::time::Duration;
+
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let (_, b, _, _, _, file, _, bytes) =
         completed_file_fixture(source.path(), target.path(), crate::file::FileKind::Media).await;
     b.decide_attachment(file, true).unwrap();
+    let generation = b.attachment_consent.lock().unwrap().generation().unwrap();
+    b.files
+        .lock()
+        .unwrap()
+        .discover_downloads(generation)
+        .unwrap();
+    let revision = b.files.lock().unwrap().claim_downloads().unwrap()[0].revision;
+    let _ = b.file_pull_notify.notified().now_or_never();
+    let mut network = b.network_changes.subscribe();
+    let mut roster = b.subscribe_roster_changes();
+    let mut available = b.subscribe_sibling_availability();
+    let mut channels = b.subscribe_channel_changes();
+    let mut peers = b.file_pull_peers();
     let outbox = target.path().join("events.log.delivery-outbox");
     let held = target.path().join("held-outbox");
     std::fs::rename(&outbox, &held).unwrap();
@@ -9944,7 +9960,37 @@ async fn failed_media_completion_metadata_keeps_durable_bytes_pending() {
         b.files.lock().unwrap().pending_for_test(file),
         "bytes alone cannot retire pending durable completion metadata"
     );
+    assert_eq!(
+        b.files.lock().unwrap().claim_downloads().unwrap()[0].revision,
+        revision,
+        "a failed completion retains the same admitted download obligation"
+    );
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let waiting = b.wait_for_file_pull(
+        &mut network,
+        &mut roster,
+        &mut available,
+        &mut channels,
+        &mut peers,
+        Duration::from_secs(300),
+    );
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(299), &mut waiting)
+            .await
+            .is_err(),
+        "failed completion must preserve backoff instead of waking its own recovery loop"
+    );
+    assert!(started.elapsed() >= Duration::from_secs(299));
+    assert!(started.elapsed() < Duration::from_secs(300));
     std::fs::rename(&held, &outbox).unwrap();
+    b.decide_attachment(file, true).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut waiting)
+            .await
+            .expect("a real consent decision must wake recovery before its repair deadline")
+    );
     b.pull_pending_files().await;
     assert!(b.has_verified_file_completion(file));
     assert!(!b.files.lock().unwrap().pending_for_test(file));

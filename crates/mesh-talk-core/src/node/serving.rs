@@ -1284,12 +1284,10 @@ impl Node {
                             if !managed || self.local_media_recovery_complete(fc)?
                             {
                                 self.files.lock().expect("files lock").finish_download(work)?;
-                            } else {
-                                // The byte store may succeed before completion metadata.
-                                // Its helper clears the transient queue; restore recovery
-                                // ownership until both durable writes have succeeded.
-                                self.file_pull_notify.notify_one();
                             }
+                            // Incomplete durable completion retains this download
+                            // for a real change or the bounded repair deadline;
+                            // an unchanged failure must not wake its own retry.
                             self.note_file_change();
                         }
                         Ok(())

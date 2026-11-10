@@ -486,6 +486,13 @@ deadline. The real, tick-disabled [account history failure regressions](../crate
 combine favorites failure with authenticated EOF or negotiation timeout, then
 assert quiet backoff and eventual retained-work recovery.
 
+Retaining a failed completion does not justify notifying its own retry waiter.
+The media completion regression in
+[delivery runtime tests](../crates/mesh-talk-core/src/node/delivery_runtime_tests.rs)
+fails the actual persistence owner, preserves the exact pending revision and
+requires backoff until a real consent event wakes recovery. Keep received-byte
+progress notifications separate from unsuccessful completion attempts.
+
 Review fairness across successive turns, not only the batch size. Use the existing
 cursor, coalescing and admission owners; distinguish independent lanes where
 needed. Failed publication must not indefinitely prevent later eligible work.
