@@ -561,8 +561,8 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
             .available_targets()
             .await
             .map_err(|e| CommandError::Internal(format!("cannot query screenshot targets: {e}")))?;
-        if targets.contains(AvailableTargets::Screen) {
-            request = request.target(AvailableTargets::Screen);
+        if targets.contains(AvailableTargets::SCREEN) {
+            request = request.target(AvailableTargets::SCREEN);
         } else {
             return Err(CommandError::Internal(
                 "screenshot portal cannot capture a display".into(),

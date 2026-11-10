@@ -267,6 +267,8 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) before_sent_delete_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) before_recovery_sent_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) profile_read_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) profile_prepare_hook: BlockingTestHook,
@@ -1206,6 +1208,8 @@ impl Node {
             untracked_chunk_validations: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             before_sent_delete_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_recovery_sent_hook: Mutex::new(None),
             #[cfg(test)]
             profile_read_hook: Mutex::new(None),
             #[cfg(test)]

@@ -1256,8 +1256,15 @@ impl Node {
                 if let Some(tx) = store.pending_transactions().first() {
                     store.validate_message_action_transaction(tx, &log, &self.identity)?;
                 }
-                let mut received = self.received.lock().expect("received lock not poisoned");
+                #[cfg(test)]
+                {
+                    let hook = self.before_recovery_sent_hook.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
                 let mut sent = self.sentlog.lock().expect("sent lock not poisoned");
+                let mut received = self.received.lock().expect("received lock not poisoned");
                 let mut files = self.received_files.lock().expect("files lock not poisoned");
                 let recall = store
                     .pending_transactions()
@@ -4156,5 +4163,90 @@ mod diagnostic_tests {
             "revoked verification must prevent a new proactive recovery connection"
         );
         assert!(finished.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod lock_order_tests {
+    use std::{sync::Arc, time::Duration};
+
+    #[tokio::test]
+    async fn recovery_does_not_hold_received_while_waiting_for_sent() {
+        use crate::identity::{account::Account, device::DeviceIdentity};
+
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof =
+            crate::discovery::Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _messages, _files) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("Recovery lock order", vec![])
+            .await
+            .unwrap();
+        // Normal durable acceptance retains a real outgoing WAL transaction when
+        // its sent-sidecar installation fails. Recovery must finish that same send.
+        node.sentlog
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(true)
+            .unwrap();
+        let accepted = node
+            .enqueue_channel_message_reply_expiring_if(
+                channel,
+                b"recover this accepted message",
+                None,
+                None,
+                |commit| commit(),
+            )
+            .unwrap();
+        node.sentlog
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(false)
+            .unwrap();
+        assert_eq!(
+            node.delivery.lock().unwrap().pending_transactions().len(),
+            1
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        *node.before_recovery_sent_hook.lock().unwrap() = Some(Box::new(move || {
+            let _ = entered_tx.try_send(());
+        }));
+        // Archive snapshots own sent before received. Hold only their first
+        // guard, then observe recovery without deliberately forming a lock cycle.
+        let sent = node.sentlog.lock().unwrap();
+        let worker_node = Arc::clone(&node);
+        let worker = std::thread::spawn(move || {
+            worker_node.recover_delivery(&mut worker_node.delivery.lock().unwrap())
+        });
+        let reached_sent = entered_rx.recv_timeout(Duration::from_secs(5));
+        let received_available = node.received.try_lock().is_ok();
+        drop(sent);
+        let recovered = worker.join();
+        assert!(reached_sent.is_ok(), "recovery reached the sent boundary");
+        assert!(
+            received_available,
+            "recovery must acquire sent before received"
+        );
+        assert!(
+            recovered.unwrap().is_ok(),
+            "recovery completes after release"
+        );
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        let history = node.channel_history(channel, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, accepted);
+        assert_eq!(history[0].text, b"recover this accepted message");
     }
 }

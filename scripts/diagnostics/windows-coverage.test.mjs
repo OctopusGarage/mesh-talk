@@ -78,7 +78,7 @@ test("nextest security minimum and every CI installer follow the version owner",
       /uses: taiki-e\/install-action@/u.test(block) && /tool: .*cargo-nextest@/u.test(block));
     assert.equal(installers.length, pins.length, `${file} must retain managed prebuilt installers`);
     for (const installer of installers) {
-      assert.match(installer, /uses: taiki-e\/install-action@v2\.88\.1\b/u,
+      assert.match(installer, /uses: taiki-e\/install-action@v2\.90\.2\b/u,
         `${file} installer must support the owned tool version`);
       assert.match(installer, /^          fallback: none$/mu,
         `${file} must not compile host tools under test instrumentation`);

@@ -422,7 +422,9 @@ it("anchors wheel zoom, clamps dragging and resets on double click", async () =>
   await act(async () =>
     image.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })),
   );
-  expect(transform.style.transform).toBe("translate(0px, 0px) scale(1)");
+  expect(transform.style.transform).toMatch(
+    /^translate\(0px(?:, 0px)?\) scale\(1\)$/,
+  );
 });
 
 it("keeps video controls interactive and restores focus after Escape", async () => {
