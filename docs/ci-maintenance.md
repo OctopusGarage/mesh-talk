@@ -84,7 +84,12 @@ replace the API name to satisfy a prose checker.
 
 PR creation runs `make pr-check`'s cheap-check owner against its actual comparison
 base, rejects ownership blockers and checks applicable frontend patch coverage
-before publication. Version projections, contract references and hygiene already
+before publication. The creation wrapper accepts repeated `--owner ID` and
+`--reason TEXT` before `--` and forwards them only to that existing affected-plan
+owner. Review every otherwise unmapped path before making this explicit selection;
+it records responsibility, not test acceptance. Platform selectors remain separate,
+and missing/invalid owners, absent reasons and checker failures still block creation.
+Version projections, contract references and hygiene already
 belong to structural standards; reuse that owner rather than adding duplicate
 gates. Do not install dependencies, compile Rust, launch browsers or run application suites
 implicitly in the cheap mode. Source changes during checking invalidate it.
@@ -274,9 +279,11 @@ operation failing. Full Chromium uses its existing Windows/coverage safety margi
 on all hosts; portable execution retains its existing Windows allowance. Keep
 state-based readiness, all assertions, explicit latency limits, zero retries and
 first-failure traces. Do not erase a failed assertion by increasing its timeout.
-The real-runner control derives both configured watchdogs, accelerates only their
-duration, requires actual parked-case failure and subsequent-case execution, and
-verifies descendant retirement before removing its fixture.
+The real-runner control derives both configured watchdogs and accelerates only
+the deliberately parked case. Subsequent cases retain the source configuration's
+normal allowance; deliberate latency beyond the accelerated bound verifies this
+isolation. Require actual parked-case failure, subsequent-case execution and
+verified descendant retirement before removing the fixture.
 
 ## Reuse compatible work with verifiable inputs
 
@@ -939,6 +946,26 @@ one signed probe and its original five-second discovery budget, while a real
 cache-path failure must surface the cache API's error chain before that deadline.
 Retain the core cache writer's cancellation/profile-lease controls. A successful
 rerun does not identify the mechanism of a previous missing-peer timeout.
+A cached peer can already satisfy the identity predicate while a newly sent
+query remains outstanding. The [restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
+also requires a response to a nonce issued by that invocation, from its exact
+endpoint, with the actually accepted device/account binding. Keep the original
+whole observation deadline, probe cadence and count; subsequent cooldown starts
+after witnessed completion. Real warm-cache/retired-target and restart controls
+must reject the cached-only shortcut. Test-only packet witnesses are opt-in,
+instance-owned and bounded, expose omissions, avoid disabled formatting work and
+retire real listener tasks. They add evidence, not network authority or a claimed
+explanation of unobserved packet loss.
+
+Explicit-endpoint discovery fixtures retire the named broadcast, scan and rejoin
+tasks through their existing participant owner while retaining the real UDP
+listener, public policy, certificates, TCP and delivery work. On their current-thread
+runtime, qualify retirement before the producers' first poll with per-instance
+entry counts and three actual joins; the control must detect normal ambient
+startup. Abort all selected tasks before awaiting any, join every handle and
+retain failures until cleanup completes. Production still launches all four
+discovery tasks. This isolates a fixture's environment-dependent traffic; it does
+not establish an empty OS interface inventory or resolve production socket pressure.
 
 When a UI action moves into a menu, update the existing shared interaction helper
 and its callers before publication. Exercise the real entry point; retain
@@ -962,6 +989,12 @@ the same nonwaiting page snapshot for its initial visible row. Capture its exact
 identity and offset together; retain the outer poll budget and all subsequent
 anchor, focus, unread and navigation assertions. A late successful observation
 does not establish a missing-row defect or identify the source of driver latency.
+Initial history preparation uses a browser-local observer for exact row identity,
+text and visible geometry within the caller's original remaining budget. Keep
+mutation checks immediate and a deduplicated frame fallback; absent/hidden rows
+must fail and queued recovery must clean up even with frames held. Check the
+monotonic deadline before and after sampling so delayed callbacks cannot accept
+a late state. Preserve every later live/read, scroll and focus assertion.
 
 The [memory guardrail](../frontend/e2e/memory.spec.ts) retains its seeded history,
 25 complete conversation rounds, original watchdog and rendered-bubble ceiling.
@@ -974,6 +1007,12 @@ directly; the repeated phase does not qualify trusted-input latency. Preserve
 the final pointer navigation and DOM bound; a deliberate extra-bubble control
 must still fail. This fixture does not measure pointer latency or prove the cause
 of hosted driver stalls.
+Its [observer](../frontend/e2e/helpers/conversation-churn.ts) checks DOM commits
+without waiting for an animation frame, retaining the frame fallback for CSS-only
+readiness. A held-frame browser control must cover the original readiness timeout,
+observer/frame cleanup and recovery. Retained trace timing is bounded per completed
+activation; it does not qualify a late assertion after the whole-test deadline.
+The owning browser selector includes both the scenario and its helper.
 
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the

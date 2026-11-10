@@ -600,19 +600,31 @@ single-instance activation and tray actions reuse its show/unminimize/focus path
 
 ### Dialog focus ownership
 
-`frontend/src/components/ui/dialog.tsx` owns default focus restoration for shared
-Radix dialogs. A deferred close callback may restore the opener only while focus
+`frontend/src/components/ui/focus-restoration.ts` owns the shared restoration rule
+used by Radix dialog and context-menu content. A deferred close callback may restore the opener only while focus
 is neutral or still belongs to that closing content. A connected control outside
 the closing dialog represents a newer focus owner and must retain focus. Document
 body/root and Radix focus guards are neutral; ordinary and nested trigger
 restoration remain delegated to the existing focus stack. Consumer
 `onCloseAutoFocus` handlers run first and retain their cancellation behavior.
+When a context menu opens a newer popover, the old menu's deferred unmount must
+not move focus away and dismiss that popover. Hold the actual Radix close cleanup
+until the newer popover owns focus, then verify retained focus and completion of
+the new action. Ordinary trigger restoration remains delegated to Radix.
 
 Sidebar utility helpers observe the trigger's expanded state and the menu's open
 state before real scoped item clicks. They must not compensate for a stale
 production focus callback by sleeping through it. The `frontend-dialog-focus`
 validation owner requires real primitive lifecycle regressions and a browser
 handoff from a closing dialog to an already opened utility menu.
+
+Shared context-menu items own their visible keyboard indicator through the
+existing `--ring` theme token. Verify resolved outline style, width and color in
+both themes after the bounded color transition, with real keyboard navigation
+and activation; utility class presence alone is not evidence of visible focus.
+The shared focus audit helper dismisses with Escape by default. A caller that
+continues to activate the same menu must explicitly retain it, without changing
+cleanup for unrelated consumers. These controls share the existing focus owner.
 
 ### Focused validation ownership
 

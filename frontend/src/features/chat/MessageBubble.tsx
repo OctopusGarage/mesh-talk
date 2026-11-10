@@ -28,7 +28,7 @@ import { IdentityGlyph } from "@/components/identity";
 import {
   Popover,
   PopoverContent,
-  PopoverTrigger,
+  PopoverAnchor,
 } from "@/components/ui/popover";
 import {
   ContextMenu,
@@ -939,17 +939,9 @@ function Actions({
         <CornerUpLeft className="h-3.5 w-3.5" />
       </button>
       <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
-        <PopoverTrigger asChild>
-          <button
-            disabled={disabled}
-            data-testid="message-react"
-            title={t("message.react")}
-            aria-label={t("message.react")}
-            className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
-          >
-            <SmilePlus className="h-3.5 w-3.5" />
-          </button>
-        </PopoverTrigger>
+        <PopoverAnchor asChild>
+          <span aria-hidden="true" />
+        </PopoverAnchor>
         <PopoverContent className="w-auto" data-testid="reaction-picker">
           <div className="flex gap-1">
             {EMOJIS.map((e) => (

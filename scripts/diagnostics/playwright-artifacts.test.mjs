@@ -90,15 +90,22 @@ test("configured browser watchdog terminates a parked case and collects the next
     const report = path.join(directory, "report.json");
     const config = path.join(directory, "fixture.config.cjs");
     // Playwright's config loader applies its normal TypeScript transformation.
-    // Accelerate only the actual source's watchdog, keeping its execution rule.
+    // Keep the source watchdog for ordinary cases; only the deliberately parked
+    // case accelerates that bound. Runner startup/collection is not a parked case.
     writeFileSync(config, `const base = require(${JSON.stringify(source)}).default;
 module.exports = { ...base, testDir: __dirname, testMatch: 'watchdog.spec.js', fullyParallel: false,
   webServer: undefined, projects: [{ name: 'watchdog' }], retries: 0, workers: 1,
-  timeout: base.timeout / 360, metadata: { sourceWatchdog: base.timeout } };\n`);
+  metadata: { sourceWatchdog: base.timeout } };\n`);
     writeFileSync(path.join(directory, "watchdog.spec.js"), `const { test } = require(${JSON.stringify(runner)});
 const { writeFileSync } = require('node:fs');
-test('parked', async () => { await new Promise(() => {}); });
-test('later', async () => { writeFileSync(${JSON.stringify(marker)}, 'executed after timeout'); });\n`);
+test('parked', async ({}, info) => { test.setTimeout(info.timeout / 360); await new Promise(() => {}); });
+// Deliberate fixture latency exceeds the parked case's accelerated watchdog.
+// Collection of a later case must retain the actual source's normal allowance.
+test('later', async ({}, info) => {
+  await new Promise(resolve => setTimeout(resolve, info.config.metadata.sourceWatchdog / 180));
+  require('node:assert/strict').equal(info.timeout, info.config.metadata.sourceWatchdog);
+  writeFileSync(${JSON.stringify(marker)}, 'executed after timeout');
+});\n`);
     retired = false;
     const result = await execute([process.execPath, cli, "test", "--config", config, "--reporter=json"], {
       cwd: directory, env: { ...process.env, EVAL_BROWSER: "chromium", EVAL_TIER: "core", PLAYWRIGHT_JSON_OUTPUT_NAME: report },
@@ -109,12 +116,19 @@ test('later', async () => { writeFileSync(${JSON.stringify(marker)}, 'executed a
     assert.equal(result.code, 1, "a parked case must fail the command");
     const evidence = JSON.parse(readFileSync(report, "utf8"));
     assert(Number.isFinite(evidence.config.metadata.sourceWatchdog) && evidence.config.metadata.sourceWatchdog > 0 && evidence.config.metadata.sourceWatchdog <= 120000);
-    assert.equal(evidence.stats.unexpected, 1);
+    assert.equal(evidence.stats.unexpected, 1, JSON.stringify({ stats: evidence.stats, suites: evidence.suites }));
     assert.equal(evidence.stats.expected, 1);
     assert.equal(evidence.stats.skipped, 0);
     assert.equal(evidence.stats.flaky, 0);
     const results = evidence.suites.flatMap(suite => suite.specs.flatMap(spec => spec.tests.flatMap(row => row.results)));
     assert.equal(results.filter(row => row.status === "timedOut").length, 1);
+    const cases = evidence.suites.flatMap(suite => suite.specs);
+    const parked = cases.find(spec => spec.title === "parked").tests[0];
+    const later = cases.find(spec => spec.title === "later").tests[0];
+    assert.equal(parked.timeout, evidence.config.metadata.sourceWatchdog / 360);
+    assert.equal(parked.results[0].status, "timedOut");
+    assert.equal(later.timeout, evidence.config.metadata.sourceWatchdog);
+    assert.equal(later.results[0].status, "passed");
     assert.equal(readFileSync(marker, "utf8"), "executed after timeout");
   }
 });
