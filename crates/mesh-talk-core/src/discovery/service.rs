@@ -953,6 +953,42 @@ pub fn spawn_discovery_with_routed(
         routed,
         None,
     )
+    .into_handles()
+}
+
+/// Named producer ownership; public callers retain the historical four-handle order.
+pub(crate) struct DiscoveryTasks {
+    listener: JoinHandle<()>,
+    broadcast: JoinHandle<()>,
+    scan: JoinHandle<()>,
+    rejoin: JoinHandle<()>,
+    #[cfg(test)]
+    first_polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DiscoveryTasks {
+    pub(crate) fn into_handles(self) -> Vec<JoinHandle<()>> {
+        vec![self.listener, self.broadcast, self.scan, self.rejoin]
+    }
+    #[cfg(test)]
+    pub(crate) fn ambient_ids(&self) -> [tokio::task::Id; 3] {
+        [self.broadcast.id(), self.scan.id(), self.rejoin.id()]
+    }
+    #[cfg(test)]
+    pub(crate) fn ambient_first_polls(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.first_polls.clone()
+    }
+}
+
+#[cfg(test)]
+fn spawn_observed_ambient(
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+    first_polls: Arc<std::sync::atomic::AtomicUsize>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        first_polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        future.await;
+    })
 }
 
 pub(crate) fn spawn_discovery_with_network_changes(
@@ -965,40 +1001,60 @@ pub(crate) fn spawn_discovery_with_network_changes(
     visibility: Arc<DiscoveryVisibility>,
     routed: Option<Arc<RoutedDiscovery>>,
     network_changes: Option<tokio::sync::watch::Sender<u64>>,
-) -> Vec<JoinHandle<()>> {
+) -> DiscoveryTasks {
     let trigger = trigger.unwrap_or_else(|| Arc::new(Notify::new()));
     let target: SocketAddr = (
         crate::transport::net::DISCOVERY_MULTICAST_GROUP,
         discovery_port,
     )
         .into();
-    vec![
-        tokio::spawn(run_listen_with_routed(
-            Arc::clone(&socket),
-            roster,
-            self_user_id,
-            Arc::clone(&announce),
-            discovery_port,
-            Arc::clone(&visibility),
-            routed,
-        )),
-        tokio::spawn(run_broadcast_with_visibility(
-            Arc::clone(&socket),
-            Arc::clone(&announce),
-            target,
-            Duration::from_secs(2),
-            Some(Arc::clone(&trigger)),
-            Arc::clone(&visibility),
-        )),
-        tokio::spawn(run_scan_with_visibility(
-            Arc::clone(&socket),
-            announce,
-            discovery_port,
-            Some(Arc::clone(&trigger)),
-            visibility,
-        )),
-        tokio::spawn(run_rejoin(socket, trigger, network_changes)),
-    ]
+    #[cfg(test)]
+    let first_polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::spawn(run_listen_with_routed(
+        Arc::clone(&socket),
+        roster,
+        self_user_id,
+        Arc::clone(&announce),
+        discovery_port,
+        Arc::clone(&visibility),
+        routed,
+    ));
+    let broadcast = run_broadcast_with_visibility(
+        Arc::clone(&socket),
+        Arc::clone(&announce),
+        target,
+        Duration::from_secs(2),
+        Some(Arc::clone(&trigger)),
+        Arc::clone(&visibility),
+    );
+    #[cfg(test)]
+    let broadcast = spawn_observed_ambient(broadcast, first_polls.clone());
+    #[cfg(not(test))]
+    let broadcast = tokio::spawn(broadcast);
+    let scan = run_scan_with_visibility(
+        Arc::clone(&socket),
+        announce,
+        discovery_port,
+        Some(Arc::clone(&trigger)),
+        visibility,
+    );
+    #[cfg(test)]
+    let scan = spawn_observed_ambient(scan, first_polls.clone());
+    #[cfg(not(test))]
+    let scan = tokio::spawn(scan);
+    let rejoin = run_rejoin(socket, trigger, network_changes);
+    #[cfg(test)]
+    let rejoin = spawn_observed_ambient(rejoin, first_polls.clone());
+    #[cfg(not(test))]
+    let rejoin = tokio::spawn(rejoin);
+    DiscoveryTasks {
+        listener,
+        broadcast,
+        scan,
+        rejoin,
+        #[cfg(test)]
+        first_polls,
+    }
 }
 
 /// IPv6 uses unicast only; the existing IPv4 LAN multicast loop remains separate.

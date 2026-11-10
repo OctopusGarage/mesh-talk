@@ -957,6 +957,16 @@ instance-owned and bounded, expose omissions, avoid disabled formatting work and
 retire real listener tasks. They add evidence, not network authority or a claimed
 explanation of unobserved packet loss.
 
+Explicit-endpoint discovery fixtures retire the named broadcast, scan and rejoin
+tasks through their existing participant owner while retaining the real UDP
+listener, public policy, certificates, TCP and delivery work. On their current-thread
+runtime, qualify retirement before the producers' first poll with per-instance
+entry counts and three actual joins; the control must detect normal ambient
+startup. Abort all selected tasks before awaiting any, join every handle and
+retain failures until cleanup completes. Production still launches all four
+discovery tasks. This isolates a fixture's environment-dependent traffic; it does
+not establish an empty OS interface inventory or resolve production socket pressure.
+
 When a UI action moves into a menu, update the existing shared interaction helper
 and its callers before publication. Exercise the real entry point; retain
 functional, permission, focus and geometry assertions at the toolbar or popup

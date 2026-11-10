@@ -501,6 +501,15 @@ retain bounded public metadata with explicit omissions. Qualify real UDP
 acceptance/rejection, disabled outcomes and listener retirement; traces do not
 establish a historical failure stage that was never observed.
 
+An explicit loopback exchange can accidentally share its UDP send capacity with
+environment-dependent scans. Isolate those fixture producers through named task
+ownership, preserving the actual listener and protocol admission. The
+[participant owner](../crates/mesh-talk-core/src/node/participant_runtime.rs) aborts
+all selected tasks before joining any and retains every join failure until cleanup
+finishes. Per-instance first-poll and actual-join controls distinguish isolated
+startup from ordinary ambient startup. This does not prove the cause of a past
+send timeout or qualify production behavior under network pressure.
+
 Bind executable probes to the owning package, target kind and complete test
 identity, and require exactly one runnable match. A matching binary basename is
 not authority: Cargo can emit library and binary targets with the same name,

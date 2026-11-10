@@ -659,16 +659,103 @@ async fn discover(stage: &str, from: &NodeRuntime, target: &NodeRuntime) -> Resu
     .await
 }
 
+// The successful startup path performs no await after launching producers.
+// On a current-thread host, aborting these named tasks immediately therefore
+// precedes their first poll; the per-instance counter qualifies that boundary.
+async fn start_explicit_discovery_runtime(
+    base: &Path,
+    owner: &str,
+) -> (
+    NodeRuntime,
+    tokio::sync::mpsc::UnboundedReceiver<ReceivedDm>,
+) {
+    assert_eq!(
+        tokio::runtime::Handle::current().runtime_flavor(),
+        tokio::runtime::RuntimeFlavor::CurrentThread
+    );
+    let reservation = crate::transport::net::discovery_socket(0).unwrap();
+    let (mut runtime, messages) =
+        start(base, owner, reservation.local_addr().unwrap().port()).await;
+    runtime.participant.discovery_trace().enable_trace();
+    let report = runtime
+        .participant
+        .retire_ambient_discovery_for_test()
+        .await;
+    drop(reservation);
+    if report.first_polls != 0
+        || report.removed != 3
+        || report.joined != 3
+        || !report.failures.is_empty()
+    {
+        let cleanup = runtime.stop_for_storage().await.close();
+        panic!(
+            "explicit discovery ambient retirement failed: {report:?}; runtime cleanup={cleanup:?}"
+        );
+    }
+    (runtime, messages)
+}
+
+#[tokio::test]
+async fn explicit_certified_discovery_retires_ambient_producers_before_first_poll() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _) = start_explicit_discovery_runtime(dir.path(), "explicit-source").await;
+    let (target, mut target_messages) =
+        start_explicit_discovery_runtime(dir.path(), "explicit-target").await;
+    let discovered = discover("isolated explicit certified discovery", &source, &target).await;
+    let sent = source
+        .send_to_account(
+            target.account_id(),
+            b"explicit listener and TCP remain active",
+            None,
+        )
+        .await;
+    let received = tokio::time::timeout(Duration::from_secs(6), target_messages.recv()).await;
+    let source_polls = source.participant.ambient_discovery_first_polls();
+    let target_polls = target.participant.ambient_discovery_first_polls();
+    target.stop_for_storage().await.close().unwrap();
+    source.stop_for_storage().await.close().unwrap();
+    let reservation = crate::transport::net::discovery_socket(0).unwrap();
+    let (mut ordinary, _) = start(
+        dir.path(),
+        "ordinary-ambient",
+        reservation.local_addr().unwrap().port(),
+    )
+    .await;
+    drop(reservation);
+    let ordinary_polled = tokio::time::timeout(Duration::from_secs(6), async {
+        while ordinary.participant.ambient_discovery_first_polls() != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let ordinary_retired = ordinary
+        .participant
+        .retire_ambient_discovery_for_test()
+        .await;
+    ordinary.stop_for_storage().await.close().unwrap();
+    discovered.unwrap();
+    sent.unwrap();
+    assert_eq!(
+        received.unwrap().unwrap().text,
+        b"explicit listener and TCP remain active"
+    );
+    assert_eq!(source_polls, 0);
+    assert_eq!(target_polls, 0);
+    assert!(
+        ordinary_polled.is_ok(),
+        "ordinary ambient producers must actually be polled"
+    );
+    assert_eq!(ordinary_retired.first_polls, 3);
+    assert_eq!(ordinary_retired.removed, 3);
+    assert_eq!(ordinary_retired.joined, 3);
+    assert!(ordinary_retired.failures.is_empty(), "{ordinary_retired:?}");
+}
+
 #[tokio::test]
 async fn certified_discovery_requires_a_fresh_reply_despite_cached_peer() {
     let dir = tempfile::tempdir().unwrap();
-    let start_reserved = async |owner: &str| {
-        let reservation = crate::transport::net::discovery_socket(0).unwrap();
-        let running = start(dir.path(), owner, reservation.local_addr().unwrap().port()).await;
-        running.0.participant.discovery_trace().enable_trace();
-        drop(reservation);
-        running
-    };
+    let start_reserved =
+        async |owner: &str| start_explicit_discovery_runtime(dir.path(), owner).await;
     let (source, _) = start_reserved("fresh-source").await;
     let (target, _) = start_reserved("fresh-target").await;
     let warm = discover("warm real certified cache", &source, &target).await;
@@ -712,14 +799,8 @@ async fn certified_discovery_requires_a_fresh_reply_despite_cached_peer() {
 #[tokio::test]
 async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts() {
     let dir = tempfile::tempdir().unwrap();
-    let start_reserved = async |owner: &str| {
-        // Retain a compatible reservation until the runtime owns this port.
-        let reservation = crate::transport::net::discovery_socket(0).unwrap();
-        let running = start(dir.path(), owner, reservation.local_addr().unwrap().port()).await;
-        running.0.participant.discovery_trace().enable_trace();
-        drop(reservation);
-        running
-    };
+    let start_reserved =
+        async |owner: &str| start_explicit_discovery_runtime(dir.path(), owner).await;
     let (alice, _) = start_reserved("pair-owner").await;
     let (bob, _) = start_reserved("pair-joiner").await;
     let alice_id = alice.user_id().to_owned();

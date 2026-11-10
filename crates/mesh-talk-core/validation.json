@@ -1097,12 +1097,14 @@
           "filters": [
             "discovery::",
             "node::runtime::privacy_tests::certified_discovery_requires_a_fresh_reply_despite_cached_peer",
+            "node::runtime::privacy_tests::explicit_certified_discovery_retires_ambient_producers_before_first_poll",
+            "node::participant_runtime::ambient_retirement_tests::",
             "node::runtime::privacy_tests::pairing_previously_known_foreign_device_survives_both_runtime_restarts"
           ]
         }
       ],
       "escalation": [
-        "Discovery fixture completion requires this invocation's nonce and exact endpoint plus an actually accepted device/account binding, not a warm cached row alone. Preserve its original deadline and probe cadence/count. Run real warm-cache stopped-target/restart controls and UDP witness acceptance/rejection, bound, instance isolation, disabled formatting and joined listener retirement. Test-only traces remain opt-in and do not establish an unobserved historical cause; see docs/ci-maintenance.md.",
+        "Discovery fixture completion requires this invocation's nonce and exact endpoint plus an actually accepted device/account binding, not a warm cached row alone. Preserve its original deadline and probe cadence/count. Run real warm-cache stopped-target/restart controls and UDP witness acceptance/rejection, bound, instance isolation, disabled formatting and joined listener retirement. Explicit-endpoint fixtures retire three named ambient producers before first poll through their participant owner, retaining real listener/public-policy/certificates/TCP/delivery. Verify normal-startup rejection, zero first polls, all actual joins and cleanup-before-failure reporting; production still launches all four tasks. Test-only traces remain opt-in; fixture isolation does not resolve production socket pressure or establish an unobserved historical cause. See docs/ci-maintenance.md.",
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
         "Pinned gateway queries must recover when another loopback client consumes the existing per-source UDP reply quota. Preserve the absolute four-second deadline, at most four datagrams, exact endpoint and signed pinned-identity validation, and cancellation ownership. Run the real responder quota regression and existing gateway lifecycle/security tests; repeat bridge_cross_lan and channel_peer_recovery against the production CLI."
       ],

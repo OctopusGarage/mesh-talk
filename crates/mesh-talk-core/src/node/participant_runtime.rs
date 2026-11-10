@@ -82,7 +82,7 @@ impl PreparedParticipant {
         let announce = shared_announce(&current_announce);
         let discovery_trigger = Arc::new(Notify::new());
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-        tasks.extend(spawn_discovery_with_network_changes(
+        let discovery = spawn_discovery_with_network_changes(
             Arc::clone(&socket),
             Arc::clone(&roster),
             Arc::clone(&announce),
@@ -92,7 +92,12 @@ impl PreparedParticipant {
             Arc::clone(&visibility),
             Some(Arc::clone(&routed)),
             Some(node.network_changes.clone()),
-        ));
+        );
+        #[cfg(test)]
+        let ambient_discovery_ids = discovery.ambient_ids();
+        #[cfg(test)]
+        let ambient_discovery_first_polls = discovery.ambient_first_polls();
+        tasks.extend(discovery.into_handles());
         if let Some(socket_v6) = socket_v6.as_ref() {
             tasks.push(spawn_routed_listener(
                 Arc::clone(socket_v6),
@@ -204,6 +209,10 @@ impl PreparedParticipant {
             discovery_health,
             tasks,
             graceful_host_tasks: Vec::new(),
+            #[cfg(test)]
+            ambient_discovery_ids,
+            #[cfg(test)]
+            ambient_discovery_first_polls,
         }
     }
 }
@@ -223,6 +232,126 @@ pub struct ParticipantRuntime {
     discovery_health: Vec<tokio::task::AbortHandle>,
     pub(super) tasks: Vec<JoinHandle<()>>,
     graceful_host_tasks: Vec<GracefulHostTask>,
+    #[cfg(test)]
+    ambient_discovery_ids: [tokio::task::Id; 3],
+    #[cfg(test)]
+    ambient_discovery_first_polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct AmbientDiscoveryRetirement {
+    pub first_polls: usize,
+    pub removed: usize,
+    pub joined: usize,
+    pub failures: Vec<tokio::task::JoinError>,
+}
+
+#[cfg(test)]
+async fn retire_named_ambient_discovery(
+    tasks: &mut Vec<JoinHandle<()>>,
+    health: &mut Vec<tokio::task::AbortHandle>,
+    ids: &[tokio::task::Id; 3],
+    first_polls: &std::sync::atomic::AtomicUsize,
+) -> AmbientDiscoveryRetirement {
+    let mut ambient = Vec::with_capacity(3);
+    let mut retained = Vec::with_capacity(tasks.len());
+    for task in tasks.drain(..) {
+        if ids.contains(&task.id()) {
+            ambient.push(task);
+        } else {
+            retained.push(task);
+        }
+    }
+    *tasks = retained;
+    for task in &ambient {
+        task.abort();
+    }
+    health.retain(|task| !ambient.iter().any(|removed| removed.id() == task.id()));
+    let mut report = AmbientDiscoveryRetirement {
+        first_polls: first_polls.load(std::sync::atomic::Ordering::SeqCst),
+        removed: ambient.len(),
+        joined: 0,
+        failures: Vec::new(),
+    };
+    // Every removed owner is awaited even if another producer panicked or an
+    // expected task was absent. The caller checks the report after cleanup.
+    for task in ambient {
+        match task.await {
+            Ok(()) => report.joined += 1,
+            Err(error) if error.is_cancelled() => report.joined += 1,
+            Err(error) => report.failures.push(error),
+        }
+    }
+    report
+}
+
+#[cfg(test)]
+mod ambient_retirement_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_named_task_and_panicked_producer_preserve_failure_and_join_other_owners() {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let panicked = tokio::spawn(async move {
+            let _ = entered.send(());
+            panic!("owned ambient panic control");
+        });
+        let entered = ready.await;
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        let missing = tokio::spawn(std::future::pending::<()>());
+        let unrelated = tokio::spawn(std::future::pending::<()>());
+        let ids = [panicked.id(), cancelled.id(), missing.id()];
+        let survivor_ids = [missing.id(), unrelated.id()];
+        let mut health = vec![
+            panicked.abort_handle(),
+            cancelled.abort_handle(),
+            missing.abort_handle(),
+            unrelated.abort_handle(),
+        ];
+        let mut tasks = vec![panicked, cancelled, unrelated];
+        let mut report = retire_named_ambient_discovery(
+            &mut tasks,
+            &mut health,
+            &ids,
+            &std::sync::atomic::AtomicUsize::new(0),
+        )
+        .await;
+        let retained_ids: Vec<_> = tasks.iter().map(JoinHandle::id).collect();
+        let health_ids: std::collections::HashSet<_> =
+            health.iter().map(tokio::task::AbortHandle::id).collect();
+        let unrelated_live = tasks.iter().all(|task| !task.is_finished());
+        let missing_live = !missing.is_finished();
+        for task in &tasks {
+            task.abort();
+        }
+        missing.abort();
+        let mut cleanup = Vec::new();
+        for task in tasks {
+            cleanup.push(task.await);
+        }
+        cleanup.push(missing.await);
+        assert_eq!(report.removed, 2);
+        assert_eq!(report.joined, 1);
+        assert_eq!(report.failures.len(), 1);
+        let failure = report.failures.pop().unwrap();
+        assert!(failure.is_panic());
+        let payload = failure.into_panic();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("owned ambient panic control"));
+        assert!(entered.is_ok());
+        assert_eq!(retained_ids, vec![survivor_ids[1]]);
+        assert_eq!(health_ids, survivor_ids.into_iter().collect());
+        assert!(unrelated_live && missing_live);
+        assert!(
+            cleanup
+                .into_iter()
+                .all(|result| result.is_err_and(|error| error.is_cancelled()))
+        );
+    }
 }
 
 struct GracefulHostTask {
@@ -234,6 +363,25 @@ impl ParticipantRuntime {
     #[cfg(test)]
     pub(super) fn discovery_trace(&self) -> &RoutedDiscovery {
         &self.routed_discovery
+    }
+
+    #[cfg(test)]
+    pub(super) fn ambient_discovery_first_polls(&self) -> usize {
+        self.ambient_discovery_first_polls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Explicit loopback fixtures retain the listener and all TCP/delivery work.
+    /// Abort every named ambient producer before the first join can yield.
+    #[cfg(test)]
+    pub(super) async fn retire_ambient_discovery_for_test(&mut self) -> AmbientDiscoveryRetirement {
+        retire_named_ambient_discovery(
+            &mut self.tasks,
+            &mut self.discovery_health,
+            &self.ambient_discovery_ids,
+            &self.ambient_discovery_first_polls,
+        )
+        .await
     }
 
     /// Local discovery producer health; makes no claim about Internet or LAN reachability.
