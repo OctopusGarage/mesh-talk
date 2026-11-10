@@ -1223,6 +1223,15 @@ evidence before stronger guarantees. No SSID inference or network-name logging
 is used. Existing peers may continue selecting a paused sharing member; normal
 bounded recovery/source rotation still applies without changing wire formats.
 
+Attachment recovery selects at most three sources in the existing sorted,
+rotating peer order. Each selection traverses file offer and sent-scope metadata
+once through bounded SQL pages, retaining only per-call routing-peer eligibility.
+Current accepted membership and replica preferences qualify channel sources;
+when no retained scope has local channel state, the existing exact file-author
+lookup supplies the direct fallback. Scope/read failures remain errors. This
+advisory selection grants neither admission nor file export; the exchange still
+rechecks consent and the exact retained offer/provider through its owning paths.
+
 Both sync directions recheck file export projections at each bounded page,
 including existing sessions. Possession inventories and fingerprints remain
 accurate while serving is paused, preventing peers from sending retained chunks
@@ -2761,9 +2770,19 @@ Optional checkpoints and inner-to-wrapper mappings live on the existing
 encrypted profile connection. Checkpoints are locally signed and bind the full
 relay, recipient and mailbox identities, the local incoming repair revision and
 source floor. Semantic Profile compaction is classified transactionally and does
-not advance this repair revision; the full destructive revision still guards
-outgoing authority and retained-event views. Actual deletion and retirement keep
-their incoming invalidation behavior. At most 512 checkpoints use 8 MiB; each
+not advance the global repair or cross-conversation authority revision. It removes
+only unreferenced Profile leaves, preserving required ancestors, manifests,
+controls and separately owned identity proofs. The affected conversation's own
+physical epoch and history binding still invalidate its retained-event views and
+exact history stamps. Unrelated prepared views survive this classified work;
+actual retirement, erasure and other destructive rewrites retain the global fence,
+including a file's inherited parent authority. Missing or corrupt classification
+fails closed rather than supplying reusable evidence. The private outgoing history
+fingerprint uses the V2 authority hash domain: a legacy full-counter fingerprint
+cannot regain completion qualification when a later classified counter has the
+same numeric value. Checkpoint decoding, receive cursors and pending retries keep
+their existing representation; old outgoing completion proofs requalify through
+normal synchronization. At most 512 checkpoints use 8 MiB; each
 blob is limited to 16 KiB. A successfully validated cold receipt warms its existing
 bounded upload or receive-only owner even when a new adapter changes no progress.
 Only after validation rejects retired session-only evidence is durable progress

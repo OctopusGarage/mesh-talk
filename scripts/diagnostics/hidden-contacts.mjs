@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
 import { captureNativeEvidence, captureNativeFailure, collectNativeApplicationLogs, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
+import { enterNativeAccount, coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, cliListenerEndpoint, receiptPeerEndpointContext, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -43,14 +43,18 @@ report.sourceSha = sourceSha;
 report.buildVerified = initialBuildProof.buildVerified;
 report.buildProof = initialBuildProof;
 if (process.env.GITHUB_RUN_ID) report.runId = process.env.GITHUB_RUN_ID;
-let app, peer, session, endpoint, account, userId, signedInUser;
+let app, peer, session, endpoint, account, userId, signedInUser, previousReceiptPeer;
 const registeredOwners = new Map();
 const redact = value => String(value).replaceAll(password, "[REDACTED]");
 function launch(binary, args) {
   const child = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: false });
   owned.add(child);
   child.output = "";
-  for (const stream of [child.stdout, child.stderr]) stream.on("data", data => { child.output = (child.output + redact(data)).slice(-64000); });
+  child.receiptListener = null;
+  for (const stream of [child.stdout, child.stderr]) stream.on("data", data => {
+    child.output = (child.output + redact(data)).slice(-64000);
+    child.receiptListener ??= cliListenerEndpoint(child.output);
+  });
   child.on("error", error => { child.output += redact(error.message); });
   child.stdin.on("error", error => { child.output += redact(`stdin: ${error.message}`); });
   child.on("close", () => owned.delete(child));
@@ -313,9 +317,10 @@ try {
   await element(row());
   await click(row());
   const coreContext = { execute, observe, invoke, captureReceiptCard: screenshot, captureAuthError: screenshot, invalidCredentialTexts, readFileBytes, until, passed, fill, click, get peer() { return peer; }, account, userId, fixture, history, row, privacySettings, key, signOut, login, userName, peerName, command, focusOwnedWindow, openDialog, settledDialog, element, exists, get owner() { return signedInUser; }, nonce: randomBytes(4).toString("hex"),
-    stopPeer: async () => { const old = peer; await stop(old, true); assert.ok(!owned.has(old), "peer actually exited"); },
+    stopPeer: async () => { const old = peer; await stop(old, true); assert.ok(!owned.has(old), "peer actually exited"); previousReceiptPeer = { ...old.receiptListener, pid: old.pid, owned: owned.has(old), exited: !owned.has(old) && (old.exitCode !== null || old.signalCode !== null), exitCode: old.exitCode, signalCode: old.signalCode }; },
+    receiptFailureContext: () => receiptPeerEndpointContext({ observe, expectedAccount: account, previousPeer: previousReceiptPeer ?? null, currentPeer: { ...peer.receiptListener, pid: peer.pid, owned: owned.has(peer), exited: !owned.has(peer) && (peer.exitCode !== null || peer.signalCode !== null), exitCode: peer.exitCode, signalCode: peer.signalCode } }),
     peerExited: () => !owned.has(peer) && (peer.exitCode !== null || peer.signalCode !== null),
-    restartPeer: async () => { const originalId = /node (\S+) listening/.exec(peer.output)?.[1]; assert.match(originalId ?? "", /^[0-9a-f]{32}$/); peer = launch(nodeBinary, ["--keystore", join(fixture, "peer", "identity.keystore"), "--password", password, "--name", peerName, "--discovery-port", String(discoveryPort)]); const restartedId = await until("same-keystore peer restarted", () => /node (\S+) listening/.exec(peer.output)?.[1], 180000); assert.equal(restartedId, originalId, "restarted peer has original signing identity"); },
+    restartPeer: async () => { const originalId = peer.receiptListener?.deviceId; assert.match(originalId ?? "", /^[0-9a-f]{32}$/); peer = launch(nodeBinary, ["--keystore", join(fixture, "peer", "identity.keystore"), "--password", password, "--name", peerName, "--discovery-port", String(discoveryPort)]); const restartedId = await until("same-keystore peer restarted", () => /node (\S+) listening/.exec(peer.output)?.[1], 180000); assert.equal(restartedId, originalId, "restarted peer has original signing identity"); },
   };
   const coreState = await coreScenarios(coreContext);
   const receiptState = await receiptScenarios(coreContext);

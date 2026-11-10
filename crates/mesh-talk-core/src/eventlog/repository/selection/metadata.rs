@@ -51,18 +51,24 @@ impl EventRepository {
             nonnegative(revision.unwrap_or(0))
         })
     }
-    /// Incoming traversal survives semantic Profile compaction, but any other
-    /// destructive change still invalidates its coverage. Outgoing authority
-    /// continues to use the complete destructive_policy_revision.
-    pub(crate) fn receive_repair_revision(&self) -> Result<i64, LogError> {
+    /// Global destructive changes that can invalidate cross-conversation
+    /// authority. Classified Profile compaction deletes only unreferenced leaves;
+    /// each affected view still checks its own physical destructive epoch.
+    /// Missing or corrupt classification is an error, never reusable evidence.
+    pub(crate) fn authority_destructive_revision(&self) -> Result<i64, LogError> {
         self.database.read(|c| {
             let (destructive, classified) = self.compaction_revisions_on(c)?;
             Ok(destructive - classified)
         })
     }
+    /// Incoming traversal survives the same classified leaf retirement, while
+    /// every other destructive change still invalidates its coverage.
+    pub(crate) fn receive_repair_revision(&self) -> Result<i64, LogError> {
+        self.authority_destructive_revision()
+    }
     /// Called exactly once after each affected conversation's destructive epoch
     /// update in the SAME Profile publication transaction. This classifies the
-    /// trigger's increment; it never suppresses the raw authority invalidation.
+    /// trigger's increment; affected scopes retain their raw epoch invalidation.
     pub(crate) fn record_profile_compaction_on(&self, c: &Connection) -> Result<(), LogError> {
         // Raw repository users (including relays) need not initialize participant
         // selections. Only an entirely absent registry permits this no-op;

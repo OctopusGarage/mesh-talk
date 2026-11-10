@@ -176,6 +176,29 @@ export async function receiptColdRestartCheckpoint(c, state) {
   return { owner: c.owner, account: c.account, ids: [...state.ids], statuses, offlineBackendDurabilityVerified: true, peerOfflineDuringSourceRestart: true };
 }
 
+// Cache only the fixture's already-emitted startup endpoint, never a live
+// connectivity claim or an extra CLI command.
+export function cliListenerEndpoint(output) {
+  const match = /node ([0-9a-f]{32}) listening on tcp\/(\d+)\b/.exec(output);
+  const tcpPort = Number(match?.[2]);
+  return match && tcpPort > 0 && tcpPort <= 65535 ? { deviceId: match[1], tcpPort } : null;
+}
+
+export async function receiptPeerEndpointContext({ observe, expectedAccount, previousPeer, currentPeer }) {
+  const context = { expectedAccount, previousPeer, currentPeer, observedPeers: null, observationError: null };
+  const deviceId = currentPeer?.deviceId ?? previousPeer?.deviceId;
+  try {
+    // Use the existing driver/HTTP deadline and await this one request; do
+    // not race a detached promise. A request error does not prove backend cancellation.
+    const peers = await observe("list_peers");
+    context.observedPeers = peers.filter(peer => deviceId && peer.user_id === deviceId).slice(0, 4)
+      .map(peer => ({ deviceId: peer.user_id, accountId: peer.account_id, addr: String(peer.addr).slice(0, 256) }));
+  } catch (error) {
+    context.observationError = String(error.message ?? error).slice(0, 512);
+  }
+  return context;
+}
+
 export async function receiptPhase(c, state, name, expected, historical = false, cold = undefined) {
   assert.equal(c.owner, state.owner, "receipt owner unchanged");
   if (historical) {
@@ -201,7 +224,12 @@ export async function receiptPhase(c, state, name, expected, historical = false,
       }
     });
   } catch (error) {
-    const diagnostic = JSON.stringify({ statuses: latestStatuses, observationError });
+    let endpointContext = null, endpointContextError = null;
+    if (c.receiptFailureContext) {
+      try { endpointContext = await c.receiptFailureContext(); JSON.stringify(endpointContext); }
+      catch (secondary) { endpointContext = null; endpointContextError = String(secondary.message ?? secondary).slice(0, 512); }
+    }
+    const diagnostic = JSON.stringify({ statuses: latestStatuses, observationError, endpointContext, endpointContextError });
     throw new Error(`${error.message}; receipt observation=${diagnostic}`, { cause: error });
   }
   const captures = [];

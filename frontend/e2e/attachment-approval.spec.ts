@@ -250,8 +250,25 @@ test("an expired previously ready attachment becomes unavailable", async ({
   await expect(
     bubble.getByRole("button", { name: "Save", exact: true }),
   ).toBeEnabled();
-  await page.evaluate(() => {
-    (window as unknown as { __expired: boolean }).__expired = true;
+  await page.evaluate(async () => {
+    const host = window as unknown as {
+      __expired: boolean;
+      __TAURI_INTERNALS__: {
+        invoke(cmd: string, args: Record<string, unknown>): Promise<unknown>;
+      };
+      __mockEmit(event: string, payload: unknown): void;
+    };
+    host.__expired = true;
+    // This fixture changes host availability, not a message's known deadline.
+    // Publish the same scoped invalidation as a real host-side file change.
+    const identity = await host.__TAURI_INTERNALS__.invoke(
+      "owner_node_identity",
+      { owner: "u_self" },
+    );
+    host.__mockEmit("node-state-changed", {
+      ...(identity as Record<string, unknown>),
+      kind: "files",
+    });
   });
   await expect(
     bubble.getByRole("button", { name: "Save", exact: true }),

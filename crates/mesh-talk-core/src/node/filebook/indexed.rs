@@ -84,6 +84,11 @@ fn page_limit(rows: usize, bytes: usize, charge: usize) -> Result<i64, LogError>
     Ok(rows.min(bytes / charge) as i64)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(in crate::node) static OFFER_PAGE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexedFileBook {
     pub(super) profile: Arc<ProfileStorage>,
@@ -294,6 +299,8 @@ impl IndexedFileBook {
         let limit = page_limit(rows, bytes, 144)?;
         self.profile.database().read(|c| {
             self.check(c)?;
+            #[cfg(test)]
+            OFFER_PAGE_QUERIES.with(|count| count.set(count.get() + 1));
             // Distinct statements preserve key seeks on each compound index.
             let selector = match (file,author) { (Some(_),Some(_)) => " AND file=?4 AND author=?5", (Some(_),None) => " AND file=?4", (None,Some(_)) => " AND author=?5", (None,None) => "" };
             let mut statement = c.prepare_cached(&format!("SELECT ordinal,event,file,parent,author FROM file_book_offers WHERE account=?1 AND ordinal>?2{selector} ORDER BY ordinal LIMIT ?3"))?;

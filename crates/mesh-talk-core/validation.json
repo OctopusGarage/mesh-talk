@@ -2511,6 +2511,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::group_file_delivery_tests::",
+            "node::serving::file_recovery_tests::",
             "node::group_file_delivery::authorization_tests::",
             "node::file_consent_tests::",
             "node::file_consent::",
@@ -3009,6 +3010,7 @@
         "crates/mesh-talk-core/src/storage/database/work_clock.rs",
         "crates/mesh-talk-core/src/storage/database/selection_work.rs",
         "crates/mesh-talk-core/src/eventlog/repository/selection/export.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/selection/metadata.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
       ],
       "rust": [
@@ -3022,6 +3024,11 @@
             "postoffice::storage::role::delta::tests::",
             "participant_history_upload_",
             "participant_history_sync_stamp_",
+            "participant_network_unrelated_profile_compaction_",
+            "participant_network_profile_compaction_sql_failure_",
+            "participant_network_missing_or_corrupt_compaction_classification_",
+            "participant_network_parent_retirement_",
+            "participant_receive_repair_revision_",
             "participant_probe_metadata_",
             "node::opaque_receive_cache::checkpoints::tests::",
             "node::opaque_receive_cache::tests::",

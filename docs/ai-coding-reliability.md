@@ -616,6 +616,14 @@ terminal deletion. The complete-page and partial-page regression in the
 checks fairness and SQL/commit/body-read costs together. The settled ordinary and
 control callback regression in [node tests](../crates/mesh-talk-core/src/node/node_tests.rs)
 checks SQL mutations, committed writes and body reads together.
+Within one operation, traverse a shared bounded source once rather than
+reconstructing its SQL iterator for every candidate peer. Retain only the
+already-bounded candidate metadata; do not collect historical scopes or turn
+advisory selection into a grant. Keep fallible pages, current membership and
+replica checks, and final exchange authority. The [file recovery regressions](../crates/mesh-talk-core/src/node/serving.rs)
+count real offer/scope queries across multiple peers and retain direct fallback,
+read failure recovery, replica opt-out, membership removal and source rotation.
+
 Compare repeated exact queries with their first preparation too. A metadata-only
 probe cache does not eliminate selection reconstruction in a different request
 path. Reuse an exclusively owned, bounded prepared view only under its complete
@@ -865,6 +873,28 @@ and the opaque checkpoint owner's
 `failed_checkpoint_sql_write_preserves_previous_value_and_retries_after_reopen`
 regressions retain initial-sync retry, barrier rejection and SQL rollback/reopen
 evidence independently of the directory-sync budget.
+
+Scope destructive invalidation to actual dependencies while retaining a global
+fence for cross-conversation authority. The
+[repository classification owner](../crates/mesh-talk-core/src/eventlog/repository/selection/metadata.rs)
+subtracts only atomically classified, unreferenced Profile leaf compaction from
+that global fence; each affected conversation still invalidates its own physical
+epoch and exact history binding. Do not exempt raw appends, real parent retirement,
+erasure or unknown/corrupt classification. The
+[participant network regressions](../crates/mesh-talk-core/src/node/privacy_sync/network.rs)
+check unchanged dependent file exports and retained manifest/proof/ancestor facts,
+own-view rejection, classifier rollback/retry, corrupt or missing metadata, and
+logical parent retirement before physical deletion.
+
+Version the private hash domain when a persisted derived fingerprint changes
+meaning, even if its serialized fields and wire layout remain identical. Changing
+from a full destructive counter to a classified counter can otherwise let an old
+completion proof regain validity after a real retirement reuses its numeric value.
+The participant network
+`participant_history_sync_stamp_never_aliases_legacy_full_counter_after_parent_retirement`
+regression reconstructs the exact legacy serializer and exercises that collision
+through actual compaction and parent retirement. Invalidate only the obsolete
+completion qualification; preserve compatible receive cursors and pending work.
 
 Keep UI observations distinct from durable progress: phase/check timestamps
 must not rewrite a reception ledger. An unchanged committed cursor can reuse its

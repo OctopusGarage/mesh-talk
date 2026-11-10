@@ -621,7 +621,8 @@ impl GuardedSyncStore<'_> {
             .repository()?
             .history_sync_binding(conversation)?;
         // Ordinary appends in another conversation do not affect this source.
-        // Global raw controls and destructive dependencies remain exact fences.
+        // Global raw controls and unclassified destructive dependencies remain
+        // exact fences; this scope's binding retains every physical rewrite.
         observation.source = 0;
         let mut after = self.network_observation(conversation)?;
         after.source = 0;
@@ -649,8 +650,14 @@ impl GuardedSyncStore<'_> {
             self.inbound,
         ))
         .map_err(|error| LogError::Serialization(error.to_string()))?;
+        // Counter meaning is part of a persisted completion certificate. An
+        // unversioned old full-counter hash must never alias a later value of
+        // the classified authority counter after a real destructive change.
+        let mut hash = Sha256::new();
+        hash.update(b"MeshTalkHistorySyncAuthorityV2\0");
+        hash.update(bytes);
         Ok(Some(HistorySyncStamp {
-            fingerprint: Sha256::digest(bytes).into(),
+            fingerprint: hash.finalize().into(),
         }))
     }
 
@@ -706,7 +713,7 @@ impl GuardedSyncStore<'_> {
             .lock()
             .expect("log lock")
             .repository()?
-            .destructive_policy_revision()?;
+            .authority_destructive_revision()?;
         let roster = self
             .node
             .roster
@@ -2514,8 +2521,14 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn participant_network_parent_retirement_invalidates_prepared_file_authorization() {
+    async fn dependent_file_authorization_fixture() -> (
+        tempfile::TempDir,
+        std::sync::Arc<Node>,
+        DeviceIdentity,
+        Account,
+        ConversationId,
+        ConversationId,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();
         let peer_account = Account::generate();
@@ -2571,6 +2584,508 @@ mod tests {
             .send_file_channel(parent, &path, crate::file::FileKind::File)
             .await
             .unwrap();
+        (directory, node, peer, peer_account, parent, file)
+    }
+
+    fn received_profile_compaction_inputs(
+        node: &std::sync::Arc<Node>,
+        peer: &DeviceIdentity,
+        account: &Account,
+    ) -> (ConversationId, Vec<Event>, Event) {
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let mut profiles = Vec::new();
+        // Eleven leaves minus the latest pair and one genuine referenced
+        // ancestor produce the production minimum of eight droppable sources.
+        for revision in 1..=11 {
+            let payload = crate::node::profile::ProfilePayload::new(account, None, revision);
+            let event = Event::new(
+                peer,
+                conversation,
+                revision,
+                vec![],
+                revision,
+                1,
+                EventKind::Profile,
+                crate::dm::seal(peer, &node.identity.public().x25519_pub, &payload.encode())
+                    .unwrap(),
+            );
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+            profiles.push(event);
+        }
+        let child = Event::new(
+            peer,
+            conversation,
+            12,
+            vec![profiles[0].id],
+            12,
+            1,
+            EventKind::Message,
+            crate::dm::seal(
+                peer,
+                &node.identity.public().x25519_pub,
+                b"retained ancestor witness",
+            )
+            .unwrap(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(child.clone())
+            .unwrap();
+        // This is the actual receive/discovery owner. No explicit maintenance
+        // request or synthetic classifier counter grants destructive demand.
+        node.process_profile_events(conversation);
+        (conversation, profiles, child)
+    }
+
+    fn finish_natural_profile_compaction(node: &Node, conversation: ConversationId) -> usize {
+        let mut dropped = 0;
+        for _ in 0..64 {
+            node.process_profile_events(conversation);
+            dropped += node.drain_profile_compaction().unwrap().unwrap_or(0);
+        }
+        dropped
+    }
+
+    #[tokio::test]
+    async fn participant_network_unrelated_profile_compaction_preserves_prepared_file_authorization()
+     {
+        let (_directory, node, peer, peer_account, parent, file) =
+            dependent_file_authorization_fixture().await;
+        let (unrelated, profiles, child) =
+            received_profile_compaction_inputs(&node, &peer, &peer_account);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let own_view = open_prepared(&store, &unrelated);
+        let file_view = open_prepared(&store, &file);
+        let have = HashSet::new();
+        let selected = collect(&store, &file_view, &have);
+        assert!(
+            !selected.is_empty(),
+            "the real parent manifest must grant actual file export"
+        );
+        let file_binding = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .history_sync_binding(&file)
+            .unwrap();
+        let stamp = store.history_sync_stamp(&file).unwrap().unwrap();
+        let proof =
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap();
+        let manifests = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&parent)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::FileManifest)
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+        assert!(!manifests.is_empty());
+        assert_eq!(finish_natural_profile_compaction(&node, unrelated), 8);
+        {
+            let log = node.log.lock().unwrap();
+            assert!(log.get(&profiles[0].id).unwrap().as_ref() == Some(&profiles[0]));
+            assert!(log.get(&child.id).unwrap().as_ref() == Some(&child));
+            assert!(
+                profiles[1..9]
+                    .iter()
+                    .all(|event| log.get(&event.id).unwrap().is_none())
+            );
+            assert!(manifests.iter().all(|id| log.get(id).unwrap().is_some()));
+            assert_eq!(
+                log.repository()
+                    .unwrap()
+                    .history_sync_binding(&file)
+                    .unwrap(),
+                file_binding
+            );
+        }
+        assert_eq!(
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap(),
+            proof
+        );
+        assert!(
+            matches!(
+                NetworkSyncStore::validate_view(&*store, &own_view),
+                Err(LogError::StaleCursor)
+            ),
+            "the compacted conversation's own physical epoch must still reject its view"
+        );
+        // Current 28 invalidates B through the global destructive counter even
+        // though no canonical/authority dependency of B changed: expected RED.
+        assert_eq!(
+            store.history_sync_stamp(&file).unwrap(),
+            Some(stamp),
+            "unrelated classified leaf compaction must preserve exact FILES reuse evidence"
+        );
+        NetworkSyncStore::validate_view(&*store, &file_view).unwrap();
+        assert_eq!(
+            collect(&store, &file_view, &have),
+            selected,
+            "the same retained parent manifest must authorize the exact same file events"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_network_profile_compaction_sql_failure_preserves_bindings_until_retry() {
+        let (_directory, node, peer, peer_account, _parent, file) =
+            dependent_file_authorization_fixture().await;
+        let (unrelated, profiles, _) =
+            received_profile_compaction_inputs(&node, &peer, &peer_account);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let own_view = open_prepared(&store, &unrelated);
+        let file_view = open_prepared(&store, &file);
+        let stamp = store.history_sync_stamp(&file).unwrap();
+        let revisions = || {
+            let log = node.log.lock().unwrap();
+            let repo = log.repository().unwrap();
+            (
+                repo.destructive_policy_revision().unwrap(),
+                repo.receive_repair_revision().unwrap(),
+                repo.conversation_destructive_epoch(&unrelated).unwrap(),
+            )
+        };
+        let before = revisions();
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER reject_classified_profile_delete BEFORE DELETE ON retained_events WHEN OLD.kind=8 BEGIN SELECT RAISE(ABORT,'injected classified Profile delete failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        let mut failed = false;
+        for _ in 0..64 {
+            if node.drain_profile_compaction().is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "the real publication must reach the injected post-classification delete"
+        );
+        assert_eq!(
+            revisions(),
+            before,
+            "classification and destructive publication must roll back together"
+        );
+        assert!(
+            profiles
+                .iter()
+                .all(|event| node.log.lock().unwrap().get(&event.id).unwrap().is_some())
+        );
+        assert_eq!(store.history_sync_stamp(&file).unwrap(), stamp);
+        NetworkSyncStore::validate_view(&*store, &file_view).unwrap();
+        NetworkSyncStore::validate_view(&*store, &own_view).unwrap();
+        node.storage
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER reject_classified_profile_delete")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(finish_natural_profile_compaction(&node, unrelated), 8);
+        let after = revisions();
+        assert!(after.0 > before.0 && after.2 > before.2);
+        assert_eq!(
+            after.1, before.1,
+            "only the validated semantic class is subtracted"
+        );
+        assert!(matches!(
+            NetworkSyncStore::validate_view(&*store, &own_view),
+            Err(LogError::StaleCursor)
+        ));
+    }
+
+    #[tokio::test]
+    async fn participant_network_actual_dm_parent_profile_compaction_preserves_file_authorization()
+    {
+        let (directory, node, peer, peer_account, _channel, _channel_file) =
+            dependent_file_authorization_fixture().await;
+        // Unlike the unrelated-DM case, these legitimate received Profiles live
+        // in the actual manifest parent. Their exact payloads authenticate to the
+        // peer account through the ordinary Profile receive owner.
+        let (parent, profiles, child) =
+            received_profile_compaction_inputs(&node, &peer, &peer_account);
+        for profile in &profiles {
+            assert!(
+                node.profile_receive_work
+                    .lock()
+                    .unwrap()
+                    .processed(profile.id)
+                    .unwrap()
+            );
+        }
+        let path = directory.path().join("dm-parent.txt");
+        std::fs::write(&path, b"real DM file with a retained Profile ancestor").unwrap();
+        let (manifest_id, file) = node
+            .enqueue_file_dm(&peer.user_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let manifest = node.log.lock().unwrap().get(&manifest_id).unwrap().unwrap();
+        assert_eq!(manifest.conversation_id, parent);
+        assert_eq!(manifest.kind, EventKind::FileManifest);
+        assert!(
+            manifest.parents.contains(&child.id),
+            "the genuine manifest must retain the message whose parent is the old Profile"
+        );
+        assert_eq!(child.parents, vec![profiles[0].id]);
+        node.process_profile_events(parent);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let parent_view = open_prepared(&store, &parent);
+        let view = open_prepared(&store, &file);
+        let have = HashSet::new();
+        let selected = collect(&store, &view, &have);
+        assert!(!selected.is_empty());
+        let stamp = store.history_sync_stamp(&file).unwrap().unwrap();
+        let binding = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .history_sync_binding(&file)
+            .unwrap();
+        let proof =
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap();
+        assert!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .order_generation(
+                    &parent,
+                    crate::eventlog::repository::order::CausalOrder::Logical
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(finish_natural_profile_compaction(&node, parent), 8);
+        {
+            let log = node.log.lock().unwrap();
+            assert_eq!(log.get(&manifest_id).unwrap(), Some(manifest));
+            assert_eq!(log.get(&child.id).unwrap(), Some(child));
+            assert_eq!(log.get(&profiles[0].id).unwrap(), Some(profiles[0].clone()));
+            assert!(
+                profiles[1..9]
+                    .iter()
+                    .all(|event| log.get(&event.id).unwrap().is_none())
+            );
+            assert!(
+                log.repository()
+                    .unwrap()
+                    .order_generation(
+                        &parent,
+                        crate::eventlog::repository::order::CausalOrder::Logical
+                    )
+                    .unwrap()
+                    .is_none(),
+                "compaction must actually retire the parent's old canonical order"
+            );
+            assert_eq!(
+                log.repository()
+                    .unwrap()
+                    .history_sync_binding(&file)
+                    .unwrap(),
+                binding
+            );
+        }
+        assert_eq!(
+            bincode::serialize(&node.historical_author(&peer.public().ed25519_pub).unwrap())
+                .unwrap(),
+            proof
+        );
+        assert!(matches!(
+            NetworkSyncStore::validate_view(&*store, &parent_view),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(
+            store.history_sync_stamp(&file).unwrap(),
+            Some(stamp),
+            "classified parent leaf removal preserves the exact retained file authority"
+        );
+        NetworkSyncStore::validate_view(&*store, &view).unwrap();
+        assert_eq!(
+            collect(&store, &view, &have),
+            selected,
+            "retiring only the parent's derived order cannot fabricate or revoke the retained manifest proof"
+        );
+        let before_retirement = store.history_sync_stamp(&file).unwrap();
+        assert!(matches!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .begin_retirement(&parent)
+                .unwrap(),
+            crate::eventlog::repository::retirement::RetirementBegin::Started(_)
+        ));
+        assert_ne!(store.history_sync_stamp(&file).unwrap(), before_retirement);
+        assert!(
+            matches!(
+                NetworkSyncStore::validate_view(&*store, &view),
+                Err(LogError::StaleCursor)
+            ),
+            "real retirement of that same parent must revoke the cached file authority"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .history_sync_binding(&file)
+                .unwrap(),
+            binding,
+            "the revocation must come from the actual parent, not a changed file binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_history_sync_stamp_never_aliases_legacy_full_counter_after_parent_retirement()
+     {
+        use sha2::{Digest, Sha256};
+        let (_directory, node, peer, peer_account, parent, file) =
+            dependent_file_authorization_fixture().await;
+        let (unrelated, _, _) = received_profile_compaction_inputs(&node, &peer, &peer_account);
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = open_prepared(&store, &file);
+        assert!(!collect(&store, &view, &HashSet::new()).is_empty());
+        assert_eq!(finish_natural_profile_compaction(&node, unrelated), 8);
+        let binding = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .history_sync_binding(&file)
+            .unwrap();
+        let policy = store.network_policy(&file).unwrap();
+        let mut legacy_observation = store.network_observation(&file).unwrap();
+        legacy_observation.source = 0;
+        let legacy_full = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .destructive_policy_revision()
+            .unwrap();
+        legacy_observation.destructive_policy = legacy_full;
+        // Exact pre-migration 28 tuple and SHA-256 domain (no prefix), not a
+        // call to the new serializer or a substituted counterfeit fingerprint.
+        let legacy_bytes = bincode::serialize(&(
+            binding.clone(),
+            &store.peer,
+            node.identity.public(),
+            node.account_id(),
+            policy.clone(),
+            legacy_observation.clone(),
+            store.pull_only,
+            store.inbound,
+        ))
+        .unwrap();
+        let legacy = HistorySyncStamp {
+            fingerprint: Sha256::digest(legacy_bytes).into(),
+        };
+        let persisted = bincode::serialize(&legacy).unwrap();
+        let persisted_legacy: HistorySyncStamp = bincode::deserialize(&persisted).unwrap();
+        assert!(matches!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .begin_retirement(&parent)
+                .unwrap(),
+            crate::eventlog::repository::retirement::RetirementBegin::Started(_)
+        ));
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .history_sync_binding(&file)
+                .unwrap(),
+            binding,
+            "real parent retirement must not change the file's own binding"
+        );
+        assert!(store.policy_unchanged(&file, &policy));
+        let mut current = store.network_observation(&file).unwrap();
+        current.source = 0;
+        assert_eq!(
+            current.destructive_policy, legacy_full,
+            "the real D=2,C=1 authority counter must collide with the old full D=1 value"
+        );
+        assert!(
+            current == legacy_observation,
+            "all other exact fingerprint inputs remain equal across this real parent retirement"
+        );
+        let current_stamp = store.history_sync_stamp(&file).unwrap().unwrap();
+        assert_ne!(
+            current_stamp, persisted_legacy,
+            "an old persisted completion fingerprint must not regain validity when new counter semantics reuse its numeric value"
+        );
+        assert!(
+            matches!(
+                NetworkSyncStore::validate_view(&*store, &view),
+                Err(LogError::StaleCursor)
+            ),
+            "the actual parent retirement independently invalidates the old active view"
+        );
+    }
+
+    #[tokio::test]
+    async fn participant_network_missing_or_corrupt_compaction_classification_fails_closed() {
+        for missing in [false, true] {
+            let (_directory, node, peer, _peer_account, _parent, file) =
+                dependent_file_authorization_fixture().await;
+            let owner = node.sync_store(&peer.public());
+            let store = owner.lock().unwrap();
+            let view = open_prepared(&store, &file);
+            assert!(store.history_sync_stamp(&file).unwrap().is_some());
+            node.storage.database().transaction(|c| {
+                if missing {
+                    c.execute_batch("DROP TABLE participant_semantic_compaction_revisions")?;
+                } else {
+                    c.execute_batch("INSERT INTO participant_semantic_compaction_revisions(domain,counter) SELECT domain,1000000 FROM participant_event_publication WHERE singleton=1 ON CONFLICT(domain) DO UPDATE SET counter=excluded.counter")?;
+                }
+                Ok(())
+            }).unwrap();
+            let stamp = store.history_sync_stamp(&file);
+            assert!(
+                !matches!(stamp, Ok(Some(_))),
+                "missing={missing}: unavailable classification cannot certify outgoing reuse"
+            );
+            assert!(
+                NetworkSyncStore::validate_view(&*store, &view).is_err(),
+                "missing={missing}: a prepared file view must fail closed on unavailable classification"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn participant_network_parent_retirement_invalidates_prepared_file_authorization() {
+        let (_directory, node, peer, _peer_account, parent, file) =
+            dependent_file_authorization_fixture().await;
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
         let view = open_prepared(&store, &file);

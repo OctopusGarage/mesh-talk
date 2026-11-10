@@ -2354,13 +2354,22 @@ Completed media GC turns do not update an inactive namespace. Scheduling fresh
 work reactivates its existing cutoff owner, and failed completion remains pending
 for retry; no cache can turn missing or failed work into successful erasure.
 
-Semantic Profile compaction advances the full destructive revision used by
-outgoing authority and retained-history views. In the same transaction it records
-the classified increment separately. Incoming mailbox repair uses the difference
-between these counters, so reclaiming an already handled Profile leaf does not
-discard valid transport progress. Actual retirement, deletion and other
-destructive changes still invalidate incoming coverage. Older databases begin
-with no classified increments; invalid counters fail explicitly. Profile
+Semantic Profile compaction advances the full destructive revision and the
+conversation's physical epoch. In the same transaction it records the classified
+increment separately. Incoming mailbox repair and the global cross-conversation
+authority fence use the validated difference between these counters: reclaiming
+unreferenced Profile leaves neither discards valid transport progress nor rebuilds
+unrelated prepared views. Required ancestors, manifests, controls and separately
+owned identity proofs survive that operation. The affected conversation's own
+physical epoch and exact history binding still reject stale views and stamps.
+Actual retirement, erasure and other destructive rewrites retain global incoming
+and authority invalidation, including a file's parent dependency. Older databases
+begin with no classified increments; missing runtime tables and invalid counters
+fail explicitly. A private V2 hash domain distinguishes outgoing history stamps
+from the previous full-counter meaning, preventing an old persisted completion
+proof from aliasing a later classified counter value. The receipt representation,
+incoming cursor and pending retry work remain compatible; old outgoing proofs
+require fresh qualification. Profile
 publication retires both canonical-order bindings immediately, while existing
 budgeted obsolete-generation maintenance reclaims their ranks and work rows.
 It does not synchronously delete a history-sized derived index.
@@ -2441,8 +2450,10 @@ export tests selection before fetching payloads. Sibling category filtering and
 share-off ancestry use retained parent edges plus the peer's exact Have set.
 Source, roster, proof, receipt-control and channel-state revisions guard the selection, while
 privacy, sharing, cost and device-policy changes invalidate stale views. Unchanged
-views also check a domain-wide destructive revision, advanced atomically with
-logical retirement or destructive rewrites. This invalidates inherited file
+views also check a domain-wide authority destructive revision, advanced atomically
+with logical retirement or destructive rewrites. Only validated semantic Profile
+leaf compaction is excluded from this global fence; each view's own physical epoch
+remains exact. This invalidates inherited file
 authorization when a parent channel retires, even before physical deletion and
 without changing the file's own epoch, transcript or scope rows. Unchanged
 Have pages and pre-send validation read no historical bodies; each export fetches

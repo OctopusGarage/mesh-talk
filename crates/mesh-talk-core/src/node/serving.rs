@@ -1228,22 +1228,31 @@ impl Node {
         cursor: usize,
     ) -> Result<Vec<PeerRecord>, NodeError> {
         let files = self.files.lock().expect("files lock").clone();
-        let mut peers = Vec::new();
-        for peer in self.routing_peers() {
-            if peer.post_office || peer.public == self.identity.public() {
-                continue;
-            }
-            let mut channel_bound = false;
-            let mut channel_allowed = false;
-            for scope in self.manifest_scopes(file) {
-                let parent = scope?.parent;
-                let book = self.channels.lock().expect("channels lock");
-                if let Some(state) = book.state(&parent) {
-                    channel_bound = true;
-                    channel_allowed |= state.is_accepted_member(&peer.public.user_id())
+        // Only routing-peer metadata is retained. Scope pages remain bounded
+        // and are traversed once for this call, rather than once per peer.
+        let mut candidates: Vec<_> = self
+            .routing_peers()
+            .into_iter()
+            .filter(|peer| !peer.post_office && peer.public != self.identity.public())
+            .map(|peer| (peer, false))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut channel_bound = false;
+        for scope in self.manifest_scopes(file) {
+            let parent = scope?.parent;
+            let book = self.channels.lock().expect("channels lock");
+            if let Some(state) = book.state(&parent) {
+                channel_bound = true;
+                for (peer, allowed) in &mut candidates {
+                    *allowed |= state.is_accepted_member(&peer.public.user_id())
                         && book.replica_enabled(parent, &peer.public.user_id());
                 }
             }
+        }
+        let mut peers = Vec::new();
+        for (peer, channel_allowed) in candidates {
             if channel_allowed
                 || (!channel_bound
                     && files.has_author(file, Author::from_ed25519(peer.public.ed25519_pub))?)
@@ -2772,6 +2781,204 @@ mod post_office_drain_schedule_tests {
 mod file_recovery_tests {
     use crate::discovery::Announce;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn attachment_recovery_scans_file_scopes_once_for_multiple_peers() {
+        use crate::node::filebook::{indexed::OFFER_PAGE_QUERIES, scopes::SCOPE_PAGE_QUERIES};
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob_account = Account::generate();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
+        let (a, _, _) = super::super::test_support::node_with_files(source.path(), alice, aa, &bp);
+        let (b, _, _) =
+            super::super::test_support::node_with_files(target.path(), bob, bob_account, &ap);
+        for _ in 0..4 {
+            let unrelated = Announce::new_with_account(
+                &DeviceIdentity::generate(),
+                &Account::generate(),
+                "Unrelated",
+                9,
+            );
+            b.roster
+                .lock()
+                .unwrap()
+                .update(&unrelated, "127.0.0.1".parse().unwrap(), &b.user_id());
+        }
+        let path = source.path().join("source.bin");
+        std::fs::write(&path, b"source-aware recovery query count").unwrap();
+        let (id, file) = a
+            .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let event = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+            .event
+            .clone();
+        b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+        b.process_file_events(event.conversation_id);
+        assert!(
+            b.routing_peers()
+                .iter()
+                .filter(|peer| !peer.post_office && peer.public != b.identity.public())
+                .count()
+                >= 5
+        );
+        OFFER_PAGE_QUERIES.with(|count| count.set(0));
+        SCOPE_PAGE_QUERIES.with(|count| count.set(0));
+        let writes = b.storage.database().successful_write_commits();
+        let sources = b.file_recovery_sources(file, 0).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].public, ap.public());
+        assert_eq!(
+            OFFER_PAGE_QUERIES.with(|count| count.get()),
+            1,
+            "one call must traverse the real offer page once, independent of routing peers"
+        );
+        assert_eq!(
+            SCOPE_PAGE_QUERIES.with(|count| count.get()),
+            1,
+            "one call must traverse the real sent-scope page once, independent of routing peers"
+        );
+        assert_eq!(b.storage.database().successful_write_commits(), writes);
+        // Exercise actual fallible page reads, then restore the same owner.
+        // A missing scope table is not evidence that direct fallback is safe.
+        for table in ["file_book_offers", "sent_file_scopes"] {
+            b.storage
+                .database()
+                .transaction(|c| {
+                    c.execute_batch(&format!(
+                        "ALTER TABLE {table} RENAME TO recovery_unavailable"
+                    ))?;
+                    Ok(())
+                })
+                .unwrap();
+            let failed = b.file_recovery_sources(file, 0);
+            b.storage
+                .database()
+                .transaction(|c| {
+                    c.execute_batch(&format!(
+                        "ALTER TABLE recovery_unavailable RENAME TO {table}"
+                    ))?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(failed.is_err(), "{table} read failure must propagate");
+            let restored = b.file_recovery_sources(file, 0).unwrap();
+            assert_eq!(restored.len(), 1);
+            assert_eq!(restored[0].public, ap.public());
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_recovery_keeps_current_members_replica_policy_and_rotation() {
+        use crate::eventlog::{Author, Event, EventKind};
+        let target = tempfile::tempdir().unwrap();
+        let identities: Vec<_> = (0..5).map(|_| DeviceIdentity::generate()).collect();
+        let accounts: Vec<_> = (0..5).map(|_| Account::generate()).collect();
+        let announcements: Vec<_> = identities
+            .iter()
+            .zip(&accounts)
+            .map(|(id, account)| Announce::new_with_account(id, account, "Member", 9))
+            .collect();
+        let (node, _, _) = super::super::test_support::node_with_files(
+            target.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &announcements[0],
+        );
+        for announce in &announcements[1..] {
+            node.roster.lock().unwrap().update(
+                announce,
+                "127.0.0.1".parse().unwrap(),
+                &node.user_id(),
+            );
+        }
+        let group = node
+            .create_channel(
+                "Recovery sources",
+                identities.iter().map(DeviceIdentity::public).collect(),
+            )
+            .await
+            .unwrap();
+        let path = target.path().join("group-source.bin");
+        std::fs::write(&path, b"group recovery selection").unwrap();
+        let file = node
+            .send_file_channel(group, &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let mut expected: Vec<_> = identities.iter().map(DeviceIdentity::public).collect();
+        expected.sort_unstable_by_key(|peer| peer.user_id());
+        let expected_three = |all: &[crate::identity::device::PublicIdentity], cursor: usize| {
+            let mut order = all.to_vec();
+            if !order.is_empty() {
+                let offset = cursor % order.len();
+                order.rotate_left(offset);
+            }
+            order.truncate(3);
+            order
+        };
+        for cursor in [0, 2, 7] {
+            let actual: Vec<_> = node
+                .file_recovery_sources(file, cursor)
+                .unwrap()
+                .into_iter()
+                .map(|peer| peer.public)
+                .collect();
+            assert_eq!(actual, expected_three(&expected, cursor));
+        }
+        // Publish an actual member-signed replica opt-out and install it through
+        // the canonical metadata owner before asking for recovery sources again.
+        let history = node.log.lock().unwrap().events(&group).unwrap();
+        let parent = history.last().unwrap();
+        let peer = &identities[0];
+        let sequence = node
+            .log
+            .lock()
+            .unwrap()
+            .next_sequence(&group, &Author::from_ed25519(peer.public().ed25519_pub))
+            .unwrap();
+        let disabled = Event::new(
+            peer,
+            group,
+            sequence,
+            vec![parent.id],
+            parent.lamport + 1,
+            0,
+            EventKind::ChannelReplica,
+            vec![0],
+        );
+        node.log.lock().unwrap().append_durable(disabled).unwrap();
+        node.await_channel_metadata(group).await.unwrap();
+        assert!(
+            !node
+                .channels
+                .lock()
+                .unwrap()
+                .replica_enabled(group, &peer.user_id())
+        );
+        expected.retain(|public| public != &peer.public());
+        let actual: Vec<_> = node
+            .file_recovery_sources(file, 0)
+            .unwrap()
+            .into_iter()
+            .map(|peer| peer.public)
+            .collect();
+        assert_eq!(actual, expected_three(&expected, 0));
+        node.remove_channel_member(group, &identities[1].user_id())
+            .await
+            .unwrap();
+        expected.retain(|public| public != &identities[1].public());
+        let actual: Vec<_> = node
+            .file_recovery_sources(file, 0)
+            .unwrap()
+            .into_iter()
+            .map(|peer| peer.public)
+            .collect();
+        assert_eq!(actual, expected_three(&expected, 0));
+    }
 
     #[tokio::test]
     async fn attachment_recovery_excludes_unrelated_roster_peers() {

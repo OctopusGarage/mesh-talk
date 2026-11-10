@@ -232,8 +232,9 @@ test("destroyed stdin fails immediately", async () => {
 test("each native receipt card is captured while its own expected state is visible", async () => {
   const { receiptPhase } = await import("./native-core-scenarios.mjs");
   const ids = ["a", "b", "c"], labels = ["text", "sticker", "file"];
-  let visible, recorded;
+  let visible, recorded, failureContexts = 0;
   const c = {
+    receiptFailureContext: async () => { failureContexts++; throw new Error("must not observe endpoints on pass"); },
     owner: "owner", account: "account",
     observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
     until: async (_description, poll) => { const result = await poll(); assert.ok(result); return result; },
@@ -245,6 +246,7 @@ test("each native receipt card is captured while its own expected state is visib
   await receiptPhase(c, { owner: "owner", ids, labels }, "receipt-offline-awaiting", "awaiting");
   assert.deepEqual(recorded.captures.map(capture => capture.label), [...labels].reverse());
   assert.deepEqual(recorded.observations.captures, recorded.captures);
+  assert.equal(failureContexts, 0);
 });
 
 test("native receipt timeout retains cached ordered statuses and observation failure", async () => {
@@ -275,6 +277,76 @@ test("native receipt timeout retains cached ordered statuses and observation fai
     return true;
   });
   assert.equal(observations, 2, "failure reporting performs no further IPC");
+});
+
+test("receipt failure context runs once only after the original timeout", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], original = new Error("Timed out: original IDs become delivered");
+  let timedOut = false, contexts = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
+    until: async (...args) => { assert.equal(args.length, 2); assert.equal(await args[1](), false); timedOut = true; throw original; },
+    receiptFailureContext: async () => { assert.equal(timedOut, true); contexts++; return { currentListener: { tcpPort: 41002 }, observedPeers: [{ addr: "127.0.0.1:41001" }] }; },
+  };
+  await assert.rejects(receiptPhase(c, { owner: "owner", ids, labels: [] }, "restart", "delivered"), error => {
+    assert.equal(error.cause, original);
+    assert.match(error.message, /"tcpPort":41002/);
+    assert.match(error.message, /"addr":"127.0.0.1:41001"/);
+    return true;
+  });
+  assert.equal(contexts, 1);
+});
+
+test("receipt failure context errors cannot replace the original failure", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], original = new Error("Timed out: original IDs become delivered");
+  let contexts = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
+    until: async (_description, poll) => { assert.equal(await poll(), false); throw original; },
+    receiptFailureContext: async () => { contexts++; throw new Error("endpoint unavailable " + "x".repeat(2000)); },
+  };
+  await assert.rejects(receiptPhase(c, { owner: "owner", ids, labels: [] }, "restart", "delivered"), error => {
+    assert.equal(error.cause, original);
+    assert.match(error.message, /^Timed out: original IDs become delivered;/);
+    assert.match(error.message, /endpoint unavailable/);
+    assert.ok(error.message.length < 1000, "secondary failure remains bounded");
+    return true;
+  });
+  assert.equal(contexts, 1);
+});
+
+test("CLI listener evidence uses only the existing exact startup line", async () => {
+  const { cliListenerEndpoint } = await import("./native-core-scenarios.mjs");
+  const id = "a".repeat(32);
+  assert.equal(cliListenerEndpoint(`node ${id} listening`), null);
+  assert.equal(cliListenerEndpoint(`node ${id} listening on tcp/0`), null);
+  assert.equal(cliListenerEndpoint(`node ${id} listening on tcp/65536`), null);
+  assert.deepEqual(cliListenerEndpoint(`node ${id} listening on tcp/41001, discovery udp/47474`), { deviceId: id, tcpPort: 41001 });
+  assert.deepEqual(cliListenerEndpoint(`node ${id} listening on tcp/41002, discovery udp/47474`), { deviceId: id, tcpPort: 41002 });
+});
+
+test("receipt endpoint snapshot exposes only the exact fixture peer and preserves errors", async () => {
+  const { receiptPeerEndpointContext } = await import("./native-core-scenarios.mjs");
+  const previousPeer = { deviceId: "a".repeat(32), tcpPort: 41001, exitCode: 0 };
+  const currentPeer = { deviceId: previousPeer.deviceId, tcpPort: 41002, exitCode: null };
+  let calls = 0;
+  const result = await receiptPeerEndpointContext({ expectedAccount: "expected", previousPeer, currentPeer, observe: async command => {
+    calls++; assert.equal(command, "list_peers");
+    return [{ user_id: "unrelated", account_id: "private-account", addr: "private-address", name: "private-name" },
+      { user_id: currentPeer.deviceId, account_id: "observed", addr: "127.0.0.1:41001", name: "omitted" }];
+  } });
+  assert.equal(calls, 1);
+  assert.deepEqual(result, { expectedAccount: "expected", previousPeer, currentPeer,
+    observedPeers: [{ deviceId: currentPeer.deviceId, accountId: "observed", addr: "127.0.0.1:41001" }], observationError: null });
+  assert.ok(!JSON.stringify(result).includes("private-"));
+  const failed = await receiptPeerEndpointContext({ expectedAccount: "expected", previousPeer, currentPeer,
+    observe: async () => { throw new Error("unavailable " + "x".repeat(2000)); } });
+  assert.equal(failed.observedPeers, null);
+  assert.equal(failed.observationError.length, 512);
+  assert.deepEqual(failed.currentPeer, currentPeer);
 });
 
 test("localized wrong-password error is captured before successful sign-in recovery", async () => {
