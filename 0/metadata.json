@@ -1,0 +1,42 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M71VWE02J6RQS8D430TN2F6X",
+  "session_id": "01a1c0d1-d1fb-74d3-9b41-9cf66b3d8ba0",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-10T04:36:27.824316Z",
+  "branch": "fix/pr-explicit-validation-owners",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/module-boundaries.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "7bfdbc59a998",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 468,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 533888,
+    "output_tokens": 753,
+    "api_call_count": 2
+  },
+  "redaction": {
+    "replacements": 125,
+    "layers": {
+      "betterleaks": 6,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 5,
+      "credentialed_uri": 0,
+      "entropy": 121,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 3
+  }
+}
