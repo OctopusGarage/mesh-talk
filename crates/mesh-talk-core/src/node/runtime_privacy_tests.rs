@@ -700,7 +700,7 @@ async fn certified_discovery_requires_a_fresh_reply_despite_cached_peer() {
     );
     assert!(
         stopped.is_err(),
-        "cached peer must not impersonate a fresh query response: {stopped:?}"
+        "cached peer must not impersonate a fresh query response"
     );
     assert!(
         same_identity,
