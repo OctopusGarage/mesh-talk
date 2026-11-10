@@ -317,6 +317,17 @@ and [group invitation tests](../crates/mesh-talk-core/src/node/account_group/tes
 
 ## R05: Bounded work must also make progress
 
+Distinguish a fully checked no-work outcome from missing evidence, deferred
+preparation and failure before parking repeated work. Learn scheduling-only
+absence after source guards release and exact before/after inputs match; keep
+fresh direct reads and bounded repair. Negative hints must not displace useful
+confirmed work. The [consent owner](../crates/mesh-talk-core/src/node/file_consent.rs)
+returns only its explicit pending/no-published-control outcome; the
+[mailbox regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental_tests.rs)
+and [bounded hint pressure tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental/controls.rs)
+retain decision changes, direct Pending reads, failures, scope changes and the
+positive cache's existing capacity.
+
 Do not interpret an unavailable dependency or a generic stale-cursor error as
 proof of finite preparation progress. Preserve the launch deadline when no rows,
 edges or preparation phase advanced. Register dependency waiting before probing,

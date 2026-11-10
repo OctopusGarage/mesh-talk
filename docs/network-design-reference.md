@@ -2672,7 +2672,12 @@ every other control in the batch. This selection does not certify an unchanged
 control sweep or replace current send authorization.
 
 Individually confirmed consent offers may skip repeated preparation and HAVE
-queries through at most 256 runtime hints, with at most 512 scope bytes each.
+queries. Fully checked Pending offers with no previously published control may
+also skip background preparation through an explicit NoControlDue scheduling
+hint; generic empty, missing/deferred evidence and errors never create one.
+Both variants share at most 256 runtime hints, with at most 512 scope bytes each.
+NoControlDue admission never evicts a live confirmed hint; positive admission
+reclaims NoControlDue hints first. Direct include-pending requests remain fresh.
 Each hint matches the full relay/recipient/mailbox/intent scope, a conservative
 local producer fingerprint and the exact freshly observed remote binding and
 window upper/revision. The fingerprint includes relevant certificate and runtime
@@ -2703,9 +2708,14 @@ conservatively invalidates the hint. SQLite authorizer changes expire prepared
 statements; empty maintenance therefore uses a read-only existence check without
 installing a guard. Actual selection work keeps the bounded guarded path. Its
 cold/active cost requires native validation.
-Only actual HAVE/upload success
-under an unchanged captured producer scope creates a hint. Reads never renew its
-sixty-second expiry, which bounds rechecks of external files and time conditions.
+Only actual HAVE/upload success under an unchanged captured producer scope
+creates a confirmed hint. NoControlDue requires the explicit Pending/no-published
+outcome and identical fallible scope observations before and after preparation.
+The per-offer owner releases delivery, consent and publication guards before
+scope recapture or cache admission; no I/O runs under the cache guard.
+NoControlDue is neither consent nor custody evidence. Reads never renew either
+variant's sixty-second expiry, which bounds rechecks of external files and time
+conditions.
 Local mutations, remote replacement or revision changes immediately restore
 normal preparation and current send checks. Hints contain no event bodies and
 never skip the rotating offer selector, so later unseen offers retain their turn.

@@ -1,4 +1,4 @@
-//! Runtime work hints for individually confirmed consent offers. These skip
+//! Runtime work hints for confirmed controls or qualified no-control outcomes. These skip
 //! repeated preparation, never grant permission or certify new custody.
 use super::*;
 use sha2::{Digest, Sha256};
@@ -27,7 +27,14 @@ impl ControlScope {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuietConsentKind {
+    Confirmed,
+    NoControlDue,
+}
+
 struct QuietConsent {
+    kind: QuietConsentKind,
     scope: ControlScope,
     offer: Offer,
     checked: Instant,
@@ -70,22 +77,55 @@ impl QuietConsentCache {
         })
     }
 
-    fn remember(&mut self, scope: ControlScope, offer: Offer, now: Instant) {
+    fn remember(&mut self, scope: ControlScope, offer: Offer, now: Instant) -> bool {
+        self.remember_outcome(scope, offer, now, QuietConsentKind::Confirmed)
+    }
+
+    fn remember_outcome(
+        &mut self,
+        scope: ControlScope,
+        offer: Offer,
+        now: Instant,
+        kind: QuietConsentKind,
+    ) -> bool {
         if scope.key.len() > MAX_SCOPE_BYTES {
-            return;
+            return false;
         }
-        self.0.retain(|hint| {
-            now.saturating_duration_since(hint.checked) < QUIET_CONSENT_TTL
-                && !(hint.scope.key == scope.key && hint.offer == offer)
-        });
+        self.0
+            .retain(|hint| now.saturating_duration_since(hint.checked) < QUIET_CONSENT_TTL);
+        // Negative scheduling knowledge must never consume a live positive's
+        // slot, including a same-offer observation under a different scope.
+        if kind == QuietConsentKind::NoControlDue
+            && self.0.iter().any(|hint| {
+                hint.kind == QuietConsentKind::Confirmed
+                    && hint.scope.key == scope.key
+                    && hint.offer == offer
+            })
+        {
+            return false;
+        }
+        self.0
+            .retain(|hint| !(hint.scope.key == scope.key && hint.offer == offer));
         if self.0.len() >= MAX_QUIET_CONSENTS {
-            self.0.pop_front();
+            if let Some(index) = self
+                .0
+                .iter()
+                .position(|hint| hint.kind == QuietConsentKind::NoControlDue)
+            {
+                self.0.remove(index);
+            } else if kind == QuietConsentKind::Confirmed {
+                self.0.pop_front();
+            } else {
+                return false;
+            }
         }
         self.0.push_back(QuietConsent {
+            kind,
             scope,
             offer,
             checked: now,
         });
+        true
     }
 }
 
@@ -176,6 +216,37 @@ impl Node {
             .filter(|offer| !cache.quiet_consents.contains(scope, offer, now))
             .copied()
             .collect()
+    }
+
+    pub(in crate::node::opaque_relay) fn remember_no_control_due(
+        &self,
+        p: &OpaqueMailboxProgress,
+        offers: &[(ConversationId, EventId)],
+    ) -> Result<(), LogError> {
+        if offers.is_empty() {
+            return Ok(());
+        }
+        let Some(before) = state(p).control_scope.as_ref() else {
+            return Ok(());
+        };
+        let after = self.consent_control_scope(p)?;
+        if !after
+            .as_ref()
+            .is_some_and(|after| before.same_inputs(after))
+        {
+            return Ok(());
+        }
+        let mut cache = self.opaque_upload_cache.lock().expect("upload cache");
+        let now = Instant::now();
+        for offer in offers {
+            cache.quiet_consents.remember_outcome(
+                before.clone(),
+                *offer,
+                now,
+                QuietConsentKind::NoControlDue,
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn remember_quiet_consent(
@@ -284,6 +355,104 @@ mod tests {
             !cache.contains(&scope, &offer, now + QUIET_CONSENT_TTL),
             "ordinary reads cannot renew the external-state fallback deadline"
         );
+    }
+
+    #[test]
+    fn no_control_due_pressure_preserves_live_confirmations() {
+        let mut cache = QuietConsentCache::default();
+        let scope = scope();
+        let now = Instant::now();
+        let offer = |index: usize| {
+            let mut id = [0; 32];
+            id[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            (ConversationId::new([8; 32]), EventId::new(id))
+        };
+        for index in 0..MAX_QUIET_CONSENTS {
+            assert!(cache.remember(scope.clone(), offer(index), now));
+        }
+        assert!(!cache.remember_outcome(
+            scope.clone(),
+            offer(MAX_QUIET_CONSENTS),
+            now,
+            QuietConsentKind::NoControlDue
+        ));
+        assert!(!cache.remember_outcome(
+            scope.clone(),
+            offer(0),
+            now,
+            QuietConsentKind::NoControlDue
+        ));
+        assert_eq!(cache.len(), MAX_QUIET_CONSENTS);
+        for index in 0..MAX_QUIET_CONSENTS {
+            assert!(cache.contains(&scope, &offer(index), now));
+            assert!(
+                cache
+                    .0
+                    .iter()
+                    .any(|hint| hint.offer == offer(index)
+                        && hint.kind == QuietConsentKind::Confirmed)
+            );
+        }
+        let mut cache = QuietConsentCache::default();
+        for index in 0..MAX_QUIET_CONSENTS - 1 {
+            assert!(cache.remember(scope.clone(), offer(index), now));
+        }
+        let negative = offer(MAX_QUIET_CONSENTS);
+        assert!(cache.remember_outcome(
+            scope.clone(),
+            negative,
+            now,
+            QuietConsentKind::NoControlDue
+        ));
+        let new_positive = offer(MAX_QUIET_CONSENTS + 1);
+        assert!(cache.remember(scope.clone(), new_positive, now));
+        assert!(
+            !cache.contains(&scope, &negative, now),
+            "eviction reenables normal preparation"
+        );
+        assert!(cache.contains(&scope, &new_positive, now));
+        for index in 0..MAX_QUIET_CONSENTS - 1 {
+            assert!(
+                cache.contains(&scope, &offer(index), now),
+                "positive admission must evict negative scheduling knowledge first"
+            );
+        }
+    }
+
+    #[test]
+    fn no_control_due_scope_changes_and_expiry_reenable_preparation_without_renewal() {
+        let mut cache = QuietConsentCache::default();
+        let scope = scope();
+        let offer = (ConversationId::new([8; 32]), EventId::new([9; 32]));
+        let now = Instant::now();
+        assert!(cache.remember_outcome(scope.clone(), offer, now, QuietConsentKind::NoControlDue));
+        for seconds in [1, 30, 59] {
+            assert!(cache.contains(&scope, &offer, now + Duration::from_secs(seconds)));
+        }
+        assert!(!cache.contains(&scope, &offer, now + QUIET_CONSENT_TTL));
+        for changed in [
+            ControlScope {
+                source: [0; 32],
+                ..scope.clone()
+            },
+            ControlScope {
+                key: vec![0],
+                ..scope.clone()
+            },
+            ControlScope {
+                floor: (7, 8),
+                ..scope.clone()
+            },
+            ControlScope {
+                remote: RemoteBinding {
+                    epoch: 2,
+                    ..scope.remote.clone()
+                },
+                ..scope.clone()
+            },
+        ] {
+            assert!(!cache.contains(&changed, &offer, now));
+        }
     }
 
     #[test]

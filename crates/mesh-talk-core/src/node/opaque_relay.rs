@@ -661,11 +661,31 @@ impl Node {
                     progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
                 }
                 let offers = self.unsettled_consent_offers(progress);
-                controls.extend(
-                    self.file_consent_controls(&progress.recipient, &offers, false)?
-                        .into_iter()
-                        .map(|event| (event.id, event)),
-                );
+                let prepared =
+                    self.prepare_file_consent_controls(&progress.recipient, &offers, false)?;
+                #[cfg(test)]
+                self.trace_account_client(&progress.recipient, || {
+                    "consent_controls_prepared".into()
+                });
+                let mut no_control_due = Vec::new();
+                for outcome in prepared {
+                    match outcome {
+                        super::file_consent::ConsentControlOutcome::Prepared(event) => {
+                            controls.insert(event.id, event);
+                        }
+                        super::file_consent::ConsentControlOutcome::PendingNoPublishedControl(
+                            file,
+                            manifest,
+                        ) => {
+                            no_control_due.push((file, manifest));
+                        }
+                    }
+                }
+                // The per-offer owner has returned and released delivery,
+                // consent and publication guards before any scope recapture.
+                if matches!(progress.incremental, incremental::Mode::Active(_)) {
+                    self.remember_no_control_due(progress, &no_control_due)?;
+                }
             }
         }
         Ok(controls)

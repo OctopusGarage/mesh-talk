@@ -120,6 +120,14 @@ impl Decision {
     }
 }
 
+/// Qualified per-offer preparation, returned after every source guard releases.
+/// An absent result is unqualified; only this explicit pending branch proves
+/// that a background publication currently owes no control.
+pub(in crate::node) enum ConsentControlOutcome {
+    Prepared(Event),
+    PendingNoPublishedControl(ConversationId, EventId),
+}
+
 impl Node {
     /// One fixed batch per mailbox exchange. The current decisions are refreshed
     /// before each send; this cursor is discovery progress, never delivery truth.
@@ -190,6 +198,22 @@ impl Node {
         offers: &[(ConversationId, EventId)],
         include_pending: bool,
     ) -> Result<Vec<Event>, LogError> {
+        Ok(self
+            .prepare_file_consent_controls(sender, offers, include_pending)?
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                ConsentControlOutcome::Prepared(event) => Some(event),
+                ConsentControlOutcome::PendingNoPublishedControl(..) => None,
+            })
+            .collect())
+    }
+
+    pub(in crate::node) fn prepare_file_consent_controls(
+        &self,
+        sender: &PublicIdentity,
+        offers: &[(ConversationId, EventId)],
+        include_pending: bool,
+    ) -> Result<Vec<ConsentControlOutcome>, LogError> {
         if offers.len() > 8 {
             return Err(LogError::InvalidPageBudget);
         }
@@ -298,6 +322,9 @@ impl Node {
                 let previous = store.published_control_with_decision(manifest)?;
                 let previous_generation = store.published_generation(manifest)?;
                 if decision == ReceiveDecision::Pending && previous.is_none() && !include_pending {
+                    controls.push(ConsentControlOutcome::PendingNoPublishedControl(
+                        file, manifest,
+                    ));
                     continue;
                 }
                 let event = if let Some((event, _)) = previous.as_ref().filter(|(_, decision)| {
@@ -314,7 +341,7 @@ impl Node {
                     store.publish_control(event.clone(), generation)?;
                     event
                 };
-                controls.push(event);
+                controls.push(ConsentControlOutcome::Prepared(event));
             }
         }
         Ok(controls)

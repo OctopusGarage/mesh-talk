@@ -66,6 +66,268 @@ async fn exchange(
 }
 
 #[tokio::test]
+async fn incremental_pending_consent_without_publication_stays_quiet_until_decision_changes() {
+    use crate::{
+        discovery::Announce, eventlog::sync::network::NetworkSyncStore, file::FileManifest,
+    };
+    use std::sync::Arc;
+    let directory = tempfile::tempdir().unwrap();
+    let relay_directory = tempfile::tempdir().unwrap();
+    let sender = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&sender, &Account::generate(), "Sender", 47475);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.set_bridge_discovery_enabled(true);
+    node.set_attachment_global_auto(false).unwrap();
+    node.cached_peer_snapshot_async().await.unwrap();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&sender.public(), &node.identity.public());
+    let mut offers = Vec::new();
+    for index in 1..=8u8 {
+        let manifest = FileManifest {
+            name: "empty.txt".into(),
+            size: 0,
+            mime: "text/plain".into(),
+            checksum: crate::file::file_checksum(&[]),
+            file_key: [3; 32],
+            file_conv: ConversationId::new([index; 32]),
+            chunk_count: 1,
+        };
+        let original = Event::new(
+            &sender,
+            conversation,
+            u64::from(index),
+            vec![],
+            u64::from(index),
+            1,
+            EventKind::FileManifest,
+            crate::dm::seal(
+                &sender,
+                &node.identity.public().x25519_pub,
+                &manifest.encode(),
+            )
+            .unwrap(),
+        );
+        offers.push((manifest.file_conv, original.id));
+        node.accept_manifest_event(
+            &original,
+            &proof,
+            super::super::received_log::ReceivedEntry {
+                event_id: original.id,
+                conversation,
+                from: sender.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            },
+        )
+        .unwrap();
+    }
+    assert!(
+        node.file_consent_events(&sender.public())
+            .unwrap()
+            .is_empty()
+    );
+    // Missing retained evidence is unqualified, and a failed canonical read
+    // remains an error rather than becoming no-control scheduling knowledge.
+    assert!(
+        node.prepare_file_consent_controls(
+            &sender.public(),
+            &[(ConversationId::new([99; 32]), EventId::new([99; 32]))],
+            false,
+        )
+        .unwrap()
+        .is_empty()
+    );
+    node.log.lock().unwrap().fail_read_for(Some(offers[0].1));
+    let failed = node.prepare_file_consent_controls(&sender.public(), &offers, false);
+    node.log.lock().unwrap().fail_read_for(None);
+    assert!(failed.is_err());
+    assert_eq!(
+        node.opaque_upload_cache
+            .lock()
+            .unwrap()
+            .observed_control_hints(),
+        0
+    );
+    let qualified = node
+        .prepare_file_consent_controls(&sender.public(), &offers, false)
+        .unwrap();
+    assert_eq!(
+        qualified.len(),
+        offers.len(),
+        "the same exact offers recover after read admission returns"
+    );
+    assert!(qualified.iter().all(|outcome| matches!(
+        outcome,
+        super::super::file_consent::ConsentControlOutcome::PendingNoPublishedControl(..)
+    )));
+    let relay = DeviceIdentity::generate();
+    let office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_directory.path()).unwrap(),
+        &relay_directory.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    // Mutate real policy after the helper returns. It must not learn a
+    // no-control result across even an off/on transition with the same value.
+    let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let changed = changed.clone();
+        let weak = Arc::downgrade(&node);
+        move |_, phase| {
+            if phase == "consent_controls_prepared"
+                && !changed.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let node = weak.upgrade().unwrap();
+                node.set_attachment_global_auto(true).unwrap();
+                node.set_attachment_global_auto(false).unwrap();
+            }
+        }
+    }));
+    counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    *node.account_client_test_hook.lock().unwrap() = None;
+    assert!(changed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        node.opaque_upload_cache
+            .lock()
+            .unwrap()
+            .observed_control_hints(),
+        0,
+        "changed scope after a qualified empty result must prevent hint admission"
+    );
+    // Warm the real mailbox and any one-time discovery checkpoint. This is a
+    // fixed setup allowance, not retry-until-success or a warmed policy mock.
+    for _ in 0..2 {
+        counted_scope_exchange(
+            &node,
+            office.clone(),
+            &relay,
+            &sender.public(),
+            conversation,
+            true,
+            None,
+        )
+        .await;
+    }
+    for (_, manifest) in &offers {
+        assert!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_control_with_decision(*manifest)
+                .unwrap()
+                .is_none()
+        );
+    }
+    super::super::file_consent::offered_observations::reset();
+    let (_, custody, _) = counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    assert_eq!(
+        super::super::file_consent::offered_observations::count(),
+        0,
+        "fully checked pending offers with no published control must not repeat preparation under unchanged inputs"
+    );
+    assert_eq!(
+        custody, 0,
+        "no-control scheduling evidence is not relay custody"
+    );
+    for (_, manifest) in &offers {
+        assert!(
+            node.file_consent
+                .lock()
+                .unwrap()
+                .published_control_with_decision(*manifest)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // Direct requests explicitly include Pending and must bypass a quiet
+    // background hint, performing the original current-offer checks.
+    let (file, manifest) = offers[0];
+    super::super::file_consent::offered_observations::reset();
+    let pending = node
+        .direct_file_consent_control(&sender.public(), file, manifest)
+        .unwrap()
+        .expect("direct include_pending must remain available");
+    assert_eq!(
+        super::super::file_consent::Decision::open(&pending)
+            .unwrap()
+            .decision,
+        crate::node::ReceiveDecision::Pending,
+    );
+    assert_eq!(super::super::file_consent::offered_observations::count(), 1);
+    counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    let mailbox = RelayMailbox::federated(&node.identity, &sender.public()).unwrap();
+    assert!(NetworkSyncStore::durable_have(
+        &office, &mailbox.id(), &mailbox.wrap(&pending).unwrap().id,
+    ).unwrap(), "a newly published Pending control invalidates the no-control hint");
+
+    // A real user decision changes the same offer. Its exact replacement must
+    // reach actual relay custody on the next ordinary round, without a timer.
+    node.decide_attachment(file, false).unwrap();
+    counted_scope_exchange(
+        &node,
+        office.clone(),
+        &relay,
+        &sender.public(),
+        conversation,
+        true,
+        None,
+    )
+    .await;
+    let (declined, decision) = node
+        .file_consent
+        .lock()
+        .unwrap()
+        .published_control_with_decision(manifest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.decision, crate::node::ReceiveDecision::Declined);
+    assert_ne!(declined.id, pending.id);
+    assert!(
+        NetworkSyncStore::durable_have(
+            &office,
+            &mailbox.id(),
+            &mailbox.wrap(&declined).unwrap().id,
+        )
+        .unwrap(),
+        "the current explicit refusal must not inherit a pending scheduling hint"
+    );
+}
+
+#[tokio::test]
 async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
     use crate::{
         discovery::Announce, eventlog::sync::network::NetworkSyncStore, file::FileManifest,
