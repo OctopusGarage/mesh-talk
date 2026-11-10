@@ -1,6 +1,7 @@
 //! Production participant network adapter. A finite authorization selection lives
 //! in the encrypted profile DB; unchanged pages only check scalar revisions.
 //! Preparation advances bounded header/edge pages and yields in the session owner.
+use super::prepared_views::Purpose;
 use super::*;
 use crate::eventlog::{
     repository::network::{ExportCursor, HaveCursor, NetworkView},
@@ -16,6 +17,7 @@ use crate::node::work_observation::reason as query_reason;
 use std::sync::{Mutex, atomic::Ordering};
 
 pub(in crate::node) struct RetainedSelection {
+    purpose: Purpose,
     denied: bool,
     inbound: bool,
     pull_only: bool,
@@ -34,6 +36,8 @@ pub(in crate::node) struct HistoryUpload {
     view: ParticipantView,
     binding: crate::eventlog::repository::network::HistorySyncBinding,
     peer: PublicIdentity,
+    denied: bool,
+    cache_eligible: bool,
     inbound: bool,
     pull_only: bool,
     export_initialized: Mutex<bool>,
@@ -41,6 +45,10 @@ pub(in crate::node) struct HistoryUpload {
 }
 
 impl HistoryUpload {
+    pub(in crate::node) fn recipient(&self) -> &PublicIdentity {
+        &self.peer
+    }
+
     /// Runtime scheduling progress only; never authorization or custody evidence.
     pub(in crate::node) fn preparation_progress(&self) -> (u8, bool, bool) {
         let phase = self
@@ -127,9 +135,14 @@ pub(in crate::node) struct ParticipantExportCursor {
     have: [u8; 32],
 }
 impl GuardedSyncStore<'_> {
-    fn prepared_scope(&self, conversation: ConversationId) -> super::prepared_views::Scope {
+    fn prepared_scope(
+        &self,
+        conversation: ConversationId,
+        purpose: Purpose,
+    ) -> super::prepared_views::Scope {
         super::prepared_views::Scope {
             peer: self.peer.clone(),
+            purpose,
             conversation,
             inbound: self.inbound,
             pull_only: self.pull_only,
@@ -143,18 +156,35 @@ impl GuardedSyncStore<'_> {
         if !self.use_node_preparation {
             return Ok(self.custody_view.take());
         }
+        self.take_node_prepared_selection(conversation, Purpose::Ordinary)
+    }
+    fn take_node_prepared_selection(
+        &self,
+        conversation: &ConversationId,
+        purpose: Purpose,
+    ) -> Result<Option<RetainedSelection>, LogError> {
+        if self.node.runtime_work.is_closed() {
+            return Ok(None);
+        }
         let Some(stamp) = self.history_sync_stamp(conversation)? else {
             return Ok(None);
         };
         let (value, retired) = {
-            self.node
+            let mut cache = self
+                .node
                 .prepared_sync_views
                 .lock()
-                .expect("prepared sync cache lock")
-                .take(&self.prepared_scope(*conversation), &stamp)
+                .expect("prepared sync cache lock");
+            if self.node.runtime_work.is_closed() {
+                return Ok(None);
+            }
+            cache.take(&self.prepared_scope(*conversation, purpose), &stamp)
         };
         drop(retired);
         if let Some(mut value) = value {
+            if self.node.runtime_work.is_closed() {
+                return Ok(None);
+            }
             self.node
                 .log
                 .lock()
@@ -178,6 +208,7 @@ impl GuardedSyncStore<'_> {
     fn cache_prepared_view(
         &self,
         mut view: ParticipantView,
+        purpose: Purpose,
     ) -> Result<Option<ParticipantView>, LogError> {
         // Pending uninvited ancestry remains operation-owned, never node-wide.
         if !view.pending.is_empty()
@@ -186,7 +217,7 @@ impl GuardedSyncStore<'_> {
                 .preparation
                 .get_mut()
                 .expect("owned view preparation")
-                .compact_for_cache()
+                .compact_for_cache(purpose == Purpose::History)
         {
             return Ok(Some(view));
         }
@@ -220,7 +251,7 @@ impl GuardedSyncStore<'_> {
         if !super::PreparedSyncCache::accepts_bytes(bytes) {
             return Ok(Some(view));
         }
-        let scope = self.prepared_scope(view.conversation);
+        let scope = self.prepared_scope(view.conversation, purpose);
         let stamp = view.metadata_stamp.clone().ok_or(LogError::StaleCursor)?;
         let retired = {
             let mut cache = self
@@ -245,6 +276,7 @@ impl GuardedSyncStore<'_> {
                 stamp,
                 bytes,
                 RetainedSelection {
+                    purpose,
                     denied: self.denied,
                     inbound: self.inbound,
                     pull_only: self.pull_only,
@@ -377,6 +409,42 @@ impl GuardedSyncStore<'_> {
         &self,
         conversation: &ConversationId,
     ) -> Result<HistoryUpload, LogError> {
+        if !self.denied
+            && self.pending_channels.is_empty()
+            && let Some(retained) =
+                self.take_node_prepared_selection(conversation, Purpose::History)?
+        {
+            let RetainedSelection {
+                purpose,
+                denied,
+                inbound,
+                pull_only,
+                view,
+            } = retained;
+            if purpose == Purpose::History
+                && denied == self.denied
+                && inbound == self.inbound
+                && pull_only == self.pull_only
+                && self.history_sync_stamp(conversation)?.as_ref() == view.metadata_stamp.as_ref()
+            {
+                self.validate_view(&view)?;
+                let upload = HistoryUpload {
+                    binding: view.repository.history_binding.clone(),
+                    view,
+                    peer: self.peer.clone(),
+                    denied: self.denied,
+                    cache_eligible: true,
+                    inbound: self.inbound,
+                    pull_only: self.pull_only,
+                    export_initialized: Mutex::new(true),
+                    export_ready: Mutex::new(true),
+                };
+                self.validate_history_upload(&upload)?;
+                self.node
+                    .observe_mailbox_work(query_reason::QUERY_VIEW_REUSED, None);
+                return Ok(upload);
+            }
+        }
         let view = NetworkSyncStore::open_view(self, conversation)?;
         // Connection-staged invitation ancestry belongs to that connection's
         // bounded exchange, not a reusable retained-history upload.
@@ -392,6 +460,8 @@ impl GuardedSyncStore<'_> {
             view,
             binding,
             peer: self.peer.clone(),
+            denied: self.denied,
+            cache_eligible: !self.denied && self.pending_channels.is_empty(),
             inbound: self.inbound,
             pull_only: self.pull_only,
             export_initialized: Mutex::new(false),
@@ -401,11 +471,49 @@ impl GuardedSyncStore<'_> {
         Ok(upload)
     }
 
+    /// Return only an exact, ready local plan. Remote upload progress and proof
+    /// remain in their mailbox owner; this cache never certifies delivery/custody.
+    pub(in crate::node) fn retain_history_upload(
+        &self,
+        upload: HistoryUpload,
+    ) -> Result<(), LogError> {
+        let Some(_work) = self.node.runtime_work.admit() else {
+            return Ok(());
+        };
+        // Keep destruction of an unretained SQL owner inside this work permit.
+        let upload = upload;
+        if !upload.cache_eligible
+            || self.denied
+            || !self.pending_channels.is_empty()
+            || !*upload
+                .export_initialized
+                .lock()
+                .expect("upload export lock")
+            || !*upload.export_ready.lock().expect("upload export lock")
+            || !upload
+                .view
+                .preparation
+                .lock()
+                .expect("view preparation lock")
+                .ready()
+        {
+            return Ok(());
+        }
+        self.validate_history_upload(&upload)?;
+        let current = self.history_sync_stamp(&upload.view.conversation)?;
+        if current.is_none() || current.as_ref() != upload.view.metadata_stamp.as_ref() {
+            return Ok(());
+        }
+        drop(self.cache_prepared_view(upload.view, Purpose::History)?);
+        Ok(())
+    }
+
     pub(in crate::node) fn validate_history_upload(
         &self,
         upload: &HistoryUpload,
     ) -> Result<(), LogError> {
         if upload.peer != self.peer
+            || upload.denied != self.denied
             || upload.inbound != self.inbound
             || upload.pull_only != self.pull_only
         {
@@ -507,6 +615,7 @@ impl GuardedSyncStore<'_> {
         upload: &mut HistoryUpload,
     ) -> Result<bool, LogError> {
         if upload.peer != self.peer
+            || upload.denied != self.denied
             || upload.inbound != self.inbound
             || upload.pull_only != self.pull_only
             || !*upload.export_ready.lock().expect("upload export lock")
@@ -899,12 +1008,14 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             return Ok(None);
         };
         let RetainedSelection {
+            purpose,
             denied,
             inbound,
             pull_only,
             view,
         } = retained;
-        if view.conversation != *conversation
+        if purpose != Purpose::Ordinary
+            || view.conversation != *conversation
             || denied != self.denied
             || inbound != self.inbound
             || pull_only != self.pull_only
@@ -954,7 +1065,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             && self.history_sync_stamp(&view.conversation)?.as_ref() == Some(stamp)
         {
             if self.use_node_preparation {
-                let result = self.cache_prepared_view(view)?;
+                let result = self.cache_prepared_view(view, Purpose::Ordinary)?;
                 if result.is_none() {
                     self.node
                         .observe_mailbox_work(query_reason::QUERY_VIEW_RETAINED, None);
@@ -962,6 +1073,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                 return Ok(result);
             }
             self.custody_view = Some(RetainedSelection {
+                purpose: Purpose::Ordinary,
                 denied: self.denied,
                 inbound: self.inbound,
                 pull_only: self.pull_only,
@@ -1265,11 +1377,6 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         let message =
             (event.kind == EventKind::Message).then_some((event.conversation_id, event.id));
         let result = SyncStore::ingest(self, event);
-        // Duplicate payloads can restore ownership or unlock prior reception.
-        // Empty frames never call ingest, and failed admission grants no signal.
-        if result.is_ok() {
-            self.received_work = true;
-        }
         #[cfg(test)]
         if matches!(result, Ok(AppendOutcome::Appended))
             && let Some((channel, id)) = message
@@ -1342,9 +1449,9 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         SyncStore::file_message_identity(self, file, manifest)
     }
     fn accept_file_message_identity(&mut self, bundle: Event) -> Result<bool, LogError> {
-        let accepted = SyncStore::accept_file_message_identity(self, bundle)?;
-        self.received_work |= accepted;
-        Ok(accepted)
+        // The identity owner updates an already accepted file row and publishes
+        // its own history invalidation; this introduces no raw reception work.
+        SyncStore::accept_file_message_identity(self, bundle)
     }
     fn sticker_file_consent(
         &mut self,
@@ -1352,10 +1459,9 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         manifest: &EventId,
         headers: Vec<Event>,
     ) -> Result<Option<Event>, LogError> {
-        let supplied_headers = !headers.is_empty();
-        let result = SyncStore::sticker_file_consent(self, file, manifest, headers);
-        self.received_work |= supplied_headers && result.is_ok();
-        result
+        // Reconstructed chunks record their actual file conversation at the
+        // ordinary durable-ingest seam, including a partially accepted proof.
+        SyncStore::sticker_file_consent(self, file, manifest, headers)
     }
     fn sticker_file_proof(
         &self,

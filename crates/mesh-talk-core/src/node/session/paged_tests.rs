@@ -186,6 +186,118 @@ async fn metadata_query_does_not_dispatch_pending_file_reception() {
 }
 
 #[tokio::test]
+async fn partial_followup_storage_failure_dispatches_already_durable_dm_reception() {
+    use crate::{discovery::Announce, identity::account::Account};
+    use futures_util::FutureExt;
+    use std::time::Duration;
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let source_identity = DeviceIdentity::generate();
+    let target_identity = DeviceIdentity::generate();
+    let source_account = Account::generate();
+    let target_account = Account::generate();
+    let source_proof = Announce::new_with_account(&source_identity, &source_account, "Source", 9);
+    let target_proof = Announce::new_with_account(&target_identity, &target_account, "Target", 9);
+    let (source, _, _) = super::super::test_support::node_with_files(
+        source_dir.path(),
+        source_identity,
+        source_account,
+        &target_proof,
+    );
+    let (target, mut incoming, _) = super::super::test_support::node_with_files(
+        target_dir.path(),
+        target_identity,
+        target_account,
+        &source_proof,
+    );
+    target.cached_peer_snapshot_async().await.unwrap();
+    let first_id = source
+        .enqueue_to_account(&target.account_id(), b"durable prefix", None)
+        .await
+        .unwrap();
+    let second_id = source
+        .enqueue_to_account(&target.account_id(), b"blocked suffix", None)
+        .await
+        .unwrap();
+    let [first, second] = {
+        let store = source.delivery.lock().unwrap();
+        [first_id, second_id].map(|id| store.message(id).unwrap().destinations[0].event.clone())
+    };
+    let conversation = first.conversation_id;
+    assert_eq!(second.conversation_id, conversation);
+    assert!(first.verify_integrity() && first.verify_signature());
+    assert!(second.verify_integrity() && second.verify_signature());
+    assert!(second.parents.contains(&first.id));
+    // Fail only the second authentic ciphertext's SQL insertion. Each ingest
+    // owns its own transaction; the successful prefix must remain durable.
+    target.storage.database().transaction(|c| {
+        c.execute_batch(&format!("CREATE TEMP TRIGGER fail_followup_suffix BEFORE INSERT ON retained_events WHEN NEW.id=X'{}' BEGIN SELECT RAISE(ABORT,'injected followup suffix storage failure'); END;", hex::encode(second.id.as_bytes())))?;
+        Ok(())
+    }).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = target.clone();
+    let mut task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let channel = SecureChannel::accept(socket, &serving.identity)
+            .await
+            .unwrap();
+        serving.serve_connection(channel).await;
+    });
+    let result = std::panic::AssertUnwindSafe(async {
+        let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut channel = SecureChannel::connect(socket, &source.identity, Some(&target.identity.public())).await.unwrap();
+        channel.send(&encode(&SyncWire::FollowupV5(SyncFollowup {
+            conversation,
+            events: vec![first.clone(), second.clone()],
+        })).unwrap()).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), channel.recv()).await.unwrap().is_err(), "actual storage failure must close the authenticated exchange");
+        tokio::time::timeout(Duration::from_secs(5), &mut task).await.unwrap().unwrap();
+        {
+            let log = target.log.lock().unwrap();
+            assert!(log.get(&first.id).unwrap().is_some(), "first ciphertext must actually survive the suffix failure");
+            assert!(log.get(&second.id).unwrap().is_none(), "the exact injected second insert must roll back");
+            log.sync().unwrap();
+        }
+        // No metadata/Have query, subsequent payload, manual emit or explicit
+        // reconciliation can manufacture the reception signal after failure.
+        let message = tokio::time::timeout(Duration::from_secs(2), incoming.recv()).await.expect("accepted durable prefix must automatically reach plaintext reception despite a later local storage error").unwrap();
+        assert_eq!(message.message_id, Some(first_id));
+        assert_eq!(message.text, b"durable prefix");
+        assert!(target.received.lock().unwrap().processed(first.id).unwrap());
+        let receipts = target.delivery.lock().unwrap().retry_receipts(8);
+        assert_eq!(receipts.len(), 1, "only the accepted prefix may publish a durable receipt");
+        assert_eq!(receipts[0].logical_id, first_id);
+        assert_eq!(receipts[0].original_event_id, first.id);
+        assert!(receipts[0].destination.event.verify_signature());
+        assert!(incoming.try_recv().is_err(), "rejected suffix must not emit plaintext");
+    }).catch_unwind().await;
+    let cleanup = std::panic::AssertUnwindSafe(async {
+        if !task.is_finished() {
+            task.abort();
+            let joined = task.await;
+            assert!(
+                joined.is_err_and(|error| error.is_cancelled()),
+                "owned serving task must retire on failed fixture"
+            );
+        }
+        if let Some(retirement) = target.retire_prepared_sync_views() {
+            retirement.await.unwrap();
+        }
+        target.runtime_work.drain().await;
+    })
+    .catch_unwind()
+    .await;
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+    if let Err(error) = cleanup {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[tokio::test]
 async fn ordinary_requester_reuses_selection_without_idle_commits() {
     requester_selection_reuse_fixture(false, false).await;
 }

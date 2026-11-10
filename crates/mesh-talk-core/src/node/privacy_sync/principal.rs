@@ -152,7 +152,7 @@ impl Preparation {
     }
 
     pub(super) fn resume_history(&mut self, generation: Option<OrderGeneration>) -> bool {
-        if !self.ready() || !self.history_only {
+        if !self.ready() || !self.history_only || self.principal.is_none() {
             return false;
         }
         match (self.generation, generation) {
@@ -179,9 +179,10 @@ impl Preparation {
     }
 
     /// Finished network plans retain SQL identities and scalar metadata only.
-    /// History uploads have a separate incremental owner and cannot be compacted.
-    pub(super) fn compact_for_cache(&mut self) -> bool {
-        if !self.ready() || self.history_only {
+    /// A parked history plan keeps its finite generation, but releases reducers.
+    /// A subsequent append therefore opens fresh preparation instead of resuming it.
+    pub(super) fn compact_for_cache(&mut self, history: bool) -> bool {
+        if !self.ready() || self.history_only != history {
             return false;
         }
         self.principal = None;

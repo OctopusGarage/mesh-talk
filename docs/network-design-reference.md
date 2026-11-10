@@ -2667,6 +2667,15 @@ Evicted owners retire after releasing the cache guard, so SQL cleanup does not
 run while global cache admission is locked. Contended entry locks defer that
 entry without blocking unrelated admission. Bodies are fetched and wrapped
 only for selected IDs without confirmed wrapper custody.
+An evicted, fully prepared history selection may park in the existing shared
+prepared-view cache under its exact full recipient, conversation, mode and
+current history/authority stamp. History and ordinary protocol plans have distinct
+purposes within the same entry/byte budget and active-selection admission.
+Parked history plans release their reducers; changed sources prepare afresh.
+Incomplete, stale, failed or connection-staged plans cannot qualify, and closed
+runtimes cannot check out or publish retained plans. Relay cursors, upload ranks
+and custody/completion evidence remain with their mailbox owners and are never
+recovered from this local selection cache.
 Terminal export preparation rechecks selection and network authority without
 rewriting an unchanged export cursor. Direct framed export and incremental
 mailbox upload share this repository rule; consuming another ID page does not
@@ -3063,6 +3072,15 @@ between its request/followup frames, because those boundaries do not establish t
 its logical exchange has finished. Retiring an account idle session changes neither
 peer authority nor receipt semantics; subsequent requests use existing authenticated
 fresh-session recovery.
+
+Ordinary sync reception tracks the conversations of accepted payloads separately
+from protocol success. A later storage or transport failure must still dispatch
+an already accepted prefix outside the adapter guard. Connection cancellation
+transfers that work to the existing runtime-owned blocking boundary, retaining
+the original connection semaphore slot until processing finishes. It cannot
+create an unbounded cleanup lane. Empty queries, denied payloads and uncommitted
+invitation staging do not create reception work; delivery confirmation still
+requires the existing authenticated recipient receipt.
 
 Pool lookup preserves explicit listener isolation. Up to 256 bounded route
 affinities remember an actually authenticated fallback for the same requested

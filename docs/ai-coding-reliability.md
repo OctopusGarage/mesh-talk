@@ -655,7 +655,15 @@ imply received data. The production-serving metadata regression preserves a
 pending, not-yet-decryptable file queue and verifies that a fingerprint query
 cannot rotate its tickets; accepted/duplicate events publish a consumable reception
 signal and invalid events do not. Consume the signal outside its store guard
-before invoking message/file/profile owners. Reuse
+before invoking message/file/profile owners. A failed batch can still contain an
+accepted prefix: dispatch its actual conversation scopes on error as well as
+success. Cancellation cleanup must retain both runtime retirement ownership and
+the original connection capacity until reception finishes; a retirement counter
+alone does not bound concurrent workers. The partial-Followup regression in the
+[paged session tests](../crates/mesh-talk-core/src/node/session/paged_tests.rs)
+injects a real second-record storage failure, while the
+[serving controls](../crates/mesh-talk-core/src/node/serving.rs) hold reception work
+through cancellation, timeout and dropping outside the runtime context. Reuse
 completed export preparation under its current source stamp. Require exact Have
 when ancestor closure depends on it; an independent plan may instead rebind its
 cursor digest and apply the fresh Have as a read filter, without persisting query

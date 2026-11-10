@@ -464,6 +464,29 @@ fn cache_key(p: &OpaqueMailboxProgress) -> Result<Vec<u8>, session::SessionError
     Ok(key)
 }
 impl Node {
+    /// Removed entry ownership arrives only after the global admission guard is
+    /// released. Keep optional plan retirement outside both cache/entry locks.
+    fn retire_mailbox_upload_entry(&self, retired: Option<UploadEntryOwner>) {
+        let Some(retired) = retired else {
+            return;
+        };
+        let Ok(retired) = Arc::try_unwrap(retired) else {
+            return;
+        };
+        let mut retired = retired.into_inner().expect("upload entry");
+        if let Some(upload) = retired.view.take() {
+            let recipient = upload.recipient().clone();
+            let owner = self.sync_store(&recipient);
+            if let Err(error) = owner
+                .lock()
+                .expect("projection")
+                .retain_history_upload(upload)
+            {
+                log::debug!("retired history preparation not reusable: {error}");
+            }
+        }
+    }
+
     fn incremental_receive_allowed(&self, p: &OpaqueMailboxProgress) -> bool {
         p.intent == MailboxIntent::Duplex && self.relay_receive_allowed(&p.relay)
     }
@@ -1347,7 +1370,7 @@ impl Node {
                     .expect("upload cache")
                     .acquire(&key, scope, generation, std::time::Instant::now())?
             };
-            drop(retired);
+            self.retire_mailbox_upload_entry(retired);
             let hot = lease.0.lock().expect("upload entry").receipt.clone();
             let receipt =
                 self.load_mailbox_receipt_with_runtime(&key, p.mailbox.id(), hot.clone())?;

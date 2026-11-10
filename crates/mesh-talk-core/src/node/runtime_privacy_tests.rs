@@ -693,3 +693,178 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
     bob.stop().await;
     alice.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_runtime_automatically_delivers_text_and_sticker_after_recipient_cold_restart() {
+    use crate::eventlog::EventId;
+    use crate::node::delivery_store::DeliveryStatus;
+    use futures_util::FutureExt;
+
+    async fn start_bounded(base: &Path, owner: &str) -> NodeRuntime {
+        let reserve = crate::transport::net::discovery_socket(0).unwrap();
+        let port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let startup = crate::node::RuntimeStartup::bounded(RuntimeConfig {
+            base_dir: base,
+            account_id: owner,
+            display_name: owner,
+            password: "pw",
+            discovery_port: port,
+            post_office_enabled: false,
+            candidate_source: None,
+        });
+        NodeRuntime::start_owned(startup, |_| Ok(()), |launch| launch(owner))
+            .await
+            .unwrap()
+    }
+    async fn received_and_confirmed(
+        source: &NodeRuntime,
+        target: &NodeRuntime,
+        id: EventId,
+        text: &[u8],
+        sticker: Option<&str>,
+    ) {
+        loop {
+            let present = match target.account_history(source.account_id(), 20) {
+                Ok(history) => {
+                    let rows = history
+                        .iter()
+                        .filter(|entry| entry.id == id)
+                        .collect::<Vec<_>>();
+                    assert!(rows.len() <= 1, "accepted original ID must not duplicate");
+                    rows.first().is_some_and(|entry| {
+                        assert_eq!(entry.text, text);
+                        assert_eq!(entry.sticker.as_deref(), sticker);
+                        !entry.from_me
+                    })
+                }
+                Err(NodeError::Log(LogError::StaleCursor)) => false,
+                Err(error) => panic!("bounded receiver history observation failed: {error}"),
+            };
+            if present && source.node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    // Suppress LAN disclosure BEFORE startup launches discovery. This fixture
+    // covers full runtime auxiliary tasks with explicit private account grants;
+    // it does not claim to reproduce native public multicast discovery timing.
+    for owner in ["sender", "recipient"] {
+        let directory = root.path().join("accounts").join(owner);
+        std::fs::create_dir_all(&directory).unwrap();
+        crate::node::privacy::PrivacyPolicy::open(&directory.join("privacy.policy"), "pw")
+            .unwrap()
+            .set_invisible(true)
+            .unwrap();
+    }
+    let mut sender = None;
+    let mut recipient = None;
+    let result = std::panic::AssertUnwindSafe(async {
+        sender = Some(start_bounded(root.path(), "sender").await);
+        recipient = Some(start_bounded(root.path(), "recipient").await);
+        let a = sender.as_ref().unwrap();
+        let b = recipient.as_ref().unwrap();
+        let a_proof = a.node.signed_announce("sender", a.listen_tcp_port());
+        let b_proof = b.node.signed_announce("recipient", b.listen_tcp_port());
+        for (runtime, proof) in [(a, &b_proof), (b, &a_proof)] {
+            runtime.roster.lock().unwrap().update(
+                proof,
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                runtime.user_id(),
+            );
+            runtime.node.cached_peer_snapshot().unwrap();
+        }
+        a.node.set_allowed(b.account_id(), true).await.unwrap();
+        b.node.set_allowed(a.account_id(), true).await.unwrap();
+        let recipient_account = b.account_id().to_owned();
+        let recipient_device = b.user_id().to_owned();
+        let old_port = b.listen_tcp_port();
+        let old_node = Arc::downgrade(&b.node);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let first = a.node.enqueue_to_account(&recipient_account, b"before restart", None).await.unwrap();
+            received_and_confirmed(a, b, first, b"before restart", None).await;
+            let reply = b.node.enqueue_to_account(a.account_id(), b"established reply", None).await.unwrap();
+            received_and_confirmed(b, a, reply, b"established reply", None).await;
+            for body in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()] {
+                let id = a.node.enqueue_to_account(&recipient_account, &body, None).await.unwrap();
+                received_and_confirmed(a, b, id, &body, None).await;
+            }
+        }).await.expect("full bounded runtimes must establish bidirectional persisted ratchets");
+
+        recipient.take().unwrap().stop().await;
+        assert!(old_node.upgrade().is_none(), "full old receiver runtime must release its Node");
+        let profile = root.path().join("accounts/recipient");
+        drop(crate::storage::profile::ProfileStorageLease::acquire(&profile).unwrap());
+        // The real stable-listener fallback chooses a new TCP port while the
+        // old endpoint is reserved but has no protocol server.
+        let old_listener = crate::node::bind_dual_stack_listener(old_port).await.unwrap();
+        let text_id = a.node.enqueue_to_account(&recipient_account, b"queued after close", None).await.unwrap();
+        let sticker_id = a.node.enqueue_sticker_to_account(&recipient_account, "1f44b", b"wave after close").await.unwrap();
+        let file_path = root.path().join("offline-receipt-file.txt");
+        let file_bytes = b"outbound custody fixture original\n";
+        std::fs::write(&file_path, file_bytes).unwrap();
+        let (file_id, file_conversation) = a.node.enqueue_file_to_account(
+            &recipient_account, &file_path, crate::file::FileKind::File,
+        ).await.unwrap();
+        let ids = [text_id, sticker_id, file_id];
+        assert_eq!(ids.into_iter().collect::<std::collections::BTreeSet<_>>().len(), 3);
+        let originals = {
+            let store = a.node.delivery.lock().unwrap();
+            ids.map(|id| {
+                assert_eq!(store.status(id), Some(DeliveryStatus::Awaiting));
+                let message = store.message(id).unwrap();
+                assert_eq!(message.destinations.len(), 1);
+                message.destinations[0].event.id
+            })
+        };
+        recipient = Some(start_bounded(root.path(), "recipient").await);
+        let b = recipient.as_ref().unwrap();
+        assert_eq!(b.account_id(), recipient_account);
+        assert_eq!(b.user_id(), recipient_device);
+        assert_ne!(b.listen_tcp_port(), old_port);
+        let fresh = b.node.signed_announce("recipient", b.listen_tcp_port());
+        assert!(fresh.verify());
+        // Publish the actual signed replacement route once. The wait below
+        // does not call peers(), flush, transfer, or explicit reconciliation.
+        a.roster.lock().unwrap().update(&fresh, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), a.user_id());
+        let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+            received_and_confirmed(a, b, ids[0], b"queued after close", None).await;
+            received_and_confirmed(a, b, ids[1], b"wave after close", Some("1f44b")).await;
+            // Delivered confirms durable recipient manifest custody, not an
+            // attachment approval, chunk download, export, or read receipt.
+            received_and_confirmed(a, b, ids[2], b"", None).await;
+            let history = b.account_history(a.account_id(), 20).unwrap();
+            let card = history.iter().find(|entry| entry.id == file_id).unwrap();
+            let file = card.file.as_ref().expect("original file ID retains manifest metadata");
+            assert_eq!(file.file_conv, file_conversation);
+            assert_eq!(file.name, "offline-receipt-file.txt");
+            assert_eq!(file.size, file_bytes.len() as u64);
+            assert!(!file.media);
+        }).await;
+        let evidence = recovered.is_err().then(|| originals.map(|id| {
+            let held = { b.node.log.lock().unwrap().get(&id).map(|event| event.is_some()) };
+            let processed = { b.node.received.lock().unwrap().processed(id) };
+            (held, processed)
+        }));
+        assert!(recovered.is_ok(), "full runtime cold recovery failed: sender={:?}; receiver(ciphertext-held,plaintext-processed)={evidence:?}", a.node.account_delivery_observations(&recipient_account, &ids));
+        drop(old_listener);
+    }).catch_unwind().await;
+    let mut cleanup_failure = None;
+    for runtime in [recipient.take(), sender.take()].into_iter().flatten() {
+        let stopped = std::panic::AssertUnwindSafe(runtime.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+    if let Some(error) = cleanup_failure {
+        std::panic::resume_unwind(error);
+    }
+}

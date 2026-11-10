@@ -1278,20 +1278,32 @@ async fn hold_original_pair_resume(
     executor: &Arc<Node>,
     requester: &Arc<Node>,
     partial_keys: &Arc<Mutex<Vec<crate::node::AccountDocumentKey>>>,
+    source_control: (ConversationId, &Mutex<ColdControlScope>),
     trace: &BTrace,
     clock: std::time::Instant,
 ) -> PaidPairBoundary {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    super::cold_account_setup(async {
-        while !executor.device_sync_status().iter().any(|status| {
-            status.device_id == source.user_id()
-                && status.document_phase == crate::node::SyncPhase::UpToDate
-        }) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    let (group, source_scope) = source_control;
+    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+        // This fault owns Control inputs and pair retirement. Optional document
+        // lanes can remain busy without changing the paid-page precondition.
+        let keys = partial_keys.lock().unwrap().clone();
+        let prefix_current = keys.iter().all(|key| {
+            source.account_document_meta(key).is_some_and(|meta| {
+                executor.account_document_meta(key).as_ref() == Some(&meta)
+                    && executor.operation_input_consumed_for_test(&meta)
+            })
+        });
+        prefix_current
+            && executor_has_processed_current_inputs(
+                executor,
+                [source, requester],
+                group,
+                source_scope,
+            )
+    }))
     .await
-    .expect("the executor's unrelated scope must settle before the deterministic fault");
+    .expect("the executor must consume current Control inputs and retire its prior source pair before the deterministic fault");
     let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let gates = PaidPairBoundary {
         original: Arc::new(Semaphore::new(0)),
@@ -3166,6 +3178,17 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
                             other,
                             &reference,
                             &partial_keys,
+                            (
+                                group,
+                                &cold_scopes
+                                    .iter()
+                                    .find(|(_, _, node, peer, _)| {
+                                        node.user_id() == other.user_id()
+                                            && peer.user_id() == owner.user_id()
+                                    })
+                                    .expect("the executor has an exact source Control scope")
+                                    .4,
+                            ),
                             &b_trace,
                             b_clock,
                         )

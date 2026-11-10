@@ -60,7 +60,7 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     // adapters check out an exclusive plan from the node/version owner.
     custody_view: Option<network::RetainedSelection>,
     use_node_preparation: bool,
-    received_work: bool,
+    received_work: std::collections::HashSet<ConversationId>,
 }
 // Field order keeps the actual SQL retirement alive until its work permit ends.
 struct PreparedViewsRetirement {
@@ -70,7 +70,14 @@ struct PreparedViewsRetirement {
 
 impl GuardedSyncStore<'_> {
     /// Reception work is published by accepted payload owners, not by queries.
+    #[cfg(test)]
     pub(in crate::node) fn take_received_work(&mut self) -> bool {
+        !self.take_received_conversations().is_empty()
+    }
+
+    pub(in crate::node) fn take_received_conversations(
+        &mut self,
+    ) -> std::collections::HashSet<ConversationId> {
         std::mem::take(&mut self.received_work)
     }
 }
@@ -117,7 +124,7 @@ impl Node {
             pending_bytes: 0,
             custody_view: None,
             use_node_preparation: false,
-            received_work: false,
+            received_work: Default::default(),
         })
     }
     pub(in crate::node) fn pull_sync_store(
@@ -134,7 +141,7 @@ impl Node {
             pending_bytes: 0,
             custody_view: None,
             use_node_preparation: false,
-            received_work: false,
+            received_work: Default::default(),
         })
     }
 
@@ -152,7 +159,7 @@ impl Node {
             pending_bytes: 0,
             custody_view: None,
             use_node_preparation: false,
-            received_work: false,
+            received_work: Default::default(),
         })
     }
 
@@ -619,6 +626,8 @@ impl GuardedSyncStore<'_> {
                 .map(|()| AppendOutcome::Appended);
             if result.is_err() {
                 self.denied = true;
+            } else if self.inbound {
+                self.received_work.insert(conversation);
             }
             return Some(result);
         }
@@ -1587,6 +1596,18 @@ impl SyncStore for GuardedSyncStore<'_> {
         self.outgoing_projection(conversation, have, true)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        // A validated ordinary frame owns one conversation; reconstructed file
+        // proof chunks can add one file conversation. Refuse excess scopes
+        // before any insertion rather than dropping accepted recovery work.
+        if self.inbound
+            && self.received_work.len() >= 2
+            && !self.received_work.contains(&event.conversation_id)
+        {
+            self.denied = true;
+            return Err(LogError::AdmissionRejected(
+                "inbound reception scope limit".into(),
+            ));
+        }
         let node = self.node;
         let _membership = matches!(
             event.kind,
@@ -1761,11 +1782,19 @@ impl SyncStore for GuardedSyncStore<'_> {
                 "attachment chunk stream already belongs to another sender".into(),
             ));
         }
-        if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
+        let conversation = event.conversation_id;
+        let result = if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
             log.append_durable(event)
         } else {
             log.append(event)
+        };
+        // Accepted appends own reception work; receipt/Have owners retain their
+        // existing synchronization before acknowledgement. Uninvited ancestry
+        // above remains connection-local until its approved atomic commit.
+        if result.is_ok() && self.inbound {
+            self.received_work.insert(conversation);
         }
+        result
     }
 }
 

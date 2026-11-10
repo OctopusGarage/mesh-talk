@@ -1190,3 +1190,406 @@ fn drain_ordinary_profile_maintenance(node: &Node) -> usize {
         .map(|_| node.drain_profile_compaction().unwrap().unwrap_or(0))
         .sum()
 }
+
+#[tokio::test]
+async fn ready_history_upload_owner_retirement_reuses_exact_principal_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (node, _, _) = super::super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    let conversation = node
+        .create_channel("Exact history preparation owner", vec![peer.public()])
+        .await
+        .unwrap();
+    let mut messages = Vec::new();
+    for _ in 0..32 {
+        node.await_channel_metadata(conversation).await.unwrap();
+        messages.push(
+            node.enqueue_channel_message_reply_expiring_if(
+                conversation,
+                &[b'm'; 1024],
+                None,
+                None,
+                |commit| commit(),
+            )
+            .unwrap(),
+        );
+    }
+    node.await_channel_metadata(conversation).await.unwrap();
+    let collect_ids = |store: &GuardedSyncStore<'_>, upload: &HistoryUpload| {
+        let mut ids = Vec::new();
+        let mut rank = -1;
+        loop {
+            let page = store
+                .history_upload_id_page(
+                    upload,
+                    rank,
+                    IdPageBudget {
+                        ids: 16,
+                        examined: 64,
+                    },
+                )
+                .unwrap();
+            ids.extend(page.ids);
+            rank = page.next_rank;
+            if page.complete {
+                break;
+            }
+        }
+        ids
+    };
+    let (expected, captured) = {
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        // Opaque history uses the recipient projection; the Noise peer is a
+        // relay, so this adapter is intentionally not bound as that recipient.
+        let upload = store.open_history_upload(&conversation).unwrap();
+        prepare_upload(&store, &upload);
+        let ids = collect_ids(&store, &upload);
+        assert!(messages.iter().all(|id| ids.contains(id)));
+        let stamp = store.history_sync_stamp(&conversation).unwrap().unwrap();
+        // This is the actual ready HistoryUpload owner. No remote receipt,
+        // CompletedUpload certificate or synthetic permission is installed.
+        store.retain_history_upload(upload).unwrap();
+        (ids, stamp)
+    };
+    let database = node.storage.database();
+    let changes = database
+        .read(|connection| Ok(connection.total_changes()))
+        .unwrap();
+    let commits = database.successful_write_commits();
+    let body_reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    let owner = node.sync_store(&peer.public());
+    let store = owner.lock().unwrap();
+    assert_eq!(
+        store.history_sync_stamp(&conversation).unwrap(),
+        Some(captured),
+        "fresh adapter must observe the exact same full-principal source"
+    );
+    let upload = store.open_history_upload(&conversation).unwrap();
+    let prepared_rows = prepare_upload(&store, &upload);
+    assert_eq!(collect_ids(&store, &upload), expected);
+    let written = database
+        .read(|connection| Ok(connection.total_changes()))
+        .unwrap()
+        - changes;
+    let committed = database.successful_write_commits() - commits;
+    eprintln!(
+        "history-owner-retirement prepared_rows={prepared_rows} sql_changes={written} write_commits={committed}"
+    );
+    assert_eq!(
+        written, 0,
+        "retiring a ready history owner must preserve its exact qualified SQL preparation for a fresh adapter"
+    );
+    assert_eq!(committed, 0);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        body_reads,
+        "an unchanged ready ID selection must not rehydrate canonical bodies"
+    );
+}
+
+async fn history_retention_fixture() -> (
+    tempfile::TempDir,
+    std::sync::Arc<Node>,
+    DeviceIdentity,
+    ConversationId,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (node, _, _) = super::super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    let conversation = node
+        .create_channel("History retention fences", vec![peer.public()])
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        node.await_channel_metadata(conversation).await.unwrap();
+        node.enqueue_channel_message_reply_expiring_if(
+            conversation,
+            b"retained original",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    }
+    node.await_channel_metadata(conversation).await.unwrap();
+    (directory, node, peer, conversation)
+}
+
+#[tokio::test]
+async fn ready_history_retention_scopes_modes_purpose_and_cancelled_checkout() {
+    let (_directory, node, peer, conversation) = history_retention_fixture().await;
+    let owner = node.sync_store(&peer.public());
+    let mut store = owner.lock().unwrap();
+    let upload = store.open_history_upload(&conversation).unwrap();
+    prepare_upload(&store, &upload);
+    store.retain_history_upload(upload).unwrap();
+    assert_eq!(node.prepared_sync_views.lock().unwrap().len(), 1);
+    let mut changed_transport = peer.public();
+    changed_transport.x25519_pub = DeviceIdentity::generate().public().x25519_pub;
+    for other in [
+        node.sync_store(&changed_transport),
+        node.sync_store(&DeviceIdentity::generate().public()),
+        node.serve_sync_store(&peer.public()),
+        node.pull_sync_store(&peer.public()),
+    ] {
+        let other = other.lock().unwrap();
+        let fresh = other.open_history_upload(&conversation).unwrap();
+        assert!(
+            !fresh.preparation_progress().2,
+            "different full principal/mode must open fresh"
+        );
+        assert_eq!(node.prepared_sync_views.lock().unwrap().len(), 1);
+    }
+    store.denied = true;
+    let denied = store.open_history_upload(&conversation).unwrap();
+    assert!(!denied.preparation_progress().2);
+    drop(denied);
+    store.denied = false;
+    NetworkSyncStore::bind_session_peer(&mut *store, &peer.public());
+    assert!(
+        NetworkSyncStore::take_custody_view(&mut *store, &conversation)
+            .unwrap()
+            .is_none(),
+        "ordinary sync cannot consume a history-purpose plan"
+    );
+    let checked_out = store.open_history_upload(&conversation).unwrap();
+    assert!(checked_out.preparation_progress().2);
+    assert_eq!(node.prepared_sync_views.lock().unwrap().len(), 0);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .active_selection_count(),
+        1
+    );
+    // Cancellation owns this checkout, not an implicit Drop callback. Releasing
+    // it frees admission and cannot republish into the idle cache.
+    drop(checked_out);
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .active_selection_count(),
+        0
+    );
+    assert_eq!(node.prepared_sync_views.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn ready_history_retention_revalidates_append_leave_and_physical_erase() {
+    for mutation in ["append", "leave", "erase"] {
+        let (_directory, node, peer, conversation) = history_retention_fixture().await;
+        let owner = node.sync_store(&peer.public());
+        {
+            let store = owner.lock().unwrap();
+            let upload = store.open_history_upload(&conversation).unwrap();
+            prepare_upload(&store, &upload);
+            store.retain_history_upload(upload).unwrap();
+        }
+        let new_message = match mutation {
+            "append" => Some(
+                node.enqueue_channel_message_reply_expiring_if(
+                    conversation,
+                    b"new source",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap(),
+            ),
+            "leave" => {
+                let leave = {
+                    let log = node.log.lock().unwrap();
+                    let (parents, lamport) = log.prepare(&conversation).unwrap();
+                    Event::new(
+                        &peer,
+                        conversation,
+                        1,
+                        parents,
+                        lamport,
+                        1,
+                        EventKind::ChannelLeave,
+                        vec![],
+                    )
+                };
+                node.log.lock().unwrap().append_durable(leave).unwrap();
+                node.await_channel_metadata(conversation).await.unwrap();
+                Some(
+                    node.enqueue_channel_message_reply_expiring_if(
+                        conversation,
+                        b"after recipient left",
+                        None,
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap(),
+                )
+            }
+            "erase" => {
+                assert!(
+                    node.log
+                        .lock()
+                        .unwrap()
+                        .drop_conversation(&conversation)
+                        .unwrap()
+                        > 0
+                );
+                None
+            }
+            _ => unreachable!(),
+        };
+        let store = owner.lock().unwrap();
+        let fresh = store.open_history_upload(&conversation).unwrap();
+        assert!(
+            !fresh.preparation_progress().2,
+            "mutation={mutation}: stale plan must not be reused"
+        );
+        if mutation == "erase" {
+            // Erasing the signed genesis removes canonical grant authority; a
+            // stale ChannelBook cannot authorize a completed empty projection.
+            assert_eq!(node.prepared_sync_views.lock().unwrap().len(), 0);
+            assert!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .events(&conversation)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                matches!(
+                    store.history_upload_id_page(
+                        &fresh,
+                        -1,
+                        IdPageBudget {
+                            ids: 16,
+                            examined: 64
+                        }
+                    ),
+                    Err(LogError::StaleCursor)
+                ),
+                "an erased canonical group must expose no cached IDs"
+            );
+            continue;
+        }
+        prepare_upload(&store, &fresh);
+        if let Some(event) = new_message {
+            assert_eq!(
+                store.history_upload_contains(&fresh, event).unwrap(),
+                mutation == "append"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn ready_history_retention_incomplete_pending_unknown_read_failure_and_close_are_not_cached()
+{
+    for state in ["incomplete", "pending", "unknown", "read_failure", "closed"] {
+        let (_directory, node, peer, conversation) = history_retention_fixture().await;
+        let owner = node.sync_store(&peer.public());
+        let mut store = owner.lock().unwrap();
+        let upload = store.open_history_upload(&conversation).unwrap();
+        if state != "incomplete" {
+            prepare_upload(&store, &upload);
+        }
+        if state == "closed" {
+            store.retain_history_upload(upload).unwrap();
+            assert_eq!(node.prepared_sync_views.lock().unwrap().len(), 1);
+            let work = node.runtime_work.admit().unwrap();
+            node.runtime_work.close();
+            let fresh = store.open_history_upload(&conversation).unwrap();
+            assert!(
+                !fresh.preparation_progress().2,
+                "closed runtime cannot check out a parked plan"
+            );
+            assert_eq!(node.prepared_sync_views.lock().unwrap().len(), 1);
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .active_selection_count(),
+                0
+            );
+            drop(fresh);
+            drop(node.take_prepared_sync_views());
+            drop(work);
+            continue;
+        }
+        match state {
+            "pending" => {
+                store
+                    .pending_channels
+                    .insert(conversation, super::super::PendingChannel::default());
+            }
+            "unknown" => {
+                node.storage
+                    .database()
+                    .transaction(|c| {
+                        c.execute_batch("DELETE FROM participant_kind_scan")?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            "read_failure" => {
+                node.storage.database().transaction(|c| {c.execute_batch("ALTER TABLE participant_semantic_compaction_revisions RENAME TO unavailable_compaction_classification")?; Ok(())}).unwrap();
+            }
+            _ => {}
+        }
+        let result = store.retain_history_upload(upload);
+        if state == "read_failure" {
+            assert!(
+                result.is_err(),
+                "actual missing SQL source must fail closed"
+            );
+        }
+        assert_eq!(
+            node.prepared_sync_views.lock().unwrap().len(),
+            0,
+            "state={state}: no unqualified plan may be parked"
+        );
+        if state == "read_failure" {
+            node.storage.database().transaction(|c| {c.execute_batch("ALTER TABLE unavailable_compaction_classification RENAME TO participant_semantic_compaction_revisions")?; Ok(())}).unwrap();
+            let fresh = store.open_history_upload(&conversation).unwrap();
+            prepare_upload(&store, &fresh);
+            store.retain_history_upload(fresh).unwrap();
+            assert_eq!(
+                node.prepared_sync_views.lock().unwrap().len(),
+                1,
+                "recovered SQL source may qualify a new ready plan"
+            );
+        }
+    }
+}

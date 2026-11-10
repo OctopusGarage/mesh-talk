@@ -24,6 +24,44 @@ const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// streams wait in the OS queue; the Node's shared pool also counts handshakes.
 pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS;
 
+/// Accepted payloads outlive a failed or cancelled connection future. The
+/// connection owns one admission through actual blocking cleanup; Drop never
+/// performs reception callbacks or SQL while unwinding.
+struct SyncReceptionScope<'a, 'node> {
+    node: Arc<Node>,
+    store: &'a std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'node>>,
+    permit: Option<super::runtime_work::WorkPermit>,
+    capacity: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Drop for SyncReceptionScope<'_, '_> {
+    fn drop(&mut self) {
+        let conversations = match self.store.lock() {
+            Ok(mut store) => store.take_received_conversations(),
+            Err(_) => return,
+        };
+        if conversations.is_empty() {
+            return;
+        }
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let node = self.node.clone();
+        let capacity = self.capacity.take();
+        // WorkPermit keeps the captured Node and SQL work inside retirement's
+        // drain even though cancellation has destroyed the awaiting connection.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _runtime = self.runtime.enter();
+            drop(permit.spawn_blocking(move || {
+                // Releasing the socket does not release SQL cleanup capacity.
+                let _capacity = capacity;
+                node.dispatch_received_conversations(conversations);
+            }));
+        }));
+    }
+}
+
 /// Retry scheduling retains a conversation and deadline, never plaintext or
 /// receiver keys. The durable pending row is the complete retry authority.
 #[derive(Default)]
@@ -559,7 +597,7 @@ impl Node {
                 return;
             };
             connections.spawn(work.track(async move {
-                let _permit = permit; // held for the connection's lifetime, freed on drop
+                let capacity = Arc::new(permit);
                 #[cfg(test)]
                 if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
                     let _ = hook.send(());
@@ -581,7 +619,8 @@ impl Node {
                     )
                 });
                 if let Ok(channel) = accepted {
-                    node.serve_connection(channel).await;
+                    node.serve_connection_with_capacity(channel, Some(capacity))
+                        .await;
                 }
                 #[cfg(test)]
                 node.trace_account_client(&node.identity.public(), || {
@@ -595,7 +634,17 @@ impl Node {
     /// any newly-received DMs, until the peer disconnects. The first frame is peeked:
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
-    pub async fn serve_connection(self: &Arc<Self>, mut channel: SecureChannel<TcpStream>) {
+    /// Direct protocol hosts own their own concurrent connection admission.
+    /// The production listener supplies its retained semaphore capacity below.
+    pub async fn serve_connection(self: &Arc<Self>, channel: SecureChannel<TcpStream>) {
+        self.serve_connection_with_capacity(channel, None).await;
+    }
+
+    async fn serve_connection_with_capacity(
+        self: &Arc<Self>,
+        mut channel: SecureChannel<TcpStream>,
+        capacity: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    ) {
         if channel.pairing_only() {
             // A retired account proof can recover an interrupted authorized link,
             // but can never enter sync, account history, attachments or call IPC.
@@ -630,7 +679,17 @@ impl Node {
         if is_relay {
             return;
         }
+        let Some(permit) = self.runtime_work.admit() else {
+            return;
+        };
         let store = self.serve_sync_store(channel.peer_identity());
+        let _reception = SyncReceptionScope {
+            node: self.clone(),
+            store: &store,
+            permit: Some(permit),
+            capacity,
+            runtime: tokio::runtime::Handle::current(),
+        };
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
         let first = match tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {
@@ -818,26 +877,24 @@ impl Node {
         // The first frame may be a Request, which makes serve_wire_bytes await the peer's
         // streamed have-chunks — so it needs the same idle timeout as the loop, or a peer that
         // sends one Request then stalls would pin this task (and its connection permit) forever.
-        match tokio::time::timeout(
+        let result = tokio::time::timeout(
             SERVE_IDLE_TIMEOUT,
             serve_wire_bytes(&mut channel, &store, &first),
         )
-        .await
-        {
-            Ok(Ok(Served::Handled(conv))) => {
-                self.dispatch_received_sync_work(&store, conv);
-            }
-            _ => return,
+        .await;
+        self.dispatch_received_sync_work(&store);
+        if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+            return;
         }
         for _ in 0..MAX_SERVE_ROUNDS {
             if is_relay && !self.relay_allowed(channel.peer_identity()) {
                 break;
             }
-            match tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
-                Ok(Ok(Served::Handled(conv))) => {
-                    self.dispatch_received_sync_work(&store, conv);
-                }
-                _ => break, // peer closed, error, or idle past the timeout
+            let result =
+                tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await;
+            self.dispatch_received_sync_work(&store);
+            if !matches!(result, Ok(Ok(Served::Handled(_conversation)))) {
+                break; // peer closed, error, or idle past the timeout
             }
         }
     }
@@ -845,17 +902,25 @@ impl Node {
     fn dispatch_received_sync_work(
         &self,
         store: &std::sync::Mutex<super::privacy_sync::GuardedSyncStore<'_>>,
-        conversation: ConversationId,
     ) {
-        let received = store.lock().expect("sync store lock").take_received_work();
-        if !received {
-            return;
-        }
+        let conversations = store
+            .lock()
+            .expect("sync store lock")
+            .take_received_conversations();
         // Release the adapter guard before reception acquires log/book owners.
-        self.emit_new_messages(conversation);
-        self.process_channel(conversation);
-        self.process_file_events(conversation);
-        self.process_profile_events(conversation);
+        self.dispatch_received_conversations(conversations);
+    }
+
+    fn dispatch_received_conversations(
+        &self,
+        conversations: std::collections::HashSet<ConversationId>,
+    ) {
+        for conversation in conversations {
+            self.emit_new_messages(conversation);
+            self.process_channel(conversation);
+            self.process_file_events(conversation);
+            self.process_profile_events(conversation);
+        }
     }
 
     /// Open and surface any new `FileManifest` events in `conv`. Channel manifests
@@ -3028,6 +3093,201 @@ mod inbound_idle_capacity_tests {
         identity::{account::Account, device::DeviceIdentity},
         node::{AccountDocumentKey, account_devices::AccountDevice},
     };
+
+    #[tokio::test]
+    async fn cancelled_timed_out_and_external_drop_owners_retain_capacity_until_reception_drains() {
+        use crate::eventlog::sync::network::NetworkSyncStore;
+        use futures_util::FutureExt;
+        struct HeldDelivery {
+            release: Option<std::sync::mpsc::Sender<()>>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl HeldDelivery {
+            fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+                if let Some(thread) = self.thread.take() {
+                    assert!(thread.join().is_ok());
+                }
+            }
+        }
+        impl Drop for HeldDelivery {
+            fn drop(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        for mode in [0, 1, 2] {
+            let source_dir = tempfile::tempdir().unwrap();
+            let target_dir = tempfile::tempdir().unwrap();
+            let source_identity = DeviceIdentity::generate();
+            let target_identity = DeviceIdentity::generate();
+            let source_account = Account::generate();
+            let target_account = Account::generate();
+            let source_proof =
+                Announce::new_with_account(&source_identity, &source_account, "Source", 9);
+            let target_proof =
+                Announce::new_with_account(&target_identity, &target_account, "Target", 9);
+            let (source, _, _) = super::super::test_support::node_with_files(
+                source_dir.path(),
+                source_identity,
+                source_account,
+                &target_proof,
+            );
+            let (target, mut incoming, _) = super::super::test_support::node_with_files(
+                target_dir.path(),
+                target_identity,
+                target_account,
+                &source_proof,
+            );
+            target.cached_peer_snapshot_async().await.unwrap();
+            let id = source
+                .enqueue_to_account(&target.account_id(), b"accepted before cancellation", None)
+                .await
+                .unwrap();
+            let event = source
+                .delivery
+                .lock()
+                .unwrap()
+                .message(id)
+                .unwrap()
+                .destinations[0]
+                .event
+                .clone();
+            let wire = event.id;
+            let peer = source.identity.public();
+            let capacity_slots = Arc::new(Semaphore::new(1));
+            let capacity = Arc::new(capacity_slots.clone().acquire_owned().await.unwrap());
+            let (release, released) = std::sync::mpsc::channel();
+            let (locked, holding) = tokio::sync::oneshot::channel();
+            let held_target = target.clone();
+            let mut gate = HeldDelivery {
+                release: Some(release),
+                thread: Some(std::thread::spawn(move || {
+                    let _delivery = held_target.delivery.lock().unwrap();
+                    locked.send(()).unwrap();
+                    let _ = released.recv();
+                })),
+            };
+            tokio::time::timeout(Duration::from_secs(3), holding)
+                .await
+                .unwrap()
+                .unwrap();
+            let receiving = target.clone();
+            let (accepted, ready) = tokio::sync::oneshot::channel();
+            let mut task = tokio::spawn(async move {
+                let operation = async {
+                    let permit = receiving.runtime_work.admit().unwrap();
+                    let store = receiving.serve_sync_store(&peer);
+                    let _owner = SyncReceptionScope {
+                        node: receiving.clone(),
+                        store: &store,
+                        permit: Some(permit),
+                        capacity: Some(capacity),
+                        runtime: tokio::runtime::Handle::current(),
+                    };
+                    NetworkSyncStore::ingest(&mut *store.lock().unwrap(), event).unwrap();
+                    accepted.send(()).unwrap();
+                    // Exercise the actual adapter/admission owner at a suspended
+                    // protocol boundary; no fake ciphertext or reception callback.
+                    std::future::pending::<()>().await;
+                };
+                if mode == 0 {
+                    operation.await;
+                } else if mode == 2 {
+                    let mut operation = Box::pin(operation);
+                    std::future::poll_fn(|context| {
+                        assert!(
+                            std::future::Future::poll(operation.as_mut(), context).is_pending()
+                        );
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    std::thread::scope(|scope| {
+                        scope.spawn(move || {
+                            assert!(tokio::runtime::Handle::try_current().is_err(), "the cancellation drop must actually occur outside Tokio context");
+                            drop(operation);
+                        }).join().unwrap();
+                    });
+                } else {
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(10), operation)
+                            .await
+                            .is_err()
+                    );
+                }
+            });
+            let outcome = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(3), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(target.log.lock().unwrap().get(&wire).unwrap().is_some());
+            if mode == 0 {
+                task.abort();
+                assert!((&mut task).await.unwrap_err().is_cancelled());
+            } else {
+                tokio::time::timeout(Duration::from_secs(3), &mut task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(
+                capacity_slots.clone().try_acquire_owned().is_err(),
+                "a cancelled connection must not admit another cleanup while its real reception SQL is blocked"
+            );
+            let drained = target.runtime_work.drain();
+            tokio::pin!(drained);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut drained)
+                    .await
+                    .is_err(),
+                "retirement must remain blocked by actual accepted reception work"
+            );
+            gate.release();
+            tokio::time::timeout(Duration::from_secs(3), &mut drained)
+                .await
+                .expect("releasing actual SQL work must finish retirement's drain");
+            assert_eq!(
+                capacity_slots.available_permits(),
+                1,
+                "connection capacity retires only after actual reception completes"
+            );
+            let received = incoming.try_recv().expect("accepted reception must survive its suspended owner disappearing without another query");
+            assert_eq!(received.message_id, Some(id));
+            assert_eq!(received.text, b"accepted before cancellation");
+            assert!(target.received.lock().unwrap().processed(wire).unwrap());
+            let receipts = target.delivery.lock().unwrap().retry_receipts(8);
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].original_event_id, wire);
+            assert!(incoming.try_recv().is_err());
+            }).catch_unwind().await;
+            let cleanup = std::panic::AssertUnwindSafe(async {
+                gate.release();
+                if !task.is_finished() {
+                    task.abort();
+                    let _ = (&mut task).await;
+                }
+                if let Some(retirement) = target.retire_prepared_sync_views() {
+                    retirement.await.unwrap();
+                }
+                target.runtime_work.drain().await;
+            })
+            .catch_unwind()
+            .await;
+            if let Err(error) = outcome {
+                std::panic::resume_unwind(error);
+            }
+            if let Err(error) = cleanup {
+                std::panic::resume_unwind(error);
+            }
+        }
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,

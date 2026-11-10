@@ -9017,6 +9017,163 @@ async fn relocated_recipient_cancels_stalled_old_route_before_exchange_deadline(
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_text_and_sticker_delivery_survives_established_recipient_cold_restart() {
+    use super::test_support::IndependentPeerRuntime;
+    use futures_util::FutureExt;
+    use std::time::Duration;
+
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let sender_identity = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let recipient_identity = DeviceIdentity::generate();
+    let recipient_account = Account::generate();
+    let recipient_secret = recipient_identity.secret_bytes();
+    let recipient_account_secret = recipient_account.secret_bytes();
+    let sender_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let old_address = recipient_listener.local_addr().unwrap();
+    let sender_proof = Announce::new_with_account(
+        &sender_identity,
+        &sender_account,
+        "Sender",
+        sender_listener.local_addr().unwrap().port(),
+    );
+    let recipient_proof = Announce::new_with_account(
+        &recipient_identity,
+        &recipient_account,
+        "Recipient",
+        old_address.port(),
+    );
+    let (sender, mut sender_received) = node(
+        sender_dir.path(),
+        sender_identity,
+        sender_account,
+        &recipient_proof,
+    );
+    let (recipient, mut recipient_received) = node(
+        recipient_dir.path(),
+        recipient_identity,
+        recipient_account,
+        &sender_proof,
+    );
+    let recipient_account_id = recipient.account_id();
+    let recipient_public = recipient.identity.public();
+    let old_recipient = Arc::downgrade(&recipient);
+    let mut recipient_node = Some(recipient);
+    let mut sender_runtime =
+        Some(IndependentPeerRuntime::start_multithreaded(sender.clone(), sender_listener).await);
+    let mut recipient_runtime = Some(
+        IndependentPeerRuntime::start_multithreaded(
+            recipient_node.as_ref().unwrap().clone(),
+            recipient_listener,
+        )
+        .await,
+    );
+    sender_runtime.as_mut().unwrap().launch();
+    recipient_runtime.as_mut().unwrap().launch();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        // Establish both ratchet directions before closing the real receiver.
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let first = sender.enqueue_to_account(&recipient_account_id, b"before restart", None).await.unwrap();
+            let received = recipient_received.recv().await.unwrap();
+            assert_eq!(received.message_id, Some(first));
+            assert_eq!(received.text, b"before restart");
+            wait_for_durable_delivery(&sender, first).await;
+            let reply = recipient_node.as_ref().unwrap().enqueue_to_account(&sender.account_id(), b"established reply", None).await.unwrap();
+            let received = sender_received.recv().await.unwrap();
+            assert_eq!(received.message_id, Some(reply));
+            assert_eq!(received.text, b"established reply");
+            wait_for_durable_delivery(recipient_node.as_ref().unwrap(), reply).await;
+            // Native CI confirms three more sender messages after the reply:
+            // persist the new receiving chain before the receiver goes cold.
+            for body in ["你好 🌍 café".as_bytes().to_vec(), b"first\nsecond\nthird".to_vec(), "mesh消息🙂 ".repeat(300).into_bytes()] {
+                let id = sender.enqueue_to_account(&recipient_account_id, &body, None).await.unwrap();
+                let received = recipient_received.recv().await.unwrap();
+                assert_eq!(received.message_id, Some(id));
+                assert_eq!(received.text, body);
+                wait_for_durable_delivery(&sender, id).await;
+            }
+        }).await.expect("automatic bidirectional delivery must establish the persisted session");
+
+        recipient_runtime.take().unwrap().stop().await;
+        drop(recipient_node.take());
+        assert!(old_recipient.upgrade().is_none(), "old receiver and its owned runtime must actually retire");
+        // Acquisition is an independent proof that all old profile owners released
+        // their leases; reopening never bypasses exclusion for this fixture.
+        drop(crate::storage::profile::ProfileStorageLease::acquire(recipient_dir.path()).unwrap());
+        // Keep the old port reserved so the reopened listener is genuinely new.
+        // No protocol server exists at the departed endpoint.
+        let old_port = TcpListener::bind(old_address).await.unwrap();
+        let text_id = sender.enqueue_to_account(&recipient_account_id, b"queued after close", None).await.unwrap();
+        let sticker_id = sender.enqueue_sticker_to_account(&recipient_account_id, "1f44b", b"wave after close").await.unwrap();
+        assert_ne!(text_id, sticker_id);
+        for id in [text_id, sticker_id] {
+            assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_ne!(listener.local_addr().unwrap(), old_address);
+        let identity = DeviceIdentity::from_secret_bytes(recipient_secret.0, recipient_secret.1);
+        let account = Account::from_secret_bytes(recipient_account_secret);
+        let fresh = Announce::new_with_account(&identity, &account, "Recipient", listener.local_addr().unwrap().port());
+        assert!(fresh.verify());
+        assert_eq!(fresh.public(), recipient_public);
+        assert_eq!(fresh.account_id().as_deref(), Some(recipient_account_id.as_str()));
+        let (reopened, mut received) = node(recipient_dir.path(), identity, account, &sender_proof);
+        recipient_runtime = Some(IndependentPeerRuntime::start_multithreaded(reopened.clone(), listener).await);
+        recipient_node = Some(reopened.clone());
+        recipient_runtime.as_mut().unwrap().launch();
+        sender.roster.lock().unwrap().update(&fresh, IpAddr::V4(Ipv4Addr::LOCALHOST), &sender.user_id());
+        // Only the ordinary runtimes may move ciphertexts and authenticated
+        // receipts. No flush, direct transfer or explicit reconciliation here.
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut delivered = std::collections::BTreeMap::new();
+            while delivered.len() < 2 {
+                let message = received.recv().await.unwrap();
+                let id = message.message_id.expect("account message retains its accepted logical ID");
+                assert!([text_id, sticker_id].contains(&id), "cold reopen must not re-emit old messages");
+                assert!(delivered.insert(id, message.text).is_none(), "one reception per original ID");
+            }
+            assert_eq!(delivered[&text_id], b"queued after close");
+            assert_eq!(delivered[&sticker_id], b"wave after close");
+            wait_for_durable_delivery(&sender, text_id).await;
+            wait_for_durable_delivery(&sender, sticker_id).await;
+            let history = loop {
+                match reopened.account_history(&sender.account_id(), 10) {
+                    Ok(history) => break history,
+                    Err(NodeError::Log(LogError::StaleCursor)) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(error) => panic!("reopened recipient history observation failed: {error}"),
+                }
+            };
+            let sticker = history.iter().filter(|entry| entry.id == sticker_id).collect::<Vec<_>>();
+            assert_eq!(sticker.len(), 1);
+            assert_eq!(sticker[0].sticker.as_deref(), Some("1f44b"));
+            assert_eq!(history.iter().filter(|entry| entry.id == text_id).count(), 1);
+        }).await.expect("same-profile cold restart and new signed route must automatically deliver original text/sticker IDs and receipts");
+        drop(old_port);
+    }).catch_unwind().await;
+    let mut cleanup_failure = None;
+    for runtime in [recipient_runtime.take(), sender_runtime.take()]
+        .into_iter()
+        .flatten()
+    {
+        let stopped = std::panic::AssertUnwindSafe(runtime.stop())
+            .catch_unwind()
+            .await;
+        if cleanup_failure.is_none() {
+            cleanup_failure = stopped.err();
+        }
+    }
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+    if let Some(error) = cleanup_failure {
+        std::panic::resume_unwind(error);
+    }
+}
+
 #[tokio::test]
 async fn approving_an_attachment_wakes_recovery_immediately() {
     let source = tempfile::tempdir().unwrap();

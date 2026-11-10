@@ -7,9 +7,16 @@ use std::{collections::VecDeque, time::Instant};
 const MAX_ENTRIES: usize = 64;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Purpose {
+    Ordinary,
+    History,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::node) struct Scope {
     pub(super) peer: PublicIdentity,
+    pub(super) purpose: Purpose,
     pub(super) conversation: ConversationId,
     pub(super) inbound: bool,
     pub(super) pull_only: bool,
@@ -39,6 +46,11 @@ impl<T> Default for PreparedCache<T> {
     }
 }
 impl<T> PreparedCache<T> {
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(super) fn accepts_bytes(bytes: usize) -> bool {
         bytes <= MAX_BYTES
     }
@@ -142,6 +154,7 @@ mod tests {
     fn scope(tag: u8) -> Scope {
         Scope {
             peer: crate::identity::device::DeviceIdentity::generate().public(),
+            purpose: Purpose::Ordinary,
             conversation: ConversationId::new([tag; 32]),
             inbound: false,
             pull_only: false,
@@ -160,6 +173,9 @@ mod tests {
         let now = Instant::now();
         assert!(cache.insert(key.clone(), stamp(1), 1, 7, now).is_empty());
         let mut other = key.clone();
+        other.purpose = Purpose::History;
+        assert!(cache.take(&other, &stamp(1)).0.is_none());
+        other = key.clone();
         other.pull_only = true;
         assert!(cache.take(&other, &stamp(1)).0.is_none());
         assert_eq!(cache.take(&key, &stamp(1)), (Some(7), vec![]));
@@ -178,11 +194,11 @@ mod tests {
         let mut cache = PreparedCache::default();
         let now = Instant::now();
         for index in 0..MAX_ENTRIES {
-            assert!(
-                cache
-                    .insert(scope(index as u8), stamp(1), 1, index, now)
-                    .is_empty()
-            );
+            let mut scope = scope(index as u8);
+            if index % 2 != 0 {
+                scope.purpose = Purpose::History;
+            }
+            assert!(cache.insert(scope, stamp(1), 1, index, now).is_empty());
         }
         assert_eq!(
             cache.insert(scope(100), stamp(1), 1, MAX_ENTRIES, now),
@@ -191,7 +207,9 @@ mod tests {
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
         assert_eq!(cache.clear().len(), MAX_ENTRIES);
         let key = scope(1);
-        cache.insert(key.clone(), stamp(1), MAX_BYTES, 1, now);
+        let mut history = key.clone();
+        history.purpose = Purpose::History;
+        cache.insert(history, stamp(1), MAX_BYTES, 1, now);
         assert_eq!(cache.insert(scope(2), stamp(1), 1, 2, now), vec![1]);
         assert!(cache.insert(key.clone(), stamp(1), 1, 3, now).is_empty());
         assert_eq!(cache.insert(key.clone(), stamp(2), 1, 4, now), vec![3]);

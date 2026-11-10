@@ -1208,6 +1208,30 @@ async fn counted_scope_exchange(
     federated: bool,
     confirm: Option<EventId>,
 ) -> (usize, usize, Vec<(EventId, EventId)>) {
+    counted_scope_exchange_with_intent(
+        node,
+        office,
+        relay,
+        peer,
+        conversation,
+        federated,
+        confirm,
+        MailboxIntent::Duplex,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn counted_scope_exchange_with_intent(
+    node: &Node,
+    office: IndexedPostOffice,
+    relay: &DeviceIdentity,
+    peer: &PublicIdentity,
+    conversation: ConversationId,
+    federated: bool,
+    confirm: Option<EventId>,
+    intent: MailboxIntent,
+) -> (usize, usize, Vec<(EventId, EventId)>) {
     let keys = relay.secret_bytes();
     let (client, server) = tokio::io::duplex(256 * 1024);
     let task = tokio::spawn(async move {
@@ -1246,7 +1270,7 @@ async fn counted_scope_exchange(
         RelayMailbox::new(&node.identity, peer, &relay.public()).unwrap()
     };
     let uploaded = node
-        .opaque_mailbox_round_confirmed(&mut channel, peer, Some(conversation), mailbox, confirm, MailboxIntent::Duplex)
+        .opaque_mailbox_round_confirmed(&mut channel, peer, Some(conversation), mailbox, confirm, intent)
         .await
         .unwrap_or_else(|error| {
             panic!("counted scope exchange failed: federated={federated} confirm={confirm:?} conversation={conversation:?} error={error:?}")
@@ -1805,4 +1829,106 @@ async fn incremental_mailbox_six_scope_rotation_stays_metadata_and_network_quiet
             }
         }
     }
+}
+
+#[tokio::test]
+async fn history_publication_relay_eviction_reuses_the_exact_ready_selection() {
+    use crate::{discovery::Announce, eventlog::sync::network::NetworkSyncStore};
+    let directory = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&recipient, &Account::generate(), "Recipient", 9);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.set_bridge_discovery_enabled(true);
+    node.cached_peer_snapshot_async().await.unwrap();
+    let conversation = node
+        .create_channel("Relay history retirement", vec![recipient.public()])
+        .await
+        .unwrap();
+    let mut messages = Vec::new();
+    for _ in 0..32 {
+        node.await_channel_metadata(conversation).await.unwrap();
+        messages.push(
+            node.enqueue_channel_message_reply_expiring_if(
+                conversation,
+                &[b'h'; 1024],
+                None,
+                None,
+                |commit| commit(),
+            )
+            .unwrap(),
+        );
+    }
+    node.await_channel_metadata(conversation).await.unwrap();
+    let database = node.storage.database();
+    let selection_ids = || {
+        database
+            .read(|connection| {
+                let mut statement = connection
+                    .prepare("SELECT id FROM participant_sync_views WHERE retired=0 ORDER BY id")?;
+                let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap()
+    };
+    let roots: Vec<_> = (0..5).map(|_| tempfile::tempdir().unwrap()).collect();
+    let relays: Vec<_> = roots
+        .iter()
+        .map(|root| {
+            let relay = DeviceIdentity::generate();
+            let office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap();
+            (relay, office)
+        })
+        .collect();
+    let mut before_eviction = Vec::new();
+    for (index, (relay, office)) in relays.iter().enumerate() {
+        if index == 4 {
+            before_eviction = selection_ids();
+            assert_eq!(
+                before_eviction.len(),
+                4,
+                "actual hot history budget is four"
+            );
+        }
+        let mailbox = RelayMailbox::federated(&node.identity, &recipient.public()).unwrap();
+        assert!(
+            office
+                .mailbox_delta_page(&mailbox.id(), None, 64)
+                .unwrap()
+                .ids
+                .is_empty()
+        );
+        // Each relay is new and has no completed upload proof. The fifth actual
+        // admission must retire an old UploadEntry outside its cache guard.
+        let (_, _, uploaded) = counted_scope_exchange_with_intent(
+            &node,
+            office.clone(),
+            relay,
+            &recipient.public(),
+            conversation,
+            true,
+            None,
+            MailboxIntent::HistoryPublication,
+        )
+        .await;
+        for id in &messages {
+            let outer = uploaded.iter().find(|(inner, _)| inner == id).unwrap().1;
+            assert!(NetworkSyncStore::durable_have(office, &mailbox.id(), &outer).unwrap());
+        }
+    }
+    assert_eq!(
+        selection_ids(),
+        before_eviction,
+        "a fresh relay must reuse the retired exact-principal SQL identities instead of rebuilding them"
+    );
 }

@@ -241,7 +241,7 @@ async fn incremental_unfinished_upload_survives_fifth_scope_pressure() {
         expected_inner.insert(consent.id);
         assert_eq!(actual_inner, expected_inner,
             "fifth relay must contain every exact history event and the seeded consent, without substitutes");
-        assert_eq!(creations(), 1, "only the newly admitted fifth scope needs a new SQL selection");
+        assert_eq!(creations(), 0, "the fifth scope must reuse the completed exact-principal selection");
         assert!((4..=6).contains(&node.opaque_upload_cache.lock().unwrap().observed_len()),
             "four history owners and at most two receive owners must remain bounded");
     })).await.expect("bounded upload admission failed to make progress");

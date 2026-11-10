@@ -3023,6 +3023,12 @@
             "unsupported_selection_reuse_stays_conservative",
             "postoffice::storage::role::delta::tests::",
             "participant_history_upload_",
+            "ready_history_upload_owner_retirement_",
+            "ready_history_retention_",
+            "partial_followup_storage_failure_dispatches_already_durable_dm_reception",
+            "cancelled_timed_out_and_external_drop_owners_retain_capacity_until_reception_drains",
+            "automatic_text_and_sticker_delivery_survives_established_recipient_cold_restart",
+            "bounded_runtime_automatically_delivers_text_and_sticker_after_recipient_cold_restart",
             "participant_history_sync_stamp_",
             "participant_network_unrelated_profile_compaction_",
             "participant_network_profile_compaction_sql_failure_",
@@ -3069,6 +3075,10 @@
           },
           {
             "name": "Rotating beyond four heavyweight views preserves bounded completed-upload qualifications; exact current authority and fresh remote destructive identity are checked before skipping history, while explicit event custody still validates current selection and exact remote evidence. A selection reconstructed solely for a finished exact confirmation retires after the validated lookup instead of occupying protected unfinished capacity; genuine partial preparation and preexisting incomplete uploads retain their progress protection without fabricated bulk completion. Repeated absent-target confirmations reuse at most 64 runtime-only facts under exact full scope and current completed local history/authority stamps, without warm SQL changes or commits. Each retained scope is at most 256 bytes; unknown versions, incomplete views, missing payloads and errors never establish absence, source changes retry normally, and no absence becomes custody, permission or a durable deletion marker.",
+            "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
+          },
+          {
+            "name": "Ready evicted history selections reuse the existing shared prepared-view cache only under exact full recipient, source, authority, mode and distinct protocol purpose; reducers are released, incomplete or failed plans do not qualify, and runtime closure fences checkout and publication. Mailbox progress and custody evidence remain independent, while parked and active selections retain their existing shared limits.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {
