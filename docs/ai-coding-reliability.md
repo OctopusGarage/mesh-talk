@@ -507,6 +507,13 @@ For repeated lifecycle or memory churn, distinguish cumulative input-driver wait
 from the invariant being measured. The [memory guardrail](../frontend/e2e/memory.spec.ts)
 keeps a trusted pointer round and final pointer navigation, then activates the
 same DOM buttons through one browser-side journey for repeated replacement.
+The [journey observer](../frontend/e2e/helpers/conversation-churn.ts) checks
+committed DOM directly on mutations; animation frames are a fallback for layout-only
+changes, not an extra prerequisite for already-visible state. Hold frames in a
+browser control and verify success, the unchanged readiness deadline, observer/frame
+cleanup and recovery. Keep per-activation timing diagnostics bounded and limited
+to fixed fixture identities and elapsed times; aggregate timing does not identify
+which rendering or scheduling dependency caused a hosted delay.
 Require each exact visible active destination and loaded history, with bounded
 readiness observers that retire their timers and callbacks. Retain the original
 churn count, history size, watchdog and DOM bound. Do not replace UI activation

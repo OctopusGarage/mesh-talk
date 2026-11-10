@@ -979,6 +979,12 @@ directly; the repeated phase does not qualify trusted-input latency. Preserve
 the final pointer navigation and DOM bound; a deliberate extra-bubble control
 must still fail. This fixture does not measure pointer latency or prove the cause
 of hosted driver stalls.
+Its [observer](../frontend/e2e/helpers/conversation-churn.ts) checks DOM commits
+without waiting for an animation frame, retaining the frame fallback for CSS-only
+readiness. A held-frame browser control must cover the original readiness timeout,
+observer/frame cleanup and recovery. Retained trace timing is bounded per completed
+activation; it does not qualify a late assertion after the whole-test deadline.
+The owning browser selector includes both the scenario and its helper.
 
 For a reproducible race or timeout fix, use a regression or negative control that
 fails for the original mechanism and passes with the repair. Confirm that the

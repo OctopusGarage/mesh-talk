@@ -1,3 +1,4 @@
+import { runConversationChurn } from "./helpers/conversation-churn";
 import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
@@ -25,7 +26,7 @@ const CHANNEL = { id: "chan_team_dddd4444" };
  *     bubble count must still be bounded.
  *
  * Deterministic + fast: uses the mock fixture's `__mockInject` / `__mockEmit` hooks;
- * no real backend, no timers.
+ * no real backend or timed message arrivals.
  */
 
 async function enterChat(page: Page, user = "mem") {
@@ -96,6 +97,105 @@ test.describe("Frontend memory-growth guardrails", () => {
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
   });
 
+  test("committed visible destinations settle without waiting for a frame", async ({
+    page,
+  }) => {
+    await page.setContent(`
+      <button data-testid="conversation-row-bob">Bob</button>
+      <button data-testid="conversation-row-channel">Channel</button>
+      <button data-testid="conversation-row-carol">Carol</button>
+      <div data-testid="conversation-header" hidden>Conversation</div>
+      <div role="log"><span></span></div>
+      <div data-testid="conversation-empty" hidden>Empty</div>
+    `);
+    await page.evaluate(() => {
+      let frameId = 0;
+      const frames = new Set<number>();
+      const observers = new Set<MutationObserver>();
+      const NativeObserver = window.MutationObserver;
+      window.MutationObserver = class extends NativeObserver {
+        override observe(target: Node, options?: MutationObserverInit) {
+          super.observe(target, options);
+          observers.add(this);
+        }
+        override disconnect() {
+          super.disconnect();
+          observers.delete(this);
+        }
+      };
+      (window as unknown as Record<string, unknown>).__activeObservers =
+        observers;
+      window.requestAnimationFrame = () => {
+        frames.add(++frameId);
+        return frameId;
+      };
+      window.cancelAnimationFrame = (id) => {
+        frames.delete(id);
+      };
+      (window as unknown as Record<string, unknown>).__pendingFrames = frames;
+      for (const button of document.querySelectorAll("button")) {
+        button.addEventListener("click", () =>
+          queueMicrotask(() => {
+            const id = button.dataset.testid?.replace("conversation-row-", "");
+            for (const row of document.querySelectorAll("button"))
+              row.setAttribute("aria-current", String(row === button));
+            document.querySelector<HTMLElement>(
+              '[data-testid="conversation-header"]',
+            )!.hidden = id !== "bob";
+            document.querySelector<HTMLElement>(
+              '[data-testid="conversation-empty"]',
+            )!.hidden = id !== "carol";
+            document.querySelector('[role="log"] span')!.textContent =
+              id === "bob"
+                ? (window as unknown as Record<string, unknown>).__blockHistory
+                  ? "pending"
+                  : "history 299"
+                : id === "channel"
+                  ? "channel kickoff"
+                  : "";
+          }),
+        );
+      }
+    });
+    const result = await page.evaluate(runConversationChurn, {
+      bob: "bob",
+      channel: "channel",
+      carol: "carol",
+    });
+    expect(result).toEqual({ rounds: 24, activations: 72 });
+    const pending = () =>
+      page.evaluate(() => {
+        const state = window as unknown as Record<string, unknown>;
+        return {
+          frames: (state.__pendingFrames as Set<number>).size,
+          observers: (state.__activeObservers as Set<MutationObserver>).size,
+        };
+      });
+    expect(await pending()).toEqual({ frames: 0, observers: 0 });
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__blockHistory = true;
+    });
+    await expect(
+      page.evaluate(runConversationChurn, {
+        bob: "bob",
+        channel: "channel",
+        carol: "carol",
+      }),
+    ).rejects.toThrow("Conversation readiness exceeded 5000ms: bob, round 2");
+    expect(await pending()).toEqual({ frames: 0, observers: 0 });
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__blockHistory = false;
+    });
+    expect(
+      await page.evaluate(runConversationChurn, {
+        bob: "bob",
+        channel: "channel",
+        carol: "carol",
+      }),
+    ).toEqual({ rounds: 24, activations: 72 });
+    expect(await pending()).toEqual({ frames: 0, observers: 0 });
+  });
+
   test("rapid conversation switching does not accumulate DOM bubbles", async ({
     page,
   }) => {
@@ -135,110 +235,11 @@ test.describe("Frontend memory-growth guardrails", () => {
 
     // One browser journey avoids per-action protocol round trips. Activate the
     // real buttons and await each committed, visible destination before moving on.
-    const churn = await page.evaluate(
-      async ({ bob, channel, carol }) => {
-        const visible = (element: Element | null): element is HTMLElement => {
-          if (!(element instanceof HTMLElement)) return false;
-          const rect = element.getBoundingClientRect();
-          const style = getComputedStyle(element);
-          return (
-            rect.width > 0 &&
-            rect.height > 0 &&
-            style.visibility === "visible" &&
-            style.display !== "none"
-          );
-        };
-        const byTestId = (id: string) =>
-          document.querySelector(`[data-testid="${id}"]`);
-        const loaded = (text: string) => {
-          const log = document.querySelector('[role="log"]');
-          return (
-            visible(log) &&
-            [...log.querySelectorAll("*")].some(
-              (element) => element.textContent === text && visible(element),
-            )
-          );
-        };
-        const waitFor = (ready: () => boolean, description: string) =>
-          new Promise<void>((resolve, reject) => {
-            let frame = 0;
-            const cleanup = () => {
-              observer.disconnect();
-              clearTimeout(timer);
-              cancelAnimationFrame(frame);
-            };
-            const check = () => {
-              try {
-                if (ready()) {
-                  cleanup();
-                  resolve();
-                } else {
-                  scheduleCheck();
-                }
-              } catch (error) {
-                cleanup();
-                reject(error);
-              }
-            };
-            const scheduleCheck = () => {
-              if (!frame)
-                frame = requestAnimationFrame(() => {
-                  frame = 0;
-                  check();
-                });
-            };
-            const observer = new MutationObserver(scheduleCheck);
-            const timer = setTimeout(() => {
-              cleanup();
-              reject(
-                new Error(
-                  `Conversation readiness exceeded 5000ms: ${description}`,
-                ),
-              );
-            }, 5000);
-            observer.observe(document.body, {
-              subtree: true,
-              childList: true,
-              attributes: true,
-              characterData: true,
-            });
-            check();
-          });
-        let activations = 0;
-        for (let round = 0; round < 24; round++) {
-          for (const id of [bob, channel, carol]) {
-            const row = byTestId(`conversation-row-${id}`);
-            if (
-              !(row instanceof HTMLButtonElement) ||
-              !visible(row) ||
-              row.disabled
-            )
-              throw new Error(
-                `Conversation button unavailable: ${id}, round ${round + 2}`,
-              );
-            row.focus();
-            row.click();
-            activations++;
-            await waitFor(
-              () =>
-                visible(byTestId(`conversation-row-${id}`)) &&
-                byTestId(`conversation-row-${id}`)?.getAttribute(
-                  "aria-current",
-                ) === "true" &&
-                (id === bob
-                  ? visible(byTestId("conversation-header")) &&
-                    loaded("history 299")
-                  : id === channel
-                    ? loaded("channel kickoff")
-                    : visible(byTestId("conversation-empty"))),
-              `${id}, round ${round + 2}`,
-            );
-          }
-        }
-        return { rounds: 24, activations };
-      },
-      { bob: BOB.account, channel: CHANNEL.id, carol: CAROL.account },
-    );
+    const churn = await page.evaluate(runConversationChurn, {
+      bob: BOB.account,
+      channel: CHANNEL.id,
+      carol: CAROL.account,
+    });
     expect(churn).toEqual({ rounds: 24, activations: 72 });
 
     // End on Bob's large-history DM; the DOM still holds only a bounded window.

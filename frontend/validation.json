@@ -4,7 +4,8 @@
     {
       "id": "frontend-memory-guardrails",
       "paths": [
-        "frontend/e2e/memory.spec.ts"
+        "frontend/e2e/memory.spec.ts",
+        "frontend/e2e/helpers/conversation-churn.ts"
       ],
       "frontend": [
         "src/features/chat/ConversationView.test.ts",
@@ -22,7 +23,7 @@
         ]
       },
       "escalation": [
-        "Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
+        "Run the held-frame success/timeout/cleanup/recovery control and the extra-bubble negative control. Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
       ]
     },
     {
@@ -2516,9 +2517,7 @@
   "prScenarios": [
     {
       "id": "frontend-memory-guardrail-acceptance",
-      "paths": [
-        "frontend/e2e/memory.spec.ts"
-      ],
+      "paths": ["frontend/e2e/memory.spec.ts", "frontend/e2e/helpers/conversation-churn.ts"],
       "browser": [
         "e2e/memory.spec.ts"
       ]
