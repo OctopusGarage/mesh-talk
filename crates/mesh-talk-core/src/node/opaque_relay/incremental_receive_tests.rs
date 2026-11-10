@@ -85,7 +85,7 @@ async fn incremental_unfinished_upload_survives_fifth_scope_pressure() {
         }
         let database = node.storage.database();
         let active_ids = || database.read(|c| {
-            let mut q = c.prepare("SELECT id FROM participant_sync_views WHERE retired=0 ORDER BY id")?;
+            let mut q = c.prepare("SELECT id FROM participant_work.participant_sync_views WHERE retired=0 ORDER BY id")?;
             Ok(q.query_map([], |r| r.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?)
         }).unwrap();
         let unfinished = active_ids();
@@ -94,7 +94,7 @@ async fn incremental_unfinished_upload_survives_fifth_scope_pressure() {
         // original row. This connection-local fixture records no SQL payloads.
         database.read(|c| {
             c.execute_batch("CREATE TEMP TABLE observed_upload_creations(id BLOB PRIMARY KEY);
-                CREATE TEMP TRIGGER observe_upload_creation AFTER INSERT ON main.participant_sync_views
+                CREATE TEMP TRIGGER observe_upload_creation AFTER INSERT ON participant_work.participant_sync_views
                 BEGIN INSERT INTO observed_upload_creations VALUES(NEW.id); END;")?;
             Ok(())
         }).unwrap();

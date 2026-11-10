@@ -2450,7 +2450,20 @@ again before handing off prepared data. Pending invitations retain their existin
 8 MiB admission budget and remain in Have until admission completes. No full
 repository body or ID collection is retained in memory across transport awaits.
 `repository/selection.rs` stores disposable authorized IDs, causal ranks and
-outbound policy facts in the encrypted profile database. Have uses only identities;
+outbound policy facts in the encrypted `participant_work` temporary pager on the
+same exclusively owned profile connection. During unpublished connection setup,
+`storage/database/query_scratch.rs` selects FILE temporary storage, attaches an
+empty filename without a `KEY` override, then restores `temp_store=MEMORY` before
+TEMP hint owners can create objects. Any setup failure closes the unpublished
+connection. [SQLCipher ATTACH](https://www.zetetic.net/sqlcipher/sqlcipher-api/#attach)
+inherits MAIN's raw key and salt when no key is specified. SQLite owns the
+[temporary database](https://www.sqlite.org/inmemorydb.html#tempdb), its spill file
+and deletion on close; the application creates no named scratch-file lifecycle.
+The pager coalesces small commits and spills larger working sets. Its 8192 KiB
+page-cache target is not a process-memory or RSS limit. Query progress uses a
+memory rollback journal and no durability sync; MAIN retains FULL durability,
+authoritative ordering, policy and recovery checkpoints. The separate opaque
+receive-hint TEMP-MEMORY contract is unchanged. Have uses only identities;
 export tests selection before fetching payloads. Sibling category filtering and
 share-off ancestry use retained parent edges plus the peer's exact Have set.
 Source, roster, proof, receipt-control and channel-state revisions guard the selection, while
@@ -2474,8 +2487,10 @@ legacy/modern authorization, exact parent closure and the unchanged wire
 fingerprint in separate preparation turns. The session releases its store lock
 and yields after each turn, checking cancellation and current authority on resume.
 Historical selected IDs, departures and ancestor marks stay in the existing
-SQL selection owner; a persisted current reducer/cursor resumes interrupted
-preparation without a body cache. Raw kind revisions include rejected controls
+SQL selection owner; a connection-owned reducer/cursor resumes interrupted
+preparation without a body cache. Closing or reopening discards these disposable
+plans and rebuilds them from current authoritative MAIN state, without treating
+missing query progress as completion, custody or permission. Raw kind revisions include rejected controls
 and invalidate preparation independently of admitted channel authority. Message
 classification reads headers and, only for receipt-shaped payloads, a bounded
 incremental BLOB prefix; matching receipts and selected controls still receive
@@ -2530,11 +2545,13 @@ they do not collect the conversation's historical payloads.
 Selection lifetimes use the existing eight-connection exchange limit and admitted
 remote-Have budget. Each connection may hold its primary selection and one
 non-file parent selection for file-scope authorization, giving at most sixteen
-active selections. Drop/cancellation retires a selection and deletes at most 512
-rows from one working table; warm open and admitted maintenance take the same
-bounded cleanup step. A new view drains previous retirement debt through yielded
-bounded transactions before adding another selection, preventing cancellation
-buildup. An owner nonce identifies abandoned work after restart without replaying it.
+active selections. Drop/cancellation retires a selection. One 512-row allowance
+covers all child and singleton tables across legacy MAIN and runtime pager cleanup;
+active selections remain protected. A new view drains previous retirement debt
+through yielded bounded transactions before adding another selection, preventing
+cancellation buildup. The nine legacy MAIN tables retain compatible declarations
+for older profiles; owner-qualified abandoned rows are cleanup debt, not reusable
+plans. New temporary plans disappear with their connection.
 
 Owned individual participant event reads fetch only the selected body from the
 encrypted repository. Standalone legacy SDK reads copy from their resident index.

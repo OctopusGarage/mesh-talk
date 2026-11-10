@@ -2711,7 +2711,14 @@ an explicitly guarded disposable selection, transport-hint or channel-scheduling
 ordinary writes are observed first under the same guard. SQLite authorization
 allows that transaction to read current authority and use TEMP scratch, but write
 MAIN only through the purpose's closed table set. Selection work owns its nine
-`participant_sync_*` selection/progress tables; optional transport-hint work owns
+`participant_sync_*` selection/progress tables in the same-connection encrypted
+`participant_work` temporary pager; only Selection may write that attached schema.
+Legacy MAIN copies remain compatible and receive bounded cleanup under the same
+512-row allowance as runtime retirement, before another query is admitted.
+Pager setup completes before connection publication and restores TEMP-MEMORY
+before opaque hint initialization. Connection close discards query progress;
+reopen rebuilds it from current authority. MAIN FULL durability, canonical ordering,
+policy and mailbox recovery checkpoints are unchanged. Optional transport-hint work owns
 `opaque_checkpoints`, `opaque_wrapper_ids` and `opaque_checkpoint_usage` only.
 Channel scheduling owns `channel_runtime_work` only; account, source and reopen-owner changes retain their ordinary fence. The three purposes cannot write each other's tables. Other MAIN writes, including trigger side effects and previously cached
 statements, are rejected and rolled back. Schema/kind backfill, events, controls, receipts and other business facts

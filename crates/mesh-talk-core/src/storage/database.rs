@@ -14,6 +14,7 @@ use std::{
 use zeroize::Zeroizing;
 
 mod observation;
+mod query_scratch;
 mod selection_work;
 mod work_clock;
 pub(crate) use work_clock::WorkStamp;
@@ -319,6 +320,7 @@ impl EncryptedDatabase {
         }
         connection.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
         connection.pragma_update(None, "journal_size_limit", JOURNAL_BYTES)?;
+        query_scratch::initialize(&connection)?;
         let write_observer = observation::from_env();
         if write_observer.is_some() {
             page_observation::install(&mut connection);
@@ -1905,6 +1907,75 @@ mod tests {
             SECRET
         );
     }
+    #[test]
+    fn disposable_selection_scratch_has_file_backing_and_bounded_page_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = create(&directory.path().join("profile.db"));
+        db.read(|connection| {
+            let temporary: i64 =
+                connection.pragma_query_value(None, "temp_store", |row| row.get(0))?;
+            assert_eq!(
+                temporary, 2,
+                "opaque session hints and other TEMP owners must remain memory-only"
+            );
+            let main: String = connection.query_row(
+                "SELECT file FROM pragma_database_list WHERE name='main'",
+                [],
+                |row| row.get(0),
+            )?;
+            let scratch: String = connection.query_row(
+                "SELECT file FROM pragma_database_list WHERE name='participant_work'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                scratch, "",
+                "the native temporary pager has an unnamed attached file"
+            );
+            assert!(
+                !main.is_empty(),
+                "durable MAIN must retain its original named backing"
+            );
+            let cache: i64 =
+                connection.query_row("PRAGMA participant_work.cache_size", [], |row| row.get(0))?;
+            assert_eq!(
+                cache, -8192,
+                "attached scratch page cache has an explicit 8 MiB target"
+            );
+            connection.execute_batch("PRAGMA participant_work.mmap_size=0")?;
+            let mut mmap = connection.prepare("PRAGMA participant_work.mmap_size")?;
+            let mut rows = mmap.query([])?;
+            if let Some(row) = rows.next()? {
+                assert_eq!(
+                    row.get::<_, i64>(0)?,
+                    0,
+                    "an opened scratch pager must not use mmap"
+                );
+            }
+            drop(rows);
+            drop(mmap);
+            let journal: String =
+                connection
+                    .query_row("PRAGMA participant_work.journal_mode", [], |row| row.get(0))?;
+            assert_eq!(
+                journal, "memory",
+                "scratch slices need real rollback; journal OFF is not permitted"
+            );
+            let scratch_sync: i64 =
+                connection
+                    .query_row("PRAGMA participant_work.synchronous", [], |row| row.get(0))?;
+            assert_eq!(
+                scratch_sync, 0,
+                "discardable scratch must not force durable syncs"
+            );
+            let durability: i64 =
+                connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+            assert_eq!(durability, 2, "business MAIN durability must remain FULL");
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn connection_has_explicit_operational_budgets() {
         let dir = tempfile::tempdir().unwrap();

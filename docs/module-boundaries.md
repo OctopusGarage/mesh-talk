@@ -252,8 +252,13 @@ cache never retains a selection or authorizes Have, export or custody.
 and resumable preparation; historical IDs, departures and ancestry stay on disk.
 Already-current ordering and authority phases may advance within the same finite
 turn only while they spend no work. Working owners retain their separate budgeted
-turn. Selection retirement shares one row allowance across its fixed child and
-singleton tables; active selections remain outside retirement eligibility.
+turn. `core/storage/database/query_scratch.rs` initializes the encrypted temporary
+pager on the existing unpublished connection; `core/eventlog/repository/selection.rs`
+owns its nine disposable query tables, admission and retirement. Closing the
+connection discards query plans, while authoritative MAIN state retains its
+existing owner. Selection retirement shares one 512-row allowance across runtime
+pager and legacy MAIN child/singleton tables; active selections remain outside
+retirement eligibility. New admission drains existing cleanup debt in bounded turns.
 `core/node/session.rs` releases the store lock and yields between preparation
 turns, including exact Durable-Have requests. Ready views use scalar source/proof
 checks. `core/node/channel/graph/preparing.rs` owns suspended graph decisions and

@@ -1869,7 +1869,7 @@ async fn history_publication_relay_eviction_reuses_the_exact_ready_selection() {
         database
             .read(|connection| {
                 let mut statement = connection
-                    .prepare("SELECT id FROM participant_sync_views WHERE retired=0 ORDER BY id")?;
+                    .prepare("SELECT id FROM participant_work.participant_sync_views WHERE retired=0 ORDER BY id")?;
                 let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
                 Ok(rows.collect::<Result<Vec<_>, _>>()?)
             })

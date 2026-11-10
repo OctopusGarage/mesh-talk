@@ -1,10 +1,10 @@
-//! Disposable participant authorization selections in the encrypted profile DB.
+//! Disposable participant authorization selections in encrypted runtime scratch.
 //! Rows contain identities and scalar policy facts, never event bodies. The
 //! exchange owner supplies its existing active-query limit. Idle node indexes
 //! park their runtime permits under a separate bounded cache; SQL ownership and
-//! authority checks remain unchanged. Retired/crashed work is drained in bounded
-//! transactions before another selection is admitted, so cancellation cannot
-//! accumulate history.
+//! authority checks remain unchanged. Legacy MAIN indices and retired runtime
+//! work drain under one bounded allowance before another selection is admitted.
+//! Restart reconstructs scratch; durable policy/classification remains in MAIN.
 use super::network::{ExportCursor, HaveCursor, NetworkView};
 use super::*;
 use crate::eventlog::sync::network::{ExportPage, ExportPageBudget, IdPageBudget, SyncPage};
@@ -112,7 +112,7 @@ impl Drop for Selection {
     fn drop(&mut self) {
         let result = self.database.selection_work_transaction(|tx| {
             tx.execute(
-                "UPDATE participant_sync_views SET retired=1 WHERE id=?1 AND owner=?2",
+                "UPDATE participant_work.participant_sync_views SET retired=1 WHERE id=?1 AND owner=?2",
                 params![self.id.as_slice(), self.owner.as_slice()],
             )?;
             cleanup_on(tx, self.domain, self.owner, STEP).map(|_| ())
@@ -122,20 +122,68 @@ impl Drop for Selection {
         }
     }
 }
+#[derive(Clone, Copy)]
+enum SelectionStorage {
+    LegacyMain,
+    Runtime,
+}
+impl SelectionStorage {
+    fn schema(self) -> &'static str {
+        match self {
+            Self::LegacyMain => "main",
+            Self::Runtime => "participant_work",
+        }
+    }
+}
+
+fn initialize_selection_schema(c: &Connection, storage: SelectionStorage) -> Result<(), LogError> {
+    for ddl in [DDL, export::DDL] {
+        // These are closed schema identifiers, never protocol or user input.
+        // Only declarations are qualified; foreign keys stay within that schema.
+        c.execute_batch(&ddl.replace(
+            "IF NOT EXISTS participant_sync_",
+            &format!("IF NOT EXISTS {}.participant_sync_", storage.schema()),
+        ))?;
+    }
+    Ok(())
+}
+
 fn cleanup_on(
     c: &Connection,
     domain: EventDomainId,
     owner: [u8; 16],
     limit: usize,
 ) -> Result<bool, LogError> {
+    cleanup_storage_on(c, SelectionStorage::Runtime, domain, owner, limit)
+}
+
+fn cleanup_pending_on(
+    c: &Connection,
+    domain: EventDomainId,
+    owner: [u8; 16],
+    limit: usize,
+) -> Result<bool, LogError> {
+    // Legacy and live scratch retirement share one allowance. A large old
+    // index yields between slices instead of blocking startup or being orphaned.
+    if cleanup_storage_on(c, SelectionStorage::LegacyMain, domain, owner, limit)? {
+        return Ok(true);
+    }
+    cleanup_on(c, domain, owner, limit)
+}
+
+fn cleanup_storage_on(
+    c: &Connection,
+    storage: SelectionStorage,
+    domain: EventDomainId,
+    owner: [u8; 16],
+    limit: usize,
+) -> Result<bool, LogError> {
     crate::eventlog::sync::network::scan_limit(limit)?;
-    let id: Option<Vec<u8>> = c.query_row("SELECT id FROM participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2) LIMIT 1", params![domain.0.as_slice(),owner.as_slice()], |r|r.get(0)).optional()?;
+    let schema = storage.schema();
+    let id: Option<Vec<u8>> = c.query_row(&format!("SELECT id FROM {schema}.participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2) LIMIT 1"), params![domain.0.as_slice(),owner.as_slice()], |r|r.get(0)).optional()?;
     let Some(id) = id else {
         return Ok(false);
     };
-    // A small retired view may occupy several child tables. They share one
-    // allowance; none gets a fresh limit, and even the three singleton rows
-    // count toward it. The fixed table list bounds empty-table probes.
     let mut remaining = limit;
     for (table, key) in [
         ("participant_sync_rows", "id"),
@@ -145,10 +193,7 @@ fn cleanup_on(
         ("participant_sync_departures", "pass,member,event"),
         ("participant_sync_authors", "author"),
     ] {
-        let removed = c.execute(
-            &format!("DELETE FROM {table} WHERE view=?1 AND ({key}) IN (SELECT {key} FROM {table} WHERE view=?1 LIMIT ?2)"),
-            params![&id, remaining as i64],
-        )?;
+        let removed = c.execute(&format!("DELETE FROM {schema}.{table} WHERE view=?1 AND ({key}) IN (SELECT {key} FROM {schema}.{table} WHERE view=?1 LIMIT ?2)"), params![&id, remaining as i64])?;
         remaining -= removed;
         if remaining == 0 {
             return Ok(true);
@@ -159,13 +204,17 @@ fn cleanup_on(
         ("participant_sync_progress", "view"),
         ("participant_sync_views", "id"),
     ] {
-        remaining -= c.execute(&format!("DELETE FROM {table} WHERE {key}=?1"), [&id])?;
+        remaining -= c.execute(
+            &format!("DELETE FROM {schema}.{table} WHERE {key}=?1"),
+            [&id],
+        )?;
         if remaining == 0 {
             return Ok(true);
         }
     }
     Ok(true)
 }
+
 impl EventRepository {
     #[cfg(test)]
     pub(crate) fn active_selection_count(&self) -> usize {
@@ -176,28 +225,36 @@ impl EventRepository {
     pub(crate) fn selection_counts(&self) -> Result<(usize, usize, usize), LogError> {
         self.database.read(|c| {
             Ok((
-                c.query_row("SELECT count(*) FROM participant_sync_views", [], |r| {
-                    r.get::<_, i64>(0).map(|n| n as usize)
-                })?,
-                c.query_row("SELECT count(*) FROM participant_sync_rows", [], |r| {
-                    r.get::<_, i64>(0).map(|n| n as usize)
-                })?,
-                c.query_row("SELECT count(*) FROM participant_sync_have", [], |r| {
-                    r.get::<_, i64>(0).map(|n| n as usize)
-                })?,
+                c.query_row(
+                    "SELECT count(*) FROM participant_work.participant_sync_views",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|n| n as usize),
+                )?,
+                c.query_row(
+                    "SELECT count(*) FROM participant_work.participant_sync_rows",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|n| n as usize),
+                )?,
+                c.query_row(
+                    "SELECT count(*) FROM participant_work.participant_sync_have",
+                    [],
+                    |r| r.get::<_, i64>(0).map(|n| n as usize),
+                )?,
             ))
         })
     }
     pub(crate) fn initialize_selections(&self) -> Result<(), LogError> {
         self.database.transaction(|tx| {
-            tx.execute_batch(DDL)?;
+            // Preserve the old schema for compatible readers; only its bounded
+            // retirement path mutates these legacy MAIN tables now.
+            initialize_selection_schema(tx, SelectionStorage::LegacyMain)?;
             tx.execute_batch(metadata::DDL)?;
-            tx.execute_batch(export::DDL)?;
+            initialize_selection_schema(tx, SelectionStorage::Runtime)?;
             tx.execute(
                 "INSERT OR IGNORE INTO participant_kind_scan VALUES(?1,-1)",
                 [self.domain.0.as_slice()],
             )?;
-            cleanup_on(tx, self.domain, self.selection_owner, STEP).map(|_| ())
+            cleanup_pending_on(tx, self.domain, self.selection_owner, STEP).map(|_| ())
         })
     }
     pub(crate) fn cleanup_selections(&self) -> Result<bool, LogError> {
@@ -206,13 +263,13 @@ impl EventRepository {
         // A retirement after this observation is safe to defer to its owner or
         // the next bounded cleanup pass; this is not an authority decision.
         let pending = self.database.read(|c| {
-            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2))", params![self.domain.0.as_slice(),self.selection_owner.as_slice()], |r|r.get::<_,bool>(0))?)
+            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2) UNION ALL SELECT 1 FROM main.participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2))", params![self.domain.0.as_slice(),self.selection_owner.as_slice()], |r|r.get::<_,bool>(0))?)
         })?;
         if !pending {
             return Ok(false);
         }
         self.database.selection_work_transaction(|tx| {
-            cleanup_on(tx, self.domain, self.selection_owner, STEP)
+            cleanup_pending_on(tx, self.domain, self.selection_owner, STEP)
         })
     }
     pub(crate) fn activate_cached_selection(
@@ -235,16 +292,16 @@ impl EventRepository {
             self.require_selection_on(c, selection)?;
             // Conservative fixed page/index overhead per cached projection.
             let mut bytes = 64_usize * 1024;
-            for table in ["participant_sync_rows", "participant_sync_have", "participant_sync_receipts",
-                "participant_sync_ancestors", "participant_sync_departures", "participant_sync_authors",
-                "participant_sync_export_work", "participant_sync_progress"] {
+            for table in ["participant_work.participant_sync_rows", "participant_work.participant_sync_have", "participant_work.participant_sync_receipts",
+                "participant_work.participant_sync_ancestors", "participant_work.participant_sync_departures", "participant_work.participant_sync_authors",
+                "participant_work.participant_sync_export_work", "participant_work.participant_sync_progress"] {
                 let rows: i64 = c.query_row(&format!("SELECT count(*) FROM {table} WHERE view=?1"),
                     [selection.id.as_slice()], |r| r.get(0))?;
                 let charge = usize::try_from(rows).ok().and_then(|rows| rows.checked_mul(256))
                     .ok_or(LogError::RepositoryCounterExhausted)?;
                 bytes = bytes.checked_add(charge).ok_or(LogError::RepositoryCounterExhausted)?;
             }
-            let context: i64 = c.query_row("SELECT coalesce(sum(length(context)),0) FROM participant_sync_progress WHERE view=?1",
+            let context: i64 = c.query_row("SELECT coalesce(sum(length(context)),0) FROM participant_work.participant_sync_progress WHERE view=?1",
                 [selection.id.as_slice()], |r| r.get(0))?;
             bytes.checked_add(usize::try_from(context).map_err(|_| LogError::RepositoryCounterExhausted)?)
                 .ok_or(LogError::RepositoryCounterExhausted)
@@ -271,7 +328,7 @@ impl EventRepository {
             self.require_selection_on(c, selection)?;
             let mut page = self.network_have_page_on(c, view, after, budget)?;
             let mut stmt = c.prepare(
-                "SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2)",
+                "SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2)",
             )?;
             let mut allowed = Vec::new();
             for id in page.items {
@@ -290,7 +347,7 @@ impl EventRepository {
         if selection.admission.is_none() {
             return Err(LogError::StaleCursor);
         }
-        let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_views WHERE id=?1 AND owner=?2 AND domain=?3 AND retired=0)",params![selection.id.as_slice(),self.selection_owner.as_slice(),self.domain.0.as_slice()],|r|r.get(0))?;
+        let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_views WHERE id=?1 AND owner=?2 AND domain=?3 AND retired=0)",params![selection.id.as_slice(),self.selection_owner.as_slice(),self.domain.0.as_slice()],|r|r.get(0))?;
         if !valid {
             return Err(LogError::StaleCursor);
         }
@@ -329,7 +386,7 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c,selection)?;
             self.validate_network_on(c,view)?;
-            let mut stmt=c.prepare_cached("SELECT id,rank,outgoing FROM participant_sync_rows WHERE view=?1 AND rank>?2 AND rank<?3 ORDER BY rank LIMIT ?4")?;
+            let mut stmt=c.prepare_cached("SELECT id,rank,outgoing FROM participant_work.participant_sync_rows WHERE view=?1 AND rank>?2 AND rank<?3 ORDER BY rank LIMIT ?4")?;
             let mut rows=stmt.query(params![selection.id.as_slice(),after_rank,upper,crate::eventlog::sync::network::scan_limit(budget.examined)?])?;
             let mut ids=Vec::new();let mut examined=0;let mut cursor=after_rank;
             while let Some(row)=rows.next()? {
@@ -352,7 +409,7 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c,selection)?;
             self.validate_network_on(c,view)?;
-            c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2 AND rank<?3 AND outgoing=1)",params![selection.id.as_slice(),id.as_bytes().as_slice(),upper],|r|r.get(0)).map_err(Into::into)
+            c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2 AND rank<?3 AND outgoing=1)",params![selection.id.as_slice(),id.as_bytes().as_slice(),upper],|r|r.get(0)).map_err(Into::into)
         })
     }
 
@@ -371,7 +428,7 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c,selection)?;
             self.validate_network_on(c,view)?;
-            let allowed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2 AND rank<?3 AND outgoing=1)",params![selection.id.as_slice(),id.as_bytes().as_slice(),upper],|r|r.get(0))?;
+            let allowed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2 AND rank<?3 AND outgoing=1)",params![selection.id.as_slice(),id.as_bytes().as_slice(),upper],|r|r.get(0))?;
             if !allowed {return Ok(None);}
             let header=self.network_header_on(c,&id)?;
             if header.conversation!=view.binding.conversation {return Err(corrupt("selected upload conversation differs"));}
@@ -397,7 +454,7 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c, selection)?;
             self.validate_network_on(c, view)?;
-            let mut stmt = c.prepare_cached("SELECT id,rank,outgoing FROM participant_sync_rows WHERE view=?1 AND rank>?2 AND rank<?3 ORDER BY rank LIMIT ?4")?;
+            let mut stmt = c.prepare_cached("SELECT id,rank,outgoing FROM participant_work.participant_sync_rows WHERE view=?1 AND rank>?2 AND rank<?3 ORDER BY rank LIMIT ?4")?;
             let mut rows = stmt.query(params![selection.id.as_slice(),after_rank,upper,crate::eventlog::sync::network::scan_limit(budget.examined)?])?;
             let mut events = Vec::new();
             let mut examined = 0;
@@ -458,8 +515,9 @@ mod retirement_tests {
         repository.initialize_selections().unwrap();
         let reprepare = |reset| {
             db.read(|c| {
-                let mut statement =
-                    c.prepare_cached("SELECT count(*) FROM participant_sync_views")?;
+                let mut statement = c.prepare_cached(
+                    "SELECT count(*) FROM participant_work.participant_sync_views",
+                )?;
                 let _: i64 = statement.query_row([], |r| r.get(0))?;
                 Ok(if reset {
                     statement.reset_status(rusqlite::StatementStatus::RePrepare)
@@ -538,19 +596,69 @@ mod retirement_tests {
     }
 
     #[test]
+    fn legacy_and_runtime_selection_retirement_share_one_allowance() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON; ATTACH DATABASE ':memory:' AS participant_work")
+            .unwrap();
+        initialize_selection_schema(&c, SelectionStorage::LegacyMain).unwrap();
+        initialize_selection_schema(&c, SelectionStorage::Runtime).unwrap();
+        let domain = EventDomainId([13; 16]);
+        let current = [14u8; 16];
+        for (schema, id, owner) in [
+            ("main", [15u8; 16], [16u8; 16]),
+            ("participant_work", [17u8; 16], current),
+        ] {
+            c.execute(
+                &format!("INSERT INTO {schema}.participant_sync_views VALUES(?1,?2,?3,1)"),
+                params![id.as_slice(), owner.as_slice(), domain.0.as_slice()],
+            )
+            .unwrap();
+            for rank in 0..2u8 {
+                c.execute(
+                    &format!(
+                        "INSERT INTO {schema}.participant_sync_rows VALUES(?1,?2,?3,1,1,0,0,0)"
+                    ),
+                    params![id.as_slice(), [rank; 32].as_slice(), rank],
+                )
+                .unwrap();
+            }
+        }
+        let mut retired = 0;
+        while retired < 6 {
+            let before = c.total_changes();
+            assert!(cleanup_pending_on(&c, domain, current, 2).unwrap());
+            let removed = c.total_changes() - before;
+            assert!(
+                (1..=2).contains(&removed),
+                "the two schemas share one row allowance"
+            );
+            retired += removed;
+        }
+        assert_eq!(retired, 6);
+        let before = c.total_changes();
+        assert!(!cleanup_pending_on(&c, domain, current, 2).unwrap());
+        assert_eq!(
+            c.total_changes(),
+            before,
+            "completed migration and retirement are read-only"
+        );
+    }
+
+    #[test]
     fn participant_selection_retirement_shares_one_limit_across_all_tables() {
         for limit in [1usize, 2, 5, 64] {
             let c = Connection::open_in_memory().unwrap();
             c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-            c.execute_batch(DDL).unwrap();
-            c.execute_batch(export::DDL).unwrap();
+            c.execute_batch("ATTACH DATABASE ':memory:' AS participant_work")
+                .unwrap();
+            initialize_selection_schema(&c, SelectionStorage::Runtime).unwrap();
             let domain = EventDomainId([3; 16]);
             let owner = [4; 16];
             let retired = [1u8; 16];
             let active = [2u8; 16];
             for (id, is_retired) in [(retired, true), (active, false)] {
                 c.execute(
-                    "INSERT INTO participant_sync_views VALUES(?1,?2,?3,?4)",
+                    "INSERT INTO participant_work.participant_sync_views VALUES(?1,?2,?3,?4)",
                     params![
                         id.as_slice(),
                         owner.as_slice(),
@@ -562,14 +670,14 @@ mod retirement_tests {
                 for ordinal in 0..3i64 {
                     let event = [ordinal as u8; 32];
                     c.execute(
-                        "INSERT INTO participant_sync_rows VALUES(?1,?2,?3,1,1,0,0,0)",
+                        "INSERT INTO participant_work.participant_sync_rows VALUES(?1,?2,?3,1,1,0,0,0)",
                         params![id.as_slice(), event.as_slice(), ordinal],
                     )
                     .unwrap();
                     for table in [
-                        "participant_sync_have",
-                        "participant_sync_receipts",
-                        "participant_sync_ancestors",
+                        "participant_work.participant_sync_have",
+                        "participant_work.participant_sync_receipts",
+                        "participant_work.participant_sync_ancestors",
                     ] {
                         c.execute(
                             &format!("INSERT INTO {table} VALUES(?1,?2)"),
@@ -578,23 +686,23 @@ mod retirement_tests {
                         .unwrap();
                     }
                     c.execute(
-                        "INSERT INTO participant_sync_departures VALUES(?1,0,'member',?2)",
+                        "INSERT INTO participant_work.participant_sync_departures VALUES(?1,0,'member',?2)",
                         params![id.as_slice(), event.as_slice()],
                     )
                     .unwrap();
                     c.execute(
-                        "INSERT INTO participant_sync_authors VALUES(?1,?2)",
+                        "INSERT INTO participant_work.participant_sync_authors VALUES(?1,?2)",
                         params![id.as_slice(), event.as_slice()],
                     )
                     .unwrap();
                 }
                 c.execute(
-                    "INSERT INTO participant_sync_export_work VALUES(?1,-1,NULL,0,0)",
+                    "INSERT INTO participant_work.participant_sync_export_work VALUES(?1,-1,NULL,0,0)",
                     [id.as_slice()],
                 )
                 .unwrap();
                 c.execute(
-                    "INSERT INTO participant_sync_progress VALUES(?1,x'00')",
+                    "INSERT INTO participant_work.participant_sync_progress VALUES(?1,x'00')",
                     [id.as_slice()],
                 )
                 .unwrap();
@@ -612,7 +720,7 @@ mod retirement_tests {
                 turns += 1;
                 let exists: bool = c
                     .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM participant_sync_views WHERE id=?1)",
+                        "SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_views WHERE id=?1)",
                         [retired.as_slice()],
                         |r| r.get(0),
                     )
@@ -623,15 +731,15 @@ mod retirement_tests {
             assert!(!cleanup_on(&c, domain, owner, limit).unwrap());
             let mut retained = 0i64;
             for (table, key) in [
-                ("participant_sync_rows", "view"),
-                ("participant_sync_have", "view"),
-                ("participant_sync_receipts", "view"),
-                ("participant_sync_ancestors", "view"),
-                ("participant_sync_departures", "view"),
-                ("participant_sync_authors", "view"),
-                ("participant_sync_export_work", "view"),
-                ("participant_sync_progress", "view"),
-                ("participant_sync_views", "id"),
+                ("participant_work.participant_sync_rows", "view"),
+                ("participant_work.participant_sync_have", "view"),
+                ("participant_work.participant_sync_receipts", "view"),
+                ("participant_work.participant_sync_ancestors", "view"),
+                ("participant_work.participant_sync_departures", "view"),
+                ("participant_work.participant_sync_authors", "view"),
+                ("participant_work.participant_sync_export_work", "view"),
+                ("participant_work.participant_sync_progress", "view"),
+                ("participant_work.participant_sync_views", "id"),
             ] {
                 retained += c
                     .query_row(

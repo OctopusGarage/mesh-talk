@@ -1307,7 +1307,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial cursor progress and failure rollback remain durable.",
+            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial query cursors remain connection-owned and rebuildable, while authoritative mailbox/receipt progress and failure rollback retain their durability.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           }
         ]
@@ -3021,6 +3021,7 @@
         "crates/mesh-talk-core/src/storage/database.rs",
         "crates/mesh-talk-core/src/storage/database/work_clock.rs",
         "crates/mesh-talk-core/src/storage/database/selection_work.rs",
+        "crates/mesh-talk-core/src/storage/database/query_scratch.rs",
         "crates/mesh-talk-core/src/eventlog/repository/selection/export.rs",
         "crates/mesh-talk-core/src/eventlog/repository/selection/metadata.rs",
         "crates/mesh-talk-core/src/node/channel/checkpoint/work.rs"
@@ -3074,6 +3075,7 @@
             "federated_file_consent_and_complete_bytes_need_no_direct_client_route",
             "main_data_version_ignores_temp_and_reads_but_detects_owner_commits",
             "storage::database::",
+            "disposable_selection_prepare_export_and_drop_leave_main_storage_unchanged",
             "empty_selection_cleanup_preserves_cached_read_plans"
           ]
         }
@@ -3124,7 +3126,7 @@
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {
-            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial cursor progress and failure rollback remain durable.",
+            "name": "Terminal direct export and incremental upload preparation retain current selection and network authority checks while unchanged rank/parent/closure cursors perform no SQL mutations or write commits; partial query cursors remain connection-owned and rebuildable, while authoritative mailbox/receipt progress and failure rollback retain their durability.",
             "reference": "docs/network-design-reference.md#incremental-opaque-mailbox-synchronization"
           },
           {

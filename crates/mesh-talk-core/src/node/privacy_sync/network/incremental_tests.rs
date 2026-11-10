@@ -1306,6 +1306,150 @@ async fn ready_history_upload_owner_retirement_reuses_exact_principal_selection(
     );
 }
 
+#[tokio::test]
+async fn disposable_selection_prepare_export_and_drop_leave_main_storage_unchanged() {
+    let (_directory, node, peer, conversation) = history_retention_fixture().await;
+    let owner = node.sync_store(&peer.public());
+    let store = owner.lock().unwrap();
+    // Finish real canonical ordering, kind/policy classification and authority
+    // preparation once. Only a NEW disposable selection is measured below.
+    let warm = open_prepared(&store, &conversation);
+    let expected = collect(&store, &warm, &HashSet::new());
+    assert!(
+        expected.len() >= 5,
+        "real genesis and four messages must be selected"
+    );
+    let known = {
+        let log = node.log.lock().unwrap();
+        *expected
+            .iter()
+            .find(|id| {
+                log.get(id)
+                    .unwrap()
+                    .is_some_and(|event| event.kind == EventKind::Message)
+            })
+            .expect("the real group must contain a message")
+    };
+    drop(warm);
+    let database = node.storage.database();
+    let storage_snapshot = || {
+        let stamp = database.main_write_stamp().unwrap().unwrap();
+        let path: String = database
+            .read(|connection| {
+                Ok(connection.query_row(
+                    "SELECT file FROM pragma_database_list WHERE name='main'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let wal = match std::fs::read(format!("{path}-wal")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("read actual test MAIN WAL: {error}"),
+        };
+        (stamp, wal)
+    };
+    let before = storage_snapshot();
+    let changes_before = database
+        .read(|connection| Ok(connection.total_changes()))
+        .unwrap();
+    let fresh = open_prepared(&store, &conversation);
+    let body_reads = node
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    let mut have_ids = Vec::new();
+    let mut after = None;
+    loop {
+        let page = NetworkSyncStore::have_page(
+            &*store,
+            &fresh,
+            after.as_ref(),
+            IdPageBudget {
+                ids: 2,
+                examined: 4,
+            },
+        )
+        .unwrap();
+        have_ids.extend(page.items);
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        have_ids.iter().copied().collect::<HashSet<_>>(),
+        expected.iter().copied().collect()
+    );
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        body_reads,
+        "Have pages must not hydrate historical bodies"
+    );
+    let have = HashSet::from([known]);
+    let exported = collect(&store, &fresh, &have);
+    assert_eq!(
+        exported,
+        expected
+            .into_iter()
+            .filter(|id| *id != known)
+            .collect::<Vec<_>>(),
+        "actual export must exclude the peer's real known message"
+    );
+    drop(fresh);
+    assert!(
+        database
+            .read(|connection| Ok(connection.total_changes()))
+            .unwrap()
+            > changes_before,
+        "the test must execute real disposable preparation/export/retirement SQL"
+    );
+    assert_eq!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .selection_counts()
+            .unwrap(),
+        (0, 0, 0)
+    );
+    let after = storage_snapshot();
+    assert!(
+        after.1 == before.1,
+        "fresh disposable preparation/export/drop must leave actual MAIN WAL bytes unchanged"
+    );
+    // SQLite can bump its version for a no-op MAIN transaction. The owning
+    // qualified stamp distinguishes that from a page mutation; raw version alone
+    // is not physical write evidence, especially with an attached pager.
+    assert!(
+        before.0.unchanged_since(&after.0),
+        "MAIN page evidence must remain unchanged"
+    );
+    database.transaction(|connection| {
+        connection.execute_batch("CREATE TABLE main.test_selection_business_write(value INTEGER); INSERT INTO main.test_selection_business_write VALUES(1)")?;
+        Ok(())
+    }).unwrap();
+    let committed = storage_snapshot();
+    assert!(
+        !after.0.unchanged_since(&committed.0),
+        "the same observer must detect a real MAIN write"
+    );
+    assert!(
+        after.1 != committed.1,
+        "the actual WAL observation must detect that MAIN commit"
+    );
+}
+
 async fn history_retention_fixture() -> (
     tempfile::TempDir,
     std::sync::Arc<Node>,

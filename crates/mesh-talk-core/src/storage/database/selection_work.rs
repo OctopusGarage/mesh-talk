@@ -68,7 +68,13 @@ unsafe extern "C" fn authorize(
             };
             // TEMP scratch is not part of MAIN work evidence. Trigger writes
             // back into MAIN are authorized independently and remain fenced.
-            if database == b"temp" || (database == b"main" && purpose.tables().contains(&table)) {
+            let selection_scratch = database == b"participant_work"
+                && matches!(purpose, Purpose::Selection)
+                && purpose.tables().contains(&table);
+            if database == b"temp"
+                || (database == b"main" && purpose.tables().contains(&table))
+                || selection_scratch
+            {
                 ffi::SQLITE_OK
             } else {
                 ffi::SQLITE_DENY

@@ -525,7 +525,7 @@ async fn requester_selection_reuse_fixture(fresh_connections: bool, age_entries:
             .database()
             .read(|c| {
                 Ok(c.query_row(
-                    "SELECT count(*) FROM participant_sync_views WHERE retired=0",
+                    "SELECT count(*) FROM participant_work.participant_sync_views WHERE retired=0",
                     [],
                     |r| r.get(0),
                 )?)
@@ -633,7 +633,7 @@ async fn ordinary_request_connection_reuses_selection_and_rechecks_authority() {
     };
     let first = append(1);
     node.storage.database().read(|c| {
-        c.execute_batch("CREATE TEMP TABLE observed_selection_creations(value INTEGER); CREATE TEMP TRIGGER observe_selection_creation AFTER INSERT ON main.participant_sync_views BEGIN INSERT INTO observed_selection_creations VALUES(1); END;")?;
+        c.execute_batch("CREATE TEMP TABLE observed_selection_creations(value INTEGER); CREATE TEMP TRIGGER observe_selection_creation AFTER INSERT ON participant_work.participant_sync_views BEGIN INSERT INTO observed_selection_creations VALUES(1); END;")?;
         Ok(())
     }).unwrap();
     let selection_creations = || {
@@ -2604,7 +2604,7 @@ async fn ordinary_request_terminal_send_failure_and_cancellation_release_retaine
             .database()
             .read(|c| {
                 Ok(c.query_row(
-                    "SELECT count(*) FROM participant_sync_views WHERE retired=0",
+                    "SELECT count(*) FROM participant_work.participant_sync_views WHERE retired=0",
                     [],
                     |row| row.get(0),
                 )?)
@@ -2658,9 +2658,9 @@ async fn requester_have_selection_reuse_loopback() {
         node.storage.database().transaction(|c| {
             c.execute_batch("CREATE TEMP TABLE test_selection_counts(views INTEGER, rows INTEGER);
                 INSERT INTO test_selection_counts VALUES(0,0);
-                CREATE TEMP TRIGGER test_selection_admission AFTER INSERT ON main.participant_sync_views
+                CREATE TEMP TRIGGER test_selection_admission AFTER INSERT ON participant_work.participant_sync_views
                 BEGIN UPDATE test_selection_counts SET views=views+1; END;
-                CREATE TEMP TRIGGER test_selection_row AFTER INSERT ON main.participant_sync_rows
+                CREATE TEMP TRIGGER test_selection_row AFTER INSERT ON participant_work.participant_sync_rows
                 BEGIN UPDATE test_selection_counts SET rows=rows+1; END;")?;
             Ok(())
         }).unwrap();

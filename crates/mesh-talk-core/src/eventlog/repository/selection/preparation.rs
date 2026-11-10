@@ -28,7 +28,7 @@ impl EventRepository {
     ) -> Result<Option<Selection>, LogError> {
         crate::eventlog::sync::network::scan_limit(rows)?;
         if self.database.selection_work_transaction(|c| {
-            cleanup_on(c, self.domain, self.selection_owner, rows)
+            cleanup_pending_on(c, self.domain, self.selection_owner, rows)
         })? {
             return Ok(None);
         }
@@ -45,7 +45,7 @@ impl EventRepository {
         self.database.selection_work_transaction(|c| {
             self.validate_network_on(c, view)?;
             c.execute(
-                "INSERT INTO participant_sync_views(id,owner,domain) VALUES(?1,?2,?3)",
+                "INSERT INTO participant_work.participant_sync_views(id,owner,domain) VALUES(?1,?2,?3)",
                 params![
                     selection.id.as_slice(),
                     self.selection_owner.as_slice(),
@@ -64,7 +64,7 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c, selection)?;
             c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2)",
+                "SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2)",
                 params![selection.id.as_slice(), id.as_bytes().as_slice()],
                 |r| r.get(0),
             )
@@ -86,7 +86,7 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c, selection)?;
             self.validate_network_on(c, view)?;
-            let table=if receipts_only {"participant_sync_receipts"} else {"participant_sync_rows"};
+            let table=if receipts_only {"participant_work.participant_sync_receipts"} else {"participant_work.participant_sync_rows"};
             let mut stmt=c.prepare(&format!("SELECT p.parent,EXISTS(SELECT 1 FROM {table} a WHERE a.view=?3 AND a.id=p.parent) FROM retained_event_parents p WHERE p.domain=?1 AND p.child=?2 AND p.parent>COALESCE(?4,x'') ORDER BY p.parent LIMIT ?5"))?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),event.as_bytes().as_slice(),selection.id.as_slice(),after.map(|id|*id.as_bytes()),limit])?;
             let mut result=ParentStep { closed:true, ..Default::default() };
@@ -112,7 +112,7 @@ impl EventRepository {
             .ok_or(LogError::InvalidPageBudget)?;
         self.database.read(|c| {
             self.require_selection_on(c,selection)?;
-            let mut stmt=c.prepare("SELECT id FROM participant_sync_rows WHERE view=?1 AND id>COALESCE(?2,x'') ORDER BY id LIMIT ?3")?;
+            let mut stmt=c.prepare("SELECT id FROM participant_work.participant_sync_rows WHERE view=?1 AND id>COALESCE(?2,x'') ORDER BY id LIMIT ?3")?;
             let mut result=Vec::new();let mut rows=stmt.query(params![selection.id.as_slice(),after.map(|id|*id.as_bytes()),limit])?;
             while let Some(row)=rows.next()? {result.push(EventId::new(blob(row,0)?));}
             Ok(result)
@@ -167,7 +167,7 @@ impl EventRepository {
         rows: usize,
     ) -> Result<usize, LogError> {
         let rows = crate::eventlog::sync::network::scan_limit(rows)? - 1;
-        self.database.selection_work_transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_sync_ancestors WHERE view=?1 AND id IN (SELECT id FROM participant_sync_ancestors WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),rows])?)})
+        self.database.selection_work_transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_work.participant_sync_ancestors WHERE view=?1 AND id IN (SELECT id FROM participant_work.participant_sync_ancestors WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),rows])?)})
     }
     pub(crate) fn mark_selection_ancestors(
         &self,
@@ -176,8 +176,9 @@ impl EventRepository {
     ) -> Result<(), LogError> {
         self.database.selection_work_transaction(|c| {
             self.require_selection_on(c, selection)?;
-            let mut stmt =
-                c.prepare("INSERT OR IGNORE INTO participant_sync_ancestors VALUES(?1,?2)")?;
+            let mut stmt = c.prepare(
+                "INSERT OR IGNORE INTO participant_work.participant_sync_ancestors VALUES(?1,?2)",
+            )?;
             for id in ids {
                 stmt.execute(params![selection.id.as_slice(), id.as_bytes().as_slice()])?;
             }
@@ -192,7 +193,7 @@ impl EventRepository {
         self.database.read(|c| {
             self.require_selection_on(c, selection)?;
             c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM participant_sync_ancestors WHERE view=?1 AND id=?2)",
+                "SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_ancestors WHERE view=?1 AND id=?2)",
                 params![selection.id.as_slice(), id.as_bytes().as_slice()],
                 |r| r.get(0),
             )
@@ -216,13 +217,13 @@ impl EventRepository {
             self.require_selection_on(c,selection)?;self.validate_network_on(c,view)?;self.require_selection_order_on(c,view,job)?;
             let mut next=*progress;let mut step=crate::eventlog::sync::network::PreparationStep::default();
             while next.rank>=0 && step.rows<budget.rows && step.edges<budget.edges && step.bytes+64<=budget.bytes {
-                let (id,marked):(Vec<u8>,bool)=c.query_row("SELECT id,EXISTS(SELECT 1 FROM participant_sync_ancestors a WHERE a.view=?3 AND a.id=r.id) FROM event_order_rows r WHERE job=?1 AND rank=?2",params![job.as_slice(),next.rank,selection.id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                let (id,marked):(Vec<u8>,bool)=c.query_row("SELECT id,EXISTS(SELECT 1 FROM participant_work.participant_sync_ancestors a WHERE a.view=?3 AND a.id=r.id) FROM event_order_rows r WHERE job=?1 AND rank=?2",params![job.as_slice(),next.rank,selection.id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
                 if marked {
                     let limit=(budget.edges-step.edges).min((budget.bytes-step.bytes)/64);
                     if limit==0 {break;}
                     let mut stmt=c.prepare("SELECT parent FROM retained_event_parents WHERE domain=?1 AND child=?2 AND parent>COALESCE(?3,x'') ORDER BY parent LIMIT ?4")?;
                     let parents=stmt.query_map(params![self.domain.0.as_slice(),id,next.parent_after.map(|id|*id.as_bytes()),limit as i64],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?;
-                    for parent in &parents {c.execute("INSERT OR IGNORE INTO participant_sync_ancestors VALUES(?1,?2)",params![selection.id.as_slice(),parent])?;}
+                    for parent in &parents {c.execute("INSERT OR IGNORE INTO participant_work.participant_sync_ancestors VALUES(?1,?2)",params![selection.id.as_slice(),parent])?;}
                     step.edges+=parents.len();step.bytes+=parents.len()*64;
                     if parents.len()==limit {next.parent_after=parents.last().map(|id|id.as_slice().try_into().map(EventId::new).map_err(|_|corrupt("invalid ancestor id"))).transpose()?;continue;}
                 }
@@ -244,7 +245,7 @@ impl EventRepository {
         self.database.selection_work_transaction(|c| {
             self.require_selection_on(c, selection)?;
             c.execute(
-                "INSERT OR IGNORE INTO participant_sync_departures VALUES(?1,?2,?3,?4)",
+                "INSERT OR IGNORE INTO participant_work.participant_sync_departures VALUES(?1,?2,?3,?4)",
                 params![
                     selection.id.as_slice(),
                     pass,
@@ -266,7 +267,7 @@ impl EventRepository {
         let limit = crate::eventlog::sync::network::scan_limit(limit)? - 1;
         self.database.read(|c| {
             self.require_selection_on(c,selection)?;
-            let mut stmt=c.prepare("SELECT event,EXISTS(SELECT 1 FROM participant_sync_ancestors a WHERE a.view=d.view AND a.id=d.event) FROM participant_sync_departures d WHERE view=?1 AND pass=?2 AND member=?3 AND event>COALESCE(?4,x'') ORDER BY event LIMIT ?5")?;
+            let mut stmt=c.prepare("SELECT event,EXISTS(SELECT 1 FROM participant_work.participant_sync_ancestors a WHERE a.view=d.view AND a.id=d.event) FROM participant_work.participant_sync_departures d WHERE view=?1 AND pass=?2 AND member=?3 AND event>COALESCE(?4,x'') ORDER BY event LIMIT ?5")?;
             let mut rows=stmt.query(params![selection.id.as_slice(),pass,member,after.map(|id|*id.as_bytes()),limit])?;let mut result=Vec::new();
             while let Some(row)=rows.next()?{result.push((EventId::new(blob(row,0)?),row.get(1)?));}Ok(result)
         })
@@ -281,12 +282,12 @@ impl EventRepository {
             self.require_selection_on(c, selection)?;
             if insert {
                 c.execute(
-                    "INSERT OR IGNORE INTO participant_sync_authors VALUES(?1,?2)",
+                    "INSERT OR IGNORE INTO participant_work.participant_sync_authors VALUES(?1,?2)",
                     params![selection.id.as_slice(), author.ed25519_pub().as_slice()],
                 )?;
             }
             c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM participant_sync_authors WHERE view=?1 AND author=?2)",
+                "SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_authors WHERE view=?1 AND author=?2)",
                 params![selection.id.as_slice(), author.ed25519_pub().as_slice()],
                 |r| r.get(0),
             )
@@ -299,7 +300,7 @@ impl EventRepository {
         limit: usize,
     ) -> Result<usize, LogError> {
         let limit = crate::eventlog::sync::network::scan_limit(limit)? - 1;
-        self.database.selection_work_transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_sync_rows WHERE view=?1 AND id IN (SELECT id FROM participant_sync_rows WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),limit])?)})
+        self.database.selection_work_transaction(|c|{self.require_selection_on(c,selection)?;Ok(c.execute("DELETE FROM participant_work.participant_sync_rows WHERE view=?1 AND id IN (SELECT id FROM participant_work.participant_sync_rows WHERE view=?1 LIMIT ?2)",params![selection.id.as_slice(),limit])?)})
     }
 }
 
@@ -337,14 +338,14 @@ impl EventRepository {
                 if !retained {
                     return Err(LogError::StaleCursor);
                 }
-                c.execute("INSERT OR IGNORE INTO participant_sync_rows(view,id,rank,candidate,selected,own) VALUES(?1,?2,?3,?4,?5,?6)", params![selection.id.as_slice(), row.header.id.as_bytes().as_slice(), row.rank, row.candidate, row.selected, row.own])?;
+                c.execute("INSERT OR IGNORE INTO participant_work.participant_sync_rows(view,id,rank,candidate,selected,own) VALUES(?1,?2,?3,?4,?5,?6)", params![selection.id.as_slice(), row.header.id.as_bytes().as_slice(), row.rank, row.candidate, row.selected, row.own])?;
                 if row.receipt {
-                    c.execute("INSERT OR IGNORE INTO participant_sync_receipts VALUES(?1,?2)", params![selection.id.as_slice(), row.header.id.as_bytes().as_slice()])?;
+                    c.execute("INSERT OR IGNORE INTO participant_work.participant_sync_receipts VALUES(?1,?2)", params![selection.id.as_slice(), row.header.id.as_bytes().as_slice()])?;
                 }
             }
             // Repeated observation of the same selected page must not publish
             // another durable cursor. Authority/source checks above still run.
-            c.execute("INSERT INTO participant_sync_progress VALUES(?1,?2) ON CONFLICT(view) DO UPDATE SET context=excluded.context WHERE participant_sync_progress.context IS NOT excluded.context", params![selection.id.as_slice(), context])?;
+            c.execute("INSERT INTO participant_work.participant_sync_progress VALUES(?1,?2) ON CONFLICT(view) DO UPDATE SET context=excluded.context WHERE participant_work.participant_sync_progress.context IS NOT excluded.context", params![selection.id.as_slice(), context])?;
             Ok(())
         })
     }
@@ -357,7 +358,7 @@ impl EventRepository {
             self.require_selection_on(c, selection)?;
             self.validate_network_on(c, view)?;
             c.query_row(
-                "SELECT context FROM participant_sync_progress WHERE view=?1",
+                "SELECT context FROM participant_work.participant_sync_progress WHERE view=?1",
                 [selection.id.as_slice()],
                 |r| r.get(0),
             )
@@ -413,7 +414,7 @@ mod tests {
         database
             .transaction(|c| {
                 c.execute(
-                    "UPDATE participant_sync_views SET retired=1 WHERE id=?1",
+                    "UPDATE participant_work.participant_sync_views SET retired=1 WHERE id=?1",
                     [selection.id.as_slice()],
                 )?;
                 Ok(())

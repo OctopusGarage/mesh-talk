@@ -898,6 +898,15 @@ and existing compatibility rules. Multi-store changes are not automatically one
 transaction; define recovery or compensation for every partial commit boundary.
 Use established error types and distinguish absent, unavailable and corrupt data.
 
+Separate authoritative durability from disposable SQL query progress. The
+[selection owner](../crates/mesh-talk-core/src/eventlog/repository/selection.rs)
+uses the existing connection's encrypted temporary pager for derived ranks and
+cursors; reopening rebuilds them from current MAIN records. Failed preparation
+cannot become a receipt, custody or permission. Preserve MAIN transaction
+and replay guarantees while measuring its actual writes independently of scratch
+mutations. The `disposable_selection_prepare_export_and_drop_leave_main_storage_unchanged`
+regression checks selected/exported results and MAIN write evidence together.
+
 Distinguish filesystem publication durability from later database mutations.
 The [history source publisher](../crates/mesh-talk-core/src/node/transcript_repository/publication.rs)
 synchronizes the barrier file and, where supported, its renamed parent directory
@@ -1046,9 +1055,15 @@ and registered IPC tests, together with the [chat consumer](../frontend/src/stor
 exercise quiet pages and changes arriving during acknowledgement.
 
 Filter lightweight metadata before cloning large payloads. An empty final result
-does not prove that a query avoided full-record reads. Durable selection indexes
-must migrate and update in the same transaction as their authoritative records;
-failed commits cannot acknowledge work. The customization storage regression in
+does not prove that a query avoided full-record reads. Persistent indexes of
+authoritative records must migrate and update in the same transaction as those
+records; failed commits cannot acknowledge work. Disposable query indexes retain
+bounded row turns and admission while spilling through the encrypted temporary
+pager, rather than collecting history in Rust. Its 8192 KiB page-cache setting is
+a target, not a process-memory cap. The
+[query pager controls](../crates/mesh-talk-core/src/storage/database/query_scratch.rs)
+exercise spill encryption, rollback and restoration of TEMP storage before hint
+initialization; connection close discards plans without discarding source facts. The customization storage regression in
 [packs tests](../frontend/src/store/packs.test.ts) and real
 [IndexedDB browser scenario](../frontend/e2e/customization-pending-storage.spec.ts)
 checks empty pending reads, old-data migration and failed writes.

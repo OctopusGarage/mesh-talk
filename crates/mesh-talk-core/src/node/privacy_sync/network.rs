@@ -2248,11 +2248,11 @@ mod tests {
             let selected_rows = || {
                 database
                     .read(|c| {
-                        Ok(
-                            c.query_row("SELECT count(*) FROM participant_sync_rows", [], |r| {
-                                r.get::<_, i64>(0)
-                            })?,
-                        )
+                        Ok(c.query_row(
+                            "SELECT count(*) FROM participant_work.participant_sync_rows",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )?)
                     })
                     .unwrap()
             };
@@ -2354,7 +2354,7 @@ mod tests {
         }
         assert_eq!(view.preparation.lock().unwrap().metadata.count, 1);
         node.storage.database().transaction(|c| {
-            c.execute_batch("CREATE TEMP TRIGGER test_fail_selection_progress BEFORE UPDATE ON participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected selection cursor failure'); END;")?;
+            c.execute_batch("CREATE TEMP TRIGGER test_fail_selection_progress BEFORE UPDATE ON participant_work.participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected selection cursor failure'); END;")?;
             Ok(())
         }).unwrap();
         assert!(
@@ -2365,9 +2365,11 @@ mod tests {
             node.storage
                 .database()
                 .read(|c| {
-                    c.query_row("SELECT count(*) FROM participant_sync_rows", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
+                    c.query_row(
+                        "SELECT count(*) FROM participant_work.participant_sync_rows",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
                     .map_err(Into::into)
                 })
                 .unwrap(),
@@ -4524,7 +4526,7 @@ mod control_publication_tests {
             .database()
             .read(|c| {
                 Ok(c.query_row(
-                    "SELECT count(*) FROM participant_sync_views WHERE retired=0",
+                    "SELECT count(*) FROM participant_work.participant_sync_views WHERE retired=0",
                     [],
                     |r| r.get(0),
                 )?)

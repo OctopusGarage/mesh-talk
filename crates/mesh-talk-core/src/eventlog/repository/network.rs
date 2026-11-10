@@ -317,7 +317,7 @@ impl EventRepository {
             let ordinal = nonnegative(row.get(0)?)?;
             let id = EventId::new(blob(row, 1)?);
             let allowed = match selection {
-                Some(selection) => c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1)", params![selection.as_slice(), id.as_bytes().as_slice()], |r| r.get::<_, bool>(0))?,
+                Some(selection) => c.query_row("SELECT EXISTS(SELECT 1 FROM participant_work.participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1)", params![selection.as_slice(), id.as_bytes().as_slice()], |r| r.get::<_, bool>(0))?,
                 None => true,
             };
             if allowed && !have.contains(&id) {
