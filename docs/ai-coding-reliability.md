@@ -82,6 +82,14 @@ main thread:     handles UI event    -> waits for session guard
 
 Use the owning module's order; do not invent one universal order for unrelated
 subsystems. Make whether a helper acquires a guard or requires one explicit.
+Account archive snapshots, history projections and delivery recovery share the
+plaintext-sidecar order: sent, received, then received files. Recovery must not
+hold received while waiting for sent: an archive has no delivery guard and can
+otherwise hold sent while waiting for received. The real recovery regression
+`recovery_does_not_hold_received_while_waiting_for_sent` in the
+[recovery owner](../crates/mesh-talk-core/src/node/delivery_runtime.rs) holds sent,
+probes received at the actual acquisition boundary, then releases contention and
+joins the worker before asserting replay and progress.
 Avoid invoking arbitrary callbacks while guarded. Where a commit callback must
 run inside an authority guard, keep that contract narrow and inspect its complete
 call chain. Queue presentation without retaining a guard needed by the UI;
@@ -1186,6 +1194,14 @@ use `Debug` to log whole tuples or containers containing identifiers. The
 retains delivery evidence without logging its private observation tuples.
 
 ## R10: Evidence that exercises the failure
+
+Dependency upgrades can change equivalent CSS serialization without changing the
+interaction contract. Keep assertions narrow enough to reject wrong geometry and
+scale while accepting equivalent omitted zero coordinates. The reset assertion in
+[media preview tests](../frontend/src/features/chat/MediaPreview.test.ts) accepts
+one-axis or two-axis zero translation while preserving the exact wheel-anchor,
+drag-clamp and cancellation checks; reproduce the old assertion failure against
+the upgraded DOM implementation before changing it.
 
 Scope fixture transformations and assertions to the owning configuration table,
 not globally unique text. Test the same valid value in an unrelated profile and

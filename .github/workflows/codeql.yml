@@ -46,7 +46,7 @@ jobs:
           node-version: 22
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # codeql-bundle-v2.25.6 (v3)
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # codeql-bundle-v2.25.6 (v3)
         with:
           languages: ${{ matrix.language }}
           build-mode: none
@@ -54,7 +54,7 @@ jobs:
 
       - name: Perform CodeQL Analysis
         id: analysis
-        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # codeql-bundle-v2.25.6 (v3)
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # codeql-bundle-v2.25.6 (v3)
         with:
           category: "/language:${{ matrix.language }}"
 

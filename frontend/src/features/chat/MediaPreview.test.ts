@@ -440,7 +440,9 @@ it("anchors wheel zoom, clamps dragging and resets on double click", async () =>
   await act(async () =>
     image.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })),
   );
-  expect(transform.style.transform).toBe("translate(0px, 0px) scale(1)");
+  expect(transform.style.transform).toMatch(
+    /^translate\(0px(?:, 0px)?\) scale\(1\)$/,
+  );
 });
 
 it("uses a thumbnail inline and admits the original only after opening the lightbox", async () => {
