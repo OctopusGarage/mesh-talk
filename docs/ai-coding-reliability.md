@@ -690,9 +690,11 @@ Trace the failed interval: when several individually successful cold-load,
 rendering and interaction steps exhaust the total, use the existing generous
 functional allowance consistently across platforms. Preserve individual
 assertion bounds and explicit latency contracts. The real Playwright watchdog
-control derives the actual source configuration, accelerates only its duration,
-and requires timeout failure plus later-case execution with joined descendants;
-never disable the watchdog or use retries to qualify a failure.
+control derives the actual source configuration and accelerates only the
+deliberately parked case. Later cases keep the normal source allowance; inject
+latency beyond the accelerated bound to verify that isolation. Require timeout
+failure plus later-case execution with joined descendants; never disable the
+watchdog or use retries to qualify a failure.
 
 Independent message kinds should have independent browser scenarios. The
 [automatic delivery fixture](../frontend/e2e/automatic-delivery.spec.ts) checks

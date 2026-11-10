@@ -279,9 +279,11 @@ operation failing. Full Chromium uses its existing Windows/coverage safety margi
 on all hosts; portable execution retains its existing Windows allowance. Keep
 state-based readiness, all assertions, explicit latency limits, zero retries and
 first-failure traces. Do not erase a failed assertion by increasing its timeout.
-The real-runner control derives both configured watchdogs, accelerates only their
-duration, requires actual parked-case failure and subsequent-case execution, and
-verifies descendant retirement before removing its fixture.
+The real-runner control derives both configured watchdogs and accelerates only
+the deliberately parked case. Subsequent cases retain the source configuration's
+normal allowance; deliberate latency beyond the accelerated bound verifies this
+isolation. Require actual parked-case failure, subsequent-case execution and
+verified descendant retirement before removing the fixture.
 
 ## Reuse compatible work with verifiable inputs
 
