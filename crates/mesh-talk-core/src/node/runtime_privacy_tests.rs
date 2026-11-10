@@ -274,8 +274,9 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     );
     let public = bob.node.identity.public();
     let new = bob.rekey_account().unwrap();
-    drop(bob);
-    tokio::task::yield_now().await;
+    // Reopening requires retirement of actual workers and their storage lease;
+    // dropping the runtime only requests cancellation.
+    bob.stop().await;
     let (bob, mut brx) = start(dir.path(), "bob", 0).await;
     assert_eq!(bob.node.identity.public(), public);
     assert_eq!(bob.account_id(), new);

@@ -1094,7 +1094,7 @@ impl Node {
                 {
                     let delay = if held.load(Ordering::Relaxed) {
                         pending.retry_delay = std::time::Duration::from_secs(3);
-                        std::time::Duration::from_secs(30)
+                        super::delivery_runtime::QUIET_REPAIR_INTERVAL
                     } else { retry_delay };
                     pending.retry_after = Some(std::time::Instant::now() + delay);
                 }

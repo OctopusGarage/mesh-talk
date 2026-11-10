@@ -1015,7 +1015,7 @@ bounded rotating scans of durable source rows refill it, including pre-upgrade
 sends and restarts. A pass launches at most two recipient jobs and races at most
 two relay exchanges at once under the existing whole-file deadline. Rotation
 advances at launch, failed paths do not pin later recipients, and exact durable
-chunk custody suppresses redundant inventory work for 30 seconds. The index
+chunk custody parks redundant inventory work until a five-minute repair. The index
 contains outgoing group files, not historical private consent controls. Due jobs
 and unfinished authorization preparation retain the producer's short cadence.
 Network failures and unavailable routes back off from three to sixty seconds;
@@ -1027,6 +1027,11 @@ appends preserve unfinished ordinal scans; destructive rewrites restart them.
 Periodic repair still revisits eligibility changes without a new file row,
 including membership, consent and proof recovery. Failed preparation, failed scans
 and full capacity retain unfinished work while independent queued jobs advance.
+Successful unchanged pull reconciliation also uses a five-minute repair deadline;
+changed route or policy inputs still admit work immediately. These quiet deadlines
+are scheduling hints, never custody leases or recipient-delivery evidence. Actual
+page progress, unfinished preparation and failed exchanges retain their existing
+continuation, cancellation and retry contracts.
 Payload pages recheck
 current authority, refusal, relay role and managed runtime I/O admission.
 

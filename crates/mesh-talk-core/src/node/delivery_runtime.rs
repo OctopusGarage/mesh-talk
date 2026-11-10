@@ -28,7 +28,10 @@ const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(10)
 
 // Whole authenticated control exchanges need several routed round trips. Keep
 // them off the serial file scheduler, with independent capacity for each lane.
-const QUIET_PULL_REPAIR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+// Successful absence of new work, including already-confirmed relay custody,
+// needs sparse repair rather than another short progress/retry turn.
+pub(super) const QUIET_REPAIR_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
 
 const CONTROL_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -55,7 +58,7 @@ impl Reconciliation {
         now: std::time::Instant,
     ) {
         match self {
-            Self::Quiet => retries.settled(key, routes, QUIET_PULL_REPAIR_INTERVAL, now),
+            Self::Quiet => retries.settled(key, routes, QUIET_REPAIR_INTERVAL, now),
             other => retries.finished(key, routes, other == Self::Advanced, now),
         }
     }
@@ -4057,7 +4060,11 @@ mod diagnostic_tests {
         Quiet.schedule(&mut retries, "peer", 1, now);
         assert!(!retries.ready(&"peer", &1, now + Duration::from_millis(500)));
         assert!(!retries.ready(&"peer", &1, now + Duration::from_secs(59)));
-        assert!(retries.ready(&"peer", &1, now + super::QUIET_PULL_REPAIR_INTERVAL));
+        assert!(
+            !retries.ready(&"peer", &1, now + Duration::from_secs(299)),
+            "unchanged successful reconciliation needs only sparse five-minute repair"
+        );
+        assert!(retries.ready(&"peer", &1, now + super::QUIET_REPAIR_INTERVAL));
         assert!(
             retries.ready(&"peer", &2, now),
             "new route or verified policy wakes immediately"

@@ -52,6 +52,9 @@ separate bounded work budgets and progress evidence, not an unlimited exception.
    A retained blocked task is not evidence of progress: keep its recovery fact
    while backing off, and resume promptly on dependency changes. Local pagination
    and actual received bytes retain prompt continuation.
+   Reconfirming an already-held relay copy is not new progress. Park unchanged
+   successful reconciliation until sparse repair; keep authenticated recipient
+   delivery and actual custody-loss recovery separate from that scheduling hint.
    Preserve invalidation domains through batching and acknowledgement; a roster
    heartbeat must not reload unrelated settings or history. Empty pages do not
    imply a global change. Presentation metadata does not renew user activity.

@@ -541,9 +541,27 @@ async fn group_file_publisher_leaves_incoming_mailbox_to_dedicated_drain() {
     });
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         RECEIVE_ENTRY_CALLS.with(|calls| calls.set(0));
+        let earliest_repair = std::time::Instant::now() + std::time::Duration::from_secs(300);
         node.retry_group_file_delivery().await;
         let publisher_reads = RECEIVE_ENTRY_CALLS.with(std::cell::Cell::get);
         let held_before_approval = office.durable_have(&mailbox.id(), &final_outer).unwrap();
+        assert!(
+            held_before_approval,
+            "the real relay must first hold the final chunk"
+        );
+        let repair = node.group_file_delivery.jobs.lock().unwrap()[&key]
+            .retry_after
+            .expect("confirmed custody retains a finite repair deadline");
+        assert!(
+            repair >= earliest_repair,
+            "confirmed unchanged custody must not restart inventory every thirty seconds"
+        );
+        node.retry_group_file_delivery().await;
+        assert_eq!(
+            node.group_file_delivery.jobs.lock().unwrap()[&key].retry_after,
+            Some(repair),
+            "an unrelated wake must not renew or consume the quiet custody deadline"
+        );
         let preserved_receipt = node
             .opaque_receive_cache
             .lock()
