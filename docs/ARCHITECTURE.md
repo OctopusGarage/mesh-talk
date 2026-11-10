@@ -367,6 +367,11 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   already accepted member has its own certified account. Once accepted, bounded
   account reconciliation transfers available older channel plaintext with stable
   event IDs. Locally erased channel messages carry durable suppression markers.
+  Local erasure classifies channels from retained signed membership, shared
+  account references and existing legacy channel state. It does not enumerate
+  presentation summaries or wait for their publication; a pending unrelated
+  channel cannot prevent a local erase. Canonical lookup and suppression-storage
+  failures remain explicit, and encrypted event history remains unchanged.
   Historical file cards carry their signed manifest event as a detached proof when
   the original device-pair event DAG is unavailable. A sibling can request an
   available attachment through a separate authenticated stream; the receiver checks

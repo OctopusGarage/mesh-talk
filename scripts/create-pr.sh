@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 preflight_args=()
+affected_args=()
 full_preflight=0
 separator=0
 while [ "$#" -gt 0 ]; do
@@ -19,11 +20,20 @@ while [ "$#" -gt 0 ]; do
         shift
         continue
     fi
+    if [ "$1" = "--owner" ] || [ "$1" = "--reason" ]; then
+        if [ "$#" -lt 2 ]; then
+            echo "$1 requires a literal value." >&2
+            exit 2
+        fi
+        affected_args+=("$1" "$2")
+        shift 2
+        continue
+    fi
     preflight_args+=("$1")
     shift
 done
 if [ "$separator" -ne 1 ]; then
-    echo "Usage: scripts/create-pr.sh [--full-preflight] [preflight selectors and UI specs] -- [gh pr create options]" >&2
+    echo "Usage: scripts/create-pr.sh [--full-preflight] [--owner ID --reason TEXT] [preflight selectors and UI specs] -- [gh pr create options]" >&2
     exit 2
 fi
 if [ -n "${GH_REPO:-}" ]; then
@@ -64,7 +74,7 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 git diff --check "$base_ref"...HEAD
 mkdir -p target/validation
-if ! node scripts/validation/changed.mjs --cheap --base "$base_ref" --json > target/validation/pr-plan.json; then
+if ! node scripts/validation/changed.mjs --cheap --base "$base_ref" ${affected_args[@]+"${affected_args[@]}"} --json > target/validation/pr-plan.json; then
     echo "PR readiness is blocked. Resolve the cheap-check failures or affected-plan blockers in target/validation/pr-plan.json before publishing." >&2
     exit 1
 fi

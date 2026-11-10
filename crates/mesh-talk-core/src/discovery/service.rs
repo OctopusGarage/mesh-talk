@@ -45,6 +45,25 @@ pub struct RoutedDiscovery {
     pending: Mutex<QueryTracker>,
     signer: ResponseSigner,
     replies: Mutex<ResponseBudget>,
+    #[cfg(test)]
+    trace: std::sync::OnceLock<Mutex<DiscoveryTrace>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveryWitness {
+    pub elapsed_ms: u128,
+    pub stage: &'static str,
+    pub endpoint: SocketAddr,
+    pub nonce: Option<Nonce>,
+    pub outcome: String,
+}
+
+#[cfg(test)]
+struct DiscoveryTrace {
+    started: Instant,
+    omitted: usize,
+    events: std::collections::VecDeque<DiscoveryWitness>,
 }
 
 #[derive(Default)]
@@ -90,7 +109,107 @@ impl RoutedDiscovery {
             pending: Mutex::new(QueryTracker::default()),
             signer,
             replies: Mutex::new(ResponseBudget::default()),
+            #[cfg(test)]
+            trace: std::sync::OnceLock::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_trace(&self) {
+        self.trace.get_or_init(|| {
+            Mutex::new(DiscoveryTrace {
+                started: Instant::now(),
+                omitted: 0,
+                events: std::collections::VecDeque::with_capacity(128),
+            })
+        });
+    }
+
+    // Callers release pending/reply/roster guards before tracing. Visibility
+    // admission may still be held; the trace guard acquires no other lock and
+    // never crosses an await. Snapshots only clone bounded public metadata.
+    #[cfg(test)]
+    fn witness(
+        &self,
+        stage: &'static str,
+        endpoint: SocketAddr,
+        nonce: Option<Nonce>,
+        outcome: impl FnOnce() -> String,
+    ) {
+        if let Some(trace) = self.trace.get() {
+            let outcome = outcome();
+            let mut trace = trace.lock().unwrap();
+            if trace.events.len() == 128 {
+                trace.events.pop_front();
+                trace.omitted += 1;
+            }
+            let elapsed_ms = trace.started.elapsed().as_millis();
+            trace.events.push_back(DiscoveryWitness {
+                elapsed_ms,
+                stage,
+                endpoint,
+                nonce,
+                outcome,
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trace_snapshot(&self) -> (usize, Vec<DiscoveryWitness>) {
+        self.trace.get().map_or_else(
+            || (0, Vec::new()),
+            |trace| {
+                let trace = trace.lock().unwrap();
+                (trace.omitted, trace.events.iter().cloned().collect())
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trace_watermark(&self) -> usize {
+        self.trace.get().map_or(0, |trace| {
+            let trace = trace.lock().unwrap();
+            trace.omitted + trace.events.len()
+        })
+    }
+
+    // No snapshot allocation: a cached peer is readiness only when this call's
+    // own endpoint/nonce also reached the roster with the expected verified binding.
+    #[cfg(test)]
+    pub(crate) fn fresh_certified_probe_since(
+        &self,
+        watermark: usize,
+        endpoint: SocketAddr,
+        user_id: &str,
+        account_id: &str,
+    ) -> bool {
+        let Some(trace) = self.trace.get() else {
+            return false;
+        };
+        let trace = trace.lock().unwrap();
+        if trace.omitted > watermark {
+            return false;
+        }
+        trace
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(index, event)| {
+                trace.omitted + index >= watermark
+                    && event.stage == "query_sent"
+                    && event.endpoint == endpoint
+            })
+            .take(2)
+            .any(|(_, sent)| {
+                sent.nonce.is_some()
+                    && trace.events.iter().enumerate().any(|(index, event)| {
+                        trace.omitted + index >= watermark
+                            && event.stage == "roster_identity"
+                            && event.endpoint == endpoint
+                            && event.nonce == sent.nonce
+                            && event.outcome.split_once(' ') == Some((user_id, account_id))
+                    })
+            })
     }
 
     /// One bounded query to an explicitly supplied candidate endpoint.
@@ -118,6 +237,8 @@ impl RoutedDiscovery {
                     return Ok(());
                 }
                 socket.try_send_to(&query::encode_query(nonce), target)?;
+                #[cfg(test)]
+                self.witness("query_sent", target, Some(nonce), || "ok".into());
                 sent = true;
                 Ok(())
             });
@@ -253,21 +374,52 @@ async fn run_listen_with_routed(
         }
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, source))) => {
+                #[cfg(test)]
+                if let Some(routed) = &routed {
+                    routed.witness("received", source, None, || "datagram".into());
+                }
                 if !visibility.accepts_source(source) {
+                    #[cfg(test)]
+                    if let Some(routed) = &routed {
+                        routed.witness("source_rejected", source, None, || "scope".into());
+                    }
                     continue;
                 }
                 if let Some(routed) = &routed {
                     if let Some(nonce) = query::decode_query(&buf[..n]) {
+                        #[cfg(test)]
+                        routed.witness("query_decoded", source, Some(nonce), || "ok".into());
                         let allowed = routed
                             .replies
                             .lock()
                             .expect("reply lock not poisoned")
                             .allow(source.ip(), Instant::now());
-                        if allowed
-                            && let Some(announce) = decode(&current_announce(&self_announce))
-                            && let Some(reply) = (routed.signer)(nonce, &announce)
-                        {
-                            let _ = visibility.send_announce(&socket, &reply, source).await;
+                        #[cfg(test)]
+                        routed.witness("query_quota", source, Some(nonce), || allowed.to_string());
+                        if allowed {
+                            let announce = decode(&current_announce(&self_announce));
+                            #[cfg(test)]
+                            routed.witness("announce_decoded", source, Some(nonce), || {
+                                announce.is_some().to_string()
+                            });
+                            if let Some(announce) = announce {
+                                let reply = (routed.signer)(nonce, &announce);
+                                #[cfg(test)]
+                                routed.witness("response_signed", source, Some(nonce), || {
+                                    reply.is_some().to_string()
+                                });
+                                if let Some(reply) = reply {
+                                    let _sent =
+                                        visibility.send_announce(&socket, &reply, source).await;
+                                    #[cfg(test)]
+                                    routed.witness("response_sent", source, Some(nonce), || {
+                                        match _sent {
+                                            Ok(sent) => sent.to_string(),
+                                            Err(error) => format!("{:?}", error.kind()),
+                                        }
+                                    });
+                                }
+                            }
                         }
                         continue;
                     }
@@ -277,6 +429,13 @@ async fn run_listen_with_routed(
                             .lock()
                             .expect("query lock not poisoned")
                             .accept_with_latency(source.ip(), &buf[..n], Instant::now());
+                        #[cfg(test)]
+                        routed.witness(
+                            "response_accepted",
+                            source,
+                            buf[..n].get(5..21).and_then(|bytes| bytes.try_into().ok()),
+                            || answer.is_some().to_string(),
+                        );
                         if let Some((announce, rtt)) = answer {
                             let outcome = roster
                                 .lock()
@@ -287,6 +446,23 @@ async fn run_listen_with_routed(
                                     &self_user_id,
                                     rtt,
                                 );
+                            #[cfg(test)]
+                            {
+                                let nonce =
+                                    buf[..n].get(5..21).and_then(|bytes| bytes.try_into().ok());
+                                routed.witness("roster_updated", source, nonce, || {
+                                    format!("{outcome:?}")
+                                });
+                                if outcome.accepted() {
+                                    routed.witness("roster_identity", source, nonce, || {
+                                        format!(
+                                            "{} {}",
+                                            announce.public().user_id(),
+                                            announce.account_id().as_deref().unwrap_or("")
+                                        )
+                                    });
+                                }
+                            }
                             if outcome == UpdateOutcome::New {
                                 let bytes = current_announce(&self_announce);
                                 let _ = visibility.send_announce(&socket, &bytes, source).await;
@@ -777,6 +953,42 @@ pub fn spawn_discovery_with_routed(
         routed,
         None,
     )
+    .into_handles()
+}
+
+/// Named producer ownership; public callers retain the historical four-handle order.
+pub(crate) struct DiscoveryTasks {
+    listener: JoinHandle<()>,
+    broadcast: JoinHandle<()>,
+    scan: JoinHandle<()>,
+    rejoin: JoinHandle<()>,
+    #[cfg(test)]
+    first_polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DiscoveryTasks {
+    pub(crate) fn into_handles(self) -> Vec<JoinHandle<()>> {
+        vec![self.listener, self.broadcast, self.scan, self.rejoin]
+    }
+    #[cfg(test)]
+    pub(crate) fn ambient_ids(&self) -> [tokio::task::Id; 3] {
+        [self.broadcast.id(), self.scan.id(), self.rejoin.id()]
+    }
+    #[cfg(test)]
+    pub(crate) fn ambient_first_polls(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.first_polls.clone()
+    }
+}
+
+#[cfg(test)]
+fn spawn_observed_ambient(
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+    first_polls: Arc<std::sync::atomic::AtomicUsize>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        first_polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        future.await;
+    })
 }
 
 pub(crate) fn spawn_discovery_with_network_changes(
@@ -789,40 +1001,60 @@ pub(crate) fn spawn_discovery_with_network_changes(
     visibility: Arc<DiscoveryVisibility>,
     routed: Option<Arc<RoutedDiscovery>>,
     network_changes: Option<tokio::sync::watch::Sender<u64>>,
-) -> Vec<JoinHandle<()>> {
+) -> DiscoveryTasks {
     let trigger = trigger.unwrap_or_else(|| Arc::new(Notify::new()));
     let target: SocketAddr = (
         crate::transport::net::DISCOVERY_MULTICAST_GROUP,
         discovery_port,
     )
         .into();
-    vec![
-        tokio::spawn(run_listen_with_routed(
-            Arc::clone(&socket),
-            roster,
-            self_user_id,
-            Arc::clone(&announce),
-            discovery_port,
-            Arc::clone(&visibility),
-            routed,
-        )),
-        tokio::spawn(run_broadcast_with_visibility(
-            Arc::clone(&socket),
-            Arc::clone(&announce),
-            target,
-            Duration::from_secs(2),
-            Some(Arc::clone(&trigger)),
-            Arc::clone(&visibility),
-        )),
-        tokio::spawn(run_scan_with_visibility(
-            Arc::clone(&socket),
-            announce,
-            discovery_port,
-            Some(Arc::clone(&trigger)),
-            visibility,
-        )),
-        tokio::spawn(run_rejoin(socket, trigger, network_changes)),
-    ]
+    #[cfg(test)]
+    let first_polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::spawn(run_listen_with_routed(
+        Arc::clone(&socket),
+        roster,
+        self_user_id,
+        Arc::clone(&announce),
+        discovery_port,
+        Arc::clone(&visibility),
+        routed,
+    ));
+    let broadcast = run_broadcast_with_visibility(
+        Arc::clone(&socket),
+        Arc::clone(&announce),
+        target,
+        Duration::from_secs(2),
+        Some(Arc::clone(&trigger)),
+        Arc::clone(&visibility),
+    );
+    #[cfg(test)]
+    let broadcast = spawn_observed_ambient(broadcast, first_polls.clone());
+    #[cfg(not(test))]
+    let broadcast = tokio::spawn(broadcast);
+    let scan = run_scan_with_visibility(
+        Arc::clone(&socket),
+        announce,
+        discovery_port,
+        Some(Arc::clone(&trigger)),
+        visibility,
+    );
+    #[cfg(test)]
+    let scan = spawn_observed_ambient(scan, first_polls.clone());
+    #[cfg(not(test))]
+    let scan = tokio::spawn(scan);
+    let rejoin = run_rejoin(socket, trigger, network_changes);
+    #[cfg(test)]
+    let rejoin = spawn_observed_ambient(rejoin, first_polls.clone());
+    #[cfg(not(test))]
+    let rejoin = tokio::spawn(rejoin);
+    DiscoveryTasks {
+        listener,
+        broadcast,
+        scan,
+        rejoin,
+        #[cfg(test)]
+        first_polls,
+    }
 }
 
 /// IPv6 uses unicast only; the existing IPv4 LAN multicast loop remains separate.
@@ -1078,6 +1310,7 @@ mod tests {
     async fn routed_query_roundtrip(delay: Duration, expected_lease: Duration) {
         let alice = Arc::new(DeviceIdentity::generate());
         let bob = Arc::new(DeviceIdentity::generate());
+        let bob_account = crate::identity::account::Account::generate();
         let a_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let b_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let a_roster = Arc::new(Mutex::new(Roster::default()));
@@ -1093,6 +1326,8 @@ mod tests {
                 query::encode_response(nonce, announce, &bob)
             })
         }));
+        a_queries.enable_trace();
+        b_queries.enable_trace();
         let a_task = tokio::spawn(run_listen_with_routed(
             Arc::clone(&a_socket),
             Arc::clone(&a_roster),
@@ -1106,11 +1341,17 @@ mod tests {
             Arc::clone(&b_socket),
             Arc::clone(&b_roster),
             bob.user_id(),
-            shared_announce(&Announce::new(&bob, "Bob", 41002)),
+            shared_announce(&Announce::new_with_account(
+                &bob,
+                &bob_account,
+                "Bob",
+                41002,
+            )),
             47474,
             Arc::new(DiscoveryVisibility::default()),
-            Some(b_queries),
+            Some(Arc::clone(&b_queries)),
         ));
+        let watermark = a_queries.trace_watermark();
         a_queries
             .probe(&a_socket, b_socket.local_addr().unwrap())
             .await
@@ -1135,8 +1376,124 @@ mod tests {
                 expected_lease
             );
         }
+        let endpoint = b_socket.local_addr().unwrap();
+        assert!(a_queries.fresh_certified_probe_since(
+            watermark,
+            endpoint,
+            &bob.user_id(),
+            &bob_account.account_id()
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            watermark,
+            endpoint,
+            "other-user",
+            &bob_account.account_id()
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            watermark,
+            endpoint,
+            &bob.user_id(),
+            "other-account"
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            watermark,
+            a_socket.local_addr().unwrap(),
+            &bob.user_id(),
+            &bob_account.account_id()
+        ));
+        assert!(!a_queries.fresh_certified_probe_since(
+            a_queries.trace_watermark(),
+            endpoint,
+            &bob.user_id(),
+            &bob_account.account_id()
+        ));
+        let (_, source_events) = a_queries.trace_snapshot();
+        assert!(
+            source_events
+                .iter()
+                .any(|event| event.stage == "response_accepted" && event.outcome == "true")
+        );
+        assert!(
+            source_events
+                .iter()
+                .any(|event| event.stage == "roster_updated")
+        );
+        let (_, target_events) = b_queries.trace_snapshot();
+        for stage in [
+            "received",
+            "query_decoded",
+            "query_quota",
+            "announce_decoded",
+            "response_signed",
+            "response_sent",
+        ] {
+            assert!(
+                target_events.iter().any(|event| event.stage == stage),
+                "missing {stage}: {target_events:?}"
+            );
+        }
+        let source = a_socket.local_addr().unwrap();
+        let first = target_events
+            .iter()
+            .find(|event| event.stage == "query_decoded")
+            .unwrap();
+        assert_eq!(first.endpoint, source);
+        assert!(first.nonce.is_some());
+        assert!(
+            target_events
+                .windows(2)
+                .all(|events| events[0].elapsed_ms <= events[1].elapsed_ms)
+        );
+        {
+            let mut budget = b_queries.replies.lock().unwrap();
+            let consumed = budget.recent[&source.ip()];
+            budget.observed_window = Some((consumed, Arc::new(Notify::new())));
+        }
+        a_queries
+            .probe(&a_socket, b_socket.local_addr().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !b_queries
+                .trace_snapshot()
+                .1
+                .iter()
+                .any(|event| event.stage == "query_quota" && event.outcome == "false")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual second UDP query must witness quota rejection");
+        let untraced = RoutedDiscovery::new(Arc::new(|_, _| None));
+        untraced.witness("unused", source, None, || {
+            panic!("disabled tracing must not construct outcome metadata")
+        });
+        assert!(untraced.trace_snapshot().1.is_empty());
+        let before = a_queries.trace_snapshot().1.len();
+        for _ in 0..130 {
+            b_queries.witness("bound_control", source, None, || "fixed".into());
+        }
+        let (omitted, bounded) = b_queries.trace_snapshot();
+        assert_eq!(bounded.len(), 128);
+        assert!(omitted >= 2);
+        assert_eq!(a_queries.trace_snapshot().1.len(), before);
+        for _ in 0..130 {
+            a_queries.witness("omitted_control", source, None, || "fixed".into());
+        }
+        assert!(
+            !a_queries.fresh_certified_probe_since(
+                watermark,
+                endpoint,
+                &bob.user_id(),
+                &bob_account.account_id()
+            ),
+            "omitted proof must remain pending"
+        );
         a_task.abort();
         b_task.abort();
+        assert!(a_task.await.unwrap_err().is_cancelled());
+        assert!(b_task.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]

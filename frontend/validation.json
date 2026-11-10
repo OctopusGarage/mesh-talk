@@ -3,7 +3,10 @@
   "contracts": [
     {
       "id": "frontend-memory-guardrails",
-      "paths": ["frontend/e2e/memory.spec.ts"],
+      "paths": [
+        "frontend/e2e/memory.spec.ts",
+        "frontend/e2e/helpers/conversation-churn.ts"
+      ],
       "frontend": [
         "src/features/chat/ConversationView.test.ts",
         "src/features/chat/useConversationViewport.test.ts",
@@ -20,7 +23,7 @@
         ]
       },
       "escalation": [
-        "Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
+        "Run the held-frame success/timeout/cleanup/recovery control, expiry before and after DOM sampling, and the extra-bubble negative control. Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
       ]
     },
     {
@@ -62,12 +65,20 @@
       "paths": [
         "frontend/src/components/ui/dialog.tsx",
         "frontend/src/components/ui/dialog.test.ts",
+        "frontend/src/components/ui/context-menu.tsx",
+        "frontend/src/components/ui/context-menu.test.ts",
+        "frontend/src/components/ui/focus-restoration.ts",
+        "frontend/e2e/context-menu-focus.spec.ts",
+        "frontend/e2e/helpers/ui-audit.ts",
         "frontend/e2e/helpers/sidebar-actions.ts",
         "frontend/e2e/minimum-window.spec.ts"
       ],
-      "frontend": ["src/components/ui/dialog.test.ts"],
+      "frontend": [
+        "src/components/ui/dialog.test.ts",
+        "src/components/ui/context-menu.test.ts"
+      ],
       "capability": {
-        "summary": "Preserve active focus ownership across deferred dialog closure and subsequent user interactions.",
+        "summary": "Preserve active focus ownership and visible keyboard indication across shared dialogs, menus and subsequent user interactions.",
         "guide": "docs/module-boundaries.md#dialog-focus-ownership",
         "invariants": [
           {
@@ -77,7 +88,7 @@
         ]
       },
       "escalation": [
-        "Use real Radix focus lifecycle tests for ordinary, nested, custom and newer-owner cases. A controlled real-browser deferred-close callback must leave a newly opened utility menu focused and open; the old owner must fail this regression. Exercise minimum-window navigation and consumers with custom focus restoration. Sidebar helpers must observe expanded/open menu state and use real scoped clicks. Preserve existing animations, focus traps, API callbacks, timeout budgets and native keyboard acceptance."
+        "Use real Radix focus lifecycle tests for ordinary, nested, custom and newer-owner cases. A controlled real-browser deferred-close callback must leave a newly opened utility menu focused and open; the old owner must fail this regression. Exercise minimum-window navigation and consumers with custom focus restoration. Sidebar helpers must observe expanded/open menu state and use real scoped clicks. Preserve existing animations, focus traps, API callbacks, timeout budgets and native keyboard acceptance. Run e2e/context-menu-focus.spec.ts and e2e/ui-audit-message-log.spec.ts with real keyboard navigation and activation in light/dark themes. Inspect resolved outline style, width and theme-token color after bounded CSS transitions; class presence alone is not focus evidence. Focus audit helpers retain their existing Escape cleanup by default; explicitly preserve a menu when the next assertion activates it."
       ]
     },
     {
@@ -635,7 +646,8 @@
         "frontend/src/store/conversationReactions.ts",
         "frontend/src/store/conversationReactions.test.ts",
         "frontend/src/features/chat/ReactionSummaryDialog.tsx",
-        "frontend/e2e/reaction-summaries.spec.ts"
+        "frontend/e2e/reaction-summaries.spec.ts",
+        "frontend/e2e/ui-audit-message-log.spec.ts"
       ],
       "frontend": [
         "src/store/conversationHistory.test.ts",
@@ -2351,6 +2363,7 @@
         ]
       },
       "escalation": [
+        "Initial group history uses exact row identity/text and visible geometry within the caller's original remaining deadline. Run absent/hidden, expired caller and post-sample expiry controls plus queued recovery with frames held; check observer/frame cleanup. Keep all subsequent live/read, anchor, focus and navigation assertions; browser readiness does not identify the cause of hosted rendering latency.",
         "Run frontend/e2e/ui-audit-shell.spec.ts and frontend/e2e/sidebar-row-layout.spec.ts for compact tool labels, full accessible names and side-by-side geometry. Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
       ]
     },
@@ -2563,7 +2576,10 @@
   "prScenarios": [
     {
       "id": "frontend-memory-guardrail-acceptance",
-      "paths": ["frontend/e2e/memory.spec.ts"],
+      "paths": [
+        "frontend/e2e/memory.spec.ts",
+        "frontend/e2e/helpers/conversation-churn.ts"
+      ],
       "browser": ["e2e/memory.spec.ts"]
     },
     {
@@ -2680,9 +2696,14 @@
         "frontend/src/components/",
         "frontend/src/features/chat/",
         "frontend/src/lib/theme.ts",
-        "frontend/src/store/theme.ts"
+        "frontend/src/store/theme.ts",
+        "frontend/e2e/context-menu-focus.spec.ts",
+        "frontend/e2e/helpers/ui-audit.ts"
       ],
-      "browser": ["e2e/ui-visual-regression.spec.ts"]
+      "browser": [
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/context-menu-focus.spec.ts"
+      ]
     },
     {
       "id": "frontend-bootstrap-acceptance",
@@ -3280,9 +3301,14 @@
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/reaction-summaries.spec.ts",
+        "frontend/e2e/ui-audit-message-log.spec.ts",
         "src-tauri/src/owner_commands/reactions.rs"
       ],
-      "browser": ["e2e/reaction-summaries.spec.ts", "e2e/chat.spec.ts"],
+      "browser": [
+        "e2e/reaction-summaries.spec.ts",
+        "e2e/ui-audit-message-log.spec.ts",
+        "e2e/chat.spec.ts"
+      ],
       "native": ["host"]
     },
     {

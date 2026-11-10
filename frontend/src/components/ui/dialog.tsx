@@ -3,6 +3,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
+import { preserveNewerFocusOnClose } from "./focus-restoration";
 
 const Dialog = DialogPrimitive.Root;
 const DialogTrigger = DialogPrimitive.Trigger;
@@ -40,21 +41,7 @@ const DialogContent = React.forwardRef<
         {...props}
         onCloseAutoFocus={(event) => {
           onCloseAutoFocus?.(event);
-          if (event.defaultPrevented) return;
-          // Radix FocusScope dispatches this event on the closing DOM element.
-          const closing = event.target as Element;
-          const ownerDocument = closing.ownerDocument;
-          const active = ownerDocument.activeElement;
-          // Radix restores focus after unmount. A newer interaction may have
-          // already focused another surface while that callback was queued.
-          if (
-            active?.isConnected &&
-            active !== ownerDocument.body &&
-            active !== ownerDocument.documentElement &&
-            !active.hasAttribute("data-radix-focus-guard") &&
-            !closing.contains(active)
-          )
-            event.preventDefault();
+          preserveNewerFocusOnClose(event);
         }}
       >
         {children}
