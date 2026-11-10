@@ -189,6 +189,15 @@ enum MailboxIntent {
     HistoryPublication,
 }
 
+/// Transport progress is separate from retained event custody. Semantic
+/// completion survives restart only after its owning durable fact is proved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessedWrapper {
+    Retained(EventId),
+    DurableSemantic,
+    SessionOnly,
+}
+
 /// One mailbox projection retained only between complete protocol exchanges.
 /// Cancellation requires discarding this state together with its channel.
 /// Retains principal-bound IDs and a two-MiB wrapper cache. Outgoing pages are
@@ -208,7 +217,7 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     deferred_events: HashSet<EventId>,
     missing_parents: Option<(EventId, Vec<EventId>)>,
     required_parent: Option<EventId>,
-    processed_events: HashMap<EventId, Option<EventId>>,
+    processed_events: HashMap<EventId, ProcessedWrapper>,
     wrapper_ids: HashMap<EventId, EventId>,
     wrappers: Mutex<WrapperCache>,
     incremental: incremental::Mode,
@@ -530,10 +539,10 @@ impl Node {
         // identifier budget, so a disabled cache cannot pin the same page.
         {
             let log = self.log.lock().expect("log lock not poisoned");
-            for (outer, inner) in &progress.processed_events {
-                if match inner {
-                    Some(inner) => log.has(inner)?,
-                    None => true,
+            for (outer, outcome) in &progress.processed_events {
+                if match outcome {
+                    ProcessedWrapper::Retained(inner) => log.has(inner)?,
+                    ProcessedWrapper::DurableSemantic | ProcessedWrapper::SessionOnly => true,
                 } {
                     seen.insert(*outer);
                 }
@@ -799,8 +808,19 @@ impl Node {
                         processed.push(outer_id);
                         continue;
                     }
+                    let inner_id = event.id;
                     match self.import_file_message_identity_checked(event) {
-                        Ok(()) | Err(FileMessageIdentityImportError::Invalid(_)) => {
+                        Ok(()) => {
+                            // The append-only binding and all import side effects
+                            // completed; raw log retention is not its authority.
+                            semantic.push((outer_id, inner_id));
+                            self.observe_mailbox_work(
+                                super::work_observation::reason::IDENTITY_HANDLED,
+                                None,
+                            );
+                            processed.push(outer_id)
+                        }
+                        Err(FileMessageIdentityImportError::Invalid(_)) => {
                             self.observe_mailbox_work(
                                 super::work_observation::reason::IDENTITY_HANDLED,
                                 None,
@@ -823,6 +843,12 @@ impl Node {
                 match self.accept_file_consent_event(&event, &progress.recipient) {
                     Ok(true) => {
                         self.remember_consent_transport(progress.mailbox.id(), outer_id, &event)?;
+                        // Recognized controls include ineligible/malformed ones.
+                        // Only an exact durable decision or authenticated own echo
+                        // qualifies this cursor for reuse in another runtime.
+                        if self.consent_transport_seen(progress.mailbox.id(), outer_id)? {
+                            semantic.push((outer_id, event.id));
+                        }
                         self.observe_mailbox_work(
                             super::work_observation::reason::CONSENT_HANDLED,
                             None,
@@ -954,17 +980,28 @@ impl Node {
             for (outer, inner) in retained.iter().chain(&semantic) {
                 self.remember_wrapper_id(progress.mailbox.id(), *inner, *outer);
             }
-            let durable_by_outer: HashMap<_, _> =
-                retained.iter().chain(&semantic).copied().collect();
+            let durable_by_outer: HashMap<_, _> = retained
+                .iter()
+                .map(|(outer, inner)| (*outer, ProcessedWrapper::Retained(*inner)))
+                .chain(
+                    semantic
+                        .iter()
+                        .map(|(outer, _)| (*outer, ProcessedWrapper::DurableSemantic)),
+                )
+                .collect();
             for outer in &processed {
                 if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
                     && !progress.processed_events.contains_key(outer)
                 {
                     return Err(super::session::SessionError::NoProgress);
                 }
-                progress
-                    .processed_events
-                    .insert(*outer, durable_by_outer.get(outer).copied());
+                progress.processed_events.insert(
+                    *outer,
+                    durable_by_outer
+                        .get(outer)
+                        .copied()
+                        .unwrap_or(ProcessedWrapper::SessionOnly),
+                );
             }
             if !retained.is_empty() {
                 self.opaque_receive_cache
@@ -1079,7 +1116,10 @@ mod permission_tests {
                 .unwrap();
             node.accept_opaque_wrappers(&mut progress, vec![outer.clone()])
                 .unwrap();
-            assert_eq!(progress.processed_events.get(&outer.id), Some(&None));
+            assert_eq!(
+                progress.processed_events.get(&outer.id),
+                Some(&ProcessedWrapper::SessionOnly)
+            );
             assert!(progress.deferred_events.is_empty());
             assert!(!node.log.lock().unwrap().has(&outer.id).unwrap());
             assert_eq!(

@@ -978,6 +978,14 @@ The [mailbox checkpoint regressions](../crates/mesh-talk-core/src/node/opaque_re
 cover fresh adapters without signature reopens, SQL commits or directory syncs,
 retired-runtime rejection and repair progress under its live owner.
 
+Classify retained custody, durable semantic processing and session-only handling
+separately. A successful immutable identity import or qualified monotonic control
+fact can preserve receive progress without retaining its raw event. Keep account
+and repair fences, conservative mixed/failed classifications and legacy exchange
+progress; semantic evidence must never enter HAVE or custody. The
+[incremental receive regressions](../crates/mesh-talk-core/src/node/opaque_relay/incremental_receive_tests.rs)
+retain the actual checkpoint through reopen instead of deleting it before testing.
+
 Keep retry scheduling distinct from durable progress. A bounded volatile order
 may replace repeated ticket writes, but must reconcile current pending rows,
 retain oversized attempts and publish only after the database operation succeeds.
@@ -1350,6 +1358,10 @@ protected task can still reach its genuine idle deadline. Test barriers belong
 before I/O, inside the owned child, with cancellation releasing their futures;
 post-send hooks must not hide that deadline. Do not repeat long preparation waits
 inside the measured held-read window.
+Historical scope completion does not prove an existing child or pair has retired.
+When a fixture requires a natural unpaired read, establish it through receiver-owned
+demand before publishing the Wake that deliberately creates its replacement; observe
+the exact setup task, page completion and pair retirement before arming the next hold.
 
 Concurrent actual-tool fixtures must own output directories, not only source
 and temporary data. A second Playwright invocation can otherwise clean a running

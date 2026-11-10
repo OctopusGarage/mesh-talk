@@ -492,6 +492,18 @@ impl Node {
     }
 
     #[cfg(test)]
+    pub(in crate::node) fn mailbox_receive_cursor_for_test(
+        &self,
+        key: &[u8],
+        mailbox: ConversationId,
+    ) -> Option<i64> {
+        self.load_mailbox_receipt(key, mailbox)
+            .unwrap()
+            .cursor
+            .map(|cursor| cursor.after)
+    }
+
+    #[cfg(test)]
     pub(in crate::node) fn seed_duplex_receipt_pending_for_test(
         &self,
         relay: &PublicIdentity,
@@ -687,8 +699,8 @@ impl Node {
                     self.recover_mailbox_parents(channel, p, child, cursor, missing)
                         .await?;
                 }
-                if let Some(inner) = p.processed_events.get(&id) {
-                    if inner.is_none() {
+                if let Some(outcome) = p.processed_events.get(&id) {
+                    if *outcome == super::ProcessedWrapper::SessionOnly {
                         state_mut(p).receipt.session_only = true;
                     }
                     p.deferred_events.remove(&id);

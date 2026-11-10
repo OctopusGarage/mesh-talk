@@ -248,16 +248,226 @@ async fn incremental_unfinished_upload_survives_fifth_scope_pressure() {
 }
 
 #[tokio::test]
+async fn incremental_receive_imported_identity_cursor_survives_reopen() {
+    use crate::eventlog::sync::network::NetworkSyncStore;
+    let directory = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let relay_directory = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let keys = identity.secret_bytes();
+    let account = Account::generate();
+    let account_key = account.secret_bytes();
+    let remote = DeviceIdentity::generate();
+    let remote_account = Account::generate();
+    let proof =
+        crate::discovery::Announce::new_with_account(&remote, &remote_account, "Remote", 47475);
+    let recipient =
+        crate::discovery::Announce::new_with_account(&identity, &account, "Recipient", 47476);
+    let (sender, _, _) = super::super::test_support::node_with_files(
+        source.path(),
+        remote,
+        remote_account,
+        &recipient,
+    );
+    let (node, _, _) =
+        super::super::test_support::node_with_files(directory.path(), identity, account, &proof);
+    node.cached_peer_snapshot_async().await.unwrap();
+    let path = source.path().join("identity.bin");
+    std::fs::write(&path, b"durable identity cursor").unwrap();
+    let (card, _) = sender
+        .enqueue_file_to_account(&node.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let original = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(card)
+        .unwrap()
+        .destinations[0]
+        .event
+        .clone();
+    node.log
+        .lock()
+        .unwrap()
+        .append_durable(original.clone())
+        .unwrap();
+    node.process_file_events(original.conversation_id);
+    let bundle = sender.file_message_identity_bundle(card).unwrap().unwrap();
+    assert!(
+        node.file_message_identities
+            .lock()
+            .unwrap()
+            .bundle(original.id)
+            .unwrap()
+            .is_none()
+    );
+    node.set_post_office_permissions(false, true);
+    let relay = DeviceIdentity::generate();
+    let mailbox = RelayMailbox::federated(&node.identity, &proof.public()).unwrap();
+    let mut office = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_directory.path()).unwrap(),
+        &relay_directory.path().join("relay.log"),
+        "pw",
+        DeviceIdentity::generate(),
+    )
+    .unwrap();
+    office.ingest(mailbox.wrap(&bundle).unwrap()).unwrap();
+    let key = bincode::serialize(&(
+        relay.public(),
+        proof.public(),
+        mailbox.id(),
+        Option::<ConversationId>::None,
+    ))
+    .unwrap();
+    exchange_receive_only(&node, office.clone(), &relay, &proof.public()).await;
+    assert_eq!(
+        node.file_message_identities
+            .lock()
+            .unwrap()
+            .bundle(original.id)
+            .unwrap()
+            .unwrap(),
+        bundle
+    );
+    assert!(!node.log.lock().unwrap().has(&bundle.id).unwrap());
+    let cursor = node.mailbox_receive_cursor_for_test(&key, mailbox.id());
+    assert!(cursor.is_some_and(|after| after > 0));
+    let reads = office.state.body_read_counts();
+    drop(node);
+    let (node, _, _) = super::super::test_support::node_with_files(
+        directory.path(),
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        Account::from_secret_bytes(account_key),
+        &proof,
+    );
+    node.cached_peer_snapshot_async().await.unwrap();
+    node.set_post_office_permissions(false, true);
+    assert_eq!(
+        node.mailbox_receive_cursor_for_test(&key, mailbox.id()),
+        cursor,
+        "a fully imported durable identity must preserve receive progress across reopen"
+    );
+    exchange_receive_only(&node, office.clone(), &relay, &proof.public()).await;
+    assert_eq!(
+        office.state.body_read_counts(),
+        reads,
+        "resuming an imported identity cursor must not GET its control again"
+    );
+    assert!(!node.log.lock().unwrap().has(&bundle.id).unwrap());
+
+    // A legacy active exchange must retain semantic progress even when the
+    // optional durable cache is disabled. The identity owner remains durable.
+    std::fs::write(
+        directory.path().join("events.log.opaque-receive"),
+        b"unavailable optional cache",
+    )
+    .unwrap();
+    *node.opaque_receive_cache.lock().unwrap() =
+        super::super::opaque_receive_cache::OpaqueReceiveCache::open(
+            node.storage.clone(),
+            &directory.path().join("events.log"),
+            "pw",
+            &node.identity.public(),
+            &node.account_id(),
+        );
+    assert!(
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .get_wrapper_hint(b"disabled-cache-probe")
+            .is_err(),
+        "fixture must disable optional durable hints"
+    );
+    let relay_keys = relay.secret_bytes();
+    let endpoint = IndexedRelayEndpoint::new(office.clone(), None, None);
+    let (client, server) = tokio::io::duplex(256 * 1024);
+    let task = tokio::spawn(async move {
+        let identity = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
+        let channel = crate::transport::SecureChannel::accept(server, &identity)
+            .await
+            .unwrap();
+        endpoint
+            .serve_connection_checked(channel, None)
+            .await
+            .unwrap();
+    });
+    let mut channel =
+        crate::transport::SecureChannel::connect(client, &node.identity, Some(&relay.public()))
+            .await
+            .unwrap();
+    let mut progress = OpaqueMailboxProgress::new(
+        &relay.public(),
+        &proof.public(),
+        None,
+        RelayMailbox::federated(&node.identity, &proof.public()).unwrap(),
+    );
+    progress.incremental = incremental::Mode::Legacy;
+    let outer_id = mailbox.wrap(&bundle).unwrap().id;
+    let mut classified_reads = None;
+    let mut complete = false;
+    for _ in 0..16 {
+        complete = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            node.advance_opaque_mailbox(&mut channel, &mut progress),
+        )
+        .await
+        .expect("legacy control exchange must remain bounded")
+        .unwrap();
+        if progress.processed_events.get(&outer_id) == Some(&ProcessedWrapper::DurableSemantic) {
+            classified_reads.get_or_insert_with(|| office.state.body_read_counts());
+        }
+        if complete {
+            break;
+        }
+    }
+    drop(channel);
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        complete,
+        "legacy semantic progress must not pin its receive page"
+    );
+    assert_eq!(
+        Some(office.state.body_read_counts()),
+        classified_reads,
+        "classified semantic control must not be fetched again within the legacy exchange"
+    );
+    assert!(!node.log.lock().unwrap().has(&bundle.id).unwrap());
+    assert!(
+        node.opaque_receive_cache
+            .lock()
+            .unwrap()
+            .retained_seen_selected(mailbox.id(), &[outer_id], &node.log.lock().unwrap())
+            .unwrap()
+            .is_empty(),
+        "semantic progress must never establish retained custody"
+    );
+}
+
+#[tokio::test]
 async fn incremental_receive_exact_consent_mapping_survives_reopen() {
-    assert_consent_mapping_survives_reopen(false).await;
+    assert_consent_mapping_survives_reopen(false, false, false).await;
 }
 
 #[tokio::test]
 async fn incremental_receive_own_consent_mapping_survives_reopen() {
-    assert_consent_mapping_survives_reopen(true).await;
+    assert_consent_mapping_survives_reopen(true, false, false).await;
 }
 
-async fn assert_consent_mapping_survives_reopen(own: bool) {
+#[tokio::test]
+async fn incremental_receive_mixed_unknown_control_keeps_restart_repair() {
+    assert_consent_mapping_survives_reopen(true, true, false).await;
+}
+
+#[tokio::test]
+async fn incremental_receive_failed_consent_hint_keeps_restart_repair() {
+    assert_consent_mapping_survives_reopen(true, false, true).await;
+}
+
+async fn assert_consent_mapping_survives_reopen(own: bool, unknown: bool, cache_failure: bool) {
     use crate::eventlog::sync::network::NetworkSyncStore;
     let directory = tempfile::tempdir().unwrap();
     let relay_directory = tempfile::tempdir().unwrap();
@@ -322,6 +532,17 @@ async fn assert_consent_mapping_survives_reopen(own: bool) {
     let outer = mailbox.wrap(&event).unwrap();
     let outer_id = outer.id;
     office.ingest(outer).unwrap();
+    if unknown {
+        let mut missing = payload.clone();
+        missing.sender = node.identity.public();
+        missing.recipient = remote.public();
+        missing.sender_account = Some(node.account_id());
+        missing.recipient_account = remote_account.account_id();
+        missing.manifest = EventId::new([184; 32]);
+        office
+            .ingest(mailbox.wrap(&missing.event(&remote, 1).unwrap()).unwrap())
+            .unwrap();
+    }
     let key = bincode::serialize(&(
         relay.public(),
         remote.public(),
@@ -329,6 +550,12 @@ async fn assert_consent_mapping_survives_reopen(own: bool) {
         Option::<ConversationId>::None,
     ))
     .unwrap();
+    if cache_failure {
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_consent_hint_insert BEFORE INSERT ON opaque_wrapper_ids BEGIN SELECT RAISE(FAIL,'consent hint unavailable'); END")?;
+            Ok(())
+        }).unwrap();
+    }
     let before = office.state.body_read_counts();
     exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
     let classified = office.state.body_read_counts();
@@ -337,22 +564,23 @@ async fn assert_consent_mapping_survives_reopen(own: bool) {
         "first classification must perform authenticated GET"
     );
     assert!(!node.log.lock().unwrap().has(&event.id).unwrap());
-    node.opaque_receive_cache
-        .lock()
-        .unwrap()
-        .remove_checkpoint(&key)
-        .unwrap();
+    let cursor = node.mailbox_receive_cursor_for_test(&key, mailbox.id());
+    assert!(cursor.is_some_and(|after| after > 0));
     exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
     assert_eq!(
         office.state.body_read_counts(),
         classified,
         "fresh operation must reuse classification"
     );
-    node.opaque_receive_cache
-        .lock()
-        .unwrap()
-        .remove_checkpoint(&key)
-        .unwrap();
+    if cache_failure {
+        node.storage
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_consent_hint_insert")?;
+                Ok(())
+            })
+            .unwrap();
+    }
     drop(node);
     let (node, _, _) = super::super::test_support::node_with_files(
         directory.path(),
@@ -362,12 +590,23 @@ async fn assert_consent_mapping_survives_reopen(own: bool) {
     );
     node.cached_peer_snapshot_async().await.unwrap();
     node.set_post_office_permissions(false, true);
-    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
     assert_eq!(
-        office.state.body_read_counts(),
-        classified,
-        "reopen must reuse current durable consent evidence"
+        node.mailbox_receive_cursor_for_test(&key, mailbox.id()),
+        if unknown || cache_failure {
+            None
+        } else {
+            cursor
+        },
+        "only an unqualified control may invalidate the persisted receive cursor at reopen"
     );
+    exchange_receive_only(&node, office.clone(), &relay, &remote.public()).await;
+    if !unknown && !cache_failure {
+        assert_eq!(
+            office.state.body_read_counts(),
+            classified,
+            "reopen must reuse current durable consent evidence"
+        );
+    }
     assert!(!node.log.lock().unwrap().has(&event.id).unwrap());
     assert!(
         node.opaque_receive_cache

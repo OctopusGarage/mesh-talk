@@ -1700,6 +1700,76 @@ pub(in crate::node) mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct SelfControlSetupComparison {
+        settled: bool,
+        paired: bool,
+        page_finished: bool,
+        task: Option<tokio::task::Id>,
+    }
+
+    impl SelfControlSetupComparison {
+        fn observe(&mut self, event: &str, task: Option<tokio::task::Id>) {
+            if event.starts_with("control_task ") {
+                self.settled = false;
+                self.page_finished = false;
+                self.task = task;
+                self.paired |= event.starts_with("control_task paired=true ");
+            } else if event.starts_with("control_cancel ") && event.ends_with("reason=same_source")
+            {
+                self.settled = false;
+                self.page_finished = false;
+                self.paired = true;
+            } else if task.is_some() && task == self.task {
+                if event == "document_scope_settled scope=Control" {
+                    self.settled = true;
+                } else if event.starts_with("page_end ") && event.contains("outcome=ok") {
+                    self.page_finished = true;
+                }
+            }
+            if event == "control_pair_retired" {
+                self.paired = false;
+            }
+        }
+
+        fn ready(&self) -> bool {
+            self.settled && self.page_finished && !self.paired
+        }
+    }
+
+    #[tokio::test]
+    async fn self_control_setup_barrier_requires_exact_page_and_pair_retirement() {
+        tokio::spawn(async {
+            let task = Some(tokio::task::id());
+            let mut comparison = SelfControlSetupComparison::default();
+            comparison.observe("control_task paired=false protected=false ", task);
+            comparison.observe("document_scope_settled scope=Control", task);
+            assert!(
+                !comparison.ready(),
+                "scope settlement is not page retirement"
+            );
+            comparison.observe("page_end outcome=ok", None);
+            assert!(!comparison.ready(), "another task cannot finish this page");
+            comparison.observe("control_cancel task=old reason=same_source", None);
+            comparison.observe("control_task paired=true protected=true ", task);
+            comparison.observe("document_scope_settled scope=Control", task);
+            comparison.observe("page_end outcome=ok", task);
+            assert!(
+                !comparison.ready(),
+                "the completed child still owes its pair"
+            );
+            comparison.observe("control_pair_retired", None);
+            assert!(comparison.ready());
+            comparison.observe("control_task paired=false protected=false ", task);
+            assert!(
+                !comparison.ready(),
+                "a new child invalidates historical readiness"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
     struct SelfControlRequestHold {
         pages: std::sync::Mutex<crate::node::account_group::ControlTestPages>,
         original: std::sync::Mutex<Option<(tokio::task::Id, std::sync::Weak<()>)>>,
@@ -1709,6 +1779,8 @@ pub(in crate::node) mod tests {
         admitted: std::sync::atomic::AtomicBool,
         published: std::sync::atomic::AtomicBool,
         setup_wake_revision: std::sync::atomic::AtomicU64,
+        setup_comparison: std::sync::Mutex<SelfControlSetupComparison>,
+        rejected_original: std::sync::Mutex<[u64; 5]>,
         setup_wake_observed: std::sync::Mutex<Option<std::time::Instant>>,
         first_wake_revision: std::sync::atomic::AtomicU64,
         wake_received: std::sync::atomic::AtomicBool,
@@ -1728,6 +1800,8 @@ pub(in crate::node) mod tests {
                 admitted: Default::default(),
                 published: Default::default(),
                 setup_wake_revision: Default::default(),
+                setup_comparison: Default::default(),
+                rejected_original: Default::default(),
                 setup_wake_observed: Default::default(),
                 first_wake_revision: Default::default(),
                 wake_received: Default::default(),
@@ -1764,6 +1838,19 @@ pub(in crate::node) mod tests {
                     self.wake_received.store(true, Ordering::Release);
                 }
             }
+            if self.setup_wake_observed.lock().unwrap().is_some()
+                && !self.armed.load(Ordering::Acquire)
+            {
+                self.setup_comparison
+                    .lock()
+                    .unwrap()
+                    .observe(event, tokio::task::try_id());
+            }
+        }
+
+        fn reject_original(&self, reason: usize) {
+            let mut rejected = self.rejected_original.lock().unwrap();
+            rejected[reason] = rejected[reason].saturating_add(1);
         }
 
         async fn hold_original(
@@ -1776,8 +1863,15 @@ pub(in crate::node) mod tests {
             }
             let candidate = {
                 let pages = self.pages.lock().unwrap();
-                pages.live_request(request).and_then(|page| {
-                    let lifetime = pages.lifetime(page.task)?;
+                let page = pages.live_request(request);
+                if page.is_none() {
+                    self.reject_original(0);
+                }
+                page.and_then(|page| {
+                    let Some(lifetime) = pages.lifetime(page.task) else {
+                        self.reject_original(1);
+                        return None;
+                    };
                     Some((page, lifetime))
                 })
             };
@@ -1801,11 +1895,15 @@ pub(in crate::node) mod tests {
                     .unwrap()
                     .is_some_and(|at| page.dispatched_at >= at)
                 {
+                    self.reject_original(2);
                     return;
                 }
-                if !page.dispatch().is_some_and(|dispatch| {
-                    !dispatch.paired && !dispatch.protected && dispatch.natural_origin()
-                }) {
+                let Some(dispatch) = page.dispatch() else {
+                    self.reject_original(3);
+                    return;
+                };
+                if dispatch.paired || dispatch.protected || !dispatch.natural_origin() {
+                    self.reject_original(4);
                     return;
                 }
                 *original = Some((page.task, lifetime));
@@ -2630,14 +2728,12 @@ pub(in crate::node) mod tests {
             .new_account_group_operation_id(&shared.account_id())
             .unwrap();
         if let Some(hold) = request_hold.as_ref() {
-            hold.armed.store(true, std::sync::atomic::Ordering::Release);
-            // Settled unchanged comparisons stay idle. Create actual signed
-            // requester input after arming the hold, then send its authenticated
-            // Wake within the original readiness deadline. This is not the
-            // operation publication whose later Wake must retire the held read.
-            observe_self_control_by_deadline(readiness_deadline, async {
+            // Finish real signed setup and its comparison debt before arming.
+            // A publication Wake may legitimately replace an older active read;
+            // that paired replacement cannot witness our natural original.
+            let setup_key = observe_self_control_by_deadline(readiness_deadline, async {
                 use crate::node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
-                crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                let key = crate::node::account_documents::sync::seed_legacy_control_page_for_test(
                     &reference,
                     ConversationId::new([67; 32]),
                 );
@@ -2666,14 +2762,28 @@ pub(in crate::node) mod tests {
                     Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: received, revision: received_revision }))
                     if received == epoch && received_revision == revision));
                 channel.recycle(&reference);
+                key
             })
             .await
             .expect("changed requester input must wake its executor before self-control admission");
-            online.account_sync_notify.notify_one();
+            wait_self_control_noise_diagnosed(
+                readiness_deadline,
+                || {
+                    let comparison_ready = hold.setup_comparison.lock().unwrap().ready();
+                    comparison_ready
+                        && online.account_document_meta(&setup_key)
+                            == reference.account_document_meta(&setup_key)
+                },
+                || format!("the actual setup Control comparison and pair must finish before arming; comparison={:?}; trace={:?}", hold.setup_comparison.lock().unwrap(), trace.lock().unwrap()),
+            ).await;
+            hold.armed.store(true, std::sync::atomic::Ordering::Release);
+            // Receiver-owned demand creates a fresh natural comparison without
+            // a new publisher Wake preempting it before the operation is admitted.
+            online.request_sibling_pull_for_test(&reference.identity.public());
             wait_self_control_noise_diagnosed(
                 readiness_deadline,
                 || hold.original.lock().unwrap().is_some() && hold.server_live(),
-                || format!("the exact executor must own a live unpaired read from the requester before admission; hold_flags={:?}", hold.flags()),
+                || format!("the exact executor must own a live unpaired read from the requester before admission; hold_flags={:?}; rejected_no_live_missing_lifetime_pre_wake_missing_dispatch_ineligible_origin={:?}; bounded_trace={:?}", hold.flags(), *hold.rejected_original.lock().unwrap(), trace.lock().unwrap()),
             ).await;
         }
         trace.lock().unwrap().push_back((
