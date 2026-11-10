@@ -1,0 +1,903 @@
+# AGENTS.md instructions for /Users/kingsonwu/programming/OctopusGarage/mesh-talk
+
+<INSTRUCTIONS>
+These AGENTS.md instructions replace all previously provided AGENTS.md instructions.
+
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool** (when available): `codegraph_explore` answers most code questions in one call — the relevant symbols' verbatim source plus the call paths between them, including dynamic-dispatch hops grep can't follow. Name a file or symbol in the query to read its current line-numbered source. If it's listed but deferred, load it by name via tool search.
+- **Shell** (always works): `codegraph explore "<symbol names or question>"` prints the same output.
+
+If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
+<!-- CODEGRAPH_END -->
+
+<!-- ENGLISH_PILOT_GUIDANCE_START -->
+## EnglishPilot
+
+Do not derail the main task. When the user prompt is allowed, complete the requested work first.
+If the prompt contains any Chinese fragment, awkward English, or an obvious everyday phrasing improvement, add one English note at the end of the final response when allowed and teachable.
+In force/high intensity, treat this as required unless there is genuinely no useful improvement.
+
+When the english-pilot MCP server is available, use `english_coaching_context` to get the configured note depth and response guidance before writing the final answer.
+Use `english_rewrite_text` and `english_pronounce_text` for structured help when useful.
+
+If MCP is unavailable, prefer this fallback format:
+Use a Rich English Note by default: 5-8 useful lines, brief enough for a final response but rich enough for study.
+Use this shape:
+English note:
+Original: "fix this problem"
+Better: "fix this issue" / "resolve this startup issue"
+Why: In engineering conversations, "issue" is more precise than "problem" when discussing bugs, failures, tickets, or startup errors.
+Useful patterns:
+- "The MCP client failed during the startup handshake."
+- "This issue belongs at the config boundary, not the runtime path."
+Collocations: startup issue, handshake failure, config mismatch, reproduce the issue, verify the fix
+Common mistake: Use "problem" for general trouble; use "issue" for bugs, tickets, incidents, and engineering discussions.
+IPA: issue /ˈɪʃuː/ or /ˈɪsjuː/
+
+When the user asks for a recap, lesson, speech, or review based on their history, use `english_learning_brief`, `english_input_history`, or `english_notes_history` before answering.
+Do not add an English note for prompts blocked by the EnglishPilot hook.
+<!-- ENGLISH_PILOT_GUIDANCE_END -->
+<!-- MESH_TALK_AGENT_ACCESS_START -->
+Mesh Talk local API: "http://127.0.0.1:62865/v1/help".
+Read this help URL before using the API for user-authorized tasks.
+The desktop app must be running and unlocked, with agent access enabled.
+<!-- MESH_TALK_AGENT_ACCESS_END -->
+
+--- project-doc ---
+
+# Repository Guidelines
+
+## Reliability before implementation
+
+- Before implementing, refactoring, fixing or reviewing code, read the
+  [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules
+  triggered by the changed boundaries, and inspect the owning code and callers.
+  For concurrency/lifecycle changes, trace lock order, wait dependencies, actual
+  work ownership, cancellation and commit authority before editing.
+- Validate the applicable failure and recovery paths, not only the happy path.
+  Record concrete evidence and remaining limits; a timeout, successful build or
+  passing subset is not proof that UI freezes or all deadlocks are impossible.
+- When a confirmed defect exposes a reusable failure pattern, update that guide's
+  existing rule or add a distinct rule with its owner and regression evidence.
+  Maintain the owning contract and test selectors; keep incident logs out of the guide.
+
+## Project Structure & Module Organization
+
+- Four-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
+  `mesh_talk_core` + the `mesh-talk-node` CLI bin in `src/bin/`): feature modules `node/`,
+  `identity/`, `transport/`, `discovery/`, `eventlog/`, `ratchet/`, `channel/`, `dm.rs`,
+  `file/`, `postoffice/`, `storage/`. `src-tauri/` is the Tauri desktop app: entry
+  `src/main.rs` → `lib.rs`, IPC glue in `commands.rs` (auth) + `chat_commands/` (messaging)
+  - `events.rs`, plus `state.rs`, `tray.rs`, `services/` (auth only).
+- `crates/mesh-talk-integrations/` owns scoped local messaging grants, private IPC,
+  and the dedicated bot host/admin CLI; `crates/mesh-talk-mcp/` adapts its four
+  send/context/status tools to the official MCP SDK. Neither owns mesh crypto.
+- Integration/e2e suites live in `crates/mesh-talk-core/tests/` (`two_node_cli`,
+  `persistent_history`, `post_office_offline`, `decoder_smoke`); keep unit tests inline via
+  `mod tests` (e.g. `node/node_tests.rs`).
+- React client sits in `frontend/src`; Vite tooling in `frontend/package.json`.
+- Operational scripts in `scripts/` (`setup-hooks.sh`, `check-health.sh`); architecture in
+  `docs/ARCHITECTURE.md`; conventions in `specifications/`. The
+  [documentation map](docs/README.md) routes readers to maintained guides; the
+  [documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md) define ownership
+  across the README, guides, and project site.
+
+## Build, Test, and Development Commands
+
+- `make dev` primes Rust + Node deps and installs git hooks.
+- `make build` / `make frontend-build` — release build / Vite production build.
+- During feature development, preview changed-boundary validation with `make test-plan`
+  and run it with `make test-changed`. Unmapped changes require an explicit owner
+  and reason; inspect escalation notes for browser/native or consumer checks.
+  Use `make verify-plan` / `make verify-changed` at task completion to compose the
+  same affected tests with applicable formatting, lint/types and builds. The
+  test-only commands do not include static checks; neither mode replaces required
+  PR/review, browser/native or release gates. `make validation-report` separates
+  queue and execution costs; `make validation-audit` compares a clean affected
+  plan with same-source broader failure evidence before narrowing any gate.
+  Read selected capability references and inspect pending browser/native requirements.
+  Execution prints a structured feedback report; follow the
+  [validation protocol](docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
+  for completed work, remaining evidence and additive semantic selections.
+- During feature development, run affected tests only: `make test-focused
+TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
+  tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.
+  `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`
+  selects a frontend unit file. `make test` runs the full workspace suite
+  (`cargo test --workspace`) for pre-PR and CI gates;
+  `make e2e` runs the `#[ignore]`d multi-process backend rigs; `cd frontend && npm run e2e`
+  runs the Playwright UI suite. Test builds use cheap KDF params (the `fast-test-kdf`
+  feature), and `.cargo/config.toml` caps test/compile parallelism.
+- UI / node spot checks: `make tauri-dev`, `make frontend-dev`,
+  `cargo run -p mesh-talk-core --bin mesh-talk-node -- --keystore /tmp/a.keystore
+--password pw --name alice` (add `--post-office` for relay mode).
+
+## Coding Style & Naming Conventions
+
+- Rust: `cargo fmt` (4-space, `snake_case` modules, `UpperCamelCase` types) +
+  **`cargo clippy --all-targets -- -D warnings`** (must match CI — `--all-targets` covers
+  tests/benches).
+- Frontend: `npm run format` (Prettier) + `npm run lint` (ESLint flat config).
+- Write documentation and reusable prompts in English unless a specific exception is needed.
+- Reference `specifications/development_conventions.md` for naming nuances.
+
+## Domain Language
+
+- `CONTEXT.md` is the canonical domain glossary. `docs/domain-design.md` indexes
+  the modeling references and defines DDD vocabulary and naming translations.
+- Distinguish local users, accounts and devices; desktop, transport and ratchet
+  sessions; discovery, presence, custody, recipient delivery and read state.
+- Use explicit identity/lifetime names in new code. Preserve public, wire and
+  stored identifiers unless a separately validated compatibility change is intended.
+- Update the glossary and affected owning guides when a domain meaning changes;
+  link to definitions instead of maintaining duplicate glossaries.
+
+## Architecture & Components
+
+- Before adding business logic, consult [module ownership and reuse](docs/module-boundaries.md),
+  inspect the owning module and its callers, and extend its existing implementation.
+  Parallel tasks should name their owned paths and shared-interface dependencies;
+  coordinate changes to shared interfaces through one integration owner. Keep
+  feature-specific helpers local and share rules when their meaning and lifecycle
+  are the same. The guide owns the detailed assignment and handoff contract.
+- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
+- The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
+  (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
+  low-level socket in `transport/net.rs`) + the content-addressed event log + DM/channel/
+  file crypto. Messages are events synced as a bounded append-only log, account-addressed
+  across a user's devices; optional offline custody via equal eligible post offices.
+  Routed discovery and opt-in post-office federation connect reachable sites without
+  joining their IP subnets. Wire formats are versioned bincode.
+- See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport;
+  **`docs/network-design-reference.md`** owns the communication invariants,
+  module contracts, resource budgets and topology acceptance boundaries.
+
+## Maintaining standards as requirements change
+
+- Before changing tests, fixtures, dependencies or workflows in ways that affect
+  CI cost or reliability, read [CI maintenance](docs/ci-maintenance.md). Reuse
+  existing owners, measure the affected cost, and preserve acceptance evidence;
+  keep required-check policy in its existing owner.
+- Before implementation, identify the existing decision owner, authoritative rule,
+  observable acceptance criteria, affected consumers and required boundary evidence.
+  Extend the owning implementation and `validation.json`; new business capabilities
+  should link their guide and invariants. Explain an unchanged contract in the PR.
+- Run `make standards-check` after adding/moving source or changing contracts. It
+  checks structural ownership and maintained references, including new files; it
+  does not prove assertion quality, semantic completeness or candidate readiness.
+  Hooks inspect the working tree, so partially staged commits still need a clean
+  committed-candidate check in CI. Frontend dependencies must be installed.
+- When CI exposes a local omission or flaky fixture, fix the owning selector, task
+  or fixture and add a focused regression. Review timing and selection evidence
+  before changing policy. Follow the maintained
+  [requirement maintenance loop](docs/testing-feedback-loop.md#maintaining-standards-across-requirements).
+
+## Testing Guidelines
+
+- Integration coverage in `crates/mesh-talk-core/tests/` and `node/node_tests.rs`; embed
+  unit tests near the code. Networking/crypto changes ship a loopback integration assertion.
+- Backend multi-process E2E via `make e2e` (CI: `e2e-backend.yml`); Playwright UI E2E via
+  `cd frontend && npm run e2e` (CI: `e2e-ui.yml`).
+- Do not run full suites or E2E automatically during ordinary feature work. Run
+  the affected unit or integration tests as changes are made; run E2E and the
+  comprehensive health gate on explicit request, for optional full local preparation,
+  or in CI.
+- See `docs/testing-feedback-loop.md` for selection examples and escalation triggers.
+- Document executed validation commands in every PR; ensure `make test` passes
+  locally or through its matching CI workspace suite before merge.
+
+## Commit & Pull Request Guidelines
+
+- Before changing product versions or release automation, read [the version lifecycle](docs/updates.md#version-ownership-and-lifecycle).
+  Root `Cargo.toml` `[workspace.package].version` is authoritative. Use
+  `node scripts/release/version.mjs check|sync|prepare VERSION` (the `VERSION` argument belongs
+  to `prepare` only); do not hand-edit generated npm/Cargo lock metadata or introduce another
+  version constant. Root private npm metadata is a checked release-tooling projection;
+  frontend private metadata is versionless and Tauri inherits Cargo. Never broadly replace
+  matching dependency, fixture, history, wire or schema versions. Keep source builds `BASE-dev`,
+  Nightlies `BASE-nightly.RUN.ATTEMPT`, official tagged builds `BASE`, and standard SemVer ordering.
+- Version/changelog preparation and next-development-target changes use reviewed PRs. Ordinary main
+  pushes must not create automatic release proposals or commit-derived product notes. Stable publication
+  remains explicit through the existing verified tagged-release workflow; no direct main push,
+  public empty release, mutable published tag or gate bypass. Nightly publication requires trusted
+  `main` and a target above the latest Stable. Future changes must extend the existing version
+  owner, its tests, standards/CI enforcement and capability contracts together; the owning guide
+  documents permissions, bot-PR checks, dispatch and recovery requirements. Manual Stable draft
+  preparation uses the reviewed exact-version CHANGELOG section and requires exact-source checks
+  before creating its immutable tag/draft. The fixed release-history
+  migration floor is historical provenance; never advance it during ordinary version bumps.
+
+- Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
+  `specifications/git_standards.md`. Squash WIP; link issues. When asked to merge,
+  default to squash merge unless the user explicitly requests another strategy;
+  follow the [merge policy](specifications/git_standards.md#pull-request-merge-strategy)
+  and current-head required checks.
+- Create PRs through `./scripts/create-pr.sh -- <gh pr create options>`.
+  The default checks the clean committed candidate, comparison base, argument safety,
+  whitespace, cheap affected static checks, ownership blockers, structural standards,
+  repository hygiene and applicable verified frontend patch coverage before publication.
+  Use `make pr-check` for the same cheap static phase; missing current coverage
+  evidence reports its explicit generation command and never starts suites implicitly.
+  CI runs after publication; full-scope candidates retain cross-platform execution.
+  Only the proven [documentation scope](docs/ci-maintenance.md#documentation-only-pr-scope)
+  may omit unrelated product tests. All required checks must pass on the current PR head before merging. Creating a PR does not certify test acceptance.
+- To run comprehensive checks locally before publication, use
+  `./scripts/create-pr.sh --full-preflight <selectors/specs> -- <gh pr create options>`.
+  This invokes `prepare-pr.sh` (platform preflight plus full health). For an existing
+  PR, `./scripts/prepare-pr.sh <selectors/specs>` provides the same optional local gate.
+  Use Playwright specs relevant to changed frontend behavior and repeated
+  `--core-filter` / `--host-filter` / `--integration-filter` / `--mcp-filter` selectors
+  for changed Rust crates. Preflight runs selected tests in Linux Docker and through
+  SSH to `windows10`; Windows workspaces, caches and temporary data stay on drive D.
+  Owning scenario rules add visual specs and require real native evidence for
+  lifecycle/discovery changes. Missing environments or empty Rust selections fail
+  full preflight. Include `e2e/ui-visual-regression.spec.ts` for theme/layout changes.
+  See `docs/testing-feedback-loop.md` for configuration, coverage and plan preview.
+  Fetch `origin/main` first if the comparison base is stale.
+- Record focused validation and outstanding checks in the PR. Use
+  `./scripts/check-health.sh` when comprehensive local evidence is needed; protected
+  CI remains required before merge regardless of local results.
+
+## Security & Adjustments
+
+- `./scripts/check-health.sh` chains fmt, Clippy `--all-targets`, ESLint, tests, typos,
+  cargo-deny, cargo-machete, gitleaks, shellcheck, audits, and both builds.
+- Triage vulnerabilities immediately or document mitigation in the PR.
+- If plans shift, update the relevant committed design or architecture docs. Keep
+  `docs/superpowers/` and the root `plans/` directory local and untracked.
+
+## Repository Hygiene
+
+### Worktree lifecycle
+
+- Create a worktree only when isolation is needed. Before creating one, inspect
+  `git worktree list --porcelain` and record the task-owned path, branch and any
+  dedicated build directory in ignored `tmp/` task notes. Treat pre-existing
+  worktrees and unrelated changes as user-owned; never sweep them automatically.
+- The coordinating session owns cleanup of every worktree it creates or delegates,
+  including `.worktrees/` and `.claude/worktrees/agent-*`. Delegate completion does
+  not transfer that responsibility. Before ending the task, stop task-owned
+  processes and remove its worktrees, disposable branches and dedicated Cargo
+  target directories, subject to the preservation rules below. Never delete a
+  shared target directory or a directory whose ownership is uncertain.
+- Before removal, preserve the work through either a verified merge into the
+  intended integration branch under the existing PR/merge gates, or a local
+  archive. For an archive, commit only task-owned outstanding changes (including
+  intended untracked files), run the required commit checks, and create a unique
+  `archive/<worktree-name>-<timestamp>` tag at the final branch tip. Verify the tag
+  resolves to that tip and the worktree is clean before deleting anything. Never
+  overwrite an existing archive tag, include secrets/ignored build output, or
+  discard unrelated edits to make cleanup succeed. Cleanup does not authorize
+  merging, pushing, bypassing review or running `entire clean`.
+- Run removal from a surviving checkout with `git worktree remove <path>`, then
+  `git branch -d <branch>` for a merged branch. Use `git branch -D <branch>` only
+  for a task-owned archived branch after verifying its archive tag. Never use
+  forced worktree removal, hard reset or bulk directory deletion to bypass a
+  dirty worktree. Detached worktrees require the same preservation of their final
+  commit before removal; there is no branch to delete.
+- A pending PR, unresolved conflict, user decision, active concurrent session or
+  failed preservation/cleanup step is an explicit retention exception. Preserve
+  the required branch for an open PR; remove its clean worktree if no active work
+  needs it. Recheck `git worktree list --porcelain` and task-owned branches/build
+  paths before the final reply. Report cleanup performed and name every retained
+  path/branch, its reason and the next action; never silently leave task worktrees.
+
+- Keep implementation plans, research, investigation notes and scratch scripts
+  under ignored `tmp/`; remove them when the work is complete.
+- Merge durable decisions into the maintained owning guide. Do not commit
+  completed-work reports, score histories, duplicate runbooks or archive copies.
+- `docs/evals/` owns reusable suites/inventories, prompts and its README only.
+  Generated evidence belongs in ignored output or PR/CI artifacts.
+- Run `node scripts/check-repository-hygiene.mjs` before committing. The shared
+  index check also runs in pre-commit, CI and health, rejecting ignored files
+  even when force-added. See `docs/DOCUMENTATION_GUIDELINES.md` for ownership.
+
+</INSTRUCTIONS>
+
+---
+
+# AGENTS.md instructions for /Users/kingsonwu/programming/OctopusGarage/mesh-talk
+
+<INSTRUCTIONS>
+These AGENTS.md instructions replace all previously provided AGENTS.md instructions.
+
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool** (when available): `codegraph_explore` answers most code questions in one call — the relevant symbols' verbatim source plus the call paths between them, including dynamic-dispatch hops grep can't follow. Name a file or symbol in the query to read its current line-numbered source. If it's listed but deferred, load it by name via tool search.
+- **Shell** (always works): `codegraph explore "<symbol names or question>"` prints the same output.
+
+If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
+<!-- CODEGRAPH_END -->
+
+<!-- ENGLISH_PILOT_GUIDANCE_START -->
+## EnglishPilot
+
+Do not derail the main task. When the user prompt is allowed, complete the requested work first.
+If the prompt contains any Chinese fragment, awkward English, or an obvious everyday phrasing improvement, add one English note at the end of the final response when allowed and teachable.
+In force/high intensity, treat this as required unless there is genuinely no useful improvement.
+
+When the english-pilot MCP server is available, use `english_coaching_context` to get the configured note depth and response guidance before writing the final answer.
+Use `english_rewrite_text` and `english_pronounce_text` for structured help when useful.
+
+If MCP is unavailable, prefer this fallback format:
+Use a Rich English Note by default: 5-8 useful lines, brief enough for a final response but rich enough for study.
+Use this shape:
+English note:
+Original: "fix this problem"
+Better: "fix this issue" / "resolve this startup issue"
+Why: In engineering conversations, "issue" is more precise than "problem" when discussing bugs, failures, tickets, or startup errors.
+Useful patterns:
+- "The MCP client failed during the startup handshake."
+- "This issue belongs at the config boundary, not the runtime path."
+Collocations: startup issue, handshake failure, config mismatch, reproduce the issue, verify the fix
+Common mistake: Use "problem" for general trouble; use "issue" for bugs, tickets, incidents, and engineering discussions.
+IPA: issue /ˈɪʃuː/ or /ˈɪsjuː/
+
+When the user asks for a recap, lesson, speech, or review based on their history, use `english_learning_brief`, `english_input_history`, or `english_notes_history` before answering.
+Do not add an English note for prompts blocked by the EnglishPilot hook.
+<!-- ENGLISH_PILOT_GUIDANCE_END -->
+<!-- MESH_TALK_AGENT_ACCESS_START -->
+Mesh Talk local API: "http://127.0.0.1:57347/v1/help".
+Read this help URL before using the API for user-authorized tasks.
+The desktop app must be running and unlocked, with agent access enabled.
+<!-- MESH_TALK_AGENT_ACCESS_END -->
+
+--- project-doc ---
+
+# Repository Guidelines
+
+## Reliability before implementation
+
+- Before implementing, refactoring, fixing or reviewing code, read the
+  [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules
+  triggered by the changed boundaries, and inspect the owning code and callers.
+  For concurrency/lifecycle changes, trace lock order, wait dependencies, actual
+  work ownership, cancellation and commit authority before editing.
+- Validate the applicable failure and recovery paths, not only the happy path.
+  Record concrete evidence and remaining limits; a timeout, successful build or
+  passing subset is not proof that UI freezes or all deadlocks are impossible.
+- When a confirmed defect exposes a reusable failure pattern, update that guide's
+  existing rule or add a distinct rule with its owner and regression evidence.
+  Maintain the owning contract and test selectors; keep incident logs out of the guide.
+
+## Project Structure & Module Organization
+
+- Four-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
+  `mesh_talk_core` + the `mesh-talk-node` CLI bin in `src/bin/`): feature modules `node/`,
+  `identity/`, `transport/`, `discovery/`, `eventlog/`, `ratchet/`, `channel/`, `dm.rs`,
+  `file/`, `postoffice/`, `storage/`. `src-tauri/` is the Tauri desktop app: entry
+  `src/main.rs` → `lib.rs`, IPC glue in `commands.rs` (auth) + `chat_commands/` (messaging)
+  - `events.rs`, plus `state.rs`, `tray.rs`, `services/` (auth only).
+- `crates/mesh-talk-integrations/` owns scoped local messaging grants, private IPC,
+  and the dedicated bot host/admin CLI; `crates/mesh-talk-mcp/` adapts its four
+  send/context/status tools to the official MCP SDK. Neither owns mesh crypto.
+- Integration/e2e suites live in `crates/mesh-talk-core/tests/` (`two_node_cli`,
+  `persistent_history`, `post_office_offline`, `decoder_smoke`); keep unit tests inline via
+  `mod tests` (e.g. `node/node_tests.rs`).
+- React client sits in `frontend/src`; Vite tooling in `frontend/package.json`.
+- Operational scripts in `scripts/` (`setup-hooks.sh`, `check-health.sh`); architecture in
+  `docs/ARCHITECTURE.md`; conventions in `specifications/`. The
+  [documentation map](docs/README.md) routes readers to maintained guides; the
+  [documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md) define ownership
+  across the README, guides, and project site.
+
+## Build, Test, and Development Commands
+
+- `make dev` primes Rust + Node deps and installs git hooks.
+- `make build` / `make frontend-build` — release build / Vite production build.
+- During feature development, preview changed-boundary validation with `make test-plan`
+  and run it with `make test-changed`. Unmapped changes require an explicit owner
+  and reason; inspect escalation notes for browser/native or consumer checks.
+  Use `make verify-plan` / `make verify-changed` at task completion to compose the
+  same affected tests with applicable formatting, lint/types and builds. The
+  test-only commands do not include static checks; neither mode replaces required
+  PR/review, browser/native or release gates. `make validation-report` separates
+  queue and execution costs; `make validation-audit` compares a clean affected
+  plan with same-source broader failure evidence before narrowing any gate.
+  Read selected capability references and inspect pending browser/native requirements.
+  Execution prints a structured feedback report; follow the
+  [validation protocol](docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
+  for completed work, remaining evidence and additive semantic selections.
+- During feature development, run affected tests only: `make test-focused
+TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
+  tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.
+  `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`
+  selects a frontend unit file. `make test` runs the full workspace suite
+  (`cargo test --workspace`) for pre-PR and CI gates;
+  `make e2e` runs the `#[ignore]`d multi-process backend rigs; `cd frontend && npm run e2e`
+  runs the Playwright UI suite. Test builds use cheap KDF params (the `fast-test-kdf`
+  feature), and `.cargo/config.toml` caps test/compile parallelism.
+- UI / node spot checks: `make tauri-dev`, `make frontend-dev`,
+  `cargo run -p mesh-talk-core --bin mesh-talk-node -- --keystore /tmp/a.keystore
+--password pw --name alice` (add `--post-office` for relay mode).
+
+## Coding Style & Naming Conventions
+
+- Rust: `cargo fmt` (4-space, `snake_case` modules, `UpperCamelCase` types) +
+  **`cargo clippy --all-targets -- -D warnings`** (must match CI — `--all-targets` covers
+  tests/benches).
+- Frontend: `npm run format` (Prettier) + `npm run lint` (ESLint flat config).
+- Write documentation and reusable prompts in English unless a specific exception is needed.
+- Reference `specifications/development_conventions.md` for naming nuances.
+
+## Domain Language
+
+- `CONTEXT.md` is the canonical domain glossary. `docs/domain-design.md` indexes
+  the modeling references and defines DDD vocabulary and naming translations.
+- Distinguish local users, accounts and devices; desktop, transport and ratchet
+  sessions; discovery, presence, custody, recipient delivery and read state.
+- Use explicit identity/lifetime names in new code. Preserve public, wire and
+  stored identifiers unless a separately validated compatibility change is intended.
+- Update the glossary and affected owning guides when a domain meaning changes;
+  link to definitions instead of maintaining duplicate glossaries.
+
+## Architecture & Components
+
+- Before adding business logic, consult [module ownership and reuse](docs/module-boundaries.md),
+  inspect the owning module and its callers, and extend its existing implementation.
+  Parallel tasks should name their owned paths and shared-interface dependencies;
+  coordinate changes to shared interfaces through one integration owner. Keep
+  feature-specific helpers local and share rules when their meaning and lifecycle
+  are the same. The guide owns the detailed assignment and handoff contract.
+- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
+- The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
+  (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
+  low-level socket in `transport/net.rs`) + the content-addressed event log + DM/channel/
+  file crypto. Messages are events synced as a bounded append-only log, account-addressed
+  across a user's devices; optional offline custody via equal eligible post offices.
+  Routed discovery and opt-in post-office federation connect reachable sites without
+  joining their IP subnets. Wire formats are versioned bincode.
+- See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport;
+  **`docs/network-design-reference.md`** owns the communication invariants,
+  module contracts, resource budgets and topology acceptance boundaries.
+
+## Maintaining standards as requirements change
+
+- Before changing tests, fixtures, dependencies or workflows in ways that affect
+  CI cost or reliability, read [CI maintenance](docs/ci-maintenance.md). Reuse
+  existing owners, measure the affected cost, and preserve acceptance evidence;
+  keep required-check policy in its existing owner.
+- Before implementation, identify the existing decision owner, authoritative rule,
+  observable acceptance criteria, affected consumers and required boundary evidence.
+  Extend the owning implementation and `validation.json`; new business capabilities
+  should link their guide and invariants. Explain an unchanged contract in the PR.
+- Run `make standards-check` after adding/moving source or changing contracts. It
+  checks structural ownership and maintained references, including new files; it
+  does not prove assertion quality, semantic completeness or candidate readiness.
+  Hooks inspect the working tree, so partially staged commits still need a clean
+  committed-candidate check in CI. Frontend dependencies must be installed.
+- When CI exposes a local omission or flaky fixture, fix the owning selector, task
+  or fixture and add a focused regression. Review timing and selection evidence
+  before changing policy. Follow the maintained
+  [requirement maintenance loop](docs/testing-feedback-loop.md#maintaining-standards-across-requirements).
+
+## Testing Guidelines
+
+- Integration coverage in `crates/mesh-talk-core/tests/` and `node/node_tests.rs`; embed
+  unit tests near the code. Networking/crypto changes ship a loopback integration assertion.
+- Backend multi-process E2E via `make e2e` (CI: `e2e-backend.yml`); Playwright UI E2E via
+  `cd frontend && npm run e2e` (CI: `e2e-ui.yml`).
+- Do not run full suites or E2E automatically during ordinary feature work. Run
+  the affected unit or integration tests as changes are made; run E2E and the
+  comprehensive health gate on explicit request, for optional full local preparation,
+  or in CI.
+- See `docs/testing-feedback-loop.md` for selection examples and escalation triggers.
+- Document executed validation commands in every PR; ensure `make test` passes
+  locally or through its matching CI workspace suite before merge.
+
+## Commit & Pull Request Guidelines
+
+- Before changing product versions or release automation, read [the version lifecycle](docs/updates.md#version-ownership-and-lifecycle).
+  Root `Cargo.toml` `[workspace.package].version` is authoritative. Use
+  `node scripts/release/version.mjs check|sync|prepare VERSION` (the `VERSION` argument belongs
+  to `prepare` only); do not hand-edit generated npm/Cargo lock metadata or introduce another
+  version constant. Root private npm metadata is a checked release-tooling projection;
+  frontend private metadata is versionless and Tauri inherits Cargo. Never broadly replace
+  matching dependency, fixture, history, wire or schema versions. Keep source builds `BASE-dev`,
+  Nightlies `BASE-nightly.RUN.ATTEMPT`, official tagged builds `BASE`, and standard SemVer ordering.
+- Version/changelog preparation and next-development-target changes use reviewed PRs. Ordinary main
+  pushes must not create automatic release proposals or commit-derived product notes. Stable publication
+  remains explicit through the existing verified tagged-release workflow; no direct main push,
+  public empty release, mutable published tag or gate bypass. Nightly publication requires trusted
+  `main` and a target above the latest Stable. Future changes must extend the existing version
+  owner, its tests, standards/CI enforcement and capability contracts together; the owning guide
+  documents permissions, bot-PR checks, dispatch and recovery requirements. Manual Stable draft
+  preparation uses the reviewed exact-version CHANGELOG section and requires exact-source checks
+  before creating its immutable tag/draft. The fixed release-history
+  migration floor is historical provenance; never advance it during ordinary version bumps.
+
+- Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
+  `specifications/git_standards.md`. Squash WIP; link issues. When asked to merge,
+  default to squash merge unless the user explicitly requests another strategy;
+  follow the [merge policy](specifications/git_standards.md#pull-request-merge-strategy)
+  and current-head required checks.
+- Create PRs through `./scripts/create-pr.sh -- <gh pr create options>`.
+  The default checks the clean committed candidate, comparison base, argument safety,
+  whitespace, cheap affected static checks, ownership blockers, structural standards,
+  repository hygiene and applicable verified frontend patch coverage before publication.
+  Use `make pr-check` for the same cheap static phase; missing current coverage
+  evidence reports its explicit generation command and never starts suites implicitly.
+  CI runs after publication; full-scope candidates retain cross-platform execution.
+  Only the proven [documentation scope](docs/ci-maintenance.md#documentation-only-pr-scope)
+  may omit unrelated product tests. All required checks must pass on the current PR head before merging. Creating a PR does not certify test acceptance.
+- To run comprehensive checks locally before publication, use
+  `./scripts/create-pr.sh --full-preflight <selectors/specs> -- <gh pr create options>`.
+  This invokes `prepare-pr.sh` (platform preflight plus full health). For an existing
+  PR, `./scripts/prepare-pr.sh <selectors/specs>` provides the same optional local gate.
+  Use Playwright specs relevant to changed frontend behavior and repeated
+  `--core-filter` / `--host-filter` / `--integration-filter` / `--mcp-filter` selectors
+  for changed Rust crates. Preflight runs selected tests in Linux Docker and through
+  SSH to `windows10`; Windows workspaces, caches and temporary data stay on drive D.
+  Owning scenario rules add visual specs and require real native evidence for
+  lifecycle/discovery changes. Missing environments or empty Rust selections fail
+  full preflight. Include `e2e/ui-visual-regression.spec.ts` for theme/layout changes.
+  See `docs/testing-feedback-loop.md` for configuration, coverage and plan preview.
+  Fetch `origin/main` first if the comparison base is stale.
+- Record focused validation and outstanding checks in the PR. Use
+  `./scripts/check-health.sh` when comprehensive local evidence is needed; protected
+  CI remains required before merge regardless of local results.
+
+## Security & Adjustments
+
+- `./scripts/check-health.sh` chains fmt, Clippy `--all-targets`, ESLint, tests, typos,
+  cargo-deny, cargo-machete, gitleaks, shellcheck, audits, and both builds.
+- Triage vulnerabilities immediately or document mitigation in the PR.
+- If plans shift, update the relevant committed design or architecture docs. Keep
+  `docs/superpowers/` and the root `plans/` directory local and untracked.
+
+## Repository Hygiene
+
+### Worktree lifecycle
+
+- Create a worktree only when isolation is needed. Before creating one, inspect
+  `git worktree list --porcelain` and record the task-owned path, branch and any
+  dedicated build directory in ignored `tmp/` task notes. Treat pre-existing
+  worktrees and unrelated changes as user-owned; never sweep them automatically.
+- The coordinating session owns cleanup of every worktree it creates or delegates,
+  including `.worktrees/` and `.claude/worktrees/agent-*`. Delegate completion does
+  not transfer that responsibility. Before ending the task, stop task-owned
+  processes and remove its worktrees, disposable branches and dedicated Cargo
+  target directories, subject to the preservation rules below. Never delete a
+  shared target directory or a directory whose ownership is uncertain.
+- Before removal, preserve the work through either a verified merge into the
+  intended integration branch under the existing PR/merge gates, or a local
+  archive. For an archive, commit only task-owned outstanding changes (including
+  intended untracked files), run the required commit checks, and create a unique
+  `archive/<worktree-name>-<timestamp>` tag at the final branch tip. Verify the tag
+  resolves to that tip and the worktree is clean before deleting anything. Never
+  overwrite an existing archive tag, include secrets/ignored build output, or
+  discard unrelated edits to make cleanup succeed. Cleanup does not authorize
+  merging, pushing, bypassing review or running `entire clean`.
+- Run removal from a surviving checkout with `git worktree remove <path>`, then
+  `git branch -d <branch>` for a merged branch. Use `git branch -D <branch>` only
+  for a task-owned archived branch after verifying its archive tag. Never use
+  forced worktree removal, hard reset or bulk directory deletion to bypass a
+  dirty worktree. Detached worktrees require the same preservation of their final
+  commit before removal; there is no branch to delete.
+- A pending PR, unresolved conflict, user decision, active concurrent session or
+  failed preservation/cleanup step is an explicit retention exception. Preserve
+  the required branch for an open PR; remove its clean worktree if no active work
+  needs it. Recheck `git worktree list --porcelain` and task-owned branches/build
+  paths before the final reply. Report cleanup performed and name every retained
+  path/branch, its reason and the next action; never silently leave task worktrees.
+
+- Keep implementation plans, research, investigation notes and scratch scripts
+  under ignored `tmp/`; remove them when the work is complete.
+- Merge durable decisions into the maintained owning guide. Do not commit
+  completed-work reports, score histories, duplicate runbooks or archive copies.
+- `docs/evals/` owns reusable suites/inventories, prompts and its README only.
+  Generated evidence belongs in ignored output or PR/CI artifacts.
+- Run `node scripts/check-repository-hygiene.mjs` before committing. The shared
+  index check also runs in pre-commit, CI and health, rejecting ignored files
+  even when force-added. See `docs/DOCUMENTATION_GUIDELINES.md` for ownership.
+
+</INSTRUCTIONS>
+
+---
+
+# AGENTS.md instructions for /Users/kingsonwu/programming/OctopusGarage/mesh-talk
+
+<INSTRUCTIONS>
+These AGENTS.md instructions replace all previously provided AGENTS.md instructions.
+
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool** (when available): `codegraph_explore` answers most code questions in one call — the relevant symbols' verbatim source plus the call paths between them, including dynamic-dispatch hops grep can't follow. Name a file or symbol in the query to read its current line-numbered source. If it's listed but deferred, load it by name via tool search.
+- **Shell** (always works): `codegraph explore "<symbol names or question>"` prints the same output.
+
+If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
+<!-- CODEGRAPH_END -->
+
+<!-- ENGLISH_PILOT_GUIDANCE_START -->
+## EnglishPilot
+
+Do not derail the main task. When the user prompt is allowed, complete the requested work first.
+If the prompt contains any Chinese fragment, awkward English, or an obvious everyday phrasing improvement, add one English note at the end of the final response when allowed and teachable.
+In force/high intensity, treat this as required unless there is genuinely no useful improvement.
+
+When the english-pilot MCP server is available, use `english_coaching_context` to get the configured note depth and response guidance before writing the final answer.
+Use `english_rewrite_text` and `english_pronounce_text` for structured help when useful.
+
+If MCP is unavailable, prefer this fallback format:
+Use a Rich English Note by default: 5-8 useful lines, brief enough for a final response but rich enough for study.
+Use this shape:
+English note:
+Original: "fix this problem"
+Better: "fix this issue" / "resolve this startup issue"
+Why: In engineering conversations, "issue" is more precise than "problem" when discussing bugs, failures, tickets, or startup errors.
+Useful patterns:
+- "The MCP client failed during the startup handshake."
+- "This issue belongs at the config boundary, not the runtime path."
+Collocations: startup issue, handshake failure, config mismatch, reproduce the issue, verify the fix
+Common mistake: Use "problem" for general trouble; use "issue" for bugs, tickets, incidents, and engineering discussions.
+IPA: issue /ˈɪʃuː/ or /ˈɪsjuː/
+
+When the user asks for a recap, lesson, speech, or review based on their history, use `english_learning_brief`, `english_input_history`, or `english_notes_history` before answering.
+Do not add an English note for prompts blocked by the EnglishPilot hook.
+<!-- ENGLISH_PILOT_GUIDANCE_END -->
+<!-- MESH_TALK_AGENT_ACCESS_START -->
+Mesh Talk local API: "http://127.0.0.1:61843/v1/help".
+Read this help URL before using the API for user-authorized tasks.
+The desktop app must be running and unlocked, with agent access enabled.
+<!-- MESH_TALK_AGENT_ACCESS_END -->
+
+--- project-doc ---
+
+# Repository Guidelines
+
+## Reliability before implementation
+
+- Before implementing, refactoring, fixing or reviewing code, read the
+  [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules
+  triggered by the changed boundaries, and inspect the owning code and callers.
+  For concurrency/lifecycle changes, trace lock order, wait dependencies, actual
+  work ownership, cancellation and commit authority before editing.
+- Validate the applicable failure and recovery paths, not only the happy path.
+  Record concrete evidence and remaining limits; a timeout, successful build or
+  passing subset is not proof that UI freezes or all deadlocks are impossible.
+- When a confirmed defect exposes a reusable failure pattern, update that guide's
+  existing rule or add a distinct rule with its owner and regression evidence.
+  Maintain the owning contract and test selectors; keep incident logs out of the guide.
+
+## Project Structure & Module Organization
+
+- Four-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
+  `mesh_talk_core` + the `mesh-talk-node` CLI bin in `src/bin/`): feature modules `node/`,
+  `identity/`, `transport/`, `discovery/`, `eventlog/`, `ratchet/`, `channel/`, `dm.rs`,
+  `file/`, `postoffice/`, `storage/`. `src-tauri/` is the Tauri desktop app: entry
+  `src/main.rs` → `lib.rs`, IPC glue in `commands.rs` (auth) + `chat_commands/` (messaging)
+  - `events.rs`, plus `state.rs`, `tray.rs`, `services/` (auth only).
+- `crates/mesh-talk-integrations/` owns scoped local messaging grants, private IPC,
+  and the dedicated bot host/admin CLI; `crates/mesh-talk-mcp/` adapts its four
+  send/context/status tools to the official MCP SDK. Neither owns mesh crypto.
+- Integration/e2e suites live in `crates/mesh-talk-core/tests/` (`two_node_cli`,
+  `persistent_history`, `post_office_offline`, `decoder_smoke`); keep unit tests inline via
+  `mod tests` (e.g. `node/node_tests.rs`).
+- React client sits in `frontend/src`; Vite tooling in `frontend/package.json`.
+- Operational scripts in `scripts/` (`setup-hooks.sh`, `check-health.sh`); architecture in
+  `docs/ARCHITECTURE.md`; conventions in `specifications/`. The
+  [documentation map](docs/README.md) routes readers to maintained guides; the
+  [documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md) define ownership
+  across the README, guides, and project site.
+
+## Build, Test, and Development Commands
+
+- `make dev` primes Rust + Node deps and installs git hooks.
+- `make build` / `make frontend-build` — release build / Vite production build.
+- During feature development, preview changed-boundary validation with `make test-plan`
+  and run it with `make test-changed`. Unmapped changes require an explicit owner
+  and reason; inspect escalation notes for browser/native or consumer checks.
+  Use `make verify-plan` / `make verify-changed` at task completion to compose the
+  same affected tests with applicable formatting, lint/types and builds. The
+  test-only commands do not include static checks; neither mode replaces required
+  PR/review, browser/native or release gates. `make validation-report` separates
+  queue and execution costs; `make validation-audit` compares a clean affected
+  plan with same-source broader failure evidence before narrowing any gate.
+  Read selected capability references and inspect pending browser/native requirements.
+  Execution prints a structured feedback report; follow the
+  [validation protocol](docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
+  for completed work, remaining evidence and additive semantic selections.
+- During feature development, run affected tests only: `make test-focused
+TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
+  tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.
+  `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`
+  selects a frontend unit file. `make test` runs the full workspace suite
+  (`cargo test --workspace`) for pre-PR and CI gates;
+  `make e2e` runs the `#[ignore]`d multi-process backend rigs; `cd frontend && npm run e2e`
+  runs the Playwright UI suite. Test builds use cheap KDF params (the `fast-test-kdf`
+  feature), and `.cargo/config.toml` caps test/compile parallelism.
+- UI / node spot checks: `make tauri-dev`, `make frontend-dev`,
+  `cargo run -p mesh-talk-core --bin mesh-talk-node -- --keystore /tmp/a.keystore
+--password pw --name alice` (add `--post-office` for relay mode).
+
+## Coding Style & Naming Conventions
+
+- Rust: `cargo fmt` (4-space, `snake_case` modules, `UpperCamelCase` types) +
+  **`cargo clippy --all-targets -- -D warnings`** (must match CI — `--all-targets` covers
+  tests/benches).
+- Frontend: `npm run format` (Prettier) + `npm run lint` (ESLint flat config).
+- Write documentation and reusable prompts in English unless a specific exception is needed.
+- Reference `specifications/development_conventions.md` for naming nuances.
+
+## Domain Language
+
+- `CONTEXT.md` is the canonical domain glossary. `docs/domain-design.md` indexes
+  the modeling references and defines DDD vocabulary and naming translations.
+- Distinguish local users, accounts and devices; desktop, transport and ratchet
+  sessions; discovery, presence, custody, recipient delivery and read state.
+- Use explicit identity/lifetime names in new code. Preserve public, wire and
+  stored identifiers unless a separately validated compatibility change is intended.
+- Update the glossary and affected owning guides when a domain meaning changes;
+  link to definitions instead of maintaining duplicate glossaries.
+
+## Architecture & Components
+
+- Before adding business logic, consult [module ownership and reuse](docs/module-boundaries.md),
+  inspect the owning module and its callers, and extend its existing implementation.
+  Parallel tasks should name their owned paths and shared-interface dependencies;
+  coordinate changes to shared interfaces through one integration owner. Keep
+  feature-specific helpers local and share rules when their meaning and lifecycle
+  are the same. The guide owns the detailed assignment and handoff contract.
+- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
+- The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
+  (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
+  low-level socket in `transport/net.rs`) + the content-addressed event log + DM/channel/
+  file crypto. Messages are events synced as a bounded append-only log, account-addressed
+  across a user's devices; optional offline custody via equal eligible post offices.
+  Routed discovery and opt-in post-office federation connect reachable sites without
+  joining their IP subnets. Wire formats are versioned bincode.
+- See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport;
+  **`docs/network-design-reference.md`** owns the communication invariants,
+  module contracts, resource budgets and topology acceptance boundaries.
+
+## Maintaining standards as requirements change
+
+- Before changing tests, fixtures, dependencies or workflows in ways that affect
+  CI cost or reliability, read [CI maintenance](docs/ci-maintenance.md). Reuse
+  existing owners, measure the affected cost, and preserve acceptance evidence;
+  keep required-check policy in its existing owner.
+- Before implementation, identify the existing decision owner, authoritative rule,
+  observable acceptance criteria, affected consumers and required boundary evidence.
+  Extend the owning implementation and `validation.json`; new business capabilities
+  should link their guide and invariants. Explain an unchanged contract in the PR.
+- Run `make standards-check` after adding/moving source or changing contracts. It
+  checks structural ownership and maintained references, including new files; it
+  does not prove assertion quality, semantic completeness or candidate readiness.
+  Hooks inspect the working tree, so partially staged commits still need a clean
+  committed-candidate check in CI. Frontend dependencies must be installed.
+- When CI exposes a local omission or flaky fixture, fix the owning selector, task
+  or fixture and add a focused regression. Review timing and selection evidence
+  before changing policy. Follow the maintained
+  [requirement maintenance loop](docs/testing-feedback-loop.md#maintaining-standards-across-requirements).
+
+## Testing Guidelines
+
+- Integration coverage in `crates/mesh-talk-core/tests/` and `node/node_tests.rs`; embed
+  unit tests near the code. Networking/crypto changes ship a loopback integration assertion.
+- Backend multi-process E2E via `make e2e` (CI: `e2e-backend.yml`); Playwright UI E2E via
+  `cd frontend && npm run e2e` (CI: `e2e-ui.yml`).
+- Do not run full suites or E2E automatically during ordinary feature work. Run
+  the affected unit or integration tests as changes are made; run E2E and the
+  comprehensive health gate on explicit request, for optional full local preparation,
+  or in CI.
+- See `docs/testing-feedback-loop.md` for selection examples and escalation triggers.
+- Document executed validation commands in every PR; ensure `make test` passes
+  locally or through its matching CI workspace suite before merge.
+
+## Commit & Pull Request Guidelines
+
+- Before changing product versions or release automation, read [the version lifecycle](docs/updates.md#version-ownership-and-lifecycle).
+  Root `Cargo.toml` `[workspace.package].version` is authoritative. Use
+  `node scripts/release/version.mjs check|sync|prepare VERSION` (the `VERSION` argument belongs
+  to `prepare` only); do not hand-edit generated npm/Cargo lock metadata or introduce another
+  version constant. Root private npm metadata is a checked release-tooling projection;
+  frontend private metadata is versionless and Tauri inherits Cargo. Never broadly replace
+  matching dependency, fixture, history, wire or schema versions. Keep source builds `BASE-dev`,
+  Nightlies `BASE-nightly.RUN.ATTEMPT`, official tagged builds `BASE`, and standard SemVer ordering.
+- Version/changelog preparation and next-development-target changes use reviewed PRs. Ordinary main
+  pushes must not create automatic release proposals or commit-derived product notes. Stable publication
+  remains explicit through the existing verified tagged-release workflow; no direct main push,
+  public empty release, mutable published tag or gate bypass. Nightly publication requires trusted
+  `main` and a target above the latest Stable. Future changes must extend the existing version
+  owner, its tests, standards/CI enforcement and capability contracts together; the owning guide
+  documents permissions, bot-PR checks, dispatch and recovery requirements. Manual Stable draft
+  preparation uses the reviewed exact-version CHANGELOG section and requires exact-source checks
+  before creating its immutable tag/draft. The fixed release-history
+  migration floor is historical provenance; never advance it during ordinary version bumps.
+
+- Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
+  `specifications/git_standards.md`. Squash WIP; link issues. When asked to merge,
+  default to squash merge unless the user explicitly requests another strategy;
+  follow the [merge policy](specifications/git_standards.md#pull-request-merge-strategy)
+  and current-head required checks.
+- Create PRs through `./scripts/create-pr.sh -- <gh pr create options>`.
+  The default checks the clean committed candidate, comparison base, argument safety,
+  whitespace, cheap affected static checks, ownership blockers, structural standards,
+  repository hygiene and applicable verified frontend patch coverage before publication.
+  Use `make pr-check` for the same cheap static phase; missing current coverage
+  evidence reports its explicit generation command and never starts suites implicitly.
+  CI runs after publication; full-scope candidates retain cross-platform execution.
+  Only the proven [documentation scope](docs/ci-maintenance.md#documentation-only-pr-scope)
+  may omit unrelated product tests. All required checks must pass on the current PR head before merging. Creating a PR does not certify test acceptance.
+- To run comprehensive checks locally before publication, use
+  `./scripts/create-pr.sh --full-preflight <selectors/specs> -- <gh pr create options>`.
+  This invokes `prepare-pr.sh` (platform preflight plus full health). For an existing
+  PR, `./scripts/prepare-pr.sh <selectors/specs>` provides the same optional local gate.
+  Use Playwright specs relevant to changed frontend behavior and repeated
+  `--core-filter` / `--host-filter` / `--integration-filter` / `--mcp-filter` selectors
+  for changed Rust crates. Preflight runs selected tests in Linux Docker and through
+  SSH to `windows10`; Windows workspaces, caches and temporary data stay on drive D.
+  Owning scenario rules add visual specs and require real native evidence for
+  lifecycle/discovery changes. Missing environments or empty Rust selections fail
+  full preflight. Include `e2e/ui-visual-regression.spec.ts` for theme/layout changes.
+  See `docs/testing-feedback-loop.md` for configuration, coverage and plan preview.
+  Fetch `origin/main` first if the comparison base is stale.
+- Record focused validation and outstanding checks in the PR. Use
+  `./scripts/check-health.sh` when comprehensive local evidence is needed; protected
+  CI remains required before merge regardless of local results.
+
+## Security & Adjustments
+
+- `./scripts/check-health.sh` chains fmt, Clippy `--all-targets`, ESLint, tests, typos,
+  cargo-deny, cargo-machete, gitleaks, shellcheck, audits, and both builds.
+- Triage vulnerabilities immediately or document mitigation in the PR.
+- If plans shift, update the relevant committed design or architecture docs. Keep
+  `docs/superpowers/` and the root `plans/` directory local and untracked.
+
+## Repository Hygiene
+
+### Worktree lifecycle
+
+- Create a worktree only when isolation is needed. Before creating one, inspect
+  `git worktree list --porcelain` and record the task-owned path, branch and any
+  dedicated build directory in ignored `tmp/` task notes. Treat pre-existing
+  worktrees and unrelated changes as user-owned; never sweep them automatically.
+- The coordinating session owns cleanup of every worktree it creates or delegates,
+  including `.worktrees/` and `.claude/worktrees/agent-*`. Delegate completion does
+  not transfer that responsibility. Before ending the task, stop task-owned
+  processes and remove its worktrees, disposable branches and dedicated Cargo
+  target directories, subject to the preservation rules below. Never delete a
+  shared target directory or a directory whose ownership is uncertain.
+- Before removal, preserve the work through either a verified merge into the
+  intended integration branch under the existing PR/merge gates, or a local
+  archive. For an archive, commit only task-owned outstanding changes (including
+  intended untracked files), run the required commit checks, and create a unique
+  `archive/<worktree-name>-<timestamp>` tag at the final branch tip. Verify the tag
+  resolves to that tip and the worktree is clean before deleting anything. Never
+  overwrite an existing archive tag, include secrets/ignored build output, or
+  discard unrelated edits to make cleanup succeed. Cleanup does not authorize
+  merging, pushing, bypassing review or running `entire clean`.
+- Run removal from a surviving checkout with `git worktree remove <path>`, then
+  `git branch -d <branch>` for a merged branch. Use `git branch -D <branch>` only
+  for a task-owned archived branch after verifying its archive tag. Never use
+  forced worktree removal, hard reset or bulk directory deletion to bypass a
+  dirty worktree. Detached worktrees require the same preservation of their final
+  commit before removal; there is no branch to delete.
+- A pending PR, unresolved conflict, user decision, active concurrent session or
+  failed preservation/cleanup step is an explicit retention exception. Preserve
+  the required branch for an open PR; remove its clean worktree if no active work
+  needs it. Recheck `git worktree list --porcelain` and task-owned branches/build
+  paths before the final reply. Report cleanup performed and name every retained
+  path/branch, its reason and the next action; never silently leave task worktrees.
+
+- Keep implementation plans, research, investigation notes and scratch scripts
+  under ignored `tmp/`; remove them when the work is complete.
+- Merge durable decisions into the maintained owning guide. Do not commit
+  completed-work reports, score histories, duplicate runbooks or archive copies.
+- `docs/evals/` owns reusable suites/inventories, prompts and its README only.
+  Generated evidence belongs in ignored output or PR/CI artifacts.
+- Run `node scripts/check-repository-hygiene.mjs` before committing. The shared
+  index check also runs in pre-commit, CI and health, rejecting ignored files
+  even when force-added. See `docs/DOCUMENTATION_GUIDELINES.md` for ownership.
+
+</INSTRUCTIONS>
