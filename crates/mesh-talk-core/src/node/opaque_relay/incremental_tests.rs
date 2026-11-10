@@ -329,6 +329,15 @@ async fn incremental_pending_consent_without_publication_stays_quiet_until_decis
 
 #[tokio::test]
 async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
+    Box::pin(assert_incremental_consent_offer_selection(false)).await;
+}
+
+#[tokio::test]
+async fn unrelated_relay_mailbox_keeps_send_only_consent_quiet() {
+    Box::pin(assert_incremental_consent_offer_selection(true)).await;
+}
+
+async fn assert_incremental_consent_offer_selection(send_only: bool) {
     use crate::{
         discovery::Announce, eventlog::sync::network::NetworkSyncStore, file::FileManifest,
     };
@@ -343,6 +352,11 @@ async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
         &proof,
     );
     node.set_bridge_discovery_enabled(true);
+    if send_only {
+        // Exercise the production send-only delta path: every fresh adapter
+        // supplies prior=None, even when its outgoing completion is qualified.
+        node.set_post_office_permissions(true, false);
+    }
     node.set_attachment_global_auto(true).unwrap();
     node.cached_peer_snapshot_async().await.unwrap();
     let conversation =
@@ -501,6 +515,116 @@ async fn incremental_mailbox_revalidates_only_the_selected_consent_offer() {
         custody, 0,
         "unchanged control evidence must not repeat per-event HAVE requests"
     );
+    if send_only {
+        assert!(!node.relay_receive_allowed(&relay.public()));
+        assert!(node.relay_send_allowed(&relay.public()));
+        let before = office
+            .mailbox_delta_page(&mailbox.id(), None, 64)
+            .unwrap()
+            .cursor;
+        let other_sender = DeviceIdentity::generate();
+        let other_recipient = DeviceIdentity::generate();
+        let other_mailbox =
+            RelayMailbox::federated(&other_sender, &other_recipient.public()).unwrap();
+        assert_ne!(other_mailbox.id(), mailbox.id());
+        let inner = Event::new(
+            &other_sender,
+            ConversationId::new([0xc1; 32]),
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Message,
+            crate::dm::seal(
+                &other_sender,
+                &other_recipient.public().x25519_pub,
+                b"unrelated mailbox fixture",
+            )
+            .unwrap(),
+        );
+        let wrapper = other_mailbox.wrap(&inner).unwrap();
+        let mut relay_writer = office.clone();
+        NetworkSyncStore::ingest(&mut relay_writer, wrapper.clone()).unwrap();
+        assert!(NetworkSyncStore::durable_have(&office, &other_mailbox.id(), &wrapper.id).unwrap());
+        let after = office
+            .mailbox_delta_page(&mailbox.id(), None, 64)
+            .unwrap()
+            .cursor;
+        assert_eq!(after.store_uuid, before.store_uuid);
+        assert_eq!(after.conversation, before.conversation);
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.first_seen, before.first_seen);
+        assert_eq!(after.revision, before.revision);
+        assert!(
+            after.after > before.after,
+            "only the relay's global upper must advance"
+        );
+        super::super::file_consent::offered_observations::reset();
+        let writes = node.storage.database().successful_write_commits();
+        let (_, custody, _) = counted_scope_exchange(
+            &node,
+            office.clone(),
+            &relay,
+            &sender.public(),
+            conversation,
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(
+            super::super::file_consent::offered_observations::count(),
+            0,
+            "an unrelated relay mailbox must not rehydrate the eight settled consent offers"
+        );
+        assert_eq!(
+            custody, 0,
+            "unrelated mailbox traffic cannot repay settled control HAVE"
+        );
+        assert_eq!(
+            node.storage.database().successful_write_commits(),
+            writes,
+            "unrelated relay traffic must not rewrite local selection or checkpoint progress"
+        );
+
+        // Growth in A itself is a different input and must retain the fresh
+        // per-offer checks, even though its existing controls are still present.
+        let same_inner = Event::new(
+            &sender,
+            conversation,
+            99,
+            vec![],
+            99,
+            1,
+            EventKind::Message,
+            crate::dm::seal(
+                &sender,
+                &node.identity.public().x25519_pub,
+                b"same mailbox growth",
+            )
+            .unwrap(),
+        );
+        NetworkSyncStore::ingest(&mut relay_writer, mailbox.wrap(&same_inner).unwrap()).unwrap();
+        let same = office
+            .mailbox_delta_page(&mailbox.id(), None, 64)
+            .unwrap()
+            .cursor;
+        assert!(same.revision > after.revision);
+        super::super::file_consent::offered_observations::reset();
+        counted_scope_exchange(
+            &node,
+            office.clone(),
+            &relay,
+            &sender.public(),
+            conversation,
+            true,
+            None,
+        )
+        .await;
+        assert!(
+            super::super::file_consent::offered_observations::count() > 0,
+            "same-mailbox append must retain fresh consent preparation"
+        );
+    }
     let replacement_directory = tempfile::tempdir().unwrap();
     let replacement_office = IndexedPostOffice::open_with_lease(
         ProfileStorageLease::acquire(replacement_directory.path()).unwrap(),

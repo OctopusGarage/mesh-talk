@@ -8,7 +8,7 @@ import { execute } from "../validation/stage.mjs";
 test("actual Node progress identifies a begun parked file before owned interruption", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "mesh-node-progress-"));
   const fixture = join(directory, "parked.test.mjs"), output = join(directory, "progress.jsonl"), ready = join(directory, "begun");
-  await writeFile(fixture, `import {test} from 'node:test';import {writeFileSync} from 'node:fs';test('parked fixture',async()=>{writeFileSync(${JSON.stringify(ready)},'begun');setInterval(()=>{},1000);await new Promise(()=>{});});`);
+  await writeFile(fixture, "import {test} from 'node:test';import {writeFileSync} from 'node:fs';test('parked fixture',async()=>{writeFileSync(process.env.MESH_PROGRESS_FIXTURE_READY,'begun');setInterval(()=>{},1000);await new Promise(()=>{});});");
   const controller = new AbortController();
   let observed = false, checking = false;
   const timer = setInterval(async () => {
@@ -21,7 +21,7 @@ test("actual Node progress identifies a begun parked file before owned interrupt
   const watchdog = setTimeout(() => controller.abort(), 20000);
   let result; let diagnostic = "";
   try {
-    const env = { ...process.env }; delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER; delete env.NODE_TEST_CONTEXT;
+    const env = { ...process.env, MESH_PROGRESS_FIXTURE_READY: ready }; delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER; delete env.NODE_TEST_CONTEXT;
     result = await execute([process.execPath, "--test", `--test-reporter=${new URL("./node-test-progress.mjs", import.meta.url).href}`, `--test-reporter-destination=${output}`, fixture], {
       cwd: directory, env, signal: controller.signal, onOutput(chunk) { diagnostic += chunk; },
     });
@@ -41,7 +41,7 @@ for (const parkedFirst of [false, true]) test(`progress exposes a completed file
   const directory = await mkdtemp(join(tmpdir(), "mesh-node-retirement-progress-"));
   const done = join(directory, "z-done.test.mjs"), parked = join(directory, "a-parked.test.mjs"), output = join(directory, "progress.jsonl"), ready = join(directory, "body-returned");
   await writeFile(done, "import {test} from 'node:test';test('finished file',()=>{});");
-  await writeFile(parked, `import {test} from 'node:test';import {writeFileSync} from 'node:fs';test('passed but live',()=>{setInterval(()=>{},1000);writeFileSync(${JSON.stringify(ready)},'returned');});`);
+  await writeFile(parked, "import {test} from 'node:test';import {writeFileSync} from 'node:fs';test('passed but live',()=>{setInterval(()=>{},1000);writeFileSync(process.env.MESH_PROGRESS_FIXTURE_READY,'returned');});");
   const controller = new AbortController();
   let observed = false, checking = false, lastRows = [];
   const timer = setInterval(async () => {
@@ -56,7 +56,7 @@ for (const parkedFirst of [false, true]) test(`progress exposes a completed file
   const watchdog = setTimeout(() => controller.abort(), 5000);
   let result;
   try {
-    const env = { ...process.env }; delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER; delete env.NODE_TEST_CONTEXT;
+    const env = { ...process.env, MESH_PROGRESS_FIXTURE_READY: ready }; delete env.MESH_VALIDATION_PROCESS_GROUP_OWNER; delete env.NODE_TEST_CONTEXT;
     result = await execute([process.execPath, "--test", `--test-reporter=${new URL("./node-test-progress.mjs", import.meta.url).href}`, `--test-reporter-destination=${output}`, ...(parkedFirst ? [parked, done] : [done, parked])], { cwd: directory, env, signal: controller.signal, onOutput() {} });
     assert.equal(observed, true, `completed-file evidence must be durable before the live worker retires: ${JSON.stringify(lastRows)}`);
     assert.equal(result.cleanupUnverified, false);

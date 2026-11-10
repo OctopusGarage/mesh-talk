@@ -212,10 +212,20 @@ export async function receiptPhase(c, state, name, expected, historical = false,
   const history = await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 });
   for (const id of state.ids) assert.equal(history.filter(item => item.id === id && item.from_me).length, 1, "original accepted history entry retained once");
   let statuses, latestStatuses = null, observationError = null;
+  let deliveryObservations = state.ids.slice(0, 3).map(() => ({ kind: "UNKNOWN", age_ms: null, reason: null }));
   try {
     statuses = await c.until(`original IDs become ${expected}`, async () => {
       try {
-        const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
+        const records = await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids });
+        const values = orderedReceiptStatuses(state.ids, records);
+        deliveryObservations = state.ids.slice(0, 3).map(id => {
+          const observation = records.find(record => record.id === id)?.observation;
+          return {
+            kind: ["attempting", "retry_scheduled"].includes(observation?.kind) ? observation.kind : "UNKNOWN",
+            age_ms: Number.isSafeInteger(observation?.age_ms) && observation.age_ms >= 0 ? observation.age_ms : null,
+            reason: ["post_office_disabled", "no_known_route", "attempt_timed_out"].includes(observation?.reason) ? observation.reason : null,
+          };
+        });
         latestStatuses = values;
         return values.every(value => value === expected) && values;
       } catch (error) {
@@ -229,7 +239,7 @@ export async function receiptPhase(c, state, name, expected, historical = false,
       try { endpointContext = await c.receiptFailureContext(); JSON.stringify(endpointContext); }
       catch (secondary) { endpointContext = null; endpointContextError = String(secondary.message ?? secondary).slice(0, 512); }
     }
-    const diagnostic = JSON.stringify({ statuses: latestStatuses, observationError, endpointContext, endpointContextError });
+    const diagnostic = JSON.stringify({ statuses: latestStatuses, deliveryObservations, observationError, endpointContext, endpointContextError });
     throw new Error(`${error.message}; receipt observation=${diagnostic}`, { cause: error });
   }
   const captures = [];

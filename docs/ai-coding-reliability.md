@@ -334,6 +334,13 @@ returns only its explicit pending/no-published-control outcome; the
 and [bounded hint pressure tests](../crates/mesh-talk-core/src/node/opaque_relay/incremental/controls.rs)
 retain decision changes, direct Pending reads, failures, scope changes and the
 positive cache's existing capacity.
+A domain-wide paging upper is not a mailbox revision. Unrelated mailbox appends
+must not invalidate settled work when its exact mailbox binding/revision and
+local source remain unchanged; retain rollback rejection and the original
+expiry deadline. The real send-only eight-offer regression in the same mailbox
+owner advances another mailbox through a genuine encrypted relay append, while
+same-mailbox growth restores preparation. Trace classification must use the
+same predicate as ordinary scheduling because it can govern actual work.
 
 Do not interpret an unavailable dependency or a generic stale-cursor error as
 proof of finite preparation progress. Preserve the launch deadline when no rows,

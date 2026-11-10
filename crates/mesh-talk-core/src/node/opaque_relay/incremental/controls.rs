@@ -18,12 +18,21 @@ pub(super) struct ControlScope {
     floor: (i64, i64),
 }
 impl ControlScope {
-    fn same_inputs(&self, current: &Self) -> bool {
+    fn accepts_remote_floor(&self, current: &Self) -> bool {
+        // The upper is the relay domain's commit cut, not this mailbox's
+        // revision. Unrelated appends may advance it without changing this mailbox.
+        self.floor.0 >= 0
+            && self.floor.0 <= current.floor.0
+            && self.floor.1 >= 0
+            && self.floor.1 == current.floor.1
+    }
+
+    fn permits_reuse(&self, current: &Self) -> bool {
         self.key == current.key
             && self.source == current.source
             && self.work_stamp.unchanged_since(&current.work_stamp)
             && self.remote == current.remote
-            && self.floor == current.floor
+            && self.accepts_remote_floor(current)
     }
 }
 
@@ -61,7 +70,7 @@ impl QuietConsentCache {
             reason::CONSENT_POLICY_CHANGED
         } else if hint.scope.remote != scope.remote {
             reason::CONSENT_REMOTE_CHANGED
-        } else if hint.scope.floor != scope.floor {
+        } else if !hint.scope.accepts_remote_floor(scope) {
             reason::CONSENT_FLOOR_CHANGED
         } else if now.saturating_duration_since(hint.checked) >= QUIET_CONSENT_TTL {
             reason::CONSENT_EXPIRED
@@ -71,7 +80,7 @@ impl QuietConsentCache {
     }
     fn contains(&self, scope: &ControlScope, offer: &Offer, now: Instant) -> bool {
         self.0.iter().any(|hint| {
-            hint.scope.same_inputs(scope)
+            hint.scope.permits_reuse(scope)
                 && hint.offer == *offer
                 && now.saturating_duration_since(hint.checked) < QUIET_CONSENT_TTL
         })
@@ -232,7 +241,7 @@ impl Node {
         let after = self.consent_control_scope(p)?;
         if !after
             .as_ref()
-            .is_some_and(|after| before.same_inputs(after))
+            .is_some_and(|after| before.permits_reuse(after))
         {
             return Ok(());
         }
@@ -263,7 +272,7 @@ impl Node {
         let after = self.consent_control_scope(p)?;
         if after
             .as_ref()
-            .is_some_and(|after| before.same_inputs(after))
+            .is_some_and(|after| before.permits_reuse(after))
         {
             // The caller already obtained actual durable HAVE/upload success.
             // No database work or authority callbacks run under this guard.
@@ -452,6 +461,92 @@ mod tests {
             },
         ] {
             assert!(!cache.contains(&changed, &offer, now));
+        }
+    }
+
+    #[test]
+    fn quiet_consent_accepts_only_monotonic_global_upper_with_exact_mailbox_revision() {
+        for kind in [QuietConsentKind::Confirmed, QuietConsentKind::NoControlDue] {
+            let mut cache = QuietConsentCache::default();
+            let prior = scope();
+            let offer = (ConversationId::new([8; 32]), EventId::new([9; 32]));
+            let now = Instant::now();
+            assert!(cache.remember_outcome(prior.clone(), offer, now, kind));
+            let advanced = ControlScope {
+                floor: (prior.floor.0 + 100, prior.floor.1),
+                ..prior.clone()
+            };
+            assert!(cache.contains(&advanced, &offer, now));
+            assert_eq!(
+                cache.observed_reason(&advanced, &offer, now),
+                reason::CONSENT_HIT,
+                "trace-enabled and ordinary scheduling must make the same decision"
+            );
+            for changed in [
+                ControlScope {
+                    floor: (prior.floor.0 - 1, prior.floor.1),
+                    ..prior.clone()
+                },
+                ControlScope {
+                    floor: (prior.floor.0 + 1, prior.floor.1 + 1),
+                    ..prior.clone()
+                },
+                ControlScope {
+                    floor: (prior.floor.0, prior.floor.1 - 1),
+                    ..prior.clone()
+                },
+                ControlScope {
+                    remote: RemoteBinding {
+                        epoch: prior.remote.epoch + 1,
+                        ..prior.remote.clone()
+                    },
+                    ..advanced.clone()
+                },
+                ControlScope {
+                    remote: RemoteBinding {
+                        store_uuid: [0; 16],
+                        ..prior.remote.clone()
+                    },
+                    ..advanced.clone()
+                },
+                ControlScope {
+                    remote: RemoteBinding {
+                        first_seen: Some(99),
+                        ..prior.remote.clone()
+                    },
+                    ..advanced.clone()
+                },
+                ControlScope {
+                    remote: RemoteBinding {
+                        conversation: ConversationId::new([0; 32]),
+                        ..prior.remote.clone()
+                    },
+                    ..advanced.clone()
+                },
+                ControlScope {
+                    source: [0; 32],
+                    ..advanced.clone()
+                },
+                ControlScope {
+                    key: vec![0],
+                    ..advanced.clone()
+                },
+            ] {
+                assert!(!cache.contains(&changed, &offer, now));
+                assert_ne!(
+                    cache.observed_reason(&changed, &offer, now),
+                    reason::CONSENT_HIT
+                );
+            }
+            assert!(cache.contains(&advanced, &offer, now + Duration::from_secs(59)));
+            assert!(
+                !cache.contains(&advanced, &offer, now + QUIET_CONSENT_TTL),
+                "upper advances must not renew the original recovery deadline"
+            );
+            assert_eq!(
+                cache.observed_reason(&advanced, &offer, now + QUIET_CONSENT_TTL),
+                reason::CONSENT_EXPIRED
+            );
         }
     }
 

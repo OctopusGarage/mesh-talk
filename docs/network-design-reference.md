@@ -2689,7 +2689,11 @@ NoControlDue admission never evicts a live confirmed hint; positive admission
 reclaims NoControlDue hints first. Direct include-pending requests remain fresh.
 Each hint matches the full relay/recipient/mailbox/intent scope, a conservative
 local producer fingerprint and the exact freshly observed remote binding and
-window upper/revision. The fingerprint includes relevant certificate and runtime
+mailbox revision. The window upper is a relay-domain commit cut: unrelated
+mailboxes may advance it while this mailbox is unchanged. Reuse permits only a
+nondecreasing upper with the same mailbox revision, store UUID, conversation,
+physical epoch and first-seen identity. An upper rollback, mailbox append,
+deletion/reset or replacement restores normal preparation. The fingerprint includes relevant certificate and runtime
 policy generations. An owner-qualified runtime work clock observes the current profile's MAIN file
 version and non-reset dirty-page write count under its exclusive connection
 mutex. Default writes, including legacy mutations through read closures, remain
@@ -2719,7 +2723,7 @@ installing a guard. Actual selection work keeps the bounded guarded path. Its
 cold/active cost requires native validation.
 Only actual HAVE/upload success under an unchanged captured producer scope
 creates a confirmed hint. NoControlDue requires the explicit Pending/no-published
-outcome and identical fallible scope observations before and after preparation.
+outcome and qualified fallible source/mailbox observations before and after preparation.
 The per-offer owner releases delivery, consent and publication guards before
 scope recapture or cache admission; no I/O runs under the cache guard.
 NoControlDue is neither consent nor custody evidence. Reads never renew either

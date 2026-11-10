@@ -258,7 +258,7 @@ test("native receipt timeout retains cached ordered statuses and observation fai
     observe: async command => {
       if (command === "owner_account_history") return ids.map(id => ({ id, from_me: true }));
       observations++;
-      if (observations === 1) return [{ id: "c", status: "delivered" }, { id: "a", status: "awaiting" }, { id: "b", status: "awaiting" }];
+      if (observations === 1) return [{ id: "c", status: "delivered" }, { id: "a", status: "awaiting", observation: { kind: "attempting", age_ms: 123, body: "must not copy" } }, { id: "b", status: "awaiting", observation: { kind: "retry_scheduled", age_ms: 456, reason: "attempt_timed_out" } }];
       throw new Error("owner observation unavailable");
     },
     until: async (...args) => {
@@ -274,6 +274,8 @@ test("native receipt timeout retains cached ordered statuses and observation fai
     assert.match(error.message, /^Timed out: original IDs become delivered;/);
     assert.match(error.message, /"statuses":\["awaiting","awaiting","delivered"\]/);
     assert.match(error.message, /"observationError":"owner observation unavailable"/);
+    assert.deepEqual(JSON.parse(error.message.split("; receipt observation=")[1]).deliveryObservations, [{ kind: "attempting", age_ms: 123, reason: null }, { kind: "retry_scheduled", age_ms: 456, reason: "attempt_timed_out" }, { kind: "UNKNOWN", age_ms: null, reason: null }]);
+    assert.ok(!error.message.includes("must not copy"));
     return true;
   });
   assert.equal(observations, 2, "failure reporting performs no further IPC");
@@ -526,4 +528,41 @@ test("native historical receipts keep scrolling when a visible message has a cli
     until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("badge remains clipped"); },
   }, "receipt-text");
   assert.deepEqual(keys, ["\uE00E"], "a partially visible message cannot certify its clipped receipt");
+});
+
+for (const mode of ["cancelled", "missing-owner", "healed"]) test(`receipt observations preserve ${mode} polling outcome without extra calls`, async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], original = mode === "cancelled" ? new DOMException("cancelled", "AbortError") : new Error(mode);
+  let calls = 0, endpointCalls = 0, passed = 0;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => {
+      if (command === "owner_account_history") return ids.map(id => ({ id, from_me: true }));
+      calls++;
+      if (mode === "missing-owner") throw original;
+      return ids.map(id => ({ id, status: mode === "healed" && calls === 2 ? "delivered" : "awaiting", observation: { kind: "attempting", age_ms: 1 } }));
+    },
+    until: async (...args) => {
+      assert.equal(args.length, 2, "original default deadline unchanged");
+      if (mode === "missing-owner") await assert.rejects(args[1](), error => error === original);
+      else assert.equal(await args[1](), false);
+      if (mode === "healed") return args[1]();
+      throw original;
+    },
+    receiptFailureContext: async () => { endpointCalls++; return null; },
+    passed: async () => { passed++; },
+  };
+  const operation = receiptPhase(c, { owner: "owner", ids, labels: [] }, "restart", "delivered");
+  if (mode === "healed") {
+    await operation;
+    assert.equal(passed, 1);
+    assert.equal(endpointCalls, 0);
+  } else await assert.rejects(operation, error => {
+    assert.equal(error.cause, original);
+    const diagnostic = JSON.parse(error.message.split("; receipt observation=")[1]);
+    assert.deepEqual(diagnostic.deliveryObservations, mode === "missing-owner" ? ids.map(() => ({ kind: "UNKNOWN", age_ms: null, reason: null })) : ids.map(() => ({ kind: "attempting", age_ms: 1, reason: null })));
+    assert.equal(endpointCalls, 1);
+    return true;
+  });
+  assert.equal(calls, mode === "healed" ? 2 : 1, "no failure-only status requery");
 });
