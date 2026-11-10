@@ -1,0 +1,62 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M72V8GPJ30BBZPJVDANNCTVZ",
+  "session_id": "01a1c0d1-d1fb-74d3-9b41-9cf66b3d8ba0",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-10T13:44:56.91932Z",
+  "branch": "build/consolidate-dependabot-20261110",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".github/workflows/check-health.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/codeql.yml",
+    ".github/workflows/fuzz.yml",
+    ".github/workflows/linux-workspace-consumer.yml",
+    ".github/workflows/mutants.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/sanitizers.yml",
+    ".github/workflows/windows-workspace.yml",
+    "Cargo.lock",
+    "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+    "crates/mesh-talk-core/src/node/node.rs",
+    "crates/mesh-talk-core/validation.json",
+    "docs/ai-coding-reliability.md",
+    "frontend/package-lock.json",
+    "frontend/package.json",
+    "frontend/src/features/chat/MediaPreview.test.ts",
+    "src-tauri/Cargo.toml",
+    "src-tauri/src/chat_commands/linux_screenshot.rs",
+    "src-tauri/src/chat_commands/platform.rs"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6.1-sol",
+  "turn_id": "32d1c3dea076",
+  "checkpoint_transcript_start": 11809,
+  "transcript_lines_at_start": 11809,
+  "compact_transcript_start": 1587,
+  "token_usage": {
+    "input_tokens": 621776,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 205690240,
+    "output_tokens": 238524,
+    "api_call_count": 888,
+    "subagent_tokens_complete": false
+  },
+  "redaction": {
+    "replacements": 165,
+    "layers": {
+      "betterleaks": 6,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 5,
+      "credentialed_uri": 0,
+      "entropy": 162,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 3
+  }
+}
