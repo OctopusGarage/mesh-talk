@@ -2604,6 +2604,7 @@
       "id": "core-indexed-transcripts",
       "paths": [
         "crates/mesh-talk-core/src/node/queries.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/account_sync/archive.rs",
         "crates/mesh-talk-core/src/node/account_sync/read_entitlement_tests.rs",
         "crates/mesh-talk-core/src/node/sent_store.rs",
@@ -2625,6 +2626,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::transcript_repository::tests::",
+            "node::delivery_runtime::lock_order_tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
             "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",
@@ -2655,6 +2657,10 @@
         "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
+          {
+            "name": "Account archive snapshots, history projections and delivery recovery acquire sent, received and received-file sidecars in the same order, preserving coherent snapshots without a received/sent lock cycle.",
+            "reference": "docs/ai-coding-reliability.md#r01-lock-order-and-reentrant-calls"
+          },
           {
             "name": "Independent encrypted source snapshots preserve originals on import failure or detected source changes; durable legacy-writer barriers precede source publication, faulted publication resumes without replay, and warm opens read metadata without historical bodies.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"

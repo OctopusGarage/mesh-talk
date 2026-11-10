@@ -71,7 +71,7 @@ pub(super) async fn portal_available() -> bool {
         proxy
             .available_targets()
             .await
-            .map(|targets| targets.contains(AvailableTargets::Screen))
+            .map(|targets| targets.contains(AvailableTargets::SCREEN))
     })
     .await
 }
