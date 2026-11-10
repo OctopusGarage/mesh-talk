@@ -23,7 +23,7 @@
         ]
       },
       "escalation": [
-        "Run the held-frame success/timeout/cleanup/recovery control and the extra-bubble negative control. Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
+        "Run the held-frame success/timeout/cleanup/recovery control, expiry before and after DOM sampling, and the extra-bubble negative control. Run e2e/memory.spec.ts with the complete pointer round, repeated browser-side DOM button journey and final pointer navigation. Preserve every visible destination, readiness deadline, churn count and bubble bound. DOM activation does not certify trusted-input latency; browser DOM bounds do not establish heap retention or the cause of hosted driver latency."
       ]
     },
     {
@@ -2333,6 +2333,7 @@
         ]
       },
       "escalation": [
+        "Initial group history uses exact row identity/text and visible geometry within the caller's original remaining deadline. Run absent/hidden, expired caller and post-sample expiry controls plus queued recovery with frames held; check observer/frame cleanup. Keep all subsequent live/read, anchor, focus and navigation assertions; browser readiness does not identify the cause of hosted rendering latency.",
         "Run frontend/e2e/ui-audit-shell.spec.ts and frontend/e2e/sidebar-row-layout.spec.ts for compact tool labels, full accessible names and side-by-side geometry. Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
       ]
     },

@@ -33,6 +33,13 @@ export async function runConversationChurn({
   const waitFor = (ready: () => boolean, description: string) =>
     new Promise<void>((resolve, reject) => {
       let frame = 0;
+      const deadline = performance.now() + 5000;
+      const expired = () => {
+        if (performance.now() >= deadline)
+          throw new Error(
+            `Conversation readiness exceeded 5000ms: ${description}`,
+          );
+      };
       const cleanup = () => {
         observer.disconnect();
         clearTimeout(timer);
@@ -40,7 +47,10 @@ export async function runConversationChurn({
       };
       const check = () => {
         try {
-          if (ready()) {
+          expired();
+          const settled = ready();
+          expired();
+          if (settled) {
             cleanup();
             resolve();
           } else {
@@ -59,12 +69,15 @@ export async function runConversationChurn({
           });
       };
       const observer = new MutationObserver(check);
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(
-          new Error(`Conversation readiness exceeded 5000ms: ${description}`),
-        );
-      }, 5000);
+      const timer = setTimeout(
+        () => {
+          cleanup();
+          reject(
+            new Error(`Conversation readiness exceeded 5000ms: ${description}`),
+          );
+        },
+        Math.max(0, deadline - performance.now()),
+      );
       observer.observe(document.body, {
         subtree: true,
         childList: true,

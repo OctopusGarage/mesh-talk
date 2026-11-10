@@ -231,6 +231,11 @@ struct GracefulHostTask {
 }
 
 impl ParticipantRuntime {
+    #[cfg(test)]
+    pub(super) fn discovery_trace(&self) -> &RoutedDiscovery {
+        &self.routed_discovery
+    }
+
     /// Local discovery producer health; makes no claim about Internet or LAN reachability.
     pub fn discovery_available(&self) -> bool {
         self.discovery_health.iter().all(|task| !task.is_finished())

@@ -944,6 +944,16 @@ one signed probe and its original five-second discovery budget, while a real
 cache-path failure must surface the cache API's error chain before that deadline.
 Retain the core cache writer's cancellation/profile-lease controls. A successful
 rerun does not identify the mechanism of a previous missing-peer timeout.
+A cached peer can already satisfy the identity predicate while a newly sent
+query remains outstanding. The [restart fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs)
+also requires a response to a nonce issued by that invocation, from its exact
+endpoint, with the actually accepted device/account binding. Keep the original
+whole observation deadline, probe cadence and count; subsequent cooldown starts
+after witnessed completion. Real warm-cache/retired-target and restart controls
+must reject the cached-only shortcut. Test-only packet witnesses are opt-in,
+instance-owned and bounded, expose omissions, avoid disabled formatting work and
+retire real listener tasks. They add evidence, not network authority or a claimed
+explanation of unobserved packet loss.
 
 When a UI action moves into a menu, update the existing shared interaction helper
 and its callers before publication. Exercise the real entry point; retain
@@ -967,6 +977,12 @@ the same nonwaiting page snapshot for its initial visible row. Capture its exact
 identity and offset together; retain the outer poll budget and all subsequent
 anchor, focus, unread and navigation assertions. A late successful observation
 does not establish a missing-row defect or identify the source of driver latency.
+Initial history preparation uses a browser-local observer for exact row identity,
+text and visible geometry within the caller's original remaining budget. Keep
+mutation checks immediate and a deduplicated frame fallback; absent/hidden rows
+must fail and queued recovery must clean up even with frames held. Check the
+monotonic deadline before and after sampling so delayed callbacks cannot accept
+a late state. Preserve every later live/read, scroll and focus assertion.
 
 The [memory guardrail](../frontend/e2e/memory.spec.ts) retains its seeded history,
 25 complete conversation rounds, original watchdog and rendered-bubble ceiling.

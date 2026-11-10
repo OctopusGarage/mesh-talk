@@ -196,6 +196,89 @@ test.describe("Frontend memory-growth guardrails", () => {
     expect(await pending()).toEqual({ frames: 0, observers: 0 });
   });
 
+  for (const phase of ["mutation", "sample"] as const) {
+    test(`conversation readiness rejects expired ${phase} observations`, async ({
+      page,
+    }) => {
+      await page.setContent(`
+        <button data-testid="conversation-row-bob">Bob</button>
+        <button data-testid="conversation-row-channel">Channel</button>
+        <button data-testid="conversation-row-carol">Carol</button>
+        <div data-testid="conversation-header">Conversation</div>
+        <div role="log"><span></span></div>
+        <div data-testid="conversation-empty">Empty</div>
+      `);
+      await page.evaluate((phase) => {
+        const now = performance.now.bind(performance);
+        const rect = Element.prototype.getBoundingClientRect;
+        const NativeObserver = window.MutationObserver;
+        let offset = 0;
+        Object.defineProperty(performance, "now", {
+          configurable: true,
+          value: () => now() + offset,
+        });
+        if (phase === "mutation")
+          window.MutationObserver = class extends NativeObserver {
+            override observe(target: Node, options?: MutationObserverInit) {
+              super.observe(target, options);
+              queueMicrotask(() => {
+                offset = 5001;
+              });
+            }
+          };
+        else
+          Element.prototype.getBoundingClientRect = function () {
+            const value = rect.call(this);
+            if (this.getAttribute("role") === "log") offset = 5001;
+            return value;
+          };
+        for (const button of document.querySelectorAll("button"))
+          button.addEventListener("click", () => {
+            const commit = () => {
+              for (const row of document.querySelectorAll("button"))
+                row.setAttribute("aria-current", String(row === button));
+              const id = button.dataset.testid?.replace(
+                "conversation-row-",
+                "",
+              );
+              document.querySelector('[role="log"] span')!.textContent =
+                id === "bob"
+                  ? "history 299"
+                  : id === "channel"
+                    ? "channel kickoff"
+                    : "";
+            };
+            if (phase === "mutation") queueMicrotask(commit);
+            else commit();
+          });
+        (window as unknown as Record<string, unknown>).__restoreDeadlineClock =
+          () => {
+            delete (performance as unknown as Record<string, unknown>).now;
+            Element.prototype.getBoundingClientRect = rect;
+            window.MutationObserver = NativeObserver;
+          };
+      }, phase);
+      try {
+        await expect(
+          page.evaluate(runConversationChurn, {
+            bob: "bob",
+            channel: "channel",
+            carol: "carol",
+          }),
+        ).rejects.toThrow(
+          "Conversation readiness exceeded 5000ms: bob, round 2",
+        );
+      } finally {
+        await page.evaluate(() =>
+          (
+            (window as unknown as Record<string, unknown>)
+              .__restoreDeadlineClock as () => void
+          )(),
+        );
+      }
+    });
+  }
+
   test("rapid conversation switching does not accumulate DOM bubbles", async ({
     page,
   }) => {

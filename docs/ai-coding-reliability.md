@@ -269,6 +269,12 @@ timers cannot interrupt a thread blocked in a synchronous mutex, native call or
 filesystem syscall. Such a path also needs R01–R03. Budget values remain in the
 [network contracts](network-design-reference.md#8-resource-budgets-compatibility-and-performance)
 and implementation, rather than a second set of constants here.
+Browser observations carry the caller's remaining budget into the browser, then
+use a monotonic deadline before and after DOM sampling. A delayed timer cannot
+make a late visible sample timely. The [group preparation controls](../frontend/e2e/group-reception.spec.ts)
+and [memory controls](../frontend/e2e/memory.spec.ts) reject expired callers and
+samples that consume the remaining time; clock overrides stay in synthetic
+protocol controls, separate from application journeys.
 
 **Evidence:** stall admission and a later network phase separately, use multiple
 candidate routes, and verify permits/socket owners are released. Check that an
@@ -389,6 +395,12 @@ remain unknown; reconcile or retry according to the owning idempotency contract.
 Process a late definite refusal without fabricating a protocol terminal state.
 Do not turn failed readback into an empty successful save or resend an accepted
 message because optional roster, preview or notification work failed.
+Durable local erasure must classify its target from canonical identity, not an
+enumeration of display projections. A ready history observation is not a lease
+on subsequent projection readiness, and a generic mutation retry can repeat work
+that already committed. The [local erasure owner](../crates/mesh-talk-core/src/node/lifecycle.rs)
+checks a real pending archived projection, unrelated DM/unknown targets,
+suppression failure without erasure, and retained suppression after reopen.
 
 Keep inspection affordances separate from mutation permissions, and propagate
 the containing view's restrictions into nested inspectors. Opening a reader must
@@ -479,6 +491,16 @@ including repeated selections and failed checks; do not replace a blocked
 selection with a silent default. The [PR creation regression](../scripts/diagnostics/create-pr.test.mjs)
 protects explicit ownership forwarding without changing acceptance authority.
 
+Cached certified discovery is not completion of a newly issued query. The
+[privacy fixture](../crates/mesh-talk-core/src/node/runtime_privacy_tests.rs) requires
+this invocation's nonce, exact endpoint and actually accepted device/account
+binding before releasing later setup. A real stopped target with a warm cache
+must fail; restart recovery must obtain a fresh response with the same identity.
+Instance-owned, opt-in [discovery witnesses](../crates/mesh-talk-core/src/discovery/service.rs)
+retain bounded public metadata with explicit omissions. Qualify real UDP
+acceptance/rejection, disabled outcomes and listener retirement; traces do not
+establish a historical failure stage that was never observed.
+
 Bind executable probes to the owning package, target kind and complete test
 identity, and require exactly one runnable match. A matching binary basename is
 not authority: Cargo can emit library and binary targets with the same name,
@@ -502,6 +524,11 @@ The [group reading-anchor fixture](../frontend/e2e/group-reception.spec.ts) also
 samples the log and row through one nonwaiting page evaluation, returning pending
 when either is absent. Keep its existing assertion budget and exact ID/offset,
 focus and unread checks; a slow locator operation is not proof of absent rows.
+Its initial history preparation observes exact identity, text and visible geometry
+inside the browser with direct mutation checks and a frame fallback. Absent and
+hidden rows must expire, and queued recovery with frames held must retire every
+observer and callback. This qualifies readiness observation, not the cause of a
+previous rendering delay.
 
 For repeated lifecycle or memory churn, distinguish cumulative input-driver waits
 from the invariant being measured. The [memory guardrail](../frontend/e2e/memory.spec.ts)

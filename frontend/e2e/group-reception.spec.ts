@@ -6,6 +6,88 @@ const CHANNEL = "chan_team_dddd4444";
 const CONVERSATION = `ch:${CHANNEL}`;
 const BOB = "device_bob_2222";
 
+// Self-contained because Page.evaluate serializes this function into the browser.
+async function waitForInitialHistory({
+  id,
+  text,
+  deadlineEpochMs,
+}: {
+  id: string;
+  text: string;
+  deadlineEpochMs: number;
+}) {
+  // Count caller-to-browser dispatch against the original assertion budget,
+  // then use monotonic time so later wall-clock changes cannot extend it.
+  const remaining = Math.min(5000, deadlineEpochMs - Date.now());
+  const deadline = performance.now() + remaining;
+  const expired = () => {
+    if (performance.now() >= deadline)
+      throw new Error(`Initial history readiness exceeded 5000ms: ${id}`);
+  };
+  await new Promise<void>((resolve, reject) => {
+    let frame = 0;
+    const visible = (element: Element | null): element is HTMLElement => {
+      if (!(element instanceof HTMLElement)) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.visibility === "visible" &&
+        style.display !== "none"
+      );
+    };
+    const cleanup = () => {
+      observer.disconnect();
+      clearTimeout(timer);
+      cancelAnimationFrame(frame);
+    };
+    const schedule = () => {
+      if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          check();
+        });
+    };
+    const check = () => {
+      try {
+        expired();
+        const log = document.querySelector('[role="log"]');
+        const row = log?.querySelector(`[data-message-id="${id}"]`) ?? null;
+        const ready =
+          visible(log) &&
+          visible(row) &&
+          [...row.querySelectorAll("*")].some(
+            (element) => element.textContent === text && visible(element),
+          );
+        expired();
+        if (ready) {
+          cleanup();
+          resolve();
+        } else schedule();
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    };
+    const observer = new MutationObserver(check);
+    const timer = setTimeout(
+      () => {
+        cleanup();
+        reject(new Error(`Initial history readiness exceeded 5000ms: ${id}`));
+      },
+      Math.max(0, deadline - performance.now()),
+    );
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+    check();
+  });
+}
+
 async function enterGroup(page: Page, count = 120) {
   await page.goto("/?data=group-reception-window");
   await page.getByTestId("login-tab-signin").click();
@@ -32,11 +114,11 @@ async function enterGroup(page: Page, count = 120) {
     { conversation: CONVERSATION, who: BOB, count },
   );
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
-  await expect(
-    page
-      .getByRole("log")
-      .getByText(`History row ${count - 1}`, { exact: true }),
-  ).toBeVisible();
+  await page.evaluate(waitForInitialHistory, {
+    id: `history-${count - 1}`,
+    text: `History row ${count - 1}`,
+    deadlineEpochMs: Date.now() + 5000,
+  });
 }
 
 type RecoveryDelivery = { id: string; index: number; complete: boolean };
@@ -90,6 +172,161 @@ async function receiveBatch(page: Page, deliveries: RecoveryDelivery[]) {
 async function receive(page: Page, id: string, index: number, complete = true) {
   await receiveBatch(page, [{ id, index, complete }]);
 }
+
+test("initial history rejects an already expired caller deadline", async ({
+  page,
+}) => {
+  await page.setContent(
+    '<div role="log"><div data-message-id="history-119"><span>History row 119</span></div></div>',
+  );
+  const target = {
+    id: "history-119",
+    text: "History row 119",
+    deadlineEpochMs: Date.now() - 1,
+  };
+  await expect(page.evaluate(waitForInitialHistory, target)).rejects.toThrow(
+    "Initial history readiness exceeded 5000ms: history-119",
+  );
+});
+
+test("initial history rejects readiness sampled after its deadline", async ({
+  page,
+}) => {
+  await page.setContent(
+    '<div role="log"><div data-message-id="history-119"><span>History row 119</span></div></div>',
+  );
+  await page.evaluate(() => {
+    const now = performance.now.bind(performance);
+    const rect = Element.prototype.getBoundingClientRect;
+    let offset = 0;
+    Object.defineProperty(performance, "now", {
+      configurable: true,
+      value: () => now() + offset,
+    });
+    Element.prototype.getBoundingClientRect = function () {
+      const value = rect.call(this);
+      if (this.getAttribute("role") === "log") offset = 5001;
+      return value;
+    };
+    (window as unknown as Record<string, unknown>).__restoreDeadlineClock =
+      () => {
+        delete (performance as unknown as Record<string, unknown>).now;
+        Element.prototype.getBoundingClientRect = rect;
+      };
+  });
+  try {
+    await expect(
+      page.evaluate(waitForInitialHistory, {
+        id: "history-119",
+        text: "History row 119",
+        deadlineEpochMs: Date.now() + 5000,
+      }),
+    ).rejects.toThrow("Initial history readiness exceeded 5000ms: history-119");
+  } finally {
+    await page.evaluate(() =>
+      (
+        (window as unknown as Record<string, unknown>)
+          .__restoreDeadlineClock as () => void
+      )(),
+    );
+  }
+});
+
+test("initial history readiness rejects absent and hidden rows and recovers", async ({
+  page,
+}) => {
+  await page.setContent('<div role="log"></div>');
+  await page.evaluate(() => {
+    const observers = new Set<MutationObserver>();
+    const frames = new Set<number>();
+    const NativeObserver = window.MutationObserver;
+    const request = window.requestAnimationFrame.bind(window);
+    const cancel = window.cancelAnimationFrame.bind(window);
+    window.MutationObserver = class extends NativeObserver {
+      override observe(target: Node, options?: MutationObserverInit) {
+        super.observe(target, options);
+        observers.add(this);
+        if (
+          (window as unknown as Record<string, unknown>).__recoverInitialHistory
+        )
+          queueMicrotask(() => {
+            document.querySelector<HTMLElement>(
+              '[data-message-id="history-119"]',
+            )!.hidden = false;
+          });
+      }
+      override disconnect() {
+        super.disconnect();
+        observers.delete(this);
+      }
+    };
+    let heldFrame = 0;
+    window.requestAnimationFrame = (callback) => {
+      if (
+        (window as unknown as Record<string, unknown>).__recoverInitialHistory
+      ) {
+        const id = --heldFrame;
+        frames.add(id);
+        return id;
+      }
+      const id = request((time) => {
+        frames.delete(id);
+        callback(time);
+      });
+      frames.add(id);
+      return id;
+    };
+    window.cancelAnimationFrame = (id) => {
+      frames.delete(id);
+      cancel(id);
+    };
+    (window as unknown as Record<string, unknown>).__historyReadiness = {
+      observers,
+      frames,
+    };
+  });
+  const target = { id: "history-119", text: "History row 119" };
+  const pending = () =>
+    page.evaluate(() => {
+      const state = (
+        window as unknown as {
+          __historyReadiness: {
+            observers: Set<MutationObserver>;
+            frames: Set<number>;
+          };
+        }
+      ).__historyReadiness;
+      return { observers: state.observers.size, frames: state.frames.size };
+    });
+  await expect(
+    page.evaluate(waitForInitialHistory, {
+      ...target,
+      deadlineEpochMs: Date.now() + 5000,
+    }),
+  ).rejects.toThrow("Initial history readiness exceeded 5000ms: history-119");
+  expect(await pending()).toEqual({ observers: 0, frames: 0 });
+  await page.evaluate(() => {
+    document.querySelector('[role="log"]')!.innerHTML =
+      '<div data-message-id="history-119" hidden><span>History row 119</span></div>';
+  });
+  await expect(
+    page.evaluate(waitForInitialHistory, {
+      ...target,
+      deadlineEpochMs: Date.now() + 5000,
+    }),
+  ).rejects.toThrow("Initial history readiness exceeded 5000ms: history-119");
+  expect(await pending()).toEqual({ observers: 0, frames: 0 });
+  await page.evaluate(() => {
+    // Commit recovery only after the observer is registered, without a timer race.
+    (window as unknown as Record<string, unknown>).__recoverInitialHistory =
+      true;
+  });
+  await page.evaluate(waitForInitialHistory, {
+    ...target,
+    deadlineEpochMs: Date.now() + 5000,
+  });
+  expect(await pending()).toEqual({ observers: 0, frames: 0 });
+});
 
 test("late history preserves reading anchor/focus and stays unread until viewed", async ({
   page,

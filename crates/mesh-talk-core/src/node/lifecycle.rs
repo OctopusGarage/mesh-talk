@@ -47,11 +47,26 @@ impl Node {
     ) -> Result<usize, NodeError> {
         use super::transcript_repository::TranscriptPageLimit;
         let target = self.file_message_logical_id(conv, target)?;
-        let suppress = account
-            || self
-                .list_channels()?
-                .iter()
-                .any(|channel| channel.id == conv);
+        // Local erasure needs channel identity, not a ready display projection.
+        // Preserve retained/archived channels, shared references and legacy RAM
+        // state without depending on unrelated channels' publication progress.
+        let suppress = if account {
+            true
+        } else {
+            let retained_channel = {
+                let log = self.log.lock().expect("log mutex");
+                log.repository()?
+                    .has_kind(&conv, EventKind::MembershipChange)?
+            };
+            retained_channel
+                || self.channel_shared_reference(conv).is_some()
+                || self
+                    .channels
+                    .lock()
+                    .expect("channels mutex")
+                    .state(&conv)
+                    .is_some()
+        };
         let mut delivery = self.delivery.lock().expect("delivery mutex");
         self.recover_delivery(&mut delivery)?;
         let mut aliases = self
@@ -601,6 +616,201 @@ mod personal_scope_tests {
         node::account_group::AccountGroupRole,
     };
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn local_delete_uses_channel_identity_while_display_projection_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let open = || {
+            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+            let (channels, _) = tokio::sync::mpsc::unbounded_channel();
+            let (files, _) = tokio::sync::mpsc::unbounded_channel();
+            Node::open_with_account(
+                DeviceIdentity::from_secret_bytes(
+                    identity.secret_bytes().0,
+                    identity.secret_bytes().1,
+                ),
+                Account::from_secret_bytes(account.secret_bytes()),
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channels,
+                files,
+                &dir.path().join("events.log"),
+                &dir.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap()
+        };
+        let node = open();
+        let group = ConversationId::new([43; 32]);
+        let remote = DeviceIdentity::generate();
+        let genesis = Event::new(
+            &remote,
+            group,
+            1,
+            vec![],
+            1,
+            10,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Legacy channel".into(),
+                members: vec![remote.public()],
+                epoch: 0,
+                owner: remote.public().user_id(),
+            }
+            .encode(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(genesis.clone())
+            .unwrap();
+        node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
+        assert!(
+            node.list_channels()
+                .unwrap()
+                .iter()
+                .any(|channel| channel.id == group && channel.archived)
+        );
+        let message = Event::new(
+            &remote,
+            group,
+            2,
+            vec![genesis.id],
+            2,
+            11,
+            EventKind::Message,
+            vec![1],
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(message.clone())
+            .unwrap();
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                group,
+                identity.public().user_id(),
+                11,
+                b"erase this",
+                message.id,
+            )
+            .unwrap();
+        {
+            let log = node.log.lock().unwrap();
+            node.channel_checkpoints
+                .project_step_with_budget(
+                    log.repository().unwrap(),
+                    &node.identity,
+                    group,
+                    crate::eventlog::sync::network::PreparationBudget {
+                        rows: 1,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        assert!(
+            matches!(
+                node.list_channels(),
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor))
+            ),
+            "real appended source work must leave the display projection pending"
+        );
+
+        // Ordinary and unknown conversations must not acquire channel markers,
+        // even while an unrelated channel display is pending.
+        for conv in [
+            crate::node::conversation::dm_conversation_id(&identity.public(), &remote.public()),
+            ConversationId::new([45; 32]),
+        ] {
+            let target = EventId::new(*conv.as_bytes());
+            node.received
+                .lock()
+                .unwrap()
+                .record(
+                    conv,
+                    identity.public().user_id(),
+                    12,
+                    b"ordinary message",
+                    target,
+                )
+                .unwrap();
+            assert_eq!(node.delete_message(conv, target, false).unwrap(), 1);
+            assert!(
+                !node
+                    .account_suppression
+                    .lock()
+                    .unwrap()
+                    .contains(conv, target)
+                    .unwrap()
+            );
+        }
+        // Suppression failure must leave plaintext available and propagate.
+        node.channel_checkpoints.profile().database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER reject_local_suppression BEFORE INSERT ON transcript_suppression BEGIN SELECT RAISE(ABORT, 'suppression failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        let failure = node.delete_message(group, message.id, false).unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                NodeError::Log(crate::eventlog::LogError::Database(_))
+            ),
+            "suppression database failure must propagate: {failure}"
+        );
+        assert_eq!(node.received.lock().unwrap().entries(&group).len(), 1);
+        assert!(
+            !node
+                .account_suppression
+                .lock()
+                .unwrap()
+                .contains(group, message.id)
+                .unwrap()
+        );
+        node.channel_checkpoints
+            .profile()
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER reject_local_suppression;")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(node.delete_message(group, message.id, false).unwrap(), 1);
+        assert!(node.received.lock().unwrap().entries(&group).is_empty());
+        assert!(
+            node.account_suppression
+                .lock()
+                .unwrap()
+                .contains(group, message.id)
+                .unwrap()
+        );
+        drop(node);
+        let restored = open();
+        assert!(
+            restored
+                .account_suppression
+                .lock()
+                .unwrap()
+                .contains(group, message.id)
+                .unwrap()
+        );
+        assert!(restored.received.lock().unwrap().entries(&group).is_empty());
+        // The same signed event remains retained; erasure never removes sync history.
+        assert!(
+            restored
+                .log
+                .lock()
+                .unwrap()
+                .get(&message.id)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[tokio::test]
     async fn late_group_clear_preserves_only_fresh_lifetime_ancestry() {

@@ -571,6 +571,144 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
     assert_eq!(alice.privacy_snapshot(), snapshot);
 }
 
+// One certified discovery observation, with the original six-second budget and
+// at most two probes at the original zero/five-second cuts.
+async fn discover_certified_peer(
+    stage: &str,
+    from: &NodeRuntime,
+    (target_user, target_account, target_port): (&str, &str, u16),
+    target_trace: Option<&crate::discovery::service::RoutedDiscovery>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    let watermark = from.participant.discovery_trace().trace_watermark();
+    let endpoint = ([127, 0, 0, 1], target_port).into();
+    let mut probes = 0;
+    let mut last_probe = Ok(());
+    let mut last_cache_error = None;
+    let mut next_probe = tokio::time::Instant::now();
+    let discovered = tokio::time::timeout_at(deadline, async {
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            if probes < 2 && tokio::time::Instant::now() >= next_probe {
+                probes += 1;
+                last_probe = from
+                    .probe_endpoint(endpoint)
+                    .await
+                    .map_err(|e| e.to_string());
+                // Keep the original zero/five-second cadence. QueryTracker
+                // retains independent (source IP, nonce) challenges for five seconds.
+                next_probe = tokio::time::Instant::now() + Duration::from_secs(5);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            let cached = from.node.cached_peer_snapshot_async().await;
+            let fresh = from
+                .participant
+                .discovery_trace()
+                .fresh_certified_probe_since(watermark, endpoint, target_user, target_account);
+            let ready = match cached {
+                Ok(peers) => {
+                    fresh
+                        && peers.iter().any(|peer| {
+                            peer.public.user_id() == target_user
+                                && peer.account_id.as_deref() == Some(target_account)
+                        })
+                }
+                Err(error) => {
+                    last_cache_error = Some(error.to_string());
+                    false
+                }
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            if ready {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if matches!(discovered, Ok(true)) && tokio::time::Instant::now() < deadline {
+        return Ok(());
+    }
+    let roster_count = from.roster.lock().unwrap().peers().len();
+    Err(format!(
+        "{stage}: certified peer discovery timed out; source_udp={}; target_udp={target_port}; probes={probes}; last_probe={last_probe:?}; cache_error={last_cache_error:?}; roster_count={}; source_trace={:?}; target_trace={:?}",
+        from.discovery_port(),
+        roster_count,
+        from.participant.discovery_trace().trace_snapshot(),
+        target_trace.map(|trace| trace.trace_snapshot()),
+    ))
+}
+
+async fn discover(stage: &str, from: &NodeRuntime, target: &NodeRuntime) -> Result<(), String> {
+    discover_certified_peer(
+        stage,
+        from,
+        (
+            target.user_id(),
+            target.account_id(),
+            target.discovery_port(),
+        ),
+        Some(target.participant.discovery_trace()),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn certified_discovery_requires_a_fresh_reply_despite_cached_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let start_reserved = async |owner: &str| {
+        let reservation = crate::transport::net::discovery_socket(0).unwrap();
+        let running = start(dir.path(), owner, reservation.local_addr().unwrap().port()).await;
+        running.0.participant.discovery_trace().enable_trace();
+        drop(reservation);
+        running
+    };
+    let (source, _) = start_reserved("fresh-source").await;
+    let (target, _) = start_reserved("fresh-target").await;
+    let warm = discover("warm real certified cache", &source, &target).await;
+    let target_user = target.user_id().to_owned();
+    let target_account = target.account_id().to_owned();
+    let target_port = target.discovery_port();
+    target.stop_for_storage().await.close().unwrap();
+    let cached = source.node.cached_peer_snapshot_async().await.unwrap();
+    let cache_present = cached.iter().any(|peer| {
+        peer.public.user_id() == target_user
+            && peer.account_id.as_deref() == Some(target_account.as_str())
+    });
+    let stopped = discover_certified_peer(
+        "stopped target",
+        &source,
+        (&target_user, &target_account, target_port),
+        None,
+    )
+    .await;
+    let (target, _) = start_reserved("fresh-target").await;
+    let same_identity = target.user_id() == target_user && target.account_id() == target_account;
+    let recovered = discover("fresh reply after restart", &source, &target).await;
+    target.stop_for_storage().await.close().unwrap();
+    source.stop_for_storage().await.close().unwrap();
+    warm.unwrap();
+    assert!(
+        cache_present,
+        "real UDP must establish the certified cached peer"
+    );
+    assert!(
+        stopped.is_err(),
+        "cached peer must not impersonate a fresh query response: {stopped:?}"
+    );
+    assert!(
+        same_identity,
+        "restart must retain the target device and account"
+    );
+    recovered.unwrap();
+}
+
 #[tokio::test]
 async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts() {
     let dir = tempfile::tempdir().unwrap();
@@ -578,6 +716,7 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
         // Retain a compatible reservation until the runtime owns this port.
         let reservation = crate::transport::net::discovery_socket(0).unwrap();
         let running = start(dir.path(), owner, reservation.local_addr().unwrap().port()).await;
+        running.0.participant.discovery_trace().enable_trace();
         drop(reservation);
         running
     };
@@ -587,51 +726,12 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
     let bob_id = bob.user_id().to_owned();
     let account = alice.account_id().to_owned();
     assert_ne!(account, bob.account_id());
-    let discover = async |stage: &str, from: &NodeRuntime, target: &NodeRuntime| {
-        let endpoint = ([127, 0, 0, 1], target.discovery_port()).into();
-        let mut probes = 0;
-        let mut last_probe = Ok(());
-        let mut last_cache_error = None;
-        let mut next_probe = tokio::time::Instant::now();
-        let discovered = tokio::time::timeout(Duration::from_secs(6), async {
-            loop {
-                if tokio::time::Instant::now() >= next_probe {
-                    probes += 1;
-                    last_probe = from
-                        .probe_endpoint(endpoint)
-                        .await
-                        .map_err(|e| e.to_string());
-                    // QueryTracker has one nonce per source IP with a five-second
-                    // lifetime. Reprobing every 200ms overwrote valid challenges
-                    // before delayed replies arrived; keep this one outstanding.
-                    next_probe = tokio::time::Instant::now() + Duration::from_secs(5);
-                }
-                match from.node.cached_peer_snapshot_async().await {
-                    Ok(peers)
-                        if peers.iter().any(|p| {
-                            p.public.user_id() == target.user_id()
-                                && p.account_id.as_deref() == Some(target.account_id())
-                        }) =>
-                    {
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error) => last_cache_error = Some(error.to_string()),
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await;
-        assert!(
-            discovered.is_ok(),
-            "{stage}: certified peer discovery timed out; source_udp={}; target_udp={}; probes={probes}; last_probe={last_probe:?}; cache_error={last_cache_error:?}; roster_count={}",
-            from.discovery_port(),
-            target.discovery_port(),
-            from.roster.lock().unwrap().peers().len()
-        );
-    };
-    discover("before pairing: owner learns joiner", &alice, &bob).await;
-    discover("before pairing: joiner learns owner", &bob, &alice).await;
+    discover("before pairing: owner learns joiner", &alice, &bob)
+        .await
+        .unwrap();
+    discover("before pairing: joiner learns owner", &bob, &alice)
+        .await
+        .unwrap();
     // Force the prior account proof to durable storage before explicit pairing.
     alice.handle().cached_peer_snapshot_async().await.unwrap();
     let code = alice.start_linking();
@@ -661,15 +761,21 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
     let (bob, _) = start_reserved("pair-joiner").await;
     assert_eq!(bob.user_id(), bob_id);
     assert_eq!(bob.account_id(), account);
-    discover("after restart: owner learns adopted joiner", &alice, &bob).await;
-    discover("after restart: adopted joiner learns owner", &bob, &alice).await;
+    discover("after restart: owner learns adopted joiner", &alice, &bob)
+        .await
+        .unwrap();
+    discover("after restart: adopted joiner learns owner", &bob, &alice)
+        .await
+        .unwrap();
     let (contact, _) = start_reserved("pair-contact").await;
     // Bob and this new contact model separate machines but share 127.0.0.1.
     // Alice's ResponseBudget admits only one query response per source IP per
     // second. Let Bob's response window expire before the contact's first query,
     // so its unchanged six-second deadline covers an eligible challenge.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    discover("after restart: contact learns owner", &contact, &alice).await;
+    discover("after restart: contact learns owner", &contact, &alice)
+        .await
+        .unwrap();
     contact
         .send_to_account(&account, b"after both restarts", None)
         .await

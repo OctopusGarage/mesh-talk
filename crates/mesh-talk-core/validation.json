@@ -580,6 +580,7 @@
             "node::account_documents::",
             "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent",
             "node::account_sync::personal_replay_tests::",
+            "node::lifecycle::personal_scope_tests::",
             "late_group_clear_preserves_only_fresh_lifetime_ancestry",
             "known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers",
             "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",
@@ -605,6 +606,10 @@
         "summary": "Synchronize typed private drafts, exact read receipts, customization assets, authenticated DM controls and account-personal conversation removal through existing certified account sessions.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
+          {
+            "name": "Local channel erasure uses retained signed identity, shared references or legacy channel state independently of display publication, preserves ordinary and unknown conversation boundaries, propagates suppression failure and retains durable suppression without changing ciphertext.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
           {
             "name": "Access-only v5 scope fixtures validate actual received signed role metadata and payloads against their completion digest inside an authenticated stable-provider epoch; later source publication belongs to another epoch. Live-provider mutation retains its cursor re-comparison contract.",
             "reference": "docs/testing-feedback-loop.md#protocol-fixture-response-epochs"
@@ -1089,10 +1094,15 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["discovery::"]
+          "filters": [
+            "discovery::",
+            "node::runtime::privacy_tests::certified_discovery_requires_a_fresh_reply_despite_cached_peer",
+            "node::runtime::privacy_tests::pairing_previously_known_foreign_device_survives_both_runtime_restarts"
+          ]
         }
       ],
       "escalation": [
+        "Discovery fixture completion requires this invocation's nonce and exact endpoint plus an actually accepted device/account binding, not a warm cached row alone. Preserve its original deadline and probe cadence/count. Run real warm-cache stopped-target/restart controls and UDP witness acceptance/rejection, bound, instance isolation, disabled formatting and joined listener retirement. Test-only traces remain opt-in and do not establish an unobserved historical cause; see docs/ci-maintenance.md.",
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
         "Pinned gateway queries must recover when another loopback client consumes the existing per-source UDP reply quota. Preserve the absolute four-second deadline, at most four datagrams, exact endpoint and signed pinned-identity validation, and cancellation ownership. Run the real responder quota regression and existing gateway lifecycle/security tests; repeat bridge_cross_lan and channel_peer_recovery against the production CLI."
       ],
