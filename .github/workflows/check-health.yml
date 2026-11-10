@@ -216,7 +216,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Install source scanners
         if: steps.scope.outputs.full == 'true' || steps.scope.outputs.profile == 'docs'
-        uses: taiki-e/install-action@v2.88.1
+        uses: taiki-e/install-action@v2.90.2
         with:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
       - name: Install pinned prebuilt workflow scanner
